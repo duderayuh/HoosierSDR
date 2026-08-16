@@ -3,6 +3,7 @@
 //! across Phases 1–2; this crate currently pins the dependency graph.
 
 pub mod decoder;
+pub mod diag;
 
 pub use hs_catalog as catalog;
 pub use hs_dsp as dsp;

@@ -62,6 +62,8 @@ pub struct ChannelDecoder {
     /// Talkgroup of the call currently on this channel (for voice routing).
     active_tg: Option<u16>,
     active_enc: bool,
+    /// Rolling diagnostics for real-signal export (see `diag`).
+    diag: crate::diag::Diagnostics,
 }
 
 impl ChannelDecoder {
@@ -81,11 +83,17 @@ impl ChannelDecoder {
             fsw_levels,
             active_tg: None,
             active_enc: false,
+            diag: crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled),
         }
     }
 
     pub fn site(&self) -> &SiteModel {
         &self.site
+    }
+
+    /// Accumulated decode diagnostics for real-signal export.
+    pub fn diagnostics(&self) -> &crate::diag::Diagnostics {
+        &self.diag
     }
 
     /// Process a slice of interleaved-IQ f32 samples.
@@ -125,6 +133,10 @@ impl ChannelDecoder {
         };
         let dibit = slice(eq_sym);
 
+        // Diagnostics: symbol-level health, the cheapest demod-health window.
+        self.diag.symbols_processed += 1;
+        self.diag.health.observe(eq_sym, dibit);
+
         let mut events = Vec::new();
         self.framer.push(dibit, &mut events);
         for ev in events {
@@ -134,8 +146,12 @@ impl ChannelDecoder {
 
     fn on_event(&mut self, ev: FramerEvent, out: &mut DecodeOutput) {
         match ev {
-            FramerEvent::Sync { .. } => {
+            FramerEvent::Sync { bit_errors } => {
                 out.syncs += 1;
+                self.diag.syncs.push(crate::diag::SyncStat {
+                    at_symbol: self.diag.symbols_processed,
+                    bit_errors,
+                });
                 // Train the equalizer on the FSW we just decoded. The framer
                 // syncs on the EQUALIZED stream, which lags the raw symbols by
                 // the equalizer's group delay `c`, so the raw FSW symbols end
@@ -154,6 +170,13 @@ impl ChannelDecoder {
                     self.eq.train_sequence(raw, &desired);
                 }
             }
+            FramerEvent::Nid { nid, bch_errors } => {
+                self.diag.nids.push(crate::diag::NidStat {
+                    nac: nid.nac,
+                    duid: nid.duid.code(),
+                    bch_errors,
+                });
+            }
             FramerEvent::Tsdu { blocks, .. } => {
                 for b in blocks {
                     self.on_tsbk(b.tsbk, out);
@@ -171,13 +194,17 @@ impl ChannelDecoder {
                 if encrypted {
                     if let Some(tg) = self.active_tg {
                         out.encrypted_skips.push(tg);
+                        self.diag.encrypted_skips.push(tg);
                     }
                     self.active_enc = true;
                     return;
                 }
                 // Clear voice: synthesize audio for all nine IMBE frames.
                 for frame in imbe.iter() {
-                    out.pcm.extend_from_slice(&self.vocoder.decode(frame));
+                    let pcm = self.vocoder.decode(frame);
+                    self.diag.voice_frames += 1;
+                    self.diag.pcm_samples += pcm.len() as u64;
+                    out.pcm.extend_from_slice(&pcm);
                 }
             }
             _ => {}
@@ -215,6 +242,12 @@ impl ChannelDecoder {
                     if encrypted {
                         out.encrypted_skips.push(group);
                     }
+                    self.diag.grants.push(crate::diag::GrantStat {
+                        talkgroup: g.talkgroup,
+                        source_unit: g.source_unit,
+                        freq_hz: g.freq_hz,
+                        encrypted: g.encrypted,
+                    });
                     out.grants.push(g);
                 }
             }
@@ -222,6 +255,12 @@ impl ChannelDecoder {
                 channel_a, group_a, ..
             } => {
                 if let Some(g) = self.site.resolve_grant(group_a, 0, channel_a, false) {
+                    self.diag.grants.push(crate::diag::GrantStat {
+                        talkgroup: g.talkgroup,
+                        source_unit: g.source_unit,
+                        freq_hz: g.freq_hz,
+                        encrypted: g.encrypted,
+                    });
                     out.grants.push(g);
                 }
             }
