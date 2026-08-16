@@ -23,9 +23,19 @@ Synthesizes a P25 control-channel + clear-voice transmission, runs it through th
 - **Encryption gate** — ALGID detection wired through; encrypted grants/voice are flagged and never decoded, by architecture.
 - **Benchmark harness** — `hs-bench` runs synthetic or field IQ and reports decode metrics with the equalizer A/B.
 
+## Live capture
+
+Streaming decode works end to end. `hs-core::stream::run` pulls IQ from any `SdrSource` in blocks and feeds the stateful decoder, so a frame split across block boundaries still decodes (tested). An RTL-SDR backend (Seify) lives behind the off-by-default `rtlsdr` feature, keeping the core build pure-Rust and libusb-free:
+
+```sh
+cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
+```
+
+(That pulls Seify + libusb; on macOS `brew install libusb`. Without the feature, `--sdr` prints setup guidance.)
+
 ## What's not done yet
 
-Live SDR capture (Seify), the coherent LSM/CQPSK front end, the **complex** pre-detection equalizer that beats simulcast (the headline thesis — see below), the Tauri UI, RadioReference catalog, and transcription. These are the Phase 2–5 roadmap.
+Field validation against a real SAFE-T signal, the Tauri UI, RadioReference catalog, and transcription. These are the Phase 3–5 roadmap.
 
 ## The thesis
 

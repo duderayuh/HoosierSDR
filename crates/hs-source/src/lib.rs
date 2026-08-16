@@ -3,6 +3,9 @@
 
 use std::io::Read;
 
+#[cfg(feature = "rtlsdr")]
+pub mod rtlsdr;
+
 /// Complex IQ sample pair as delivered by a source, interleaved f32.
 pub type IqBlock = Vec<f32>;
 

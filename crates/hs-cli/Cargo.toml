@@ -14,6 +14,8 @@ path = "src/main.rs"
 # headless (WAV output) with no audio backend present.
 default = []
 audio = ["dep:cpal"]
+# Live RTL-SDR capture (pulls Seify + libusb). Off by default.
+rtlsdr = ["hs-source/rtlsdr"]
 
 [dependencies]
 hs-core = { path = "../hs-core" }

@@ -26,6 +26,9 @@ struct Args {
     cqpsk: bool,
     play: bool,
     demo: bool,
+    sdr: bool,
+    freq: f64,
+    gain: Option<f64>,
 }
 
 fn parse_args() -> Args {
@@ -39,6 +42,9 @@ fn parse_args() -> Args {
         cqpsk: false,
         play: false,
         demo: false,
+        sdr: false,
+        freq: 851_000_000.0,
+        gain: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -57,6 +63,9 @@ fn parse_args() -> Args {
             "--cqpsk" => a.cqpsk = true,
             "--play" => a.play = true,
             "--demo" => a.demo = true,
+            "--sdr" => a.sdr = true,
+            "--freq" => a.freq = it.next().and_then(|s| parse_freq(&s)).unwrap_or(a.freq),
+            "--gain" => a.gain = it.next().and_then(|s| s.parse().ok()),
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -92,6 +101,9 @@ fn print_help() {
              --equalizer    Enable the experimental FSW-trained equalizer (C4FM)\n\
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
+             --sdr          Capture live from an RTL-SDR (build --features rtlsdr)\n\
+             --freq <HZ>    SDR center frequency (accepts 851M, 851.0125e6; default 851M)\n\
+             --gain <DB>    SDR manual gain in dB (omit for hardware AGC)\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -254,8 +266,38 @@ fn play_pcm(_samples: &[i16]) {
     eprintln!("live playback needs a build with --features audio; wrote WAV instead");
 }
 
+/// Parse a frequency like `851M`, `851.0125e6`, or `851000000`.
+fn parse_freq(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(v) = s.strip_suffix(['M', 'm']) {
+        v.parse::<f64>().ok().map(|x| x * 1e6)
+    } else if let Some(v) = s.strip_suffix(['k', 'K']) {
+        v.parse::<f64>().ok().map(|x| x * 1e3)
+    } else {
+        s.parse::<f64>().ok()
+    }
+}
+
+fn build_decoder(args: &Args) -> ChannelDecoder {
+    if args.cqpsk {
+        ChannelDecoder::new_cqpsk(args.rate)
+    } else {
+        let mode = if args.equalizer {
+            EqMode::Enabled
+        } else {
+            EqMode::Bypass
+        };
+        ChannelDecoder::new(args.rate, mode)
+    }
+}
+
 fn main() {
     let args = parse_args();
+
+    if args.sdr {
+        run_sdr(&args);
+        return;
+    }
 
     if args.input.is_none() && !args.demo {
         eprintln!("no input file (use --demo to decode a synthesized transmission)\n");
@@ -270,16 +312,7 @@ fn main() {
         load_iq(args.input.as_ref().unwrap())
     };
 
-    let mut dec = if args.cqpsk {
-        ChannelDecoder::new_cqpsk(args.rate)
-    } else {
-        let mode = if args.equalizer {
-            EqMode::Enabled
-        } else {
-            EqMode::Bypass
-        };
-        ChannelDecoder::new(args.rate, mode)
-    };
+    let mut dec = build_decoder(&args);
     let out = dec.process(&iq);
     report(&out, &dec);
 
@@ -323,4 +356,73 @@ fn save_iq(path: &str, iq: &[f32]) -> std::io::Result<()> {
         buf.extend_from_slice(&s.to_le_bytes());
     }
     f.write_all(&buf)
+}
+
+/// Live capture: stream from an RTL-SDR into the decoder until interrupted,
+/// printing grants as they resolve and accumulating decoded voice to a WAV.
+#[cfg(feature = "rtlsdr")]
+fn run_sdr(args: &Args) {
+    use hs_core::stream;
+    use hs_source::rtlsdr::RtlSdrSource;
+
+    let mut src = match RtlSdrSource::open("driver=rtlsdr", args.freq, args.rate, args.gain) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("could not open RTL-SDR: {e:?}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "Capturing {} at {:.4} MHz, {} Hz{}… Ctrl-C to stop.",
+        if args.cqpsk { "CQPSK/LSM" } else { "C4FM" },
+        args.freq / 1e6,
+        args.rate as u64,
+        match args.gain {
+            Some(g) => format!(", gain {g} dB"),
+            None => " (AGC)".into(),
+        },
+    );
+
+    let mut dec = build_decoder(args);
+    let mut pcm: Vec<i16> = Vec::new();
+    let stats = stream::run(&mut src, &mut dec, 65536, |out| {
+        for g in &out.grants {
+            println!(
+                "  grant TG {:<6} src {:<8} → {:.4} MHz{}",
+                g.talkgroup,
+                g.source_unit,
+                g.freq_hz as f64 / 1e6,
+                if g.encrypted {
+                    "  [ENCRYPTED — skipped]"
+                } else {
+                    ""
+                }
+            );
+        }
+        pcm.extend_from_slice(&out.pcm);
+    });
+    match stats {
+        Ok(s) => println!(
+            "\nstopped: {} blocks, {} syncs, {} grants, {:.1}s voice",
+            s.blocks,
+            s.syncs,
+            s.grants,
+            s.pcm_samples as f64 / VOICE_RATE as f64
+        ),
+        Err(e) => eprintln!("capture error: {e:?}"),
+    }
+    if let (Some(path), false) = (&args.wav_out, pcm.is_empty()) {
+        let _ = wav::write_wav(path, VOICE_RATE, &pcm);
+        println!("wrote {path}");
+    }
+}
+
+#[cfg(not(feature = "rtlsdr"))]
+fn run_sdr(_args: &Args) {
+    eprintln!(
+        "Live SDR capture needs a build with the rtlsdr feature:\n\
+         \n    cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M\n\
+         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)"
+    );
+    std::process::exit(2);
 }

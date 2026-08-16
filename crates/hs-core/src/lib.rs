@@ -4,6 +4,7 @@
 
 pub mod decoder;
 pub mod diag;
+pub mod stream;
 
 pub use hs_catalog as catalog;
 pub use hs_dsp as dsp;

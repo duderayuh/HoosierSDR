@@ -4,3 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+# Live RTL-SDR capture via Seify. Off by default so the core build stays
+# pure-Rust and libusb-free (see docs/ARCHITECTURE.md §2).
+default = []
+rtlsdr = ["dep:seify", "dep:num-complex"]
+
+[dependencies]
+seify = { version = "0.23", default-features = false, features = ["rtlsdr"], optional = true }
+num-complex = { version = "0.4", optional = true }
