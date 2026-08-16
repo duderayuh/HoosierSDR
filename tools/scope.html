@@ -1,0 +1,431 @@
+<title>HoosierSDR Scope</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Committed dark instrument aesthetic — an oscilloscope/spectrum-analyzer
+     world. Single-theme by design; every color is painted explicitly so the
+     page holds on any host ground. */
+  :root {
+    --panel:     #0a0e13;
+    --surface:   #111a23;
+    --well:      #0a1017;
+    --line:      #1d2b38;
+    --line-soft: #14202b;
+    --ink:       #e8eff5;
+    --ink-dim:   #93a6b6;
+    --ink-mute:  #5d7080;
+    --signal:    #5ef2a0;
+    --signal-dim:#2f8f63;
+    --cyan:      #57c7ff;
+    --amber:     #ffc24b;
+    --red:       #ff6072;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 78% -10%, #10202b 0%, transparent 60%),
+      var(--panel);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    font-size: 15px;
+    padding: clamp(16px, 3vw, 34px);
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+  /* Header */
+  .masthead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; }
+  .brand { font-family: var(--mono); font-weight: 700; font-size: clamp(20px, 3vw, 27px);
+    letter-spacing: -0.01em; color: var(--ink); text-wrap: balance; }
+  .brand b { color: var(--signal); font-weight: 700; }
+  .tagline { font-family: var(--mono); font-size: 12px; color: var(--ink-mute);
+    letter-spacing: 0.02em; }
+  .idstrip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+  .chip { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.03em;
+    padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--ink-dim); white-space: nowrap; }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip.on  { border-color: var(--signal-dim); color: var(--signal); }
+  .chip.off { color: var(--ink-mute); }
+
+  /* Section frame */
+  .panel { background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden; }
+  .panel > header { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); }
+  .panel > header h2 { margin: 0; font-family: var(--mono); font-size: 12px;
+    font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim); }
+  .panel .meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-mute); }
+  .panel .body { padding: 16px; }
+
+  /* KPI tiles */
+  .tiles { display: grid; gap: 12px; grid-template-columns: repeat(6, 1fr); }
+  @media (max-width: 860px) { .tiles { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 480px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 14px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .tile .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--ink-mute); }
+  .tile .v { font-family: var(--mono); font-size: clamp(20px, 2.6vw, 26px); font-weight: 700;
+    color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.05; }
+  .tile .v small { font-size: 13px; color: var(--ink-dim); font-weight: 500; margin-left: 2px; }
+  .tile.good .v { color: var(--signal); }
+  .tile .u { font-family: var(--mono); font-size: 10.5px; color: var(--ink-mute); }
+
+  /* Scope */
+  .scope-grid { display: grid; grid-template-columns: 1fr; gap: 0; }
+  #scope { display: block; width: 100%; height: 320px; background: var(--well); }
+  .scope-legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px 16px;
+    border-top: 1px solid var(--line-soft); font-family: var(--mono); font-size: 11.5px;
+    color: var(--ink-dim); }
+  .scope-legend .sw { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .readout { margin-left: auto; color: var(--ink-mute); }
+  .readout b { color: var(--signal); }
+
+  /* Two-up */
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .duo { grid-template-columns: 1fr; } }
+
+  /* Bars */
+  .bars { display: flex; flex-direction: column; gap: 10px; }
+  .bar-row { display: grid; grid-template-columns: 62px 1fr 58px; align-items: center; gap: 10px; }
+  .bar-row .lab { font-family: var(--mono); font-size: 12px; color: var(--ink-dim);
+    font-variant-numeric: tabular-nums; }
+  .bar-track { height: 16px; background: var(--well); border: 1px solid var(--line-soft);
+    border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px 4px 4px 3px;
+    background: linear-gradient(90deg, var(--signal-dim), var(--signal)); }
+  .bar-row .num { font-family: var(--mono); font-size: 12px; color: var(--ink);
+    text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Sync timeline */
+  #synctl { display: block; width: 100%; height: 150px; }
+  .empty { font-family: var(--mono); font-size: 12px; color: var(--ink-mute); padding: 6px 0; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+  th { text-align: left; font-weight: 600; color: var(--ink-mute); letter-spacing: 0.05em;
+    text-transform: uppercase; font-size: 10.5px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); color: var(--ink);
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  .tablescroll { overflow-x: auto; }
+  .badge { font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 2px 7px;
+    border-radius: 5px; letter-spacing: 0.03em; }
+  .badge.clear { color: var(--signal); background: rgba(94,242,160,0.10); border: 1px solid var(--signal-dim); }
+  .badge.enc   { color: var(--red); background: rgba(255,96,114,0.10); border: 1px solid #7a2f39; }
+
+  /* Encryption callout */
+  .enc-note { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--surface); }
+  .enc-note.hot { border-color: #7a2f39; background: rgba(255,96,114,0.06); }
+  .enc-note .icon { font-family: var(--mono); font-weight: 700; color: var(--ink-dim); }
+  .enc-note.hot .icon { color: var(--red); }
+  .enc-note p { margin: 0; font-size: 13.5px; color: var(--ink-dim); }
+  .enc-note b { color: var(--ink); }
+
+  /* Footer / loader */
+  .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+    padding-top: 4px; color: var(--ink-mute); font-size: 12.5px; }
+  .loadbtn { font-family: var(--mono); font-size: 12px; letter-spacing: 0.03em;
+    color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 14px; cursor: pointer; }
+  .loadbtn:hover { border-color: var(--signal-dim); color: var(--signal); }
+  .loadbtn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .foot code { font-family: var(--mono); color: var(--ink-dim); background: var(--well);
+    padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line-soft); }
+  .foot .src { margin-left: auto; font-family: var(--mono); font-size: 11.5px; }
+  .foot .src b { color: var(--signal); }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <div class="masthead">
+    <div class="brand">Hoosier<b>SDR</b> · Scope</div>
+    <div class="tagline">P25 Phase I decode session</div>
+    <div class="idstrip" id="idstrip"></div>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section class="panel">
+    <header>
+      <h2>Symbol eye · soft-decision levels</h2>
+      <span class="meta" id="scopeMeta"></span>
+    </header>
+    <div class="scope-grid">
+      <canvas id="scope"></canvas>
+    </div>
+    <div class="scope-legend">
+      <span class="sw"><span class="dot" style="background:var(--signal)"></span> on-level symbol</span>
+      <span class="sw"><span class="dot" style="background:var(--amber)"></span> off-level (eye risk)</span>
+      <span class="sw" style="color:var(--ink-mute)">guides at nominal ±1 / ±3</span>
+      <span class="readout" id="scopeRead">hover the trace</span>
+    </div>
+  </section>
+
+  <div class="duo">
+    <section class="panel">
+      <header><h2>Symbol level distribution</h2></header>
+      <div class="body"><div class="bars" id="bars"></div></div>
+    </section>
+    <section class="panel">
+      <header><h2>Frame-sync quality</h2><span class="meta" id="syncMeta"></span></header>
+      <div class="body"><canvas id="synctl"></canvas><div id="syncEmpty"></div></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <header><h2>Voice grants</h2><span class="meta" id="grantMeta"></span></header>
+    <div class="body"><div class="tablescroll"><table id="grants"></table></div></div>
+  </section>
+
+  <div id="encWrap"></div>
+
+  <section class="panel">
+    <header><h2>Network ID decodes</h2><span class="meta" id="nidMeta"></span></header>
+    <div class="body"><div class="tablescroll"><table id="nids"></table></div></div>
+  </section>
+
+  <div class="foot">
+    <button class="loadbtn" id="loadBtn">Load a real capture (run.json)</button>
+    <input type="file" id="file" accept="application/json,.json" hidden>
+    <span>Export one with <code>hoosier-sdr capture.cf32 --log run.json</code></span>
+    <span class="src" id="srcTag"></span>
+  </div>
+</div>
+
+<script>
+const DEMO = {"schema":"hoosier-sdr/diagnostics/1","sample_rate":48000,"equalizer":false,"symbols_processed":1722,"voice_frames":9,"pcm_samples":1440,"sync_count":2,"mean_sync_bit_errors":0.0,"symbol_health":{"level_counts":[888,345,190,299],"soft_mean":0.48861,"eye_error":0.04752,"soft_samples":[-0.0,0.001,-0.004,0.009,-0.017,0.04,-0.066,0.105,-0.172,0.291,-0.552,3.494,-3.086,2.888,-2.852,2.893,-2.918,2.949,-2.971,2.992,-3.008,3.02,-3.028,3.033,-3.037,3.039,-3.041,3.042,-3.043,3.044,-3.044,3.044,-3.044,3.044,-3.044,3.044,-3.044,3.044,-3.043,3.043,-3.043,3.043,-3.043,3.042,-3.042,3.042,-3.042,3.042,-3.041,3.041,-3.041,3.041,-3.041,3.04,-3.04,3.04,-3.04,3.039,-3.039,3.039,-3.039,3.039,-3.039,3.038,-3.038,3.038,-3.038,3.038,-3.037,3.037,-3.037,3.037,-3.037,3.036,-3.036,3.036,-3.036,3.036,-3.036,3.035,-3.035,3.035,-3.035,3.035,-3.034,3.034,-3.034,3.034,-3.034,3.034,-3.033,3.033,-3.033,3.033,-3.033,3.033,-3.032,3.032,-3.032,3.032,-3.032,3.032,-3.031,3.031,-3.031,3.031,-3.031,3.031,-3.03,3.03,-3.03,3.03,-3.03,3.03,-3.03,3.029,-3.029,3.029,-3.029,3.029,-3.029,3.029,-3.028,3.028,-3.028,3.028,-3.028,3.028,-3.028,3.027,-3.027,3.027,-3.027,3.027,-3.027,3.027,-3.026,3.026,-3.026,3.026,-3.026,3.026,-3.026,3.026,-3.025,3.025,-3.025,3.025,-3.025,3.025,-3.025,3.025,-3.024,3.024,-3.024,3.024,-3.024,3.024,-3.024,3.024,-3.023,3.023,-3.023,3.023,-3.023,3.023,-3.023,3.023,-3.023,3.022,-3.022,3.022,-3.022,3.022,-3.022,3.022,-3.022,3.022,-3.021,3.021,-3.021,3.021,-3.021,3.021,-3.021,3.021,-3.021,3.02,-3.02,3.02,-3.02,3.02,-3.02,3.02,-3.02,3.02,-3.02,3.019,-3.019,3.019,-3.019,3.019,-3.019,3.019,-3.019,3.019,-3.019,3.018,-3.018,3.018,-3.018,3.018,-3.018,3.018,-3.018,3.018,-3.018,3.018,-3.017,3.017,-3.017,3.017,-3.017,3.017,-3.017,3.017,-3.017,3.017,-3.017,3.017,-3.016,3.016,-3.016,3.016,-3.016,3.016,-3.016,3.016,-3.016,3.016,-3.016,3.016,-3.015,3.015,-3.015,3.015,-3.015,3.015,-3.015,3.015,-3.015,3.015,-3.015,3.015,-3.015,3.015,-3.014,3.014,-3.014,3.014,-3.014,3.014,-3.014,3.014,-3.014,3.014,-3.014,3.014,-3.014,3.014,-3.013,3.013,-3.013,3.013,-3.013,3.013,-3.013,3.013,-3.013,3.013,-3.013,3.013,-3.013,3.013,-3.013,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.012,3.012,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.011,3.011,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.01,3.01,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.009,3.009,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.008,3.008,-3.007,3.007,-3.007,3.007,-3.007,3.007,-3.007,3.007,-3.007,3.007,-3.007,3.007,-3.007,3.007,-3.007,3.006,-3.005,3.002,-2.998,2.996,-2.973,2.986,-2.971,2.992,-3.036,3.247,2.718,3.006,3.037,2.534,-2.965,3.353,2.423,-3.296,-2.622,3.398,2.52,-3.281,-2.74,-3.3,-2.336,2.553,-2.881,2.979,-3.135,-2.795,-3.035,-2.953,-2.804,1.128,-1.264,-0.706,3.198,0.486,-2.412,2.932,-3.174,-2.806,-3.018,-0.643,3.008,0.799,-0.925,1.17,3.066,2.814,1.011,3.107,2.847,0.858,-1.101,-0.885,-1.155,-2.963,-0.815,-1.294,-2.75,-1.133,-2.75,0.928,-3.013,1.143,0.768,-1.092,-3.053,-0.747,0.785,-0.865,3.211,2.81,0.938,-1.247,-2.838,1.203,0.582,-0.548,2.738,-0.905,2.858,-3.003,-0.97,-2.877,3.074,0.833,-1.102,-2.906,1.151,3.011,2.832,-3.189,-2.742,1.043,-1.278,-2.748,1.088,1.05,2.954,0.918,-1.196,-2.768,3.097,0.848,-0.98,1.282,2.58,-2.952,1.017,-0.918,2.93,-3.0,-2.918,-2.925,3.151,2.708,-0.953,1.07,0.885,-1.104,-3.066,-0.716,2.592,-2.946,1.003,-0.946,2.931,-2.971,1.049,3.012,2.875,-3.05,1.122,0.625,-2.918,1.145,2.853,-1.145,-0.74,2.98,-1.185,-2.742,1.058,-1.183,-2.988,-2.978,-2.975,-0.849,0.801,-0.797,2.881,-3.027,-0.912,-1.138,-0.854,1.039,0.961,1.068,0.753,-2.96,-0.985,-0.832,2.92,-3.05,-2.805,1.097,3.007,0.856,-0.852,0.916,-0.956,0.986,-1.0,1.055,-1.121,-0.831,3.152,2.862,-0.987,3.158,2.84,-1.004,1.118,3.042,0.831,-2.806,3.043,2.937,3.014,0.857,-0.721,2.875,-0.992,3.084,0.905,-0.888,1.009,-1.141,-2.88,1.069,0.855,-0.95,1.069,3.116,2.806,-2.942,0.988,-0.977,3.023,-1.013,-0.794,0.927,-1.067,-0.865,3.103,2.941,0.932,-0.919,0.94,-0.951,0.964,-0.912,2.959,-2.95,-0.94,1.03,3.057,2.959,0.935,-3.025,-0.948,1.048,3.053,2.937,1.012,2.997,2.984,2.935,-3.02,-2.963,-2.965,1.013,-0.992,1.002,-1.001,0.988,-1.014,1.016,-1.078,-0.918,-1.055,-0.895,0.958,-3.119,-2.867,3.014,0.977,3.051,2.974,-1.064,-2.811,0.99,-2.969,2.94,2.801,-0.932,3.045,2.997,2.948,3.009,2.962,-2.981,2.907,2.822,-3.069,-2.946,3.098,2.863,-3.031,-2.957,-3.054,-2.89,2.911,-2.951,2.865,-2.876,-2.926,-3.024,-2.972,-2.96,1.075,-1.139,-0.814,3.101,0.833,-2.806,3.072,2.936,3.001,2.987,2.973,3.027,2.876,-3.038,-0.961,-3.119,-2.872,1.046,-1.125,-2.945,1.109,2.769,-0.988,3.087,2.963,0.914,-2.851,3.012,0.993,0.923,-2.93,2.964,-0.988,1.113,0.948,0.986,-1.08,-0.974,-0.954,1.06,0.989,0.975,-1.081,-0.918,1.045,0.959,1.09,2.999,0.937,-1.05,-0.932,1.06,0.97,1.038,0.944,-1.072,-0.923,1.051,0.977,1.029,0.946,-1.073,-0.921,1.055,0.98,1.019,0.966,-1.111,-0.824,3.037,0.963,1.051,0.948,-1.097,-0.841,3.05,0.961,1.059,0.95,-1.1,-0.82,2.987,0.989,3.011,0.983,0.965,-1.032,-1.049,-2.953,1.049,0.975,0.966,-1.025,-1.048,-2.96,1.032,1.009,0.917,-0.883,2.948,-2.977,0.991,0.911,1.071,3.092,2.898,-3.018,1.018,0.93,1.044,0.98,1.031,0.979,1.016,0.998,0.997,1.019,0.968,1.085,2.984,0.976,1.033,0.986,1.014,0.994,1.014,0.999,1.005,1.001,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.002,1.003,1.001,1.004,1.002,1.008,1.004,0.994,1.021,0.968,1.084,2.985,0.976,1.033,0.986,1.014,0.994,1.014,0.999,1.005,1.001,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.001,1.004,1.002,1.008,1.004,0.994,1.021,0.968,1.084,2.985,0.977,1.033,0.986,1.013,0.995,1.013,0.999,0.999,0.994,1.004,0.992,1.027,0.937,-1.031,-1.003,-0.94,1.045,0.995,0.971,-1.077,-0.921,1.034,0.984,1.023,0.955,-1.067,-0.932,1.048,0.979,1.032,0.956,-1.072,-0.908,0.996,1.072,2.984,0.986,0.983,-1.083,-0.911,1.04,0.995,1.013,0.974,-1.1,-0.844,3.034,0.974,1.046,0.954,-1.087,-0.859,3.045,0.974,1.046,0.958,-1.089,-0.861,3.027,0.98,1.072,0.904,-0.991,-1.087,-2.928,1.037,0.992,0.948,-0.992,-1.087,-2.892,2.994,0.965,1.153,0.79,-0.766,2.871,-2.989,1.008,0.915,1.071,3.105,2.882,-3.021,1.03,0.926,1.047,0.98,1.03,0.979,1.011,0.997,1.007,1.002,1.004,1.003,1.003,1.004,1.002,1.005,1.003,1.008,1.005,0.994,1.023,0.966,1.091,2.985,0.972,1.035,0.985,1.015,0.994,1.015,1.0,1.006,1.002,1.004,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.004,1.002,1.005,1.003,1.008,1.005,0.994,1.023,0.966,1.091,2.985,0.972,1.035,0.985,1.015,0.994,1.015,1.0,1.006,1.002,1.004,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.004,1.002,1.005,1.003,1.008,1.005,0.994,1.023,0.966,1.09,2.985,0.972,1.035,0.985,1.015,0.994,1.015,1.0,1.006,1.002,1.004,1.003,1.003,1.003,1.004,1.002,1.003,0.997,0.996,1.005,0.992,1.03,0.933,-1.034,-1.003,-0.937,1.05,0.992,0.974,-1.084,-0.906,1.037,0.96,1.075,0.858,-0.853,2.959,-1.007,1.101,0.934,1.06,0.92,-1.048,-0.935,1.056,0.975,1.03,0.948,-1.071,-0.925,1.054,0.981,1.019,0.968,-1.107,-0.832,3.038,0.968,1.05,0.951,-1.095,-0.847,3.05,0.965,1.054,0.951,-1.082,-0.847,3.018,0.97,0.998,1.085,2.923,-1.032,-1.029,-2.967,1.038,0.971,0.976,-1.028,-1.046,-2.965,1.032,1.009,0.919,-0.885,2.951,-2.977,0.989,0.912,1.072,3.093,2.903,-3.02,1.018,0.931,1.044,0.982,1.03,0.979,1.013,0.997,1.013,1.004,0.995,1.022,0.969,1.085,2.987,0.977,1.033,0.986,1.015,0.995,1.015,1.0,1.006,1.002,1.004,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.004,1.002,1.005,1.003,1.009,1.005,0.995,1.022,0.969,1.084,2.987,0.978,1.033,0.987,1.015,0.995,1.015,1.0,1.006,1.002,1.004,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.004,1.002,1.005,1.003,1.009,1.005,0.995,1.021,0.969,1.084,2.987,0.978,1.033,0.987,1.015,0.995,1.015,1.0,1.006,1.002,1.004,1.003,1.004,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.003,1.004,1.003,1.004,1.003,1.003,0.997,0.995,1.007,0.992,1.034,0.941,-1.036,-0.984,-0.987,1.14,2.95,0.99,0.973,-1.08,-0.921,1.04,0.992,1.023,0.956,-1.07,-0.93,1.046,0.981,1.026,0.954,-1.068,-0.93,1.047,0.981,1.027,0.953,-1.067,-0.931,1.052,0.983,1.018,0.971,-1.102,-0.841,3.038,0.98,1.049,0.948,-1.071,-0.89,3.111,2.968,0.986,1.017,0.97,-1.106,-0.835,3.026,0.981,1.073,0.902,-0.99,-1.092,-2.929,1.036,0.985,0.963,-1.024,-1.048,-2.965,1.031,1.009,0.92,-0.887,2.953,-2.977,0.988,0.914,1.07,3.095,2.904,-3.014,1.016,0.921,1.064,0.947,1.114,2.963,0.982,1.028,0.99,1.013,0.995,1.015,1.0,1.006,1.002,1.004,1.003,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.003,1.004,1.002,1.005,1.003,1.009,1.005,0.995,1.022,0.969,1.085,2.987,0.977,1.034,0.987,1.015,0.995,1.015,1.0,1.006,1.002,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.003,1.004,1.002,1.005,1.003,1.009,1.005,0.995,1.022,0.969,1.085,2.988,0.977,1.034,0.987,1.015,0.995,1.015,1.0,1.006,1.002,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.003,1.005,1.004,1.008,1.006,0.988,1.015,0.97,1.074,3.012,0.947,-1.002,-1.02,-0.93,1.037,1.007,0.969,-1.075,-0.924,1.036,0.985,1.024,0.956,-1.068,-0.931,1.046,0.982,1.026,0.955,-1.068,-0.932,1.046,0.982,1.027,0.953,-1.065,-0.934,1.054,0.982,1.024,0.976,-1.106,-0.819,2.979,1.016,3.012,0.986,1.011,-1.123,-0.809,3.023,0.988,1.038,0.964,-1.093,-0.86,3.031,0.98,1.074,0.903,-0.991,-1.09,-2.931,1.035,0.985,0.964,-1.024,-1.047,-2.967,1.03,1.009,0.923,-0.891,2.958,-2.977,0.993,0.917,1.061,3.108,2.889,-2.971,2.963,0.972,1.076,0.965,1.042,0.971,1.023,0.994,1.01,1.001,1.005,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004,1.004]},"syncs":[{"at":435,"err":0},{"at":694,"err":0}],"nids":[{"nac":"293","duid":"7","bch_err":0},{"nac":"293","duid":"5","bch_err":0}],"grants":[{"tg":12179,"src":782065,"freq_hz":851137500,"enc":false}],"encrypted_talkgroups":[]};
+
+const DUID = { 0:"HDU", 3:"TDU", 5:"LDU1", 7:"TSBK", 10:"LDU2", 12:"PDU", 15:"TDULC" };
+const LEVELS = [ {lab:"+3", nom:3, key:0}, {lab:"+1", nom:1, key:1}, {lab:"−1", nom:-1, key:2}, {lab:"−3", nom:-3, key:3} ];
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmtInt = (n) => n.toLocaleString("en-US");
+const fmtMHz = (hz) => (hz/1e6).toFixed(4);
+
+function nearestNom(v){ let best=LEVELS[0], bd=1e9; for(const L of LEVELS){const d=Math.abs(v-L.nom); if(d<bd){bd=d;best=L;}} return {L:best, d:bd}; }
+
+function render(data, srcLabel){
+  const sh = data.symbol_health || {};
+  // ---- id strip ----
+  const eqOn = !!data.equalizer;
+  const nac = (data.nids && data.nids[0]) ? data.nids[0].nac : "—";
+  const idstrip = document.getElementById("idstrip");
+  idstrip.innerHTML = "";
+  const chips = [
+    ["NAC", nac, ""],
+    ["RATE", fmtInt(data.sample_rate)+" Hz", ""],
+    ["VOCODER", "IMBE 7200×4400", ""],
+    ["EQUALIZER", eqOn ? "ON" : "OFF", eqOn ? "on" : "off"],
+    ["SCHEMA", (data.schema||"").split("/").pop() || "1", ""],
+  ];
+  for(const [k,v,cls] of chips){
+    const c = document.createElement("span");
+    c.className = "chip " + cls;
+    c.innerHTML = `${k} <b>${v}</b>`;
+    idstrip.appendChild(c);
+  }
+
+  // ---- tiles ----
+  const voiceSec = (data.pcm_samples||0)/8000;
+  const eye = sh.eye_error ?? 0;
+  const eyeGood = eye < 0.25;
+  const tiles = [
+    {k:"Frame syncs", v:fmtInt(data.sync_count||0), good:true},
+    {k:"Voice grants", v:fmtInt((data.grants||[]).length)},
+    {k:"Voice decoded", v:voiceSec.toFixed(2), u:"seconds"},
+    {k:"Mean sync err", v:(data.mean_sync_bit_errors??0).toFixed(2), u:"bits / 48"},
+    {k:"Eye error", v:eye.toFixed(3), good:eyeGood, u:eyeGood?"open eye":"closed eye"},
+    {k:"Symbols", v:fmtInt(data.symbols_processed||0)},
+  ];
+  const tl = document.getElementById("tiles"); tl.innerHTML="";
+  for(const t of tiles){
+    const d = document.createElement("div");
+    d.className = "tile" + (t.good ? " good":"");
+    d.innerHTML = `<span class="k">${t.k}</span><span class="v">${t.v}</span>`+
+      (t.u?`<span class="u">${t.u}</span>`:`<span class="u">&nbsp;</span>`);
+    tl.appendChild(d);
+  }
+
+  // ---- scope ----
+  const samples = sh.soft_samples || [];
+  document.getElementById("scopeMeta").textContent =
+    samples.length ? `${fmtInt(samples.length)} samples · eye ${eye.toFixed(3)}` : "no samples";
+  drawScope(samples);
+
+  // ---- level bars ----
+  const counts = sh.level_counts || [0,0,0,0];
+  const maxc = Math.max(1, ...counts);
+  const bars = document.getElementById("bars"); bars.innerHTML="";
+  LEVELS.forEach((L,i)=>{
+    const n = counts[L.key] ?? 0;
+    const row = document.createElement("div"); row.className="bar-row";
+    row.innerHTML = `<span class="lab">${L.lab}</span>`+
+      `<span class="bar-track"><span class="bar-fill" style="width:${(n/maxc*100).toFixed(1)}%"></span></span>`+
+      `<span class="num">${fmtInt(n)}</span>`;
+    bars.appendChild(row);
+  });
+
+  // ---- sync timeline ----
+  const syncs = data.syncs || [];
+  document.getElementById("syncMeta").textContent = syncs.length ? `${syncs.length} detections` : "";
+  drawSync(syncs, data.symbols_processed||1);
+  document.getElementById("syncEmpty").innerHTML =
+    syncs.length ? "" : `<div class="empty">No frame syncs in this session.</div>`;
+
+  // ---- grants ----
+  const grants = data.grants || [];
+  document.getElementById("grantMeta").textContent = `${grants.length} grant${grants.length===1?"":"s"}`;
+  const gt = document.getElementById("grants");
+  if(grants.length){
+    gt.innerHTML = "<thead><tr><th>Talkgroup</th><th>Source</th><th>Downlink</th><th>Status</th></tr></thead><tbody>"+
+      grants.map(g=>`<tr><td>${g.tg}</td><td>${g.src}</td><td>${fmtMHz(g.freq_hz)} MHz</td>`+
+        `<td>${g.enc?'<span class="badge enc">ENCRYPTED</span>':'<span class="badge clear">CLEAR</span>'}</td></tr>`).join("")+
+      "</tbody>";
+  } else { gt.innerHTML = "<tbody><tr><td class='empty' style='border:none'>No voice grants decoded.</td></tr></tbody>"; }
+
+  // ---- encryption callout ----
+  const enc = data.encrypted_talkgroups || [];
+  const ew = document.getElementById("encWrap");
+  if(enc.length){
+    ew.innerHTML = `<div class="enc-note hot"><span class="icon">⨯</span><p><b>${enc.length} encrypted talkgroup(s) skipped:</b> ${enc.join(", ")}. HoosierSDR never decrypts — encrypted traffic is detected and passed over by design.</p></div>`;
+  } else {
+    ew.innerHTML = `<div class="enc-note"><span class="icon">✓</span><p><b>No encrypted traffic in this session.</b> The encryption gate is active: any non-clear ALGID is flagged and skipped, never decoded.</p></div>`;
+  }
+
+  // ---- nids ----
+  const nids = data.nids || [];
+  document.getElementById("nidMeta").textContent = `${nids.length} decode${nids.length===1?"":"s"}`;
+  const nt = document.getElementById("nids");
+  if(nids.length){
+    nt.innerHTML = "<thead><tr><th>NAC</th><th>Data unit</th><th>BCH errors</th></tr></thead><tbody>"+
+      nids.map(n=>`<tr><td>0x${n.nac}</td><td>${DUID[parseInt(n.duid,16)]||("0x"+n.duid)}</td>`+
+        `<td>${n.bch_err}</td></tr>`).join("")+"</tbody>";
+  } else { nt.innerHTML = "<tbody><tr><td class='empty' style='border:none'>No NID decodes.</td></tr></tbody>"; }
+
+  document.getElementById("srcTag").innerHTML = `SOURCE · <b>${srcLabel}</b>`;
+}
+
+// ---------- canvas: eye/level scope ----------
+let scopePts = [];
+function drawScope(samples){
+  const cv = document.getElementById("scope");
+  const dpr = Math.min(2, window.devicePixelRatio||1);
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W*dpr; cv.height = H*dpr;
+  const g = cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  const padL=40, padR=118, padY=18;
+  const plotW = W-padL-padR, plotH = H-2*padY;
+  const YMAX = 4.2;
+  const yOf = (v)=> padY + (1-(v+YMAX)/(2*YMAX))*plotH;
+  const xOf = (i,n)=> padL + (n<=1?0:(i/(n-1)))*plotW;
+
+  // grid + nominal guides
+  g.strokeStyle = css("--line-soft"); g.lineWidth=1;
+  g.beginPath(); g.moveTo(padL,yOf(0)); g.lineTo(padL+plotW,yOf(0)); g.stroke();
+  g.font = "11px "+css("--mono"); g.textBaseline="middle";
+  for(const L of LEVELS){
+    const y=yOf(L.nom);
+    g.strokeStyle=css("--line"); g.setLineDash([4,5]); g.lineWidth=1;
+    g.beginPath(); g.moveTo(padL,y); g.lineTo(padL+plotW,y); g.stroke(); g.setLineDash([]);
+    g.fillStyle=css("--ink-mute"); g.textAlign="right"; g.fillText(L.lab, padL-8, y);
+  }
+
+  // scatter
+  const n = samples.length;
+  scopePts = [];
+  const sig = css("--signal"), amb = css("--amber");
+  for(let i=0;i<n;i++){
+    const v = samples[i];
+    const {d} = nearestNom(v);
+    const off = d > 0.9;
+    const x=xOf(i,n), y=yOf(Math.max(-YMAX,Math.min(YMAX,v)));
+    g.fillStyle = off ? amb : sig;
+    g.globalAlpha = off ? 0.85 : 0.5;
+    g.beginPath(); g.arc(x,y,off?2.2:1.7,0,6.2832); g.fill();
+    scopePts.push({x,y,v,i});
+  }
+  g.globalAlpha=1;
+
+  // side histogram of value distribution
+  const bins=48, hist=new Array(bins).fill(0);
+  for(const v of samples){ let b=Math.floor((v+YMAX)/(2*YMAX)*bins); b=Math.max(0,Math.min(bins-1,b)); hist[b]++; }
+  const hmax=Math.max(1,...hist);
+  const hx0=padL+plotW+14, hw=padR-24;
+  g.fillStyle=css("--signal"); g.globalAlpha=0.55;
+  for(let b=0;b<bins;b++){
+    const v=-YMAX+(b+0.5)/bins*2*YMAX;
+    const y=yOf(v), bw=hist[b]/hmax*hw;
+    g.fillRect(hx0, y-Math.max(1,plotH/bins/2), bw, Math.max(1.4, plotH/bins-0.5));
+  }
+  g.globalAlpha=1;
+  g.fillStyle=css("--ink-mute"); g.textAlign="left";
+  g.fillText("density", hx0, padY+6);
+}
+
+function drawSync(syncs, total){
+  const cv=document.getElementById("synctl");
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  const W=cv.clientWidth,H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr;
+  const g=cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,W,H);
+  if(!syncs.length) return;
+  const padL=34,padR=12,padT=12,padB=22;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const EMAX=Math.max(2, ...syncs.map(s=>s.err));
+  const yOf=(e)=>padT+(1-e/EMAX)*plotH;
+  const xOf=(at)=>padL+(total<=1?0:at/total)*plotW;
+  // axes
+  g.strokeStyle=css("--line"); g.lineWidth=1;
+  g.beginPath(); g.moveTo(padL,padT); g.lineTo(padL,padT+plotH); g.lineTo(padL+plotW,padT+plotH); g.stroke();
+  g.font="10px "+css("--mono"); g.fillStyle=css("--ink-mute"); g.textAlign="right"; g.textBaseline="middle";
+  for(const e of [0, EMAX]){ const y=yOf(e); g.fillText(String(e), padL-6, y);
+    g.strokeStyle=css("--line-soft"); g.beginPath(); g.moveTo(padL,y); g.lineTo(padL+plotW,y); g.stroke(); }
+  g.textAlign="center"; g.textBaseline="top";
+  g.fillText("bit errors vs 48-bit sync, over symbol index", padL+plotW/2, padT+plotH+7);
+  // marks
+  for(const s of syncs){
+    const x=xOf(s.at), y=yOf(s.err);
+    g.strokeStyle=css("--cyan"); g.lineWidth=1; g.globalAlpha=0.5;
+    g.beginPath(); g.moveTo(x,padT+plotH); g.lineTo(x,y); g.stroke(); g.globalAlpha=1;
+    g.fillStyle= s.err===0 ? css("--signal") : css("--amber");
+    g.beginPath(); g.arc(x,y,4,0,6.2832); g.fill();
+  }
+}
+
+// hover readout on scope
+const scope=document.getElementById("scope");
+scope.addEventListener("mousemove",(e)=>{
+  if(!scopePts.length) return;
+  const r=scope.getBoundingClientRect(); const mx=e.clientX-r.left, my=e.clientY-r.top;
+  let best=null,bd=1e9;
+  for(const p of scopePts){ const d=(p.x-mx)**2+(p.y-my)**2; if(d<bd){bd=d;best=p;} }
+  if(best && bd<400){
+    const {L,d}=nearestNom(best.v);
+    document.getElementById("scopeRead").innerHTML =
+      `sym <b>${best.i}</b> · value <b>${best.v.toFixed(3)}</b> · nearest ${L.lab} (Δ${d.toFixed(2)})`;
+  }
+});
+
+// file loader
+document.getElementById("loadBtn").addEventListener("click",()=>document.getElementById("file").click());
+document.getElementById("file").addEventListener("change",(e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{ try{ const d=JSON.parse(rd.result); render(d, f.name); window.scrollTo({top:0,behavior:"smooth"}); }
+    catch(err){ alert("Could not parse JSON: "+err.message); } };
+  rd.readAsText(f);
+});
+
+let resizeT;
+window.addEventListener("resize",()=>{ clearTimeout(resizeT); resizeT=setTimeout(()=>render(CURRENT.data, CURRENT.src),120); });
+let CURRENT={data:DEMO, src:"demo run"};
+const _render=render;
+render=(d,s)=>{ CURRENT={data:d,src:s||CURRENT.src}; _render(d,CURRENT.src); };
+render(DEMO,"demo run");
+</script>

@@ -65,9 +65,77 @@ between the multipath and the equalizer. The table confirms exactly that:
 This is the design doc's thesis demonstrating itself. Passing the gate
 requires the **complex fractionally-spaced equalizer before differential
 detection** (`hs-dsp::equalizer::LmsFse`, implemented and unit-tested for
-the two-ray case, not yet wired into the CQPSK front end). That front end —
-a coherent LSM/CQPSK demodulator with the equalizer ahead of the diff
-detector — is the next major DSP milestone.
+the two-ray case). The CQPSK front end it plugs into now exists — see below.
+
+## CQPSK carrier + timing front end — WORKS on realistic IQ
+
+`hs-dsp::cqpsk::CqpskReceiver` takes the symbol-level thesis off the bench and
+onto a continuous, oversampled signal with the impairments a real tuner
+delivers. `cargo test -p hs-dsp --test cqpsk_frontend` feeds it RRC-shaped
+CQPSK through:
+
+| Impairment | Recovered BER |
+|------------|:-------------:|
+| Carrier frequency offset (0.01 rad/sample) + phase offset + AWGN | **0.000** |
+| 0.2% sample-clock skew + carrier offset + AWGN | **0.000** |
+
+The chain is: RRC matched filter → complex Gardner timing recovery (NCO +
+interpolator + PI loop) → differential detection with carrier-frequency
+tracking. Two design facts worth recording:
+
+- **No Costas loop.** P25 CQPSK is π/4-DQPSK, whose constellation is an
+  8-point union of two QPSK grids; a plain QPSK Costas loop corrupts it. A
+  static carrier *phase* offset is removed for free by differential detection,
+  and the residual carrier *frequency* offset is tracked as a constant bias in
+  the differential-phase domain (decision-directed, zero steady-state error).
+  The recovered bias matches the injected offset to within 0.02 rad.
+- **Equalizer placement.** Wiring the equalizer into this front end ahead of
+  the detector needs a **phase-blind (CMA)** equalizer, because the coherent
+  FSW-trained FSE wants an absolute phase reference this differential front end
+  deliberately never establishes. That integration now exists — see below.
+
+## Thesis on live-style IQ (ISI + carrier + timing) — PASSES
+
+`cargo test -p hs-dsp --test cqpsk_frontend` (`thesis_on_live_iq_*`) runs the
+whole story on one channel: a two-ray (simulcast) echo **plus** carrier
+frequency offset, phase offset, sample-clock skew, and AWGN — then decodes it
+two ways through the full `CqpskReceiver`.
+
+| Front end | Recovered BER |
+|-----------|:-------------:|
+| Bare — differential detection first (OP25 / trunk-recorder / SDRTrunk) | **0.070** |
+| CMA-equalized — `CmaEqualizer` **before** differential detection (HoosierSDR) | **0.000** |
+
+This is the thesis and the front end combined: the phase-blind constant-modulus
+equalizer (`hs-dsp::equalizer::CmaEqualizer`) opens the eye with no reference
+symbol and no carrier lock — which is exactly what lets it sit ahead of the
+differential detector on π/4-DQPSK — while the Gardner loop recovers timing and
+the differential-domain tracker removes the carrier frequency offset. The
+equalizer takes a 7% error rate to zero on a channel that carries the full set
+of real-tuner impairments, not just clean symbols.
+
+### CQPSK path decodes full P25 frames
+
+The front end is now wired all the way through the protocol stack.
+`ChannelDecoder::new_cqpsk()` runs IQ → carrier + timing recovery → CMA
+equalizer → differential detection → **`hs-p25` framer → trunking → IMBE
+voice**, the same back end the C4FM path uses. `cargo test -p hs-core --test
+cqpsk_pipeline` synthesizes a P25 transmission as π/4-DQPSK IQ and decodes it:
+
+- control channel → frame sync, NID (BCH, 0 errors), TSBK trellis+CRC →
+  **voice grant resolved to 851.1375 MHz**
+- LDU1 → **1440 PCM samples of IMBE audio**
+
+`hoosier-sdr --cqpsk --demo` exercises the whole path from the CLI, and
+`--cqpsk <capture.cf32>` decodes a real simulcast recording once you have one.
+
+### What remains
+
+This is validated on **synthetic** IQ end to end (both modulations now decode
+real frames). The open items are live I/O and field validation, not DSP
+theory: run live SDR capture (`hs-source` + Seify) into the decoder, and re-run
+the whole thing on a captured SAFE-T corpus against SDRTrunk / OP25 to fill in
+the external-baseline table below.
 
 ## External-decoder baselines (to be filled during Phase 0)
 

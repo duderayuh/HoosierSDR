@@ -48,7 +48,13 @@ pub struct SymbolHealth {
     /// Mean absolute deviation of |soft| from the nearest nominal level —
     /// small = open eye, large = closed eye.
     pub eye_err_sum: f64,
+    /// A bounded sample of raw soft-symbol values (post-equalizer), for the
+    /// eye/level plot in visual tools. Capped so long captures stay small.
+    pub soft_samples: Vec<f32>,
 }
+
+/// Max soft-symbol values retained for the eye plot.
+pub const SOFT_SAMPLE_CAP: usize = 4000;
 
 impl SymbolHealth {
     pub fn observe(&mut self, soft: f32, dibit: u8) {
@@ -63,6 +69,9 @@ impl SymbolHealth {
             _ => -3.0,
         };
         self.eye_err_sum += (soft as f64 - nominal).abs();
+        if self.soft_samples.len() < SOFT_SAMPLE_CAP {
+            self.soft_samples.push(soft);
+        }
     }
 
     pub fn soft_mean(&self) -> f64 {
@@ -86,6 +95,7 @@ impl SymbolHealth {
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     pub sample_rate: f64,
+    pub modulation: crate::decoder::Modulation,
     pub equalizer: bool,
     pub symbols_processed: u64,
     pub syncs: Vec<SyncStat>,
@@ -120,6 +130,11 @@ impl Diagnostics {
         let mut s = String::with_capacity(2048);
         s.push_str("{\n");
         s.push_str("  \"schema\": \"hoosier-sdr/diagnostics/1\",\n");
+        let modn = match self.modulation {
+            crate::decoder::Modulation::C4fm => "C4FM",
+            crate::decoder::Modulation::Cqpsk => "CQPSK",
+        };
+        s.push_str(&format!("  \"modulation\": \"{modn}\",\n"));
         s.push_str(&format!("  \"sample_rate\": {},\n", self.sample_rate));
         s.push_str(&format!("  \"equalizer\": {},\n", self.equalizer));
         s.push_str(&format!(
@@ -148,10 +163,17 @@ impl Diagnostics {
             self.health.soft_mean()
         ));
         s.push_str(&format!(
-            "    \"eye_error\": {:.5}\n",
+            "    \"eye_error\": {:.5},\n",
             self.health.eye_error()
         ));
-        s.push_str("  },\n");
+        s.push_str("    \"soft_samples\": [");
+        for (i, v) in self.health.soft_samples.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("{v:.3}"));
+        }
+        s.push_str("]\n  },\n");
 
         // Syncs (capped to keep files small on long captures).
         s.push_str("  \"syncs\": [");
