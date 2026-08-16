@@ -4,3 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
+
+[features]
+# IMBE (Phase I) decoder via vendored ISC mbelib. On by default; disable for
+# a pure-Rust build with no C toolchain.
+default = ["imbe"]
+imbe = ["dep:cc"]
+
+[dependencies]
+hs-p25 = { path = "../hs-p25" }
+
+[build-dependencies]
+cc = { version = "1", optional = true }

@@ -8,3 +8,4 @@ corpus/
 node_modules/
 dist/
 .DS_Store
+!crates/hs-vocoder/vendor/
