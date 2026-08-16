@@ -3,6 +3,16 @@
 //! Protocol constants are facts from the public TIA-102 specifications and
 //! are not derived from any GPL implementation.
 
+pub mod bch;
+pub mod bits;
+pub mod crc;
+pub mod framer;
+pub mod nid;
+pub mod synth;
+pub mod trellis;
+pub mod tsbk;
+pub mod voice;
+
 /// P25 Frame Sync Word: 48 bits / 24 dibit symbols, transmitted before every
 /// data unit. This is the free training sequence the equalizer trains on.
 pub const FRAME_SYNC: u64 = 0x5575F5FF77FF;
