@@ -1,0 +1,21 @@
+[package]
+name = "hoosier-sdr-app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "HoosierSDR desktop app (Tauri v2)"
+
+# Own workspace: keep this out of the core Cargo workspace so `cargo build
+# --workspace` and CI (which run on Linux without WebKit) never try to build
+# the Tauri layer. Build this app separately on macOS/Windows.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+hs-core = { path = "../crates/hs-core" }
+hs-source = { path = "../crates/hs-source", features = ["rtlsdr"] }
+hs-catalog = { path = "../crates/hs-catalog" }

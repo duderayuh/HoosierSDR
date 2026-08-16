@@ -27,6 +27,7 @@ struct Args {
     play: bool,
     demo: bool,
     sdr: bool,
+    catalog: Option<String>,
     freq: f64,
     gain: Option<f64>,
 }
@@ -43,6 +44,7 @@ fn parse_args() -> Args {
         play: false,
         demo: false,
         sdr: false,
+        catalog: None,
         freq: 851_000_000.0,
         gain: None,
     };
@@ -64,6 +66,7 @@ fn parse_args() -> Args {
             "--play" => a.play = true,
             "--demo" => a.demo = true,
             "--sdr" => a.sdr = true,
+            "--catalog" => a.catalog = it.next(),
             "--freq" => a.freq = it.next().and_then(|s| parse_freq(&s)).unwrap_or(a.freq),
             "--gain" => a.gain = it.next().and_then(|s| s.parse().ok()),
             "-h" | "--help" => {
@@ -104,6 +107,7 @@ fn print_help() {
              --sdr          Capture live from an RTL-SDR (build --features rtlsdr)\n\
              --freq <HZ>    SDR center frequency (accepts 851M, 851.0125e6; default 851M)\n\
              --gain <DB>    SDR manual gain in dB (omit for hardware AGC)\n\
+             --catalog <P>  RadioReference talkgroup CSV: show names instead of TG numbers\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -189,7 +193,15 @@ fn demo_iq(rate: f64, cqpsk: bool) -> Vec<f32> {
     to_interleaved(iq)
 }
 
-fn report(out: &DecodeOutput, dec: &ChannelDecoder) {
+/// Talkgroup label from the catalog, else the numeric ID.
+fn tg_label(cat: Option<&hs_core::catalog::CsvCatalog>, id: u16) -> String {
+    match cat {
+        Some(c) => c.label(id),
+        None => format!("TG {id}"),
+    }
+}
+
+fn report(out: &DecodeOutput, dec: &ChannelDecoder, cat: Option<&hs_core::catalog::CsvCatalog>) {
     println!("── HoosierSDR decode summary ──");
     println!("modulation:       {:?}", dec.modulation());
     println!("vocoder:          {}", dec.vocoder_name());
@@ -197,8 +209,8 @@ fn report(out: &DecodeOutput, dec: &ChannelDecoder) {
     println!("voice grants:     {}", out.grants.len());
     for g in &out.grants {
         println!(
-            "   TG {:<6} src {:<8} → {:.4} MHz{}",
-            g.talkgroup,
+            "   {:<20} src {:<8} → {:.4} MHz{}",
+            tg_label(cat, g.talkgroup),
             g.source_unit,
             g.freq_hz as f64 / 1e6,
             if g.encrypted {
@@ -291,6 +303,21 @@ fn build_decoder(args: &Args) -> ChannelDecoder {
     }
 }
 
+/// Load a RadioReference talkgroup CSV, or warn and continue without it.
+fn load_catalog(path: &str) -> Option<hs_core::catalog::CsvCatalog> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let cat = hs_core::catalog::CsvCatalog::parse(&text);
+            println!("loaded catalog: {} talkgroups from {path}", cat.len());
+            Some(cat)
+        }
+        Err(e) => {
+            eprintln!("could not read catalog {path}: {e}");
+            None
+        }
+    }
+}
+
 fn main() {
     let args = parse_args();
 
@@ -312,9 +339,10 @@ fn main() {
         load_iq(args.input.as_ref().unwrap())
     };
 
+    let catalog = args.catalog.as_deref().and_then(load_catalog);
     let mut dec = build_decoder(&args);
     let out = dec.process(&iq);
-    report(&out, &dec);
+    report(&out, &dec, catalog.as_ref());
 
     if let Some(path) = &args.wav_out {
         if out.pcm.is_empty() {

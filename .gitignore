@@ -1,4 +1,6 @@
 /target
+target/
+app/gen/
 Cargo.lock
 *.iq
 *.cf32
@@ -6,6 +8,7 @@ Cargo.lock
 *.wav
 corpus/
 node_modules/
-dist/
+/dist/
+!app/dist/
 .DS_Store
 !crates/hs-vocoder/vendor/
