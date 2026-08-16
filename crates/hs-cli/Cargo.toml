@@ -1,0 +1,23 @@
+[package]
+name = "hs-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hoosier-sdr"
+path = "src/main.rs"
+
+[features]
+# Live audio playback via cpal. Off by default so the CLI builds and runs
+# headless (WAV output) with no audio backend present.
+default = []
+audio = ["dep:cpal"]
+
+[dependencies]
+hs-core = { path = "../hs-core" }
+hs-p25 = { path = "../hs-p25" }
+hs-dsp = { path = "../hs-dsp" }
+hs-source = { path = "../hs-source" }
+cpal = { version = "0.15", optional = true }

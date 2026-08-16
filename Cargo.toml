@@ -10,6 +10,7 @@ members = [
     "crates/hs-transcribe",
     "crates/hs-core",
     "crates/hs-bench",
+    "crates/hs-cli",
 ]
 
 [workspace.package]
