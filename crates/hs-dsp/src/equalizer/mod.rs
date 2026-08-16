@@ -8,9 +8,11 @@
 //! Build order (§4): LMS FSE → CMA fallback → DFE → MLSE.
 
 pub mod lms;
+pub mod real_lms;
 
 // Planned: pub mod cma;  — blind fallback when sync is lost
 // Planned: pub mod dfe;  — feedforward + feedback taps
 // Planned: pub mod mlse; — Viterbi equalization over 2–3 symbol memory
 
 pub use lms::LmsFse;
+pub use real_lms::RealLmsEq;

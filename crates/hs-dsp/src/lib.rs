@@ -6,7 +6,14 @@
 //! Proakis, *Digital Communications*) and TIA-102 protocol facts. No code in
 //! this crate is derived from GPL-licensed projects. See CONTRIBUTING.md.
 
+pub mod c4fm;
 pub mod equalizer;
+pub mod fir;
+pub mod fm;
+pub mod modulator;
+pub mod receiver;
+pub mod rrc;
+pub mod timing;
 
 /// Complex baseband sample. Deliberately minimal; swap for `num_complex`
 /// once external dependencies are introduced.
