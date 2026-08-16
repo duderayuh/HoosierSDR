@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hs-source",
+    "crates/hs-dsp",
+    "crates/hs-p25",
+    "crates/hs-vocoder",
+    "crates/hs-trunk",
+    "crates/hs-catalog",
+    "crates/hs-transcribe",
+    "crates/hs-core",
+    "crates/hs-bench",
+    "crates/hs-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/duderayuh/HoosierSDR"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,39 @@
+HoosierSDR
+Copyright 2026 HoosierSDR contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party attributions
+================================================================================
+
+Portions of the P25 protocol constant tables in this project — specifically
+the 1/2-rate trellis interleave schedule and dibit-pair transition matrix
+(crates/hs-p25/src/trellis.rs) and the Phase I IMBE de-interleave schedule
+(crates/hs-p25/src/voice.rs) — are protocol facts derived from tables
+published in DSD-FME:
+
+    DSD-FME (https://github.com/lwvmobile/dsd-fme)
+    Copyright (C) 2010 DSD Author
+    Licensed under the ISC license.
+
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+    THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH
+    REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL ISC BE LIABLE FOR ANY
+    SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+The IMBE vocoder to be vendored in crates/hs-vocoder/src/imbe/ (Phase 2) is
+derived from mbelib (https://github.com/szechyjs/mbelib), Copyright (C) 2010
+mbelib Author, also ISC-licensed. Its full notice will be added when that code
+lands.
+
+No GPL-licensed source (SDRTrunk, JMBE, OP25, trunk-recorder, dsd-neo,
+mbelib-neo, or any other) has been copied, ported, or transliterated into this
+project. See CONTRIBUTING.md for the provenance policy.
