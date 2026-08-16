@@ -20,3 +20,28 @@ jobs:
       # Once the field-IQ corpus exists this step also reports metric deltas
       # (corpus fetched from external storage, never committed).
       - run: cargo run -p hs-bench
+
+  # Build the Tauri desktop app on a macOS runner, which has the WebKit
+  # webview the app links against (Linux CI can't build it). This is the
+  # authoritative compile check for the `app/` crate and its own workspace.
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install libusb (Seify RTL-SDR backend)
+        run: brew install libusb
+      - name: fmt
+        working-directory: app
+        run: cargo fmt --check
+      - name: clippy
+        working-directory: app
+        run: cargo clippy --all-targets -- -D warnings
+      - name: build
+        working-directory: app
+        run: cargo build
+      # Also confirm the CLI's live-capture backend compiles with libusb present.
+      - name: build hs-cli --features rtlsdr
+        run: cargo build -p hs-cli --features rtlsdr
