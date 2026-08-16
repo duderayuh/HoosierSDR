@@ -16,5 +16,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-  # Phase 0 addition: run hs-bench against the IQ corpus and report metric
-  # deltas per PR (corpus fetched from external storage, not the repo).
+      # Decode-quality gate: the synthetic benchmark must run clean every PR.
+      # Once the field-IQ corpus exists this step also reports metric deltas
+      # (corpus fetched from external storage, never committed).
+      - run: cargo run -p hs-bench

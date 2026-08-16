@@ -4,11 +4,34 @@
 
 Desktop-first (macOS primary, Windows port planned). Built for Indiana's Hoosier SAFE-T system (P25 Phase I), useful for any P25 Phase I network.
 
-> Status: **pre-alpha scaffolding.** See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design doc and roadmap.
+> Status: **pre-alpha, but it decodes.** A complete offline P25 Phase I decode chain works end to end today — control-channel trunking, voice grants, and IMBE audio. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design doc and roadmap, and [`results/baselines.md`](results/baselines.md) for measured decode quality.
+
+## Try it now
+
+```sh
+cargo run -p hs-cli -- --demo
+```
+
+Synthesizes a P25 control-channel + clear-voice transmission, runs it through the whole pipeline (C4FM demod → framer → BCH/trellis/CRC FEC → trunking state machine → IMBE vocoder), resolves the voice grant to its downlink frequency, and writes decoded audio to `hoosier_out.wav`. To decode a real recording: `cargo run -p hs-cli -- --rate 48000 capture.cf32`.
+
+## What works today
+
+- **Full C4FM modem** — FM discriminator, RRC matched filter, Gardner timing recovery, 4-level slicer, with a clean-channel modulator↔demodulator loopback test.
+- **P25 Phase I layer 2** — 48-bit frame sync, BCH(63,16) NID decode (Berlekamp–Massey + Chien, corrects 11 errors), 1/2-rate trellis Viterbi for TSBK, CRC-CCITT16, status-symbol handling.
+- **Trunking** — TSBK parsing (grants, IDEN_UP channel plans, network/RFSS status), channel→downlink-frequency resolution, grant tracking.
+- **IMBE voice** — Phase I vocoder via vendored ISC-licensed mbelib (FFI), producing 8 kHz PCM.
+- **Encryption gate** — ALGID detection wired through; encrypted grants/voice are flagged and never decoded, by architecture.
+- **Benchmark harness** — `hs-bench` runs synthetic or field IQ and reports decode metrics with the equalizer A/B.
+
+## What's not done yet
+
+Live SDR capture (Seify), the coherent LSM/CQPSK front end, the **complex** pre-detection equalizer that beats simulcast (the headline thesis — see below), the Tauri UI, RadioReference catalog, and transcription. These are the Phase 2–5 roadmap.
 
 ## The thesis
 
 Every open-source P25 CQPSK receiver (OP25, trunk-recorder, SDRTrunk) performs differential detection *before* any point where an equalizer could act. Differential detection is a nonlinearity that scrambles inter-symbol interference irrecoverably. HoosierSDR places a sync-trained T/2 fractionally-spaced adaptive equalizer **before** differential detection, trained on the 24-symbol Frame Sync Word that arrives free every 180 ms — targeting the simulcast-distortion regime where existing decoders degrade.
+
+**Honest status of the thesis:** the equalizer *slot* is wired into the decode chain ahead of the slicer, and a sync-trained real symbol-domain LMS runs there today (opt-in via `--equalizer`). It is verified non-harmful but does **not** yet beat the baseline on multipath — because a post-discriminator *real* equalizer cannot invert *pre-discriminator* complex multipath. Passing the Phase 1 gate requires the complex fractionally-spaced equalizer on a coherent LSM/CQPSK front end; that is the project's core remaining DSP work. `results/baselines.md` reports the current numbers without spin.
 
 ## Workspace layout
 
@@ -23,6 +46,7 @@ Every open-source P25 CQPSK receiver (OP25, trunk-recorder, SDRTrunk) performs d
 | `hs-transcribe` | VAD → ASR trait (Whisper / Parakeet) → hallucination filter → normalizer |
 | `hs-core` | Orchestration, scan lists, call routing, recording |
 | `hs-bench` | BER/decode-quality benchmark harness — built first, wired into CI |
+| `hs-cli` | `hoosier-sdr` command-line app: decode a recording or `--demo`, write WAV |
 | `app/` | Tauri v2 desktop shell (Phase 3) |
 
 ## Building
@@ -30,7 +54,13 @@ Every open-source P25 CQPSK receiver (OP25, trunk-recorder, SDRTrunk) performs d
 ```sh
 cargo build --workspace
 cargo test --workspace
+cargo run -p hs-bench          # synthetic decode-quality A/B
+cargo run -p hs-cli -- --demo  # decode a synthesized transmission
 ```
+
+The IMBE vocoder compiles vendored C (ISC-licensed mbelib) via `cc`, so a C
+compiler is required for the default build. `cargo build -p hs-vocoder
+--no-default-features` gives a pure-Rust build with the vocoder stubbed out.
 
 ## Legal posture (read this)
 
