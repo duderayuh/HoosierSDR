@@ -6,7 +6,6 @@
 //! Berlekamp–Massey + Chien search decoding. Protocol fact per TIA-102.BAAA:
 //! the NID is the 16 information bits (NAC 12 + DUID 4).
 
-const M: usize = 6;
 const N: usize = 63;
 const K: usize = 16;
 const T: usize = 11;
@@ -22,8 +21,8 @@ impl Gf {
         let mut exp = [0u8; 128];
         let mut log = [0u8; 64];
         let mut x = 1u8;
-        for i in 0..63 {
-            exp[i] = x;
+        for (i, e) in exp.iter_mut().take(63).enumerate() {
+            *e = x;
             log[x as usize] = i as u8;
             x <<= 1;
             if x & 0x40 != 0 {
@@ -167,7 +166,7 @@ impl Bch6316 {
             }
             if d == 0 {
                 m += 1;
-            } else if 2 * l <= n - 1 {
+            } else if 2 * l < n {
                 let t = c.clone();
                 let coef = self.gf.mul(d, self.gf.inv(bb));
                 for i in 0..N - m {

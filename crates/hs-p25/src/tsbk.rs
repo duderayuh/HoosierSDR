@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn grant_roundtrip() {
         // channel 0x100A, group 0x2F93, source 0xBEEF1
-        let args: u64 = (0u64 << 56) | (0x100Au64 << 40) | (0x2F93u64 << 24) | 0xBEEF1;
+        let args: u64 = (0x100Au64 << 40) | (0x2F93u64 << 24) | 0xBEEF1;
         let bits = build(true, 0x00, 0, args);
         let b = parse(&bits).unwrap();
         assert!(b.last_block);

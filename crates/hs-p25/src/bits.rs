@@ -29,6 +29,6 @@ pub fn write_bits(bits: &mut [u8], pos: usize, n: usize, v: u64) {
 
 /// Pack bits (MSB-first) into dibits.
 pub fn bits_to_dibits(bits: &[u8]) -> Vec<u8> {
-    assert!(bits.len() % 2 == 0);
+    assert!(bits.len().is_multiple_of(2));
     bits.chunks(2).map(|c| (c[0] << 1) | c[1]).collect()
 }

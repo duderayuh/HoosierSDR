@@ -24,7 +24,7 @@ fn tsdu_roundtrip_through_framer() {
     let args: u64 = (0x100Au64 << 40) | (0x2F93u64 << 24) | 0xBEEF1;
     let stream = build_tsdu(
         0x293,
-        &[(0x00, 0, args), (0x3A, 0, 0x01_02_0064_00u64 << 8)],
+        &[(0x00, 0, args), (0x3A, 0, 0x0001_0200_6400_u64 << 8)],
     );
     let ev = run(&stream);
 
@@ -72,8 +72,8 @@ fn ldu1_voice_frames_roundtrip_through_framer() {
     let widths = [23usize, 23, 23, 23, 15, 15, 15, 7];
     for (k, fr) in frames.iter_mut().enumerate() {
         for (w, row) in fr.iter_mut().enumerate() {
-            for x in 0..widths[w] {
-                row[x] = (((k + 1) * (w + 2) * (x + 3)) % 2) as u8;
+            for (x, cell) in row.iter_mut().enumerate().take(widths[w]) {
+                *cell = (((k + 1) * (w + 2) * (x + 3)) % 2) as u8;
             }
         }
     }
