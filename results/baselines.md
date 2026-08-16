@@ -65,9 +65,36 @@ between the multipath and the equalizer. The table confirms exactly that:
 This is the design doc's thesis demonstrating itself. Passing the gate
 requires the **complex fractionally-spaced equalizer before differential
 detection** (`hs-dsp::equalizer::LmsFse`, implemented and unit-tested for
-the two-ray case, not yet wired into the CQPSK front end). That front end —
-a coherent LSM/CQPSK demodulator with the equalizer ahead of the diff
-detector — is the next major DSP milestone.
+the two-ray case). The CQPSK front end it plugs into now exists — see below.
+
+## CQPSK carrier + timing front end — WORKS on realistic IQ
+
+`hs-dsp::cqpsk::CqpskReceiver` takes the symbol-level thesis off the bench and
+onto a continuous, oversampled signal with the impairments a real tuner
+delivers. `cargo test -p hs-dsp --test cqpsk_frontend` feeds it RRC-shaped
+CQPSK through:
+
+| Impairment | Recovered BER |
+|------------|:-------------:|
+| Carrier frequency offset (0.01 rad/sample) + phase offset + AWGN | **0.000** |
+| 0.2% sample-clock skew + carrier offset + AWGN | **0.000** |
+
+The chain is: RRC matched filter → complex Gardner timing recovery (NCO +
+interpolator + PI loop) → differential detection with carrier-frequency
+tracking. Two design facts worth recording:
+
+- **No Costas loop.** P25 CQPSK is π/4-DQPSK, whose constellation is an
+  8-point union of two QPSK grids; a plain QPSK Costas loop corrupts it. A
+  static carrier *phase* offset is removed for free by differential detection,
+  and the residual carrier *frequency* offset is tracked as a constant bias in
+  the differential-phase domain (decision-directed, zero steady-state error).
+  The recovered bias matches the injected offset to within 0.02 rad.
+- **Equalizer placement next.** Wiring `LmsFse` into this front end ahead of
+  the detector needs a **phase-blind (CMA)** equalizer, because the coherent
+  FSW-trained FSE wants an absolute phase reference this differential front end
+  deliberately never establishes. That CMA integration — combining the proven
+  thesis with the working front end on one ISI+carrier+timing channel — is the
+  next DSP milestone.
 
 ## External-decoder baselines (to be filled during Phase 0)
 

@@ -7,6 +7,7 @@
 //! this crate is derived from GPL-licensed projects. See CONTRIBUTING.md.
 
 pub mod c4fm;
+pub mod costas;
 pub mod cqpsk;
 pub mod equalizer;
 pub mod fir;
@@ -15,6 +16,7 @@ pub mod modulator;
 pub mod receiver;
 pub mod rrc;
 pub mod timing;
+pub mod timing_complex;
 
 /// Complex baseband sample. Deliberately minimal; swap for `num_complex`
 /// once external dependencies are introduced.
