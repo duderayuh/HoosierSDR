@@ -7,6 +7,7 @@
 //! this crate is derived from GPL-licensed projects. See CONTRIBUTING.md.
 
 pub mod c4fm;
+pub mod cqpsk;
 pub mod equalizer;
 pub mod fir;
 pub mod fm;

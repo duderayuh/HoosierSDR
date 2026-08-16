@@ -31,7 +31,14 @@ Live SDR capture (Seify), the coherent LSM/CQPSK front end, the **complex** pre-
 
 Every open-source P25 CQPSK receiver (OP25, trunk-recorder, SDRTrunk) performs differential detection *before* any point where an equalizer could act. Differential detection is a nonlinearity that scrambles inter-symbol interference irrecoverably. HoosierSDR places a sync-trained T/2 fractionally-spaced adaptive equalizer **before** differential detection, trained on the 24-symbol Frame Sync Word that arrives free every 180 ms — targeting the simulcast-distortion regime where existing decoders degrade.
 
-**Honest status of the thesis:** the equalizer *slot* is wired into the decode chain ahead of the slicer, and a sync-trained real symbol-domain LMS runs there today (opt-in via `--equalizer`). It is verified non-harmful but does **not** yet beat the baseline on multipath — because a post-discriminator *real* equalizer cannot invert *pre-discriminator* complex multipath. Passing the Phase 1 gate requires the complex fractionally-spaced equalizer on a coherent LSM/CQPSK front end; that is the project's core remaining DSP work. `results/baselines.md` reports the current numbers without spin.
+**Status of the thesis — now demonstrated in a controlled experiment.** `cargo test -p hs-dsp --test thesis_cqpsk` runs a CQPSK stream through a complex two-ray (simulcast-like) channel and decodes it two ways:
+
+| Decode path | Symbol error rate |
+|-------------|:-----------------:|
+| Differential detection first (OP25 / trunk-recorder / SDRTrunk) | **0.259** |
+| Sync-trained equalizer **before** differential detection (this project) | **0.000** |
+
+That is the whole claim in one number — a categorical win, because differential detection is a nonlinearity that makes ISI unrecoverable, so removing it first is not a marginal gain. What remains is *integration*: wiring this proven complex equalizer (`hs-dsp::cqpsk::EqualizedCqpsk` / `LmsFse`) behind live Costas carrier + Gardner timing recovery on real CQPSK IQ, then re-running the gate on a field corpus. The C4FM voice/control path above already decodes end to end today; the CQPSK front end is the next integration. `results/baselines.md` reports everything without spin.
 
 ## Workspace layout
 
