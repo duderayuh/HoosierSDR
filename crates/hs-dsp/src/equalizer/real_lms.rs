@@ -50,17 +50,75 @@ impl RealLmsEq {
         acc
     }
 
-    /// One LMS training step against a known symbol level (±1, ±3).
+    /// One NLMS step against a known symbol level using the live delay line.
+    /// Prefer [`Self::train_sequence`] for sync-anchored training; this direct
+    /// form is used by unit tests where the reference is known every symbol.
     pub fn train(&mut self, desired: f32) -> f32 {
         let y = self.output();
         let e = desired - y;
         let n = self.taps.len();
+        let mut power = 1e-3f32;
+        for &d in &self.delay {
+            power += d * d;
+        }
+        let step = self.mu / power;
         for k in 0..n {
-            self.taps[k] += self.mu * e * self.delay[(self.pos + n - k) % n];
+            let x = self.delay[(self.pos + n - k) % n];
+            self.taps[k] += step * e * x;
         }
         self.error_var = 0.95 * self.error_var + 0.05 * e * e;
         self.trained = true;
         e
+    }
+
+    /// Sync-anchored training: adapt taps over a window of raw input symbols
+    /// with known desired outputs, using a scratch delay line so the live
+    /// filtering state is untouched. `raw[i]` is the receiver symbol and
+    /// `desired[i]` its known level (e.g. the 24 Frame Sync Word symbols).
+    ///
+    /// This is the design's training-sequence LMS: it never adapts on its own
+    /// decisions, so it cannot cold-start into instability. Several passes are
+    /// run over the short window to converge. Output for tap-center `c` aligns
+    /// to input `i-c`, so only positions with full context are used.
+    pub fn train_sequence(&mut self, raw: &[f32], desired: &[f32]) {
+        assert_eq!(raw.len(), desired.len());
+        let n = self.taps.len();
+        let c = n / 2;
+        if raw.len() <= n {
+            return;
+        }
+        for _pass in 0..8 {
+            let mut line = vec![0.0f32; n];
+            let mut p = 0usize;
+            for (i, &sample) in raw.iter().enumerate() {
+                p = (p + 1) % n;
+                line[p] = sample;
+                if i < n - 1 {
+                    continue;
+                }
+                // Output aligns to desired[i - c]. A NaN target marks a
+                // context position with no ground truth — skip it.
+                let idx = i - c;
+                if desired[idx].is_nan() {
+                    continue;
+                }
+                let mut y = 0.0;
+                let mut power = 1e-3f32;
+                for k in 0..n {
+                    let x = line[(p + n - k) % n];
+                    y += self.taps[k] * x;
+                    power += x * x;
+                }
+                let e = desired[idx] - y;
+                let step = self.mu / power;
+                for k in 0..n {
+                    let x = line[(p + n - k) % n];
+                    self.taps[k] += step * e * x;
+                }
+                self.error_var = 0.9 * self.error_var + 0.1 * e * e;
+            }
+        }
+        self.trained = true;
     }
 }
 
@@ -71,7 +129,7 @@ mod tests {
     #[test]
     fn flattens_symbol_isi() {
         // Channel: s[n] + 0.35 s[n-1] (post-discriminator simulcast echo).
-        let mut eq = RealLmsEq::new(7, 0.01);
+        let mut eq = RealLmsEq::new(7, 0.5);
         let seq: Vec<f32> = (0..5000)
             .map(|i| [3.0, 1.0, -1.0, -3.0][(i * 5 + i / 7) % 4])
             .collect();

@@ -33,11 +33,17 @@ pub struct DecodeOutput {
 }
 
 /// Whether the equalizer sits in the symbol path.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum EqMode {
-    /// Thesis mode: adaptive LMS equalizer before the slicer.
+    /// Experimental: FSW-trained real symbol-domain LMS equalizer before the
+    /// slicer. Non-harmful on clean channels but does not yet beat the
+    /// baseline on multipath (see hs-bench and docs/ARCHITECTURE.md §4); the
+    /// complex pre-discriminator FSE is the path to the Phase 1 gate. Opt in
+    /// for A/B measurement.
     Enabled,
-    /// Baseline mode: slice the receiver output directly (for A/B on bench).
+    /// Shipping default: slice the receiver output directly. This is the
+    /// proven decode path.
+    #[default]
     Bypass,
 }
 
@@ -48,6 +54,11 @@ pub struct ChannelDecoder {
     framer: Framer,
     site: SiteModel,
     vocoder: ImbeDecoder,
+    /// Rolling buffer of recent RAW receiver symbols (pre-equalizer), used to
+    /// train the equalizer on the Frame Sync Word once the framer confirms
+    /// one. Sized to hold the 24 FSW symbols plus filter context.
+    raw_hist: Vec<f32>,
+    fsw_levels: Vec<f32>,
     /// Talkgroup of the call currently on this channel (for voice routing).
     active_tg: Option<u16>,
     active_enc: bool,
@@ -55,13 +66,19 @@ pub struct ChannelDecoder {
 
 impl ChannelDecoder {
     pub fn new(sample_rate: f64, eq_mode: EqMode) -> Self {
+        let fsw_levels = hs_p25::synth::sync_dibits()
+            .into_iter()
+            .map(hs_dsp::c4fm::dibit_to_level)
+            .collect();
         Self {
             rx: C4fmReceiver::new(sample_rate),
-            eq: RealLmsEq::new(7, 0.005),
+            eq: RealLmsEq::new(7, 0.5),
             eq_mode,
             framer: Framer::new(),
             site: SiteModel::new(),
             vocoder: ImbeDecoder::new(),
+            raw_hist: Vec::with_capacity(48),
+            fsw_levels,
             active_tg: None,
             active_enc: false,
         }
@@ -86,26 +103,27 @@ impl ChannelDecoder {
     }
 
     fn on_symbol(&mut self, sym: f32, out: &mut DecodeOutput) {
+        // Buffer the raw (pre-equalizer) symbol so we can train on the Frame
+        // Sync Word once the framer confirms one.
+        if self.eq_mode == EqMode::Enabled {
+            self.raw_hist.push(sym);
+            if self.raw_hist.len() > 40 {
+                self.raw_hist.remove(0);
+            }
+        }
+
         // Equalize (or bypass) to get the decision-stage symbol. In Enabled
         // mode the equalizer filters the raw symbol stream and its output —
         // not the raw sample — is what the slicer decides on. This is the
-        // project thesis in one line: ISI removal ahead of detection.
+        // project thesis in one line: ISI removal ahead of detection. The
+        // equalizer is FROZEN between syncs (never adapts on its own
+        // decisions), so it cannot cold-start into instability; it only
+        // updates on the known FSW via train_sequence() below.
         let eq_sym = match self.eq_mode {
             EqMode::Enabled => self.eq.push(sym),
             EqMode::Bypass => sym,
         };
         let dibit = slice(eq_sym);
-
-        // Decision-directed LMS: adapt taps toward the nominal level of the
-        // decided symbol, using the live delay line already advanced by
-        // push() — no replay, no corruption of the sample stream. Across the
-        // 24-symbol FSW the decisions ARE the known reference, so this is
-        // exactly sync-anchored training during those symbols and DD-LMS
-        // elsewhere; both keep the equalizer ahead of the slicer.
-        if self.eq_mode == EqMode::Enabled {
-            let target = hs_dsp::c4fm::dibit_to_level(dibit);
-            self.eq.train(target);
-        }
 
         let mut events = Vec::new();
         self.framer.push(dibit, &mut events);
@@ -118,6 +136,23 @@ impl ChannelDecoder {
         match ev {
             FramerEvent::Sync { .. } => {
                 out.syncs += 1;
+                // Train the equalizer on the FSW we just decoded. The framer
+                // syncs on the EQUALIZED stream, which lags the raw symbols by
+                // the equalizer's group delay `c`, so the raw FSW symbols end
+                // `c` samples back from the tail of raw_hist. Slice with that
+                // offset and prepend `ctx` context symbols to prime the filter.
+                let c = self.eq.delay_syms();
+                let ctx = 6;
+                let need = 24 + ctx + c;
+                if self.eq_mode == EqMode::Enabled && self.raw_hist.len() >= need {
+                    let n = self.raw_hist.len();
+                    let end = n - c; // one past the last raw FSW symbol
+                    let start = end - 24 - ctx;
+                    let raw = &self.raw_hist[start..end];
+                    let mut desired = vec![f32::NAN; ctx]; // no ground truth
+                    desired.extend_from_slice(&self.fsw_levels);
+                    self.eq.train_sequence(raw, &desired);
+                }
             }
             FramerEvent::Tsdu { blocks, .. } => {
                 for b in blocks {

@@ -55,7 +55,7 @@ fn control_channel_grant_resolves_through_full_chain() {
     let stream = build_tsdu(0x293, &[(0x3D, 0, iden_args), (0x00, 0, grant_args)]);
     let iq = modulate(&stream);
 
-    let mut dec = ChannelDecoder::new(RATE, EqMode::Enabled);
+    let mut dec = ChannelDecoder::new(RATE, EqMode::Bypass);
     let out = dec.process(&iq);
 
     assert!(out.syncs >= 1, "no frame sync detected");
@@ -83,10 +83,38 @@ fn clear_voice_produces_audio_encrypted_is_skipped() {
     let stream = build_ldu1(0x293, &frames);
     let iq = modulate(&stream);
 
-    let mut dec = ChannelDecoder::new(RATE, EqMode::Enabled);
+    let mut dec = ChannelDecoder::new(RATE, EqMode::Bypass);
     let out = dec.process(&iq);
 
     assert!(out.syncs >= 1, "no sync on voice frame");
     // Nine IMBE frames × 160 samples if the LDU decoded.
     assert_eq!(out.pcm.len(), 9 * 160, "expected 1440 PCM samples");
+}
+
+#[test]
+fn equalizer_is_non_harmful_on_clean_channel() {
+    // The experimental FSW-trained equalizer must not degrade a clean-channel
+    // decode relative to the bypass path. (It is not expected to *beat*
+    // bypass on pre-discriminator multipath — that needs the complex FSE —
+    // but it must never break what already works.)
+    let iden_args: u64 = {
+        let iden = 1u64 << 60;
+        let bw = 100u64 << 51;
+        let sign = 1u64 << 50;
+        let spacing = 100u64 << 32;
+        let base = 851_012_500u64 / 5;
+        iden | bw | sign | spacing | base
+    };
+    let grant_channel = (1u64 << 12) | 10;
+    let grant_args: u64 = (grant_channel << 40) | (0x2F93u64 << 24) | 0xBEEF1;
+    let stream = build_tsdu(0x293, &[(0x3D, 0, iden_args), (0x00, 0, grant_args)]);
+    let iq = modulate(&stream);
+
+    let mut eq = ChannelDecoder::new(RATE, EqMode::Enabled);
+    let out = eq.process(&iq);
+    assert!(out.syncs >= 1);
+    assert!(
+        out.grants.iter().any(|g| g.talkgroup == 0x2F93),
+        "equalizer broke a clean-channel grant decode"
+    );
 }

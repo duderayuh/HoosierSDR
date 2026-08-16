@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "hs-bench"
+path = "src/main.rs"
+
 [dependencies]
 hs-dsp = { path = "../hs-dsp" }
 hs-p25 = { path = "../hs-p25" }
+hs-core = { path = "../hs-core" }
