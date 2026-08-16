@@ -175,12 +175,16 @@ impl EqualizedCqpsk {
 /// detection; a carrier *frequency* offset survives as a constant bias on
 /// every differential phase, so we estimate and remove that bias in the
 /// differential domain (decision-directed, tracking to zero steady-state
-/// error). Placing an adaptive equalizer ahead of the detector — the thesis —
-/// requires a phase-blind (CMA) equalizer on this modulation and is the next
-/// integration step; see `EqualizedCqpsk` for the proven symbol-level result.
+/// error). This receiver realizes the **thesis on live-style IQ**: a
+/// phase-blind CMA equalizer (`equalizer::CmaEqualizer`) sits ahead of the
+/// differential detector, removing inter-symbol interference before the
+/// nonlinearity — with no carrier lock, which π/4-DQPSK does not permit. Build
+/// with [`CqpskReceiver::new`] for the equalized path, or
+/// [`CqpskReceiver::new_bare`] to bypass the equalizer for A/B comparison.
 pub struct CqpskReceiver {
     mf: crate::fir::FirC,
     gardner: crate::timing_complex::ComplexGardner,
+    eq: Option<crate::equalizer::CmaEqualizer>,
     prev_sym: Option<C32>,
     /// Tracked differential-phase bias from the carrier frequency offset.
     freq_bias: f32,
@@ -189,12 +193,23 @@ pub struct CqpskReceiver {
 }
 
 impl CqpskReceiver {
-    /// `sps` samples/symbol of the incoming IQ; `beta` RRC rolloff.
+    /// Equalized front end: CMA equalizer before differential detection.
+    /// `sps` samples/symbol; `beta` RRC rolloff.
     pub fn new(sps: usize, beta: f64) -> Self {
+        Self::build(sps, beta, Some(9))
+    }
+
+    /// Baseline front end with no equalizer (for A/B measurement).
+    pub fn new_bare(sps: usize, beta: f64) -> Self {
+        Self::build(sps, beta, None)
+    }
+
+    fn build(sps: usize, beta: f64, eq_taps: Option<usize>) -> Self {
         use crate::rrc::rrc_taps;
         Self {
             mf: crate::fir::FirC::new(rrc_taps(sps, 6, beta), 1),
             gardner: crate::timing_complex::ComplexGardner::new(sps as f32, 0.004),
+            eq: eq_taps.map(|n| crate::equalizer::CmaEqualizer::new(n, 0.002)),
             prev_sym: None,
             freq_bias: 0.0,
             mu_freq: 0.02,
@@ -206,6 +221,13 @@ impl CqpskReceiver {
     pub fn push(&mut self, iq: C32) -> Option<u8> {
         let filtered = self.mf.push(iq)?;
         let sym = self.gardner.push(filtered)?;
+        self.settle = self.settle.saturating_add(1);
+        // Equalize before differential detection (the thesis). Freeze the CMA
+        // taps until the timing loop has settled so it adapts on a real eye.
+        let sym = match self.eq.as_mut() {
+            Some(eq) => eq.push(sym, self.settle > 32),
+            None => sym,
+        };
         let prev = match self.prev_sym {
             Some(p) => p,
             None => {
@@ -219,7 +241,6 @@ impl CqpskReceiver {
         let dibit = dphase_to_dibit(corr);
         // Decision-directed bias update: pull toward the ideal differential
         // phase of the decided dibit. Let timing/interp settle first.
-        self.settle = self.settle.saturating_add(1);
         if self.settle > 16 {
             let ideal = dibit_to_dphase(dibit);
             self.freq_bias += self.mu_freq * wrap_pi(corr - ideal);

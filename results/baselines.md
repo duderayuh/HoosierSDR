@@ -89,12 +89,39 @@ tracking. Two design facts worth recording:
   and the residual carrier *frequency* offset is tracked as a constant bias in
   the differential-phase domain (decision-directed, zero steady-state error).
   The recovered bias matches the injected offset to within 0.02 rad.
-- **Equalizer placement next.** Wiring `LmsFse` into this front end ahead of
+- **Equalizer placement.** Wiring the equalizer into this front end ahead of
   the detector needs a **phase-blind (CMA)** equalizer, because the coherent
   FSW-trained FSE wants an absolute phase reference this differential front end
-  deliberately never establishes. That CMA integration — combining the proven
-  thesis with the working front end on one ISI+carrier+timing channel — is the
-  next DSP milestone.
+  deliberately never establishes. That integration now exists — see below.
+
+## Thesis on live-style IQ (ISI + carrier + timing) — PASSES
+
+`cargo test -p hs-dsp --test cqpsk_frontend` (`thesis_on_live_iq_*`) runs the
+whole story on one channel: a two-ray (simulcast) echo **plus** carrier
+frequency offset, phase offset, sample-clock skew, and AWGN — then decodes it
+two ways through the full `CqpskReceiver`.
+
+| Front end | Recovered BER |
+|-----------|:-------------:|
+| Bare — differential detection first (OP25 / trunk-recorder / SDRTrunk) | **0.070** |
+| CMA-equalized — `CmaEqualizer` **before** differential detection (HoosierSDR) | **0.000** |
+
+This is the thesis and the front end combined: the phase-blind constant-modulus
+equalizer (`hs-dsp::equalizer::CmaEqualizer`) opens the eye with no reference
+symbol and no carrier lock — which is exactly what lets it sit ahead of the
+differential detector on π/4-DQPSK — while the Gardner loop recovers timing and
+the differential-domain tracker removes the carrier frequency offset. The
+equalizer takes a 7% error rate to zero on a channel that carries the full set
+of real-tuner impairments, not just clean symbols.
+
+### What remains
+
+This is validated on **synthetic** IQ end to end. The open items are
+integration, not DSP theory: feed `CqpskReceiver`'s recovered dibits into the
+`hs-p25` framer (sync → NID → FEC → TSBK/voice) so the CQPSK path decodes real
+frames, run live SDR capture into it, and re-run the whole thing on the field
+corpus against SDRTrunk/OP25. The symbol engine that makes the gate winnable
+now exists and is measured.
 
 ## External-decoder baselines (to be filled during Phase 0)
 

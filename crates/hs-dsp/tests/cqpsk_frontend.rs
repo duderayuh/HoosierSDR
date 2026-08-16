@@ -160,3 +160,62 @@ fn front_end_tracks_timing_clock_skew() {
         "timing tracking failed under clock skew: BER {e:.4}"
     );
 }
+
+/// Symbol-spaced complex two-ray channel applied to the oversampled IQ (echo
+/// delayed by one symbol = SPS samples).
+fn two_ray_iq(iq: &[C32], gain: f32, theta: f32, sps: usize) -> Vec<C32> {
+    let echo = C32::new(gain * theta.cos(), gain * theta.sin());
+    let mut out = vec![C32::ZERO; iq.len()];
+    for i in 0..iq.len() {
+        let mut y = iq[i];
+        if i >= sps {
+            y = y + echo * iq[i - sps];
+        }
+        out[i] = y;
+    }
+    out
+}
+
+#[test]
+fn thesis_on_live_iq_cma_beats_bare_on_isi() {
+    // The whole story on one channel: ISI (two-ray) + carrier offset + timing
+    // skew + noise. The CMA-equalized front end (equalizer before differential
+    // detection) must beat the bare front end (differential detection first).
+    let mut s = 0xBEEF_1234u64;
+    let dibits: Vec<u8> = (0..4000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let iq = modulate_iq(&dibits, SPS, BETA);
+    let isi = two_ray_iq(&iq, 0.6, std::f32::consts::FRAC_PI_4, SPS);
+    let rx = impair(&isi, 0.006, 0.9, 0.04, 5);
+
+    let run = |mut recv: CqpskReceiver| -> f64 {
+        let mut out = Vec::new();
+        for &x in &rx {
+            if let Some(d) = recv.push(x) {
+                out.push(d);
+            }
+        }
+        // Use the settled tail (CMA needs time to converge).
+        let tail = &out[out.len().saturating_sub(1500)..];
+        best_ber(tail, &dibits)
+    };
+
+    let bare = run(CqpskReceiver::new_bare(SPS, BETA));
+    let eq = run(CqpskReceiver::new(SPS, BETA));
+    eprintln!("live IQ + ISI: bare BER = {bare:.4}, CMA-equalized BER = {eq:.4}");
+
+    assert!(
+        bare > 0.05,
+        "channel too easy — bare should struggle (got {bare:.4})"
+    );
+    assert!(
+        eq < bare * 0.5,
+        "CMA did not beat bare: eq {eq:.4} vs bare {bare:.4}"
+    );
+}
