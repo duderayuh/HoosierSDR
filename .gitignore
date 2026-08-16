@@ -1,0 +1,10 @@
+/target
+Cargo.lock
+*.iq
+*.cf32
+*.cs16
+*.wav
+corpus/
+node_modules/
+dist/
+.DS_Store

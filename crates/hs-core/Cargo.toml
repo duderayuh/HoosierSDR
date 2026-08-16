@@ -1,0 +1,15 @@
+[package]
+name = "hs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hs-source = { path = "../hs-source" }
+hs-dsp = { path = "../hs-dsp" }
+hs-p25 = { path = "../hs-p25" }
+hs-vocoder = { path = "../hs-vocoder" }
+hs-trunk = { path = "../hs-trunk" }
+hs-catalog = { path = "../hs-catalog" }
+hs-transcribe = { path = "../hs-transcribe" }
