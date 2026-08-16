@@ -21,9 +21,9 @@ fn runs_and_returns_bounded_frames() {
         for (x, cell) in fr[0].iter_mut().enumerate().take(12) {
             *cell = ((f as usize + x) % 2) as u8;
         }
-        for cw in 1..8 {
-            for x in 0..10 {
-                fr[cw][x] = ((f as usize * 3 + cw + x) % 2) as u8;
+        for (cw, row) in fr.iter_mut().enumerate().skip(1) {
+            for (x, cell) in row.iter_mut().enumerate().take(10) {
+                *cell = ((f as usize * 3 + cw + x) % 2) as u8;
             }
         }
         let pcm = dec.decode(&fr);

@@ -2,6 +2,8 @@
 //! trunking → vocoder → audio/recording/transcription. Real pipeline lands
 //! across Phases 1–2; this crate currently pins the dependency graph.
 
+pub mod decoder;
+
 pub use hs_catalog as catalog;
 pub use hs_dsp as dsp;
 pub use hs_p25 as p25;
