@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HoosierSDR</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand">Hoosier<b>SDR</b></div>
+    <div class="statuspill" id="statuspill">idle</div>
+    <div class="tagline">P25 Phase I receiver · never decrypts</div>
+  </header>
+
+  <main>
+    <section class="panel controls">
+      <header><h2>Tuning</h2></header>
+      <div class="body grid2">
+        <label>Frequency
+          <input id="freq" type="text" value="851.0125M" />
+        </label>
+        <label>Sample rate
+          <select id="rate">
+            <option value="48000">48 kHz (file)</option>
+            <option value="2400000" selected>2.4 MHz (RTL-SDR)</option>
+            <option value="10000000">10 MHz (Airspy)</option>
+          </select>
+        </label>
+        <label>Gain (dB)
+          <input id="gain" type="text" placeholder="AGC" />
+        </label>
+        <label>Modulation
+          <select id="mod">
+            <option value="c4fm" selected>C4FM</option>
+            <option value="cqpsk">CQPSK / LSM (simulcast)</option>
+          </select>
+        </label>
+        <label class="wide">Talkgroup catalog (RadioReference CSV path)
+          <span class="row">
+            <input id="catalog" type="text" placeholder="/path/to/talkgroups.csv" />
+            <button id="loadcat" class="ghost">Load</button>
+          </span>
+        </label>
+        <label>Record IQ to
+          <input id="reciq" type="text" placeholder="run.cf32 (share with support)" />
+        </label>
+        <label>Record log to
+          <input id="reclog" type="text" placeholder="run.json" />
+        </label>
+      </div>
+      <div class="body actions">
+        <button id="start" class="primary">Start capture</button>
+        <button id="stop" class="danger" disabled>Stop</button>
+        <span class="sep"></span>
+        <input id="decfile" type="text" placeholder="decode a .cf32 file instead" />
+        <button id="decode" class="ghost">Decode file</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header><h2>Spectrum</h2><span class="meta" id="specmeta"></span></header>
+      <canvas id="waterfall" width="1024" height="200"></canvas>
+    </section>
+
+    <div class="tiles">
+      <div class="tile"><span class="k">Frame syncs</span><span class="v" id="t-syncs">0</span></div>
+      <div class="tile"><span class="k">Grants</span><span class="v" id="t-grants">0</span></div>
+      <div class="tile"><span class="k">Voice</span><span class="v" id="t-voice">0.0<small>s</small></span></div>
+      <div class="tile"><span class="k">Blocks</span><span class="v" id="t-blocks">0</span></div>
+      <div class="tile"><span class="k">Modulation</span><span class="v small" id="t-mod">—</span></div>
+    </div>
+
+    <section class="panel">
+      <header><h2>Calls</h2><button id="clear" class="ghost small">clear</button></header>
+      <div class="body">
+        <table id="calls">
+          <thead><tr><th>Time</th><th>Talkgroup</th><th>Source</th><th>Downlink</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="callsEmpty" class="empty">No calls yet. Start a capture or decode a file.</div>
+      </div>
+    </section>
+
+    <p class="legal">Decodes unencrypted P25 only — encrypted talkgroups are detected and skipped by design.
+      Indiana: use at your dwelling or place of business only (IC 35-44.1-2-7).</p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -33,9 +33,22 @@ cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 
 (That pulls Seify + libusb; on macOS `brew install libusb`. Without the feature, `--sdr` prints setup guidance.)
 
+## Desktop app
+
+A Tauri v2 desktop app lives in [`app/`](app/) (its own workspace, built on
+macOS/Windows — see [`app/README.md`](app/README.md)): tune an RTL-SDR, watch
+calls decode live with talkgroup names, a spectrum waterfall, and one-click
+**record IQ + diagnostics to disk**. Talkgroup names come from a RadioReference
+CSV via `hs-catalog` (also available on the CLI: `--catalog talkgroups.csv`).
+
+```sh
+cd app && cargo tauri dev      # macOS: brew install libusb; cargo install tauri-cli
+```
+
 ## What's not done yet
 
-Field validation against a real SAFE-T signal, the Tauri UI, RadioReference catalog, and transcription. These are the Phase 3–5 roadmap.
+Field validation against a real SAFE-T signal, the RadioReference SOAP API
+(CSV import works today), and transcription. These are the Phase 4–5 roadmap.
 
 ## The thesis
 
@@ -64,7 +77,7 @@ That is the whole claim in one number — a categorical win, because differentia
 | `hs-core` | Orchestration, scan lists, call routing, recording |
 | `hs-bench` | BER/decode-quality benchmark harness — built first, wired into CI |
 | `hs-cli` | `hoosier-sdr` command-line app: decode a recording or `--demo`, write WAV |
-| `app/` | Tauri v2 desktop shell (Phase 3) |
+| `app/` | Tauri v2 desktop app: live tune/decode, spectrum, record IQ (own workspace) |
 
 ## Building
 
