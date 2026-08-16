@@ -9,6 +9,7 @@
 //! `EqMode::Bypass` disables it for A/B comparison on the bench.
 
 use hs_dsp::c4fm::slice;
+use hs_dsp::cqpsk::CqpskReceiver;
 use hs_dsp::equalizer::RealLmsEq;
 use hs_dsp::receiver::C4fmReceiver;
 use hs_dsp::C32;
@@ -18,6 +19,19 @@ use hs_p25::{AlgId, Duid};
 use hs_trunk::{Grant, IdenPlan, SiteModel};
 use hs_vocoder::imbe::ImbeDecoder;
 use hs_vocoder::Vocoder;
+
+/// P25 Phase I modulation of the incoming signal.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Modulation {
+    /// C4FM (frequency): the FM-discriminator path with the symbol-domain
+    /// equalizer. Used on non-simulcast sites.
+    #[default]
+    C4fm,
+    /// CQPSK / LSM (linear, π/4-DQPSK): the coherent front end with carrier +
+    /// timing recovery and the phase-blind CMA equalizer **before**
+    /// differential detection. Used on simulcast sites — the project thesis.
+    Cqpsk,
+}
 
 /// Output of the decoder for one processed IQ block.
 #[derive(Default)]
@@ -48,7 +62,9 @@ pub enum EqMode {
 }
 
 pub struct ChannelDecoder {
+    modulation: Modulation,
     rx: C4fmReceiver,
+    cqpsk: Option<CqpskReceiver>,
     eq: RealLmsEq,
     eq_mode: EqMode,
     framer: Framer,
@@ -67,13 +83,37 @@ pub struct ChannelDecoder {
 }
 
 impl ChannelDecoder {
+    /// C4FM decoder with the symbol-domain equalizer mode.
     pub fn new(sample_rate: f64, eq_mode: EqMode) -> Self {
+        Self::build(sample_rate, Modulation::C4fm, eq_mode)
+    }
+
+    /// CQPSK / LSM decoder: carrier + timing recovery with the CMA equalizer
+    /// before differential detection (simulcast sites). `sample_rate` must be
+    /// an integer multiple of the 4800-baud symbol rate.
+    pub fn new_cqpsk(sample_rate: f64) -> Self {
+        Self::build(sample_rate, Modulation::Cqpsk, EqMode::Bypass)
+    }
+
+    fn build(sample_rate: f64, modulation: Modulation, eq_mode: EqMode) -> Self {
         let fsw_levels = hs_p25::synth::sync_dibits()
             .into_iter()
             .map(hs_dsp::c4fm::dibit_to_level)
             .collect();
+        let cqpsk = match modulation {
+            Modulation::Cqpsk => {
+                let sps = (sample_rate / hs_dsp::P25_SYMBOL_RATE).round() as usize;
+                assert!(sps >= 4, "CQPSK needs >= 4 samples/symbol");
+                Some(CqpskReceiver::new(sps, 0.2))
+            }
+            Modulation::C4fm => None,
+        };
+        let mut diag = crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled);
+        diag.modulation = modulation;
         Self {
+            modulation,
             rx: C4fmReceiver::new(sample_rate),
+            cqpsk,
             eq: RealLmsEq::new(7, 0.5),
             eq_mode,
             framer: Framer::new(),
@@ -83,8 +123,12 @@ impl ChannelDecoder {
             fsw_levels,
             active_tg: None,
             active_enc: false,
-            diag: crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled),
+            diag,
         }
+    }
+
+    pub fn modulation(&self) -> Modulation {
+        self.modulation
     }
 
     pub fn site(&self) -> &SiteModel {
@@ -103,8 +147,19 @@ impl ChannelDecoder {
         while i + 1 < iq.len() {
             let s = C32::new(iq[i], iq[i + 1]);
             i += 2;
-            if let Some(sym) = self.rx.push(s) {
-                self.on_symbol(sym, &mut out);
+            match self.modulation {
+                Modulation::C4fm => {
+                    if let Some(sym) = self.rx.push(s) {
+                        self.on_symbol(sym, &mut out);
+                    }
+                }
+                Modulation::Cqpsk => {
+                    // The CQPSK front end (matched filter → Gardner → CMA →
+                    // differential detection) emits dibits directly.
+                    if let Some(dibit) = self.cqpsk.as_mut().unwrap().push(s) {
+                        self.feed_dibit(dibit, None, &mut out);
+                    }
+                }
             }
         }
         out
@@ -132,11 +187,18 @@ impl ChannelDecoder {
             EqMode::Bypass => sym,
         };
         let dibit = slice(eq_sym);
+        self.feed_dibit(dibit, Some(eq_sym), out);
+    }
 
-        // Diagnostics: symbol-level health, the cheapest demod-health window.
+    /// Shared dibit-domain path: diagnostics + framer + event handling. Both
+    /// front ends (C4FM symbol slicing, CQPSK differential detection) converge
+    /// here. `soft` is the real soft-symbol value for eye diagnostics when the
+    /// front end has one (C4FM); the CQPSK path passes None.
+    fn feed_dibit(&mut self, dibit: u8, soft: Option<f32>, out: &mut DecodeOutput) {
         self.diag.symbols_processed += 1;
-        self.diag.health.observe(eq_sym, dibit);
-
+        if let Some(s) = soft {
+            self.diag.health.observe(s, dibit);
+        }
         let mut events = Vec::new();
         self.framer.push(dibit, &mut events);
         for ev in events {

@@ -23,6 +23,7 @@ struct Args {
     log_out: Option<String>,
     save_iq: Option<String>,
     equalizer: bool,
+    cqpsk: bool,
     play: bool,
     demo: bool,
 }
@@ -35,6 +36,7 @@ fn parse_args() -> Args {
         log_out: None,
         save_iq: None,
         equalizer: false,
+        cqpsk: false,
         play: false,
         demo: false,
     };
@@ -52,6 +54,7 @@ fn parse_args() -> Args {
             "--log" => a.log_out = it.next(),
             "--save-iq" => a.save_iq = it.next(),
             "--equalizer" => a.equalizer = true,
+            "--cqpsk" => a.cqpsk = true,
             "--play" => a.play = true,
             "--demo" => a.demo = true,
             "-h" | "--help" => {
@@ -86,7 +89,9 @@ fn print_help() {
              --no-wav       Do not write a WAV file\n\
              --log <PATH>   Write a JSON diagnostics log for offline refinement\n\
              --save-iq <P>  Save the decoded IQ to <P>.cf32 (share it to reproduce a decode)\n\
-             --equalizer    Enable the experimental FSW-trained equalizer\n\
+             --equalizer    Enable the experimental FSW-trained equalizer (C4FM)\n\
+             --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
+                            timing recovery + CMA equalizer before differential detection\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -116,9 +121,9 @@ fn load_iq(path: &str) -> Vec<f32> {
 }
 
 /// Synthesize a demo transmission (control channel + clear voice) as IQ so
-/// the app runs end-to-end with no capture hardware or recording.
-fn demo_iq(rate: f64) -> Vec<f32> {
-    use hs_dsp::modulator::C4fmModulator;
+/// the app runs end-to-end with no capture hardware or recording. Emits C4FM
+/// or, when `cqpsk` is set, π/4-DQPSK so `--cqpsk --demo` exercises that path.
+fn demo_iq(rate: f64, cqpsk: bool) -> Vec<f32> {
     use hs_dsp::C32;
     use hs_p25::synth::{build_ldu1, build_tsdu};
     use hs_p25::voice::ImbeFrame;
@@ -139,6 +144,25 @@ fn demo_iq(rate: f64) -> Vec<f32> {
     }
     stream.extend(build_ldu1(0x293, &frames));
 
+    let to_interleaved = |iq: Vec<C32>| {
+        let mut out = Vec::with_capacity(iq.len() * 2);
+        for c in iq {
+            out.push(c.re);
+            out.push(c.im);
+        }
+        out
+    };
+
+    if cqpsk {
+        // Preamble + frame + trailing flush; modulate as π/4-DQPSK.
+        let sps = (rate / hs_dsp::P25_SYMBOL_RATE).round() as usize;
+        let mut dibits: Vec<u8> = (0..300).map(|i| ((i * 5 + i / 3) % 4) as u8).collect();
+        dibits.extend(stream);
+        dibits.extend((0..120).map(|i| ((i * 5) % 4) as u8));
+        return to_interleaved(hs_dsp::cqpsk::modulate_iq(&dibits, sps, 0.2));
+    }
+
+    use hs_dsp::modulator::C4fmModulator;
     let mut m = C4fmModulator::new(rate);
     let mut iq: Vec<C32> = Vec::new();
     for i in 0..400 {
@@ -150,16 +174,12 @@ fn demo_iq(rate: f64) -> Vec<f32> {
     for _ in 0..200 {
         m.modulate(0b00, &mut iq);
     }
-    let mut out = Vec::with_capacity(iq.len() * 2);
-    for c in iq {
-        out.push(c.re);
-        out.push(c.im);
-    }
-    out
+    to_interleaved(iq)
 }
 
 fn report(out: &DecodeOutput, dec: &ChannelDecoder) {
     println!("── HoosierSDR decode summary ──");
+    println!("modulation:       {:?}", dec.modulation());
     println!("vocoder:          {}", dec.vocoder_name());
     println!("frame syncs:      {}", out.syncs);
     println!("voice grants:     {}", out.grants.len());
@@ -245,17 +265,21 @@ fn main() {
 
     let iq = if args.demo {
         println!("Decoding a synthesized P25 transmission (demo mode)…\n");
-        demo_iq(args.rate)
+        demo_iq(args.rate, args.cqpsk)
     } else {
         load_iq(args.input.as_ref().unwrap())
     };
 
-    let mode = if args.equalizer {
-        EqMode::Enabled
+    let mut dec = if args.cqpsk {
+        ChannelDecoder::new_cqpsk(args.rate)
     } else {
-        EqMode::Bypass
+        let mode = if args.equalizer {
+            EqMode::Enabled
+        } else {
+            EqMode::Bypass
+        };
+        ChannelDecoder::new(args.rate, mode)
     };
-    let mut dec = ChannelDecoder::new(args.rate, mode);
     let out = dec.process(&iq);
     report(&out, &dec);
 

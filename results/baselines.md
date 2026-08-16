@@ -114,14 +114,28 @@ the differential-domain tracker removes the carrier frequency offset. The
 equalizer takes a 7% error rate to zero on a channel that carries the full set
 of real-tuner impairments, not just clean symbols.
 
+### CQPSK path decodes full P25 frames
+
+The front end is now wired all the way through the protocol stack.
+`ChannelDecoder::new_cqpsk()` runs IQ → carrier + timing recovery → CMA
+equalizer → differential detection → **`hs-p25` framer → trunking → IMBE
+voice**, the same back end the C4FM path uses. `cargo test -p hs-core --test
+cqpsk_pipeline` synthesizes a P25 transmission as π/4-DQPSK IQ and decodes it:
+
+- control channel → frame sync, NID (BCH, 0 errors), TSBK trellis+CRC →
+  **voice grant resolved to 851.1375 MHz**
+- LDU1 → **1440 PCM samples of IMBE audio**
+
+`hoosier-sdr --cqpsk --demo` exercises the whole path from the CLI, and
+`--cqpsk <capture.cf32>` decodes a real simulcast recording once you have one.
+
 ### What remains
 
-This is validated on **synthetic** IQ end to end. The open items are
-integration, not DSP theory: feed `CqpskReceiver`'s recovered dibits into the
-`hs-p25` framer (sync → NID → FEC → TSBK/voice) so the CQPSK path decodes real
-frames, run live SDR capture into it, and re-run the whole thing on the field
-corpus against SDRTrunk/OP25. The symbol engine that makes the gate winnable
-now exists and is measured.
+This is validated on **synthetic** IQ end to end (both modulations now decode
+real frames). The open items are live I/O and field validation, not DSP
+theory: run live SDR capture (`hs-source` + Seify) into the decoder, and re-run
+the whole thing on a captured SAFE-T corpus against SDRTrunk / OP25 to fill in
+the external-baseline table below.
 
 ## External-decoder baselines (to be filled during Phase 0)
 

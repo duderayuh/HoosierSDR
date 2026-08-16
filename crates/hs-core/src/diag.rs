@@ -95,6 +95,7 @@ impl SymbolHealth {
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     pub sample_rate: f64,
+    pub modulation: crate::decoder::Modulation,
     pub equalizer: bool,
     pub symbols_processed: u64,
     pub syncs: Vec<SyncStat>,
@@ -129,6 +130,11 @@ impl Diagnostics {
         let mut s = String::with_capacity(2048);
         s.push_str("{\n");
         s.push_str("  \"schema\": \"hoosier-sdr/diagnostics/1\",\n");
+        let modn = match self.modulation {
+            crate::decoder::Modulation::C4fm => "C4FM",
+            crate::decoder::Modulation::Cqpsk => "CQPSK",
+        };
+        s.push_str(&format!("  \"modulation\": \"{modn}\",\n"));
         s.push_str(&format!("  \"sample_rate\": {},\n", self.sample_rate));
         s.push_str(&format!("  \"equalizer\": {},\n", self.equalizer));
         s.push_str(&format!(
