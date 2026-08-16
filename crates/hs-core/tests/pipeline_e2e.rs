@@ -118,3 +118,41 @@ fn equalizer_is_non_harmful_on_clean_channel() {
         "equalizer broke a clean-channel grant decode"
     );
 }
+
+#[test]
+fn diagnostics_capture_reflects_decode() {
+    let iden_args: u64 = {
+        let iden = 1u64 << 60;
+        let bw = 100u64 << 51;
+        let sign = 1u64 << 50;
+        let spacing = 100u64 << 32;
+        let base = 851_012_500u64 / 5;
+        iden | bw | sign | spacing | base
+    };
+    let grant_channel = (1u64 << 12) | 10;
+    let grant_args: u64 = (grant_channel << 40) | (0x2F93u64 << 24) | 0xBEEF1;
+    let stream = build_tsdu(0x293, &[(0x3D, 0, iden_args), (0x00, 0, grant_args)]);
+    let iq = modulate(&stream);
+
+    let mut dec = ChannelDecoder::new(RATE, EqMode::Bypass);
+    let _ = dec.process(&iq);
+    let d = dec.diagnostics();
+
+    assert!(d.symbols_processed > 0);
+    assert_eq!(d.syncs.len(), 1);
+    assert_eq!(d.syncs[0].bit_errors, 0);
+    assert!(d.nids.iter().all(|n| n.nac == 0x293));
+    assert_eq!(d.grants.len(), 1);
+    assert_eq!(d.grants[0].talkgroup, 0x2F93);
+    // Clean synthetic signal → tight eye.
+    assert!(
+        d.health.eye_error() < 0.2,
+        "eye_error={}",
+        d.health.eye_error()
+    );
+
+    // JSON must be well-formed and carry the schema tag.
+    let json = d.to_json();
+    assert!(json.contains("\"schema\": \"hoosier-sdr/diagnostics/1\""));
+    assert!(json.contains("\"grants\": [{"));
+}

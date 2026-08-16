@@ -20,6 +20,8 @@ struct Args {
     input: Option<String>,
     rate: f64,
     wav_out: Option<String>,
+    log_out: Option<String>,
+    save_iq: Option<String>,
     equalizer: bool,
     play: bool,
     demo: bool,
@@ -30,6 +32,8 @@ fn parse_args() -> Args {
         input: None,
         rate: DEFAULT_RATE,
         wav_out: Some("hoosier_out.wav".into()),
+        log_out: None,
+        save_iq: None,
         equalizer: false,
         play: false,
         demo: false,
@@ -45,6 +49,8 @@ fn parse_args() -> Args {
             }
             "--wav" => a.wav_out = it.next(),
             "--no-wav" => a.wav_out = None,
+            "--log" => a.log_out = it.next(),
+            "--save-iq" => a.save_iq = it.next(),
             "--equalizer" => a.equalizer = true,
             "--play" => a.play = true,
             "--demo" => a.demo = true,
@@ -78,10 +84,17 @@ fn print_help() {
              --rate <HZ>    IQ sample rate (default 48000; must be a multiple of 4800)\n\
              --wav <PATH>   Write decoded voice to this WAV file (default hoosier_out.wav)\n\
              --no-wav       Do not write a WAV file\n\
+             --log <PATH>   Write a JSON diagnostics log for offline refinement\n\
+             --save-iq <P>  Save the decoded IQ to <P>.cf32 (share it to reproduce a decode)\n\
              --equalizer    Enable the experimental FSW-trained equalizer\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
+         \n\
+         REFINING FROM A REAL TEST: run against your capture with --log run.json\n\
+         (and optionally --save-iq run.cf32), then share those two files. The\n\
+         log captures sync quality, NID/BCH stats, symbol-eye health, grants,\n\
+         and encryption events; the .cf32 lets the decode be reproduced exactly.\n\
          \n\
          LEGAL: Decodes unencrypted P25 only. Encrypted talkgroups are detected\n\
          and skipped by design — HoosierSDR never decrypts. Indiana users: run\n\
@@ -257,7 +270,33 @@ fn main() {
         }
     }
 
+    if let Some(path) = &args.log_out {
+        let json = dec.diagnostics().to_json();
+        match std::fs::write(path, json) {
+            Ok(()) => println!("wrote diagnostics {path}"),
+            Err(e) => eprintln!("failed to write {path}: {e}"),
+        }
+    }
+
+    if let Some(path) = &args.save_iq {
+        match save_iq(path, &iq) {
+            Ok(()) => println!("wrote IQ {path} ({} samples)", iq.len() / 2),
+            Err(e) => eprintln!("failed to write {path}: {e}"),
+        }
+    }
+
     if args.play && !out.pcm.is_empty() {
         play_pcm(&out.pcm);
     }
+}
+
+/// Persist interleaved-f32 IQ so a decode can be reproduced offline.
+fn save_iq(path: &str, iq: &[f32]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut buf = Vec::with_capacity(iq.len() * 4);
+    for &s in iq {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+    f.write_all(&buf)
 }

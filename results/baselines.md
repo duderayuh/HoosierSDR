@@ -6,11 +6,31 @@ synthetic table with `cargo run -p hs-bench`.
 
 ## Status of the Phase 1 gate
 
-**Not passed** — and expected not to be, at this stage. The gate is
+**Not yet passed on real recordings** — but the core mechanism is now proven
+in a controlled experiment (see "Thesis experiment" below). The full gate is
 "measurably lower BER and sync-loss than SDRTrunk on real simulcast
-recordings." That requires (a) the field-IQ corpus, which is not yet
-captured, and (b) the complex fractionally-spaced equalizer before
-differential detection. Both are the project's core remaining work.
+recordings," which still requires (a) the field-IQ corpus, not yet captured,
+and (b) wiring the proven complex equalizer behind live carrier/timing
+recovery on the CQPSK front end. Those are the remaining integration steps.
+
+## Thesis experiment (complex two-ray channel) — PASSES
+
+`cargo test -p hs-dsp --test thesis_cqpsk` runs the project's central claim as
+a controlled experiment: a CQPSK symbol stream through a complex two-ray
+(simulcast-like) channel, decoded two ways.
+
+| Decode path | Symbol error rate |
+|-------------|:-----------------:|
+| Differential detection first (what OP25 / trunk-recorder / SDRTrunk do) | **0.259** |
+| Sync-trained equalizer **before** differential detection (HoosierSDR) | **0.000** |
+
+Echo: 55% amplitude, π/4 phase offset. The equalizer is the complex T/2
+`LmsFse`, trained on a 24-symbol known sync sequence, then frozen. This is the
+whole thesis in one number: differential detection is a nonlinearity that
+makes ISI unrecoverable, so removing it *before* that step is a categorical
+win, not a marginal one. The complex echo here is exactly the class of
+distortion the real post-discriminator equalizer *cannot* touch (next
+section) — which is why the CQPSK front end is the path that matters.
 
 ## Synthetic self-benchmark (no external corpus)
 

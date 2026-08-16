@@ -1,0 +1,206 @@
+//! Decode diagnostics — the data you export from a real-signal test so it can
+//! be replayed and the DSP refined offline.
+//!
+//! The accumulator rides along inside `ChannelDecoder` and records the health
+//! signals that matter when a real capture decodes poorly: how strong each
+//! frame-sync correlation was, how many BCH errors the NID needed, the
+//! distribution of sliced symbol levels (a proxy for timing/gain/equalizer
+//! health), and every grant / encryption event. Serialize it with
+//! [`Diagnostics::to_json`] and share the file.
+
+/// One frame-sync detection and how clean it was.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncStat {
+    /// Symbol index (count of symbols processed) at detection.
+    pub at_symbol: u64,
+    /// Bit errors in the 48-bit sync correlation (0 = perfect).
+    pub bit_errors: u32,
+}
+
+/// One NID decode.
+#[derive(Debug, Clone, Copy)]
+pub struct NidStat {
+    pub nac: u16,
+    pub duid: u8,
+    pub bch_errors: u32,
+}
+
+/// A logged grant (clear or encrypted).
+#[derive(Debug, Clone, Copy)]
+pub struct GrantStat {
+    pub talkgroup: u16,
+    pub source_unit: u32,
+    pub freq_hz: u64,
+    pub encrypted: bool,
+}
+
+/// Running histogram of sliced symbol levels and soft-symbol amplitude, the
+/// cheapest window into demod health on a real signal.
+#[derive(Debug, Clone, Default)]
+pub struct SymbolHealth {
+    /// Count of each sliced dibit: [+3(01), +1(00), -1(10), -3(11)].
+    pub level_counts: [u64; 4],
+    /// Sum and sum-of-squares of the post-equalizer soft symbol, for mean and
+    /// variance without storing every sample.
+    pub soft_sum: f64,
+    pub soft_sq_sum: f64,
+    pub soft_n: u64,
+    /// Mean absolute deviation of |soft| from the nearest nominal level —
+    /// small = open eye, large = closed eye.
+    pub eye_err_sum: f64,
+}
+
+impl SymbolHealth {
+    pub fn observe(&mut self, soft: f32, dibit: u8) {
+        self.level_counts[(dibit & 3) as usize] += 1;
+        self.soft_sum += soft as f64;
+        self.soft_sq_sum += (soft as f64) * (soft as f64);
+        self.soft_n += 1;
+        let nominal = match dibit & 3 {
+            0b01 => 3.0,
+            0b00 => 1.0,
+            0b10 => -1.0,
+            _ => -3.0,
+        };
+        self.eye_err_sum += (soft as f64 - nominal).abs();
+    }
+
+    pub fn soft_mean(&self) -> f64 {
+        if self.soft_n == 0 {
+            0.0
+        } else {
+            self.soft_sum / self.soft_n as f64
+        }
+    }
+
+    pub fn eye_error(&self) -> f64 {
+        if self.soft_n == 0 {
+            0.0
+        } else {
+            self.eye_err_sum / self.soft_n as f64
+        }
+    }
+}
+
+/// Full diagnostic record for a decode session.
+#[derive(Debug, Clone, Default)]
+pub struct Diagnostics {
+    pub sample_rate: f64,
+    pub equalizer: bool,
+    pub symbols_processed: u64,
+    pub syncs: Vec<SyncStat>,
+    pub nids: Vec<NidStat>,
+    pub grants: Vec<GrantStat>,
+    pub encrypted_skips: Vec<u16>,
+    pub voice_frames: u64,
+    pub pcm_samples: u64,
+    pub health: SymbolHealth,
+}
+
+impl Diagnostics {
+    pub fn new(sample_rate: f64, equalizer: bool) -> Self {
+        Self {
+            sample_rate,
+            equalizer,
+            ..Default::default()
+        }
+    }
+
+    /// Mean bit-error of all frame-sync detections (lower is better).
+    pub fn mean_sync_errors(&self) -> f64 {
+        if self.syncs.is_empty() {
+            return 0.0;
+        }
+        self.syncs.iter().map(|s| s.bit_errors as f64).sum::<f64>() / self.syncs.len() as f64
+    }
+
+    /// Serialize to a JSON string. Hand-rolled to keep hs-core dependency-free;
+    /// the schema is stable and documented in docs/DIAGNOSTICS.md.
+    pub fn to_json(&self) -> String {
+        let mut s = String::with_capacity(2048);
+        s.push_str("{\n");
+        s.push_str("  \"schema\": \"hoosier-sdr/diagnostics/1\",\n");
+        s.push_str(&format!("  \"sample_rate\": {},\n", self.sample_rate));
+        s.push_str(&format!("  \"equalizer\": {},\n", self.equalizer));
+        s.push_str(&format!(
+            "  \"symbols_processed\": {},\n",
+            self.symbols_processed
+        ));
+        s.push_str(&format!("  \"voice_frames\": {},\n", self.voice_frames));
+        s.push_str(&format!("  \"pcm_samples\": {},\n", self.pcm_samples));
+        s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
+        s.push_str(&format!(
+            "  \"mean_sync_bit_errors\": {:.4},\n",
+            self.mean_sync_errors()
+        ));
+
+        // Symbol health block.
+        s.push_str("  \"symbol_health\": {\n");
+        s.push_str(&format!(
+            "    \"level_counts\": [{},{},{},{}],\n",
+            self.health.level_counts[0],
+            self.health.level_counts[1],
+            self.health.level_counts[2],
+            self.health.level_counts[3]
+        ));
+        s.push_str(&format!(
+            "    \"soft_mean\": {:.5},\n",
+            self.health.soft_mean()
+        ));
+        s.push_str(&format!(
+            "    \"eye_error\": {:.5}\n",
+            self.health.eye_error()
+        ));
+        s.push_str("  },\n");
+
+        // Syncs (capped to keep files small on long captures).
+        s.push_str("  \"syncs\": [");
+        for (i, sync) in self.syncs.iter().take(2000).enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"at\":{},\"err\":{}}}",
+                sync.at_symbol, sync.bit_errors
+            ));
+        }
+        s.push_str("],\n");
+
+        // NIDs.
+        s.push_str("  \"nids\": [");
+        for (i, n) in self.nids.iter().take(2000).enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"nac\":\"{:03X}\",\"duid\":\"{:X}\",\"bch_err\":{}}}",
+                n.nac, n.duid, n.bch_errors
+            ));
+        }
+        s.push_str("],\n");
+
+        // Grants.
+        s.push_str("  \"grants\": [");
+        for (i, g) in self.grants.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"tg\":{},\"src\":{},\"freq_hz\":{},\"enc\":{}}}",
+                g.talkgroup, g.source_unit, g.freq_hz, g.encrypted
+            ));
+        }
+        s.push_str("],\n");
+
+        // Encrypted skips.
+        s.push_str("  \"encrypted_talkgroups\": [");
+        for (i, tg) in self.encrypted_skips.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&tg.to_string());
+        }
+        s.push_str("]\n}\n");
+        s
+    }
+}

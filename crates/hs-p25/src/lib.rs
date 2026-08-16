@@ -47,6 +47,22 @@ impl From<u8> for Duid {
     }
 }
 
+impl Duid {
+    /// The 4-bit DUID code as transmitted.
+    pub fn code(self) -> u8 {
+        match self {
+            Duid::HeaderDataUnit => 0x0,
+            Duid::TerminatorNoLc => 0x3,
+            Duid::LogicalLinkDataUnit1 => 0x5,
+            Duid::TrunkSignalBlock => 0x7,
+            Duid::LogicalLinkDataUnit2 => 0xA,
+            Duid::PacketDataUnit => 0xC,
+            Duid::TerminatorWithLc => 0xF,
+            Duid::Unknown(v) => v & 0xF,
+        }
+    }
+}
+
 /// P25 encryption algorithm IDs. ALGID 0x80 is clear (unencrypted).
 ///
 /// HoosierSDR **never decrypts**. Anything other than `Clear` is surfaced to
