@@ -20,6 +20,9 @@ jobs:
       # Once the field-IQ corpus exists this step also reports metric deltas
       # (corpus fetched from external storage, never committed).
       - run: cargo run -p hs-bench
+      # Optional features must keep compiling and passing their own tests.
+      - run: cargo test -p hs-catalog --features radioreference
+      - run: cargo clippy -p hs-cli --features radioreference --all-targets -- -D warnings
 
   # Build the Tauri desktop app on a macOS runner, which has the WebKit
   # webview the app links against (Linux CI can't build it). This is the

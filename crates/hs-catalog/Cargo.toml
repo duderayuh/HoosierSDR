@@ -4,3 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+default = []
+# RadioReference database web service. Off by default: it pulls an HTTPS
+# client, and the core catalog (CSV import) needs no network at all.
+radioreference = ["dep:ureq"]
+
+[dependencies]
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }

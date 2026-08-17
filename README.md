@@ -41,6 +41,30 @@ cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 
 ## Desktop app
 
+## Finding the control channel
+
+Don't hunt for it with a power sweep — that method put the first field capture
+50 kHz off the real carrier, locked onto a strong signal that wasn't P25 at
+all. RadioReference already knows every site's control and alternate channels:
+
+```sh
+export RR_APP_KEY=... RR_USERNAME=... RR_PASSWORD=...
+cargo run -p hs-cli --features radioreference -- --rr-system 7804
+```
+
+prints each site with its NAC, RFSS and control channels (primary first, ready
+to paste into `--freq`), and writes a talkgroup CSV that `--catalog` reads
+back. The NAC it prints is the same one the decoder reports off the air, so a
+capture can be matched to the exact site it was hearing.
+
+This needs an **application key** — register the app once at
+[radioreference.com/apps/account](https://www.radioreference.com/apps/account/?tab=api)
+— and each user supplies their own RadioReference login with an active premium
+subscription; the service authenticates the end user on every call. HoosierSDR
+deliberately ships no key of its own. Without a subscription, export the
+talkgroup CSV from the website by hand and use `--catalog` — that path needs no
+credentials and always works.
+
 A Tauri v2 desktop app lives in [`app/`](app/) (its own workspace, built on
 macOS/Windows — see [`app/README.md`](app/README.md)): tune an RTL-SDR, watch
 calls decode live with talkgroup names, a spectrum waterfall, and one-click
@@ -59,8 +83,10 @@ validates the receiver, not the equalizer. Confirming the thesis needs captures
 where the conventional detect-first path actually fails: weak signal, deep
 multipath, or overlapping simulcast transmitters at comparable strength.
 Also outstanding: control-channel capture (the one recorded so far is a traffic
-channel), the RadioReference SOAP API (CSV import works today), and
-transcription. These are the Phase 4–5 roadmap.
+channel) and transcription. The RadioReference client is written but has not yet
+run against the live service — the response field mapping is built from
+published documentation and may need one correction pass against a real payload
+(`--rr-dump` captures it). These are the Phase 4–5 roadmap.
 
 ## The thesis
 

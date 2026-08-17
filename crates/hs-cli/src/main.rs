@@ -11,6 +11,9 @@
 mod wav;
 
 use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
+
+#[cfg(feature = "radioreference")]
+mod rr;
 use std::io::Read;
 
 const DEFAULT_RATE: f64 = 48000.0;
@@ -32,6 +35,8 @@ struct Args {
     gain: Option<f64>,
     offset: f64,
     no_equalizer: bool,
+    rr_system: Option<u32>,
+    rr_dump: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -51,6 +56,8 @@ fn parse_args() -> Args {
         gain: None,
         offset: 0.0,
         no_equalizer: false,
+        rr_system: None,
+        rr_dump: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -67,6 +74,8 @@ fn parse_args() -> Args {
             "--save-iq" => a.save_iq = it.next(),
             "--equalizer" => a.equalizer = true,
             "--no-equalizer" => a.no_equalizer = true,
+            "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
+            "--rr-dump" => a.rr_dump = it.next(),
             "--cqpsk" => a.cqpsk = true,
             "--offset" => a.offset = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
             "--play" => a.play = true,
@@ -119,6 +128,13 @@ fn print_help() {
              --freq <HZ>    SDR center frequency (accepts 851M, 851.0125e6; default 851M)\n\
              --gain <DB>    SDR manual gain in dB (omit for hardware AGC)\n\
              --catalog <P>  RadioReference talkgroup CSV: show names instead of TG numbers\n\
+             --rr-system <N> Download a trunked system\'s sites, control channels and\n\
+             \x20              talkgroups from RadioReference and print where to tune.\n\
+             \x20              Needs RR_APP_KEY, RR_USERNAME, RR_PASSWORD and a premium\n\
+             \x20              account. Writes a talkgroup CSV (--catalog reads it).\n\
+             \x20              Build with --features radioreference.\n\
+             --rr-dump <D>  Save raw RadioReference XML responses to <D>/ for\n\
+             \x20              diagnosing an unexpected response schema.\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -301,6 +317,29 @@ fn parse_freq(s: &str) -> Option<f64> {
     }
 }
 
+#[cfg(feature = "radioreference")]
+fn run_rr(sys_id: u32, cache: Option<&str>, dump: Option<&str>) -> i32 {
+    rr::run(sys_id, cache, dump)
+}
+
+#[cfg(not(feature = "radioreference"))]
+fn run_rr(_sys_id: u32, _cache: Option<&str>, _dump: Option<&str>) -> i32 {
+    eprintln!(
+        "--rr-system needs the `radioreference` feature:\n\
+         \n\
+         \x20   cargo run -p hs-cli --features radioreference -- --rr-system <N>\n\
+         \n\
+         It also needs an application key registered at\n\
+         https://www.radioreference.com/apps/account/?tab=api and a RadioReference\n\
+         login with an active premium subscription, supplied as RR_APP_KEY,\n\
+         RR_USERNAME and RR_PASSWORD.\n\
+         \n\
+         Without it, export your system's talkgroup CSV from the RadioReference\n\
+         website and pass it with --catalog <file.csv>."
+    );
+    2
+}
+
 fn build_decoder(args: &Args) -> ChannelDecoder {
     let modulation = if args.cqpsk {
         Modulation::Cqpsk
@@ -337,6 +376,14 @@ fn load_catalog(path: &str) -> Option<hs_core::catalog::CsvCatalog> {
 
 fn main() {
     let args = parse_args();
+
+    if let Some(sys_id) = args.rr_system {
+        std::process::exit(run_rr(
+            sys_id,
+            args.catalog.as_deref(),
+            args.rr_dump.as_deref(),
+        ));
+    }
 
     if args.sdr {
         run_sdr(&args);
