@@ -150,12 +150,10 @@ impl ScanConfig {
     fn offsets(&self) -> Vec<f64> {
         let half = self.sample_rate / 2.0 - EDGE_MARGIN_HZ;
         let steps = (half / STEP_HZ).floor() as i64;
-        let mut v = vec![0.0];
-        for k in 1..=steps {
-            v.push(k as f64 * STEP_HZ);
-            v.push(-(k as f64) * STEP_HZ);
-        }
-        v
+        // Ascending order: the screening pass compares each candidate against
+        // its spectral neighbours, which only means anything if adjacent
+        // entries are adjacent in frequency.
+        (-steps..=steps).map(|k| k as f64 * STEP_HZ).collect()
     }
 
     /// Keep only the offsets where the spectrum shows something above the
