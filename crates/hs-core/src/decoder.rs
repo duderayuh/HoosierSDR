@@ -377,6 +377,13 @@ impl ChannelDecoder {
         }
     }
 
+    /// Unvoiced synthesis quality passed to the vocoder (1-64). Higher gives
+    /// fricatives more high-frequency detail; it changes only how decoded
+    /// parameters are rendered to audio, never what was decoded.
+    pub fn set_uv_quality(&mut self, q: i32) {
+        self.vocoder.set_uv_quality(q);
+    }
+
     pub fn vocoder_name(&self) -> &'static str {
         self.vocoder.name()
     }

@@ -39,6 +39,7 @@ struct Args {
     rr_dump: Option<String>,
     scan: bool,
     scan_secs: f64,
+    uv_quality: Option<i32>,
 }
 
 fn parse_args() -> Args {
@@ -62,6 +63,7 @@ fn parse_args() -> Args {
         rr_dump: None,
         scan: false,
         scan_secs: 4.0,
+        uv_quality: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -80,6 +82,7 @@ fn parse_args() -> Args {
             "--no-equalizer" => a.no_equalizer = true,
             "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
             "--rr-dump" => a.rr_dump = it.next(),
+            "--uv-quality" => a.uv_quality = it.next().and_then(|s| s.parse().ok()),
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
@@ -141,6 +144,9 @@ fn print_help() {
              \x20              Build with --features radioreference.\n\
              --rr-dump <D>  Save raw RadioReference XML responses to <D>/ for\n\
              \x20              diagnosing an unexpected response schema.\n\
+             --uv-quality <N> Vocoder unvoiced synthesis detail, 1-64 (default 3).\n\
+             \x20              Affects only how audio is rendered, never what is\n\
+             \x20              decoded. Higher is smoother but not brighter; A/B by ear.\n\
              --scan         Sweep the whole captured band and report which channels\n\
              \x20              actually carry P25 — by decoding, not by signal power.\n\
              \x20              Marks control vs voice channels and reports each NAC.\n\
@@ -469,6 +475,9 @@ fn main() {
 
     let catalog = args.catalog.as_deref().and_then(load_catalog);
     let mut dec = build_decoder(&args);
+    if let Some(q) = args.uv_quality {
+        dec.set_uv_quality(q);
+    }
     let out = dec.process(&iq);
     report(&out, &dec, catalog.as_ref());
 
