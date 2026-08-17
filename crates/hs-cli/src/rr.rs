@@ -87,6 +87,13 @@ fn report(sys: &RrSystem) {
         };
         let tdma = if site.tdma_control { "  [TDMA CC]" } else { "" };
         println!("  site {:>3}  {name}  ({nac}){tdma}", site.site_id);
+        if let Some((lat, lon)) = site.position() {
+            let range = match site.range_mi {
+                Some(r) => format!("  ~{r:.0} mi"),
+                None => String::new(),
+            };
+            println!("      {lat:.5}, {lon:.5}{range}    https://maps.google.com/?q={lat},{lon}");
+        }
         for (i, hz) in site.control_channels_hz.iter().enumerate() {
             let kind = if i == 0 { "primary  " } else { "alternate" };
             println!("      {kind} {:.4} MHz    --freq {}", *hz as f64 / 1e6, hz);

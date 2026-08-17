@@ -252,6 +252,8 @@ impl CqpskReceiver {
     }
 
     /// Push one IQ sample. Returns Some(dibit) when a symbol decision is made.
+    /// Use [`CqpskReceiver::push_phase`] to get the differential phase too,
+    /// which downstream soft-decision decoding needs.
     ///
     /// Cold-start order matters here. On real tuner output the receiver must
     /// first strip the DC spur and normalize level (so the constant-modulus
@@ -261,6 +263,15 @@ impl CqpskReceiver {
     /// differential phase per symbol, far outside the ±π/4 decision well, so
     /// every decision it would steer on is already wrong.
     pub fn push(&mut self, iq: C32) -> Option<u8> {
+        self.push_phase(iq).map(|(d, _)| d)
+    }
+
+    /// As [`CqpskReceiver::push`], but also returns the carrier-corrected
+    /// differential phase the dibit was sliced from. How far that phase sits
+    /// from a decision boundary is precisely how much the decision can be
+    /// trusted, and discarding it is what forces every stage downstream into
+    /// hard decisions.
+    pub fn push_phase(&mut self, iq: C32) -> Option<(u8, f32)> {
         let cleaned = self.agc.push(self.dc.push(iq));
         let filtered = self.mf.push(cleaned)?;
         let sym = self.gardner.push(filtered)?;
@@ -308,7 +319,7 @@ impl CqpskReceiver {
         // decision well, pull it toward the ideal phase of the decided dibit.
         let ideal = dibit_to_dphase(dibit);
         self.freq_bias += self.mu_freq * wrap_pi(corr - ideal);
-        Some(dibit)
+        Some((dibit, corr))
     }
 
     /// True once blind carrier acquisition has completed.

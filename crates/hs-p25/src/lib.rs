@@ -8,6 +8,7 @@ pub mod bits;
 pub mod crc;
 pub mod framer;
 pub mod nid;
+pub mod soft;
 pub mod synth;
 pub mod trellis;
 pub mod tsbk;

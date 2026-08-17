@@ -199,11 +199,16 @@ impl ChannelDecoder {
                     // directly, but blind carrier acquisition leaves them
                     // rotated by an unknown quarter turn; the derotator pins
                     // that against the Frame Sync Word before the framer.
-                    if let Some(raw) = self.cqpsk.as_mut().unwrap().push(s) {
+                    if let Some((raw, dphi)) = self.cqpsk.as_mut().unwrap().push_phase(s) {
                         derot_buf.clear();
                         self.derot.push(raw, &mut derot_buf);
+                        // Confidence comes from the differential phase's
+                        // distance to its decision boundaries. Derotation
+                        // permutes which dibit is meant but not how well the
+                        // symbol was resolved, so the confidences carry over.
+                        let conf = hs_p25::soft::soft_slice_cqpsk(dphi).conf;
                         for &d in &derot_buf {
-                            self.feed_dibit(d, None, &mut out);
+                            self.feed_dibit(hs_p25::soft::SoftDibit::new(d, conf), None, &mut out);
                         }
                     }
                 }
@@ -233,21 +238,30 @@ impl ChannelDecoder {
             EqMode::Enabled => self.eq.push(sym),
             EqMode::Bypass => sym,
         };
-        let dibit = slice(eq_sym);
-        self.feed_dibit(dibit, Some(eq_sym), out);
+        // Soft-slice: keep how far the symbol sits from each decision
+        // threshold, so the sync correlator and the trellis decoder can weigh
+        // a marginal symbol differently from a confident one.
+        let sd = hs_p25::soft::soft_slice_c4fm(eq_sym);
+        debug_assert_eq!(sd.bits, slice(eq_sym));
+        self.feed_dibit(sd, Some(eq_sym), out);
     }
 
     /// Shared dibit-domain path: diagnostics + framer + event handling. Both
     /// front ends (C4FM symbol slicing, CQPSK differential detection) converge
     /// here. `soft` is the real soft-symbol value for eye diagnostics when the
     /// front end has one (C4FM); the CQPSK path passes None.
-    fn feed_dibit(&mut self, dibit: u8, soft: Option<f32>, out: &mut DecodeOutput) {
+    fn feed_dibit(
+        &mut self,
+        sd: hs_p25::soft::SoftDibit,
+        soft: Option<f32>,
+        out: &mut DecodeOutput,
+    ) {
         self.diag.symbols_processed += 1;
         if let Some(s) = soft {
-            self.diag.health.observe(s, dibit);
+            self.diag.health.observe(s, sd.bits);
         }
         let mut events = Vec::new();
-        self.framer.push(dibit, &mut events);
+        self.framer.push_soft(sd, &mut events);
         for ev in events {
             self.on_event(ev, out);
         }

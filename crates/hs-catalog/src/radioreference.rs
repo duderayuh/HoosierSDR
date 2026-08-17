@@ -152,12 +152,27 @@ pub struct RrSite {
     pub nac: Option<u16>,
     pub description: Option<String>,
     pub county: Option<String>,
+    /// Tower position, when the database has one. Decimal degrees, WGS84.
+    /// Combined with the NAC decoded off the air, this puts a capture on the
+    /// map: the NAC identifies which site was heard, and the site carries its
+    /// own coordinates.
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    /// Published coverage radius in miles, when present.
+    pub range_mi: Option<f64>,
     /// Control channels, primary first, then alternates.
     pub control_channels_hz: Vec<u64>,
     /// Every frequency on the site, control and voice alike.
     pub frequencies_hz: Vec<u64>,
     /// The control channel uses Phase II TDMA.
     pub tdma_control: bool,
+}
+
+impl RrSite {
+    /// Tower position, if the database records one.
+    pub fn position(&self) -> Option<(f64, f64)> {
+        Some((self.lat?, self.lon?))
+    }
 }
 
 /// A whole trunked system: identity, sites, talkgroups.
@@ -191,9 +206,15 @@ impl RrSystem {
     }
 
     /// The site whose NAC matches one decoded off the air, if any. Lets a
-    /// capture identify which site it was actually hearing.
+    /// capture identify which site it was actually hearing — and, when the
+    /// database has coordinates, where that site is.
     pub fn site_by_nac(&self, nac: u16) -> Option<&RrSite> {
         self.sites.iter().find(|s| s.nac == Some(nac))
+    }
+
+    /// Position of the site transmitting a given NAC, in decimal degrees.
+    pub fn locate_nac(&self, nac: u16) -> Option<(f64, f64)> {
+        self.site_by_nac(nac)?.position()
     }
 }
 
@@ -380,6 +401,16 @@ fn parse_site(n: &Node) -> Option<RrSite> {
             .get_any(&["siteDescr", "siteDescription", "description"])
             .map(str::to_string),
         county: n.get_any(&["ctyName", "county"]).map(str::to_string),
+        // Coordinate field spellings vary across service versions; accept the
+        // documented forms and treat a literal 0/0 as "not recorded" rather
+        // than as a point in the Gulf of Guinea.
+        lat: n
+            .get_f64_any(&["lat", "siteLat", "latitude"])
+            .filter(nonzero),
+        lon: n
+            .get_f64_any(&["lon", "lng", "siteLon", "longitude"])
+            .filter(nonzero),
+        range_mi: n.get_f64_any(&["range", "siteRange"]).filter(nonzero),
         tdma_control: n
             .get_any(&["tdma_cc", "tdmaCc"])
             .map(|v| v.trim() != "0" && !v.trim().is_empty())
@@ -430,6 +461,12 @@ fn parse_talkgroup(n: &&Node) -> Option<Talkgroup> {
         // RR encodes encryption in the mode string: a trailing "E".
         encrypted: mode.to_ascii_uppercase().contains('E'),
     })
+}
+
+/// A coordinate of exactly zero means the database has no position, not a
+/// location on the equator.
+fn nonzero(v: &f64) -> bool {
+    v.abs() > f64::EPSILON
 }
 
 /// RadioReference reports frequencies in MHz. Round to the nearest hertz.
@@ -540,6 +577,7 @@ mod tests {
       <item>
         <siteId>3</siteId><rfss>1</rfss><nac>0x261</nac>
         <siteDescr>Test Site North</siteDescr><ctyName>Testerton</ctyName>
+        <lat>39.7684</lat><lon>-86.1581</lon><range>25</range>
         <tdma_cc>0</tdma_cc>
         <siteFreqs>
           <item><freq>858.9875</freq><use>d</use></item>
@@ -550,6 +588,7 @@ mod tests {
       <item>
         <siteId>4</siteId><rfss>1</rfss><nac>0x1AB</nac>
         <siteDescr>Test Site South</siteDescr>
+        <lat>0</lat><lon>0</lon>
         <tdma_cc>1</tdma_cc>
         <siteFreqs>
           <item><freq>851.5375</freq><use>d</use></item>
@@ -571,6 +610,23 @@ mod tests {
         assert_eq!(north.frequencies_hz.len(), 3);
         assert!(!north.tdma_control);
         assert!(sites[1].tdma_control);
+    }
+
+    #[test]
+    fn locates_a_site_from_an_off_air_nac() {
+        let sys = RrSystem {
+            sites: client(SITES).sites(999).unwrap(),
+            ..Default::default()
+        };
+        let (lat, lon) = sys.locate_nac(0x261).expect("site has coordinates");
+        assert!((lat - 39.7684).abs() < 1e-6 && (lon + 86.1581).abs() < 1e-6);
+        assert_eq!(sys.sites[0].range_mi, Some(25.0));
+        // 0/0 means "not recorded", not a point off the coast of Africa.
+        assert_eq!(
+            sys.sites[1].position(),
+            None,
+            "0/0 must not read as located"
+        );
     }
 
     #[test]

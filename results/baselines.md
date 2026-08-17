@@ -84,6 +84,56 @@ regime, and confirming it needs captures where the conventional path actually
 fails: weak signal, deep multipath, or a site with overlapping transmitters at
 comparable strength.
 
+## Soft-decision decoding — measured on the field capture
+
+Hard slicing discards the demodulator's confidence: a C4FM symbol at +2.9 and
+one at +2.05 both become the same bits, and every stage downstream treats them
+as equal evidence. Carrying per-bit confidence into the frame-sync correlator
+and the trellis Viterbi decoder recovers most of what the hard path was losing.
+
+Same 27.3 s Marion County capture, same everything else:
+
+| | hard decision | soft decision |
+|---|:--:|:--:|
+| Frame syncs | 151 | **161** |
+| Voice frames | 531 | **585** |
+| Decoded audio | 10.62 s | **11.70 s** |
+| Missed LDU frames (gap analysis) | 7 | **1** |
+
+**+1.08 s of recovered audio, and 6 of 7 dropped voice frames recovered.**
+
+The new syncs are real, not false locks — three independent checks agree:
+all 158 NIDs still decode to NAC 0x261 (a false sync yields a garbage NAC),
+the NID BCH error rate is unchanged (0.39 → 0.41 mean, ~87% clean either way),
+and LDU1/LDU2 gained *equally* (+3 each), which is the signature of genuine
+voice frames since the two alternate through a call.
+
+Mean sync bit-errors rises (0.073 → 0.385) and that is the mechanism working,
+not a regression: the correlator is now *accepting* windows with more hard bit
+errors, because the confidence pattern says those errors sit on bits the
+demodulator never trusted.
+
+### Coding gain in isolation
+
+`cargo test -p hs-p25 --lib soft_decoding` runs 300 TSBK frames through a C4FM
+symbol channel with Gaussian noise and decodes each twice from the *same*
+received symbols:
+
+| noise σ | hard | soft |
+|---|:--:|:--:|
+| 0.9 | 299/300 | 300/300 |
+| 1.1 | 290/300 | 300/300 |
+| 1.3 | 258/300 | 298/300 |
+| 1.5 | 175/300 | **291/300** |
+
+Soft decoding does not rescue a trellis stage that noise destroyed outright —
+no decoder does. It wins on the many marginal frames where the confidence
+pattern says which way to lean, which is exactly how coding gain works.
+
+Voice FEC (Golay/Hamming on the IMBE frames) and the NID's BCH decoder are
+still hard-decision; algebraic decoders need Chase-style soft decoding, which
+is the next increment.
+
 ## Synthetic self-benchmark (no external corpus)
 
 `hs-bench` synthesizes a P25 control-channel + voice transmission
