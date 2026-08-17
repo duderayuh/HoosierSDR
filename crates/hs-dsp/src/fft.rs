@@ -100,10 +100,10 @@ pub fn power_spectrum_db(iq: &[f32], size: usize) -> Vec<f32> {
     // fft-shift while converting: bin i of the FFT holds frequency
     // i/size for i < size/2, and (i-size)/size above that.
     let mut out = vec![0.0f32; size];
-    for i in 0..size {
+    for (i, o) in out.iter_mut().enumerate() {
         let src = (i + size / 2) % size;
         let p = acc[src] * scale;
-        out[i] = 10.0 * (p.max(1e-30)).log10() as f32;
+        *o = 10.0 * (p.max(1e-30)).log10() as f32;
     }
     out
 }
