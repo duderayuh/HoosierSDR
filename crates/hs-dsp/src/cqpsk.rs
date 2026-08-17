@@ -54,6 +54,24 @@ pub fn dphase_to_dibit(dphi: f32) -> u8 {
     }
 }
 
+/// Rotate a dibit by `k` quarter turns of the differential phase.
+///
+/// A residual carrier-frequency error of exactly a multiple of π/2 per symbol
+/// is invisible to any blind estimator of π/4-DQPSK — the four ideal
+/// differential phases (±π/4, ±3π/4) map onto themselves under a π/2 rotation.
+/// The estimator therefore recovers the bias only *modulo* π/2, leaving the
+/// detected dibit stream a fixed permutation of the truth. This function is
+/// that permutation; the ambiguity is resolved downstream by finding which
+/// rotation makes the known Frame Sync Word appear (see
+/// `hs_core::decoder`).
+pub fn rotate_dibit(d: u8, k: u8) -> u8 {
+    // Quadrants ordered by increasing differential phase, matching
+    // `dphase_to_dibit`: (−π,−π/2]→11, (−π/2,0]→10, (0,π/2]→00, (π/2,π]→01.
+    const QUAD_TO_DIBIT: [u8; 4] = [0b11, 0b10, 0b00, 0b01];
+    const DIBIT_TO_QUAD: [u8; 4] = [2, 3, 1, 0];
+    QUAD_TO_DIBIT[((DIBIT_TO_QUAD[(d & 3) as usize] + k) & 3) as usize]
+}
+
 /// Differentially modulate dibits into absolute complex symbols (unit
 /// magnitude), starting from phase 0.
 pub fn modulate_symbols(dibits: &[u8]) -> Vec<C32> {
@@ -182,6 +200,8 @@ impl EqualizedCqpsk {
 /// with [`CqpskReceiver::new`] for the equalized path, or
 /// [`CqpskReceiver::new_bare`] to bypass the equalizer for A/B comparison.
 pub struct CqpskReceiver {
+    dc: crate::agc::DcBlocker,
+    agc: crate::agc::Agc,
     mf: crate::fir::FirC,
     gardner: crate::timing_complex::ComplexGardner,
     eq: Option<crate::equalizer::CmaEqualizer>,
@@ -190,7 +210,16 @@ pub struct CqpskReceiver {
     freq_bias: f32,
     mu_freq: f32,
     settle: u32,
+    /// Blind (non-data-aided) acquisition accumulator: Σ exp(j·(4Δφ − π)).
+    acq: C32,
+    acq_n: u32,
+    acquired: bool,
 }
+
+/// Symbols to let the timing loop settle before blind acquisition starts.
+const SETTLE_SYMS: u32 = 64;
+/// Symbols averaged by the blind carrier-bias estimator (~90 ms at 4800 baud).
+const ACQ_SYMS: u32 = 400;
 
 impl CqpskReceiver {
     /// Equalized front end: CMA equalizer before differential detection.
@@ -207,6 +236,8 @@ impl CqpskReceiver {
     fn build(sps: usize, beta: f64, eq_taps: Option<usize>) -> Self {
         use crate::rrc::rrc_taps;
         Self {
+            dc: crate::agc::DcBlocker::default(),
+            agc: crate::agc::Agc::new(1e-3, 1.0),
             mf: crate::fir::FirC::new(rrc_taps(sps, 6, beta), 1),
             gardner: crate::timing_complex::ComplexGardner::new(sps as f32, 0.004),
             eq: eq_taps.map(|n| crate::equalizer::CmaEqualizer::new(n, 0.002)),
@@ -214,12 +245,24 @@ impl CqpskReceiver {
             freq_bias: 0.0,
             mu_freq: 0.02,
             settle: 0,
+            acq: C32::ZERO,
+            acq_n: 0,
+            acquired: false,
         }
     }
 
     /// Push one IQ sample. Returns Some(dibit) when a symbol decision is made.
+    ///
+    /// Cold-start order matters here. On real tuner output the receiver must
+    /// first strip the DC spur and normalize level (so the constant-modulus
+    /// equalizer has a meaningful modulus target), then let timing settle,
+    /// then acquire the carrier bias *blindly* — a decision-directed loop
+    /// cannot pull in from cold, because a 1 kHz tuner offset is 1.3 rad of
+    /// differential phase per symbol, far outside the ±π/4 decision well, so
+    /// every decision it would steer on is already wrong.
     pub fn push(&mut self, iq: C32) -> Option<u8> {
-        let filtered = self.mf.push(iq)?;
+        let cleaned = self.agc.push(self.dc.push(iq));
+        let filtered = self.mf.push(cleaned)?;
         let sym = self.gardner.push(filtered)?;
         self.settle = self.settle.saturating_add(1);
         // Equalize before differential detection (the thesis). Freeze the CMA
@@ -235,18 +278,51 @@ impl CqpskReceiver {
                 return None;
             }
         };
-        // Differential phase, minus the tracked carrier-frequency bias.
         let raw = differential_detect(sym, prev);
+        self.prev_sym = Some(sym);
+
+        // Phase 1 — blind carrier acquisition. The four ideal differential
+        // phases are the odd multiples of π/4, so 4·Δφ is always ≡ π (mod 2π)
+        // regardless of the data. Averaging exp(j·(4Δφ − π)) therefore cancels
+        // the modulation and leaves 4× the carrier bias, with no decisions
+        // involved. The estimate is only unique modulo π/2 (see
+        // `rotate_dibit`); the residual quarter-turn is resolved against the
+        // Frame Sync Word downstream.
+        if !self.acquired {
+            if self.settle > SETTLE_SYMS {
+                let a = 4.0 * raw - PI;
+                self.acq = self.acq + C32::new(a.cos(), a.sin());
+                self.acq_n += 1;
+                if self.acq_n >= ACQ_SYMS {
+                    self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
+                    self.acquired = true;
+                }
+            }
+            return None;
+        }
+
+        // Phase 2 — track. Differential phase, minus the carrier bias.
         let corr = wrap_pi(raw - self.freq_bias);
         let dibit = dphase_to_dibit(corr);
-        // Decision-directed bias update: pull toward the ideal differential
-        // phase of the decided dibit. Let timing/interp settle first.
-        if self.settle > 16 {
-            let ideal = dibit_to_dphase(dibit);
-            self.freq_bias += self.mu_freq * wrap_pi(corr - ideal);
-        }
-        self.prev_sym = Some(sym);
+        // Decision-directed refinement: now that the bias is inside the
+        // decision well, pull it toward the ideal phase of the decided dibit.
+        let ideal = dibit_to_dphase(dibit);
+        self.freq_bias += self.mu_freq * wrap_pi(corr - ideal);
         Some(dibit)
+    }
+
+    /// True once blind carrier acquisition has completed.
+    pub fn acquired(&self) -> bool {
+        self.acquired
+    }
+
+    /// Restart blind acquisition — call after a prolonged loss of sync, when
+    /// the tracked bias may have walked onto a neighbouring quarter turn.
+    pub fn reacquire(&mut self) {
+        self.acq = C32::ZERO;
+        self.acq_n = 0;
+        self.acquired = false;
+        self.settle = 0;
     }
 
     /// Current carrier-frequency estimate as a per-symbol differential-phase
@@ -257,7 +333,7 @@ impl CqpskReceiver {
 }
 
 /// Wrap a phase to (−π, π].
-fn wrap_pi(mut p: f32) -> f32 {
+pub fn wrap_pi(mut p: f32) -> f32 {
     use core::f32::consts::PI;
     while p > PI {
         p -= 2.0 * PI;

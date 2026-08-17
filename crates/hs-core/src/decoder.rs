@@ -10,6 +10,7 @@
 
 use hs_dsp::c4fm::slice;
 use hs_dsp::cqpsk::CqpskReceiver;
+use hs_dsp::decimate::{DecimationPlan, Decimator, TARGET_SPS};
 use hs_dsp::equalizer::RealLmsEq;
 use hs_dsp::receiver::C4fmReceiver;
 use hs_dsp::C32;
@@ -63,8 +64,14 @@ pub enum EqMode {
 
 pub struct ChannelDecoder {
     modulation: Modulation,
+    /// Front-end resampler: native SDR rates (240 kHz on an RTL-SDR) down to
+    /// the ~10 samples/symbol the demodulators are tuned for.
+    decim: Decimator,
+    plan: DecimationPlan,
     rx: C4fmReceiver,
     cqpsk: Option<CqpskReceiver>,
+    /// Resolves the π/2 rotation ambiguity of blind CQPSK acquisition.
+    derot: crate::derotate::Derotator,
     eq: RealLmsEq,
     eq_mode: EqMode,
     framer: Framer,
@@ -83,37 +90,60 @@ pub struct ChannelDecoder {
 }
 
 impl ChannelDecoder {
-    /// C4FM decoder with the symbol-domain equalizer mode.
+    /// C4FM decoder with the symbol-domain equalizer mode. `sample_rate` is
+    /// the **capture** rate; anything above ~10 samples/symbol is decimated
+    /// down internally, so native SDR rates can be passed straight in.
     pub fn new(sample_rate: f64, eq_mode: EqMode) -> Self {
-        Self::build(sample_rate, Modulation::C4fm, eq_mode)
+        Self::build(sample_rate, Modulation::C4fm, eq_mode, 0.0)
     }
 
     /// CQPSK / LSM decoder: carrier + timing recovery with the CMA equalizer
     /// before differential detection (simulcast sites). `sample_rate` must be
     /// an integer multiple of the 4800-baud symbol rate.
     pub fn new_cqpsk(sample_rate: f64) -> Self {
-        Self::build(sample_rate, Modulation::Cqpsk, EqMode::Bypass)
+        Self::build(sample_rate, Modulation::Cqpsk, EqMode::Enabled, 0.0)
     }
 
-    fn build(sample_rate: f64, modulation: Modulation, eq_mode: EqMode) -> Self {
+    /// Decode the channel `offset_hz` away from the capture centre. A
+    /// wideband capture holds many 12.5 kHz P25 channels; this selects one
+    /// without re-tuning the radio, which also rescues a recording made on the
+    /// wrong channel.
+    pub fn with_offset(
+        sample_rate: f64,
+        modulation: Modulation,
+        eq_mode: EqMode,
+        offset_hz: f64,
+    ) -> Self {
+        Self::build(sample_rate, modulation, eq_mode, offset_hz)
+    }
+
+    fn build(sample_rate: f64, modulation: Modulation, eq_mode: EqMode, offset_hz: f64) -> Self {
         let fsw_levels = hs_p25::synth::sync_dibits()
             .into_iter()
             .map(hs_dsp::c4fm::dibit_to_level)
             .collect();
+        let plan = DecimationPlan::for_rate(sample_rate, TARGET_SPS);
+        // On the CQPSK path `EqMode` selects the thesis A/B directly: the
+        // equalizer is the CMA stage ahead of differential detection, and
+        // bypassing it gives exactly the conventional receiver every other
+        // open-source P25 decoder implements. That makes the comparison
+        // measurable on field captures, not just synthetic ones.
         let cqpsk = match modulation {
-            Modulation::Cqpsk => {
-                let sps = (sample_rate / hs_dsp::P25_SYMBOL_RATE).round() as usize;
-                assert!(sps >= 4, "CQPSK needs >= 4 samples/symbol");
-                Some(CqpskReceiver::new(sps, 0.2))
+            Modulation::Cqpsk if eq_mode == EqMode::Enabled => {
+                Some(CqpskReceiver::new(plan.sps, 0.2))
             }
+            Modulation::Cqpsk => Some(CqpskReceiver::new_bare(plan.sps, 0.2)),
             Modulation::C4fm => None,
         };
         let mut diag = crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled);
         diag.modulation = modulation;
         Self {
             modulation,
-            rx: C4fmReceiver::new(sample_rate),
+            decim: Decimator::with_offset(sample_rate, TARGET_SPS, offset_hz),
+            plan,
+            rx: C4fmReceiver::new(plan.working_rate),
             cqpsk,
+            derot: crate::derotate::Derotator::default(),
             eq: RealLmsEq::new(7, 0.5),
             eq_mode,
             framer: Framer::new(),
@@ -131,6 +161,11 @@ impl ChannelDecoder {
         self.modulation
     }
 
+    /// How the capture rate is reduced before demodulation.
+    pub fn decimation(&self) -> DecimationPlan {
+        self.plan
+    }
+
     pub fn site(&self) -> &SiteModel {
         &self.site
     }
@@ -143,10 +178,15 @@ impl ChannelDecoder {
     /// Process a slice of interleaved-IQ f32 samples.
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
+        let mut derot_buf: Vec<u8> = Vec::new();
         let mut i = 0;
         while i + 1 < iq.len() {
             let s = C32::new(iq[i], iq[i + 1]);
             i += 2;
+            // Resample to the working rate first; at 1× this is a no-op.
+            let Some(s) = self.decim.push(s) else {
+                continue;
+            };
             match self.modulation {
                 Modulation::C4fm => {
                     if let Some(sym) = self.rx.push(s) {
@@ -154,10 +194,17 @@ impl ChannelDecoder {
                     }
                 }
                 Modulation::Cqpsk => {
-                    // The CQPSK front end (matched filter → Gardner → CMA →
-                    // differential detection) emits dibits directly.
-                    if let Some(dibit) = self.cqpsk.as_mut().unwrap().push(s) {
-                        self.feed_dibit(dibit, None, &mut out);
+                    // The CQPSK front end (DC block → AGC → matched filter →
+                    // Gardner → CMA → differential detection) emits dibits
+                    // directly, but blind carrier acquisition leaves them
+                    // rotated by an unknown quarter turn; the derotator pins
+                    // that against the Frame Sync Word before the framer.
+                    if let Some(raw) = self.cqpsk.as_mut().unwrap().push(s) {
+                        derot_buf.clear();
+                        self.derot.push(raw, &mut derot_buf);
+                        for &d in &derot_buf {
+                            self.feed_dibit(d, None, &mut out);
+                        }
                     }
                 }
             }

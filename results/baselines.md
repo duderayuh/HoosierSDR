@@ -6,8 +6,9 @@ synthetic table with `cargo run -p hs-bench`.
 
 ## Status of the Phase 1 gate
 
-**Not yet passed on real recordings** — but the core mechanism is now proven
-in a controlled experiment (see "Thesis experiment" below). The full gate is
+**Not yet passed on real recordings** — but the core mechanism is proven in a
+controlled experiment (see "Thesis experiment" below), and the receiver now
+decodes real off-air P25 (see "First field decode"). The full gate is
 "measurably lower BER and sync-loss than SDRTrunk on real simulcast
 recordings," which still requires (a) the field-IQ corpus, not yet captured,
 and (b) wiring the proven complex equalizer behind live carrier/timing
@@ -31,6 +32,57 @@ makes ISI unrecoverable, so removing it *before* that step is a categorical
 win, not a marginal one. The complex echo here is exactly the class of
 distortion the real post-discriminator equalizer *cannot* touch (next
 section) — which is why the CQPSK front end is the path that matters.
+
+## First field decode — Marion County, 2026-08
+
+The first real off-air capture decodes. An RTL-SDR recording made in Marion
+County, Indiana (`rtl_sdr -f 858937500 -s 240000 -g 40`, 27.3 s, cu8) was
+decoded end to end by `hoosier-sdr` with no offline preprocessing:
+
+```sh
+hoosier-sdr --rate 240000 --offset 50k --cqpsk capture.cf32
+```
+
+| Measure | Value |
+|---|---|
+| Modulation | **CQPSK / LSM** (simulcast) |
+| NAC | **0x261**, on 149/149 decoded NIDs |
+| Frame syncs | 151 in 27.3 s |
+| Mean sync bit errors (of 48) | **0.07** — 143/151 with zero |
+| NID BCH errors | mean 0.39; 130/149 with zero |
+| DUIDs seen | TDULC 88, LDU2 30, LDU1 29, TDU 1, HDU 1 |
+| Voice | 531 IMBE frames → 10.6 s of 8 kHz PCM |
+| Grants | 0 — this is a **traffic channel**, not the control channel |
+
+Two things this capture established, both now fixed in code:
+
+1. **The tuned frequency was not the P25 channel.** 858.9375 MHz was picked
+   from an `rtl_power` sweep on received power alone; the actual P25 carrier
+   is 50 kHz up, at **858.9875 MHz**. Sweeping the capture across every
+   12.5 kHz grid offset found it — 4th-power differential-phase concentration
+   peaks sharply at +50.0 kHz (0.79, versus <0.10 everywhere else), which is
+   an unambiguous π/4-DQPSK signature. The `--offset` downconverter exists so
+   a wideband capture can be re-tuned in software rather than re-recorded.
+2. **Native SDR rates were unusable.** The demodulators are tuned per symbol
+   at ~10 samples/symbol; a 240 kHz capture is 50, which detunes the matched
+   filter, timing loop and equalizer simultaneously. `hs-dsp::decimate` now
+   resamples at the front of the chain.
+
+### Equalizer A/B on this capture
+
+| Path | Syncs | Mean sync bit errors | Voice frames |
+|---|:--:|:--:|:--:|
+| CMA equalizer before differential detection | 151 | **0.073** | 531 |
+| Conventional detect-first (`--no-equalizer`) | 150 | 0.153 | 522 |
+
+Read this honestly: the equalizer roughly halves the residual sync bit-error
+rate and recovers nine more voice frames, but on a signal this strong
+(~40 dB SNR, near-perfect decode either way) there is very little ISI to
+remove and therefore very little to win. This capture does **not** test the
+thesis — it validates the receiver. The thesis targets the degraded simulcast
+regime, and confirming it needs captures where the conventional path actually
+fails: weak signal, deep multipath, or a site with overlapping transmitters at
+comparable strength.
 
 ## Synthetic self-benchmark (no external corpus)
 

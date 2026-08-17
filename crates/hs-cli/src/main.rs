@@ -10,7 +10,7 @@
 
 mod wav;
 
-use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode};
+use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
 use std::io::Read;
 
 const DEFAULT_RATE: f64 = 48000.0;
@@ -30,6 +30,8 @@ struct Args {
     catalog: Option<String>,
     freq: f64,
     gain: Option<f64>,
+    offset: f64,
+    no_equalizer: bool,
 }
 
 fn parse_args() -> Args {
@@ -47,6 +49,8 @@ fn parse_args() -> Args {
         catalog: None,
         freq: 851_000_000.0,
         gain: None,
+        offset: 0.0,
+        no_equalizer: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -62,7 +66,9 @@ fn parse_args() -> Args {
             "--log" => a.log_out = it.next(),
             "--save-iq" => a.save_iq = it.next(),
             "--equalizer" => a.equalizer = true,
+            "--no-equalizer" => a.no_equalizer = true,
             "--cqpsk" => a.cqpsk = true,
+            "--offset" => a.offset = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
             "--play" => a.play = true,
             "--demo" => a.demo = true,
             "--sdr" => a.sdr = true,
@@ -102,6 +108,11 @@ fn print_help() {
              --log <PATH>   Write a JSON diagnostics log for offline refinement\n\
              --save-iq <P>  Save the decoded IQ to <P>.cf32 (share it to reproduce a decode)\n\
              --equalizer    Enable the experimental FSW-trained equalizer (C4FM)\n\
+             --no-equalizer Bypass the CMA equalizer on the CQPSK path, giving the\n\
+             \x20              conventional detect-first receiver — the thesis A/B\n\
+             --offset <HZ>  Decode the channel this far from the capture centre\n\
+             \x20              (e.g. 50k). A wideband capture holds many 12.5 kHz\n\
+             \x20              channels; this picks one without re-recording.\n\
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
              --sdr          Capture live from an RTL-SDR (build --features rtlsdr)\n\
@@ -291,16 +302,22 @@ fn parse_freq(s: &str) -> Option<f64> {
 }
 
 fn build_decoder(args: &Args) -> ChannelDecoder {
-    if args.cqpsk {
-        ChannelDecoder::new_cqpsk(args.rate)
+    let modulation = if args.cqpsk {
+        Modulation::Cqpsk
     } else {
-        let mode = if args.equalizer {
-            EqMode::Enabled
-        } else {
-            EqMode::Bypass
-        };
-        ChannelDecoder::new(args.rate, mode)
-    }
+        Modulation::C4fm
+    };
+    // C4FM: the symbol-domain equalizer is experimental and opt-in.
+    // CQPSK: the CMA equalizer before differential detection IS the shipping
+    // path (the project thesis), so it is on unless explicitly disabled.
+    let mode = if args.no_equalizer {
+        EqMode::Bypass
+    } else if args.cqpsk || args.equalizer {
+        EqMode::Enabled
+    } else {
+        EqMode::Bypass
+    };
+    ChannelDecoder::with_offset(args.rate, modulation, mode, args.offset)
 }
 
 /// Load a RadioReference talkgroup CSV, or warn and continue without it.
