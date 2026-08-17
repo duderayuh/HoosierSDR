@@ -143,7 +143,10 @@ mod tests {
         );
         let channel = (1u16 << 12) | 1080;
         let down = site.channel_to_freq(channel).unwrap();
-        assert_eq!(down, 857_756_250, "downlink must ignore the transmit offset");
+        assert_eq!(
+            down, 857_756_250,
+            "downlink must ignore the transmit offset"
+        );
         assert!(
             (851_000_000..=869_000_000).contains(&down),
             "downlink {down} is outside the base-transmit band"
