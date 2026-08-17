@@ -43,9 +43,30 @@ cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 
 ## Finding the control channel
 
-Don't hunt for it with a power sweep — that method put the first field capture
-50 kHz off the real carrier, locked onto a strong signal that wasn't P25 at
-all. RadioReference already knows every site's control and alternate channels:
+A power sweep won't find it. That method put the first field capture 50 kHz off
+the real carrier, locked onto a strong signal that wasn't P25 at all — a
+spectrum plot can't tell a control channel from an analog repeater. There are
+two reliable ways instead.
+
+**Scan by decoding.** `--scan` sweeps every channel position in a wideband
+capture, runs the real decoder at each, and reports what actually carries P25:
+
+```sh
+hoosier-sdr --rate 240000 --freq 858.9375M --scan capture.cf32
+```
+
+```text
+Found 1 P25 channel(s):
+
+  voice    858.9875 MHz  CQPSK  NAC 0x261    20 syncs  err 0.30
+```
+
+One 240 kHz recording covers ~19 channels, and each hit is labelled control vs
+voice, with its modulation and NAC. Frequencies are snapped to the P25 channel
+raster, so they're ready to paste into `--freq`.
+
+**Or ask RadioReference**, which already knows every site's control and
+alternate channels:
 
 ```sh
 export RR_APP_KEY=... RR_USERNAME=... RR_PASSWORD=...

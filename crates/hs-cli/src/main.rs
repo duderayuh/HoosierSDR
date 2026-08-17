@@ -37,6 +37,8 @@ struct Args {
     no_equalizer: bool,
     rr_system: Option<u32>,
     rr_dump: Option<String>,
+    scan: bool,
+    scan_secs: f64,
 }
 
 fn parse_args() -> Args {
@@ -58,6 +60,8 @@ fn parse_args() -> Args {
         no_equalizer: false,
         rr_system: None,
         rr_dump: None,
+        scan: false,
+        scan_secs: 4.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -76,6 +80,8 @@ fn parse_args() -> Args {
             "--no-equalizer" => a.no_equalizer = true,
             "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
             "--rr-dump" => a.rr_dump = it.next(),
+            "--scan" => a.scan = true,
+            "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
             "--offset" => a.offset = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
             "--play" => a.play = true,
@@ -135,6 +141,11 @@ fn print_help() {
              \x20              Build with --features radioreference.\n\
              --rr-dump <D>  Save raw RadioReference XML responses to <D>/ for\n\
              \x20              diagnosing an unexpected response schema.\n\
+             --scan         Sweep the whole captured band and report which channels\n\
+             \x20              actually carry P25 — by decoding, not by signal power.\n\
+             \x20              Marks control vs voice channels and reports each NAC.\n\
+             \x20              Pass --freq <centre> to get absolute frequencies.\n\
+             --scan-secs <S> Seconds of capture to test per channel (default 4).\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -340,6 +351,54 @@ fn run_rr(_sys_id: u32, _cache: Option<&str>, _dump: Option<&str>) -> i32 {
     2
 }
 
+/// Sweep the captured band and report every channel that actually decodes.
+fn run_scan(iq: &[f32], args: &Args) {
+    let mut cfg = hs_core::scan::ScanConfig::new(args.rate).secs(args.scan_secs);
+    // --freq doubles as the capture centre here, so results can be reported as
+    // absolute frequencies rather than offsets.
+    if args.freq > 0.0 {
+        cfg = cfg.center(args.freq);
+    }
+    let channels = ((args.rate / 12_500.0) as u64).max(1);
+    println!(
+        "Scanning {:.0} kHz (~{channels} P25 channels), {:.0}s per channel…\n",
+        args.rate / 1000.0,
+        args.scan_secs
+    );
+    let found = hs_core::scan::scan(iq, &cfg);
+    if found.is_empty() {
+        println!("No P25 found in this capture.");
+        println!(
+            "\nIf you expected a signal here: the tuned frequency may be outside \n\
+             the recording entirely, or the site may be Phase II TDMA (not yet \n\
+             decoded). Widen the capture or check the frequency against \n\
+             RadioReference with --rr-system."
+        );
+        return;
+    }
+    println!("Found {} P25 channel(s):\n", found.len());
+    for f in &found {
+        println!("  {}", f.summary());
+    }
+    if let Some(cc) = found.iter().find(|f| f.control_channel) {
+        println!("\nControl channel — decode it with:");
+        println!(
+            "  hoosier-sdr --sdr --freq {} {}",
+            cc.freq_hz.unwrap_or(0.0) as u64,
+            if cc.modulation == Modulation::Cqpsk {
+                "--cqpsk"
+            } else {
+                ""
+            }
+        );
+    } else {
+        println!(
+            "\nNo control channel in this capture — these are traffic channels \n\
+             (voice only, no grants). The control channel is elsewhere in the band."
+        );
+    }
+}
+
 fn build_decoder(args: &Args) -> ChannelDecoder {
     let modulation = if args.cqpsk {
         Modulation::Cqpsk
@@ -402,6 +461,11 @@ fn main() {
     } else {
         load_iq(args.input.as_ref().unwrap())
     };
+
+    if args.scan {
+        run_scan(&iq, &args);
+        return;
+    }
 
     let catalog = args.catalog.as_deref().and_then(load_catalog);
     let mut dec = build_decoder(&args);

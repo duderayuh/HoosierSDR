@@ -5,6 +5,7 @@
 pub mod decoder;
 pub mod derotate;
 pub mod diag;
+pub mod scan;
 pub mod stream;
 
 pub use hs_catalog as catalog;
