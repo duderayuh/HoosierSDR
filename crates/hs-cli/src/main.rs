@@ -481,6 +481,16 @@ fn main() {
     let out = dec.process(&iq);
     report(&out, &dec, catalog.as_ref());
 
+    if !out.locations.is_empty() {
+        println!("\nradio positions (LRRP):");
+        for l in &out.locations {
+            println!(
+                "  unit {:<8} {:.5}, {:.5}   https://maps.google.com/?q={:.5},{:.5}",
+                l.llid, l.lat, l.lon, l.lat, l.lon
+            );
+        }
+    }
+
     if let Some(path) = &args.wav_out {
         if out.pcm.is_empty() {
             println!("\n(no voice decoded; not writing WAV)");

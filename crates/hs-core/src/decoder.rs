@@ -45,6 +45,8 @@ pub struct DecodeOutput {
     pub encrypted_skips: Vec<u16>,
     /// Frame-sync detections (for diagnostics / bench metrics).
     pub syncs: u32,
+    /// Radio position reports decoded from packet data this block.
+    pub locations: Vec<hs_p25::lrrp::LrrpReport>,
 }
 
 /// Whether the equalizer sits in the symbol path.
@@ -291,6 +293,22 @@ impl ChannelDecoder {
                     let mut desired = vec![f32::NAN; ctx]; // no ground truth
                     desired.extend_from_slice(&self.fsw_levels);
                     self.eq.train_sequence(raw, &desired);
+                }
+            }
+            FramerEvent::PacketData { packet, .. } => {
+                self.diag.packets += 1;
+                // Packet data carries IP; a location report is one particular
+                // UDP payload inside it. Anything else — and anything
+                // encrypted — simply fails to parse and is dropped.
+                if let Some(r) =
+                    hs_p25::lrrp::report_from_packet(packet.header.llid, &packet.payload)
+                {
+                    self.diag.locations.push(crate::diag::LocationStat {
+                        llid: r.llid,
+                        lat: r.lat,
+                        lon: r.lon,
+                    });
+                    out.locations.push(r);
                 }
             }
             FramerEvent::Nid { nid, bch_errors } => {

@@ -19,6 +19,14 @@ pub struct SyncStat {
 
 /// One NID decode.
 #[derive(Debug, Clone, Copy)]
+pub struct LocationStat {
+    /// Logical Link ID of the reporting radio.
+    pub llid: u32,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct NidStat {
     pub nac: u16,
     pub duid: u8,
@@ -100,6 +108,10 @@ pub struct Diagnostics {
     pub symbols_processed: u64,
     pub syncs: Vec<SyncStat>,
     pub nids: Vec<NidStat>,
+    /// Packet data units reassembled.
+    pub packets: u64,
+    /// Radio position reports decoded from packet data.
+    pub locations: Vec<LocationStat>,
     pub grants: Vec<GrantStat>,
     pub encrypted_skips: Vec<u16>,
     pub voice_frames: u64,
@@ -197,6 +209,20 @@ impl Diagnostics {
             s.push_str(&format!(
                 "{{\"nac\":\"{:03X}\",\"duid\":\"{:X}\",\"bch_err\":{}}}",
                 n.nac, n.duid, n.bch_errors
+            ));
+        }
+        s.push_str("],\n");
+
+        // Radio position reports (LRRP over packet data).
+        s.push_str(&format!("  \"packets\": {},\n", self.packets));
+        s.push_str("  \"locations\": [");
+        for (i, l) in self.locations.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"llid\":{},\"lat\":{:.6},\"lon\":{:.6}}}",
+                l.llid, l.lat, l.lon
             ));
         }
         s.push_str("],\n");

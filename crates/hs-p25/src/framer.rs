@@ -54,6 +54,11 @@ pub enum FramerEvent {
         /// Raw ALGID from LDU2 encryption sync (None for LDU1).
         algid: Option<u8>,
     },
+    /// A packet data unit completed: header plus reassembled payload.
+    PacketData {
+        nac: u16,
+        packet: crate::pdu::Packet,
+    },
     /// Frame type we don't decode yet — returned to sync search.
     Skipped {
         nac: u16,
@@ -79,6 +84,8 @@ pub struct Framer {
     nid_codec: NidCodec,
     /// Per-bit confidence for the bits currently in `shift`, oldest first.
     conf: [u8; FRAME_SYNC_BITS as usize],
+    /// Reassembles multi-block packet data across frames.
+    pdu: crate::pdu::PduAssembler,
 }
 
 impl Default for Framer {
@@ -96,6 +103,7 @@ impl Framer {
             buf: Vec::new(),
             nid_codec: NidCodec::new(),
             conf: [CERTAIN; FRAME_SYNC_BITS as usize],
+            pdu: crate::pdu::PduAssembler::new(),
         }
     }
 
@@ -173,6 +181,10 @@ impl Framer {
                             });
                             let needed = match nid.duid {
                                 Duid::TrunkSignalBlock => 98, // first block; extended as needed
+                                // Packet data blocks are the same size as a
+                                // TSBK block; how many follow is stated in the
+                                // header, so take one block at a time.
+                                Duid::PacketDataUnit => crate::pdu::BLOCK_DIBITS,
                                 Duid::LogicalLinkDataUnit1 | Duid::LogicalLinkDataUnit2 => {
                                     LDU_PAYLOAD_BITS / 2
                                 }
@@ -200,6 +212,7 @@ impl Framer {
                 }
                 match nid.duid {
                     Duid::TrunkSignalBlock => self.tsdu_block(nid, events),
+                    Duid::PacketDataUnit => self.pdu_block(nid, events),
                     Duid::LogicalLinkDataUnit1 | Duid::LogicalLinkDataUnit2 => {
                         let hard: Vec<u8> = self.buf.iter().map(|d| d.bits).collect();
                         let bits = crate::bits::dibits_to_bits(&hard);
@@ -234,6 +247,46 @@ impl Framer {
         let is_status = self.since_fs % 36 == 35;
         self.since_fs += 1;
         is_status
+    }
+
+    /// Handle one 98-dibit packet-data block, staying in Payload state until
+    /// the header's declared block count is satisfied.
+    fn pdu_block(&mut self, nid: Nid, events: &mut Vec<FramerEvent>) {
+        let n = crate::pdu::BLOCK_DIBITS;
+        let block: [SoftDibit; crate::pdu::BLOCK_DIBITS] =
+            match self.buf[self.buf.len() - n..].try_into() {
+                Ok(b) => b,
+                Err(_) => {
+                    self.buf.clear();
+                    self.state = State::Search;
+                    return;
+                }
+            };
+        match self.pdu.push_block(&block) {
+            Some(packet) => {
+                events.push(FramerEvent::PacketData {
+                    nac: nid.nac,
+                    packet,
+                });
+                self.buf.clear();
+                self.state = State::Search;
+            }
+            None if self.pdu.in_progress() => {
+                // Header accepted; keep collecting the blocks it promised.
+                self.state = State::Payload {
+                    nid,
+                    needed: self.buf.len() + n,
+                };
+            }
+            None => {
+                // The header failed its CRC, or a block was undecodable.
+                // Packet data is rare enough that guessing costs more than
+                // waiting for the next one.
+                self.pdu.reset();
+                self.buf.clear();
+                self.state = State::Search;
+            }
+        }
     }
 
     /// Handle a completed 98-dibit TSBK block; may extend for chained blocks.
