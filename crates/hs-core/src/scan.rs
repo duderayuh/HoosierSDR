@@ -15,6 +15,19 @@
 
 use crate::decoder::{ChannelDecoder, EqMode, Modulation};
 
+/// How far above the band's noise floor a channel must sit before it is worth
+/// running the decoder on it.
+///
+/// This is a screening threshold, not a detection threshold — the decoder
+/// still decides what is P25. Its only job is to skip empty air, so it is set
+/// low enough that a weak-but-real signal survives screening and only truly
+/// vacant spectrum is discarded.
+const SCREEN_MARGIN_DB: f32 = 4.0;
+
+/// FFT size for the screening spectrum. At 2.4 MHz this gives ~600 Hz bins,
+/// comfortably finer than the 12.5 kHz channel spacing being resolved.
+const SCREEN_FFT: usize = 4096;
+
 /// Channel grid step, anchored at **zero offset**, not at a band edge.
 ///
 /// Anchoring matters more than it looks. P25 channels sit 12.5 kHz apart, so
@@ -145,6 +158,36 @@ impl ScanConfig {
         v
     }
 
+    /// Keep only the offsets where the spectrum shows something above the
+    /// noise floor.
+    ///
+    /// Decoding is expensive — a wideband capture has hundreds of channel
+    /// positions and each costs a long channel filter over seconds of samples
+    /// — while a spectrum costs one pass over the data. Most of a band is
+    /// empty at any instant, so screening first is the difference between a
+    /// sweep that takes minutes and one that takes hours.
+    fn screen(&self, iq: &[f32], offsets: Vec<f64>) -> Vec<f64> {
+        let psd = hs_dsp::fft::power_spectrum_db(iq, SCREEN_FFT);
+        let floor = hs_dsp::fft::median(&psd);
+        let bin_hz = self.sample_rate / SCREEN_FFT as f64;
+
+        offsets
+            .into_iter()
+            .filter(|&off| {
+                // Peak power anywhere inside this channel's occupied width.
+                let lo = off - 6_250.0;
+                let hi = off + 6_250.0;
+                let idx = |f: f64| {
+                    ((f / bin_hz) + SCREEN_FFT as f64 / 2.0)
+                        .round()
+                        .clamp(0.0, SCREEN_FFT as f64 - 1.0) as usize
+                };
+                let (a, b) = (idx(lo), idx(hi));
+                psd[a..=b.max(a)].iter().fold(f32::MIN, |m, &v| m.max(v)) > floor + SCREEN_MARGIN_DB
+            })
+            .collect()
+    }
+
     pub fn center(mut self, hz: f64) -> Self {
         self.center_hz = Some(hz);
         self
@@ -163,8 +206,9 @@ pub fn scan(iq: &[f32], cfg: &ScanConfig) -> Vec<Found> {
     let want = (cfg.secs * cfg.sample_rate * 2.0) as usize;
     let iq = &iq[..want.min(iq.len())];
 
+    let candidates = cfg.screen(iq, cfg.offsets());
     let mut out: Vec<Found> = Vec::new();
-    for offset in cfg.offsets() {
+    for offset in candidates {
         let mut best: Option<Found> = None;
         for modulation in [Modulation::Cqpsk, Modulation::C4fm] {
             if let Some(f) = try_offset(iq, cfg, offset, modulation) {

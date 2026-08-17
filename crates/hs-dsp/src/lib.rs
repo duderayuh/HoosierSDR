@@ -12,6 +12,7 @@ pub mod costas;
 pub mod cqpsk;
 pub mod decimate;
 pub mod equalizer;
+pub mod fft;
 pub mod fir;
 pub mod fm;
 pub mod modulator;
