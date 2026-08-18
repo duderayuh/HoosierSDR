@@ -43,12 +43,19 @@ fn clean_nids(f: &TrunkFollower) -> u32 {
 /// identifier behind each sync: it carries a BCH code, so a wrong modulation
 /// produces syncs whose NIDs do not check out. Counting *clean* NIDs scores
 /// the thing that has to be right for anything downstream to work.
+/// Returns `None` when nothing decoded anywhere in the window, which the
+/// caller must report as such: a failure that prints like a successful
+/// detection at zero error is worse than no detection at all. This function
+/// used to return the nominal frequency in that case, and three control
+/// channels that were simply not on the air were duly reported as "found at
+/// nominal, tuner error +0 Hz" — indistinguishable from a real lock, and
+/// nearly recorded as a measurement.
 pub fn measure_carrier(
     iq: &[f32],
     sample_rate: f64,
     center_hz: f64,
     nominal_hz: f64,
-) -> (f64, Modulation) {
+) -> Option<(f64, Modulation)> {
     // Half a channel either way. Sweeping that whole span at the precision the
     // demodulators want would mean a hundred trial decodes, and each one
     // channelizes the probe from scratch. Coarse-then-fine gets the same
@@ -90,11 +97,7 @@ pub fn measure_carrier(
         }
     }
     if best.0 == 0 {
-        // Nothing decoded anywhere in the window, either way. Hand back the
-        // nominal frequency; the caller reports the resulting silence, which
-        // is a truer signal than a refined guess at a channel that is not
-        // there.
-        return (nominal_hz, Modulation::Cqpsk);
+        return None;
     }
     let (centre, m) = (best.1, best.2);
     let fine = (COARSE_HZ / FINE_HZ) as i32;
@@ -105,7 +108,7 @@ pub fn measure_carrier(
             best = (syncs, cand, m);
         }
     }
-    (best.1, best.2)
+    Some((best.1, best.2))
 }
 
 fn mod_name(m: Modulation) -> &'static str {
@@ -153,18 +156,36 @@ pub fn pick_modulation(
     center_hz: f64,
     nominal_hz: f64,
     measured_hz: f64,
-) -> Modulation {
+) -> Option<Modulation> {
     let probe = &iq[..(sample_rate as usize).min(iq.len())];
     let score = |m: Modulation| {
         let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
         f.process(probe);
         clean_nids(&f)
     };
-    if score(Modulation::C4fm) > score(Modulation::Cqpsk) {
-        Modulation::C4fm
+    let (c4, cq) = (score(Modulation::C4fm), score(Modulation::Cqpsk));
+    if c4 == 0 && cq == 0 {
+        None
+    } else if c4 > cq {
+        Some(Modulation::C4fm)
     } else {
-        Modulation::Cqpsk
+        Some(Modulation::Cqpsk)
     }
+}
+
+/// Say plainly that the control channel was not found, and why it might not
+/// have been.
+fn report_not_found(control_hz: f64) {
+    eprintln!(
+        "Could not find control {:.4} MHz: nothing decoded within ±12.5 kHz of it,\n\
+         on either modulation.",
+        control_hz / 1e6
+    );
+    eprintln!(
+        "\nA system lists several control-capable frequencies but only one carries the\n\
+         control channel at a time; the rest are alternates and are silent. Run --scan\n\
+         to see which one this recording actually contains."
+    );
 }
 
 /// Check the control channel is inside the captured band before anything is
@@ -199,12 +220,13 @@ pub fn run_file(
     cat: Option<&hs_core::catalog::CsvCatalog>,
 ) {
     check_in_band(sample_rate, center_hz, control_hz);
-    let (measured, modulation) = match measured_hz {
-        Some(m) => (
-            m,
-            pick_modulation(iq, sample_rate, center_hz, control_hz, m),
-        ),
+    let found = match measured_hz {
+        Some(m) => pick_modulation(iq, sample_rate, center_hz, control_hz, m).map(|md| (m, md)),
         None => measure_carrier(iq, sample_rate, center_hz, control_hz),
+    };
+    let Some((measured, modulation)) = found else {
+        report_not_found(control_hz);
+        std::process::exit(1);
     };
     let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured, modulation);
     println!(
@@ -286,8 +308,8 @@ pub fn run_live<S: hs_source::SdrSource>(
     let block = (sample_rate as usize / 10) * 2;
     let mut buf = vec![0.0f32; block];
 
-    let measured = match measured_hz {
-        Some(m) => (m, Modulation::Cqpsk),
+    let found = match measured_hz {
+        Some(m) => Some((m, Modulation::Cqpsk)),
         None => {
             // Half a second of air is plenty to see a continuously-keyed
             // control channel; accumulate it a block at a time.
@@ -304,6 +326,10 @@ pub fn run_live<S: hs_source::SdrSource>(
             }
             measure_carrier(&prime, sample_rate, center_hz, control_hz)
         }
+    };
+    let Some(measured) = found else {
+        report_not_found(control_hz);
+        std::process::exit(1);
     };
 
     let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured.0, measured.1);

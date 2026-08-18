@@ -231,11 +231,85 @@ fn chan_bench() {
     }
 }
 
+/// What decoding a call twice actually costs, over a call long enough to
+/// matter.
+///
+/// The follower hedges: it decodes each call with its control channel's
+/// modulation *and* the other one, dropping the second as soon as the first
+/// proves itself. On a two-second recording that saving is invisible next to
+/// start-up costs, so measure it where it lives — a long transmission, which
+/// is what a dispatch call actually is.
+fn hedge_bench() {
+    use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
+    use hs_dsp::cqpsk::modulate_iq;
+
+    // A 30-second CQPSK transmission: one LDU is 180 ms of voice, so ~167 of
+    // them. Built once and decoded three ways.
+    let mut frames: [ImbeFrame; 9] = [[[0u8; 23]; 8]; 9];
+    let widths = [23usize, 23, 23, 23, 15, 15, 15, 7];
+    for (k, fr) in frames.iter_mut().enumerate() {
+        for (w, row) in fr.iter_mut().enumerate() {
+            for (x, cell) in row.iter_mut().enumerate().take(widths[w]) {
+                *cell = (((k + 1) * (w + 2) * (x + 5)) % 2) as u8;
+            }
+        }
+    }
+    let ldus = 167;
+    let mut bits = Vec::new();
+    for _ in 0..ldus {
+        bits.extend(build_ldu1(0x261, &frames));
+    }
+    let sps = 10;
+    let iq = modulate_iq(&bits, sps, 0.2);
+    let mut flat = Vec::with_capacity(iq.len() * 2);
+    for v in &iq {
+        flat.push(v.re);
+        flat.push(v.im);
+    }
+    let secs = bits.len() as f64 / 4800.0;
+
+    let run = |mods: &[Modulation]| -> f64 {
+        let mut decs: Vec<ChannelDecoder> = mods
+            .iter()
+            .map(|&m| {
+                let eq = match m {
+                    Modulation::Cqpsk => EqMode::Enabled,
+                    Modulation::C4fm => EqMode::Bypass,
+                };
+                ChannelDecoder::with_offset(RATE, m, eq, 0.0)
+            })
+            .collect();
+        let t0 = std::time::Instant::now();
+        for d in decs.iter_mut() {
+            d.process(&flat);
+        }
+        t0.elapsed().as_secs_f64()
+    };
+
+    let one = run(&[Modulation::Cqpsk]);
+    let both = run(&[Modulation::Cqpsk, Modulation::C4fm]);
+
+    println!("a {secs:.1}s call, decoded at {RATE:.0} Hz:\n");
+    println!("  inherited modulation only : {one:.3}s cpu");
+    println!("  both, the whole call      : {both:.3}s cpu");
+    println!(
+        "\n  hedging until confirmed saves {:.3}s per call ({:.0}% of the decode)",
+        both - one,
+        100.0 * (both - one) / both
+    );
+    println!(
+        "  real time margin: {:.1}x with one decoder, {:.1}x with two",
+        secs / one,
+        secs / both
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         None | Some("synth") => synth_bench(),
         Some("chan") => chan_bench(),
+        Some("hedge") => hedge_bench(),
         Some("file") => {
             let path = args
                 .get(2)
@@ -245,7 +319,7 @@ fn main() {
         }
         Some(other) => {
             eprintln!(
-                "unknown mode '{other}'. usage: hs-bench [synth | chan | file <path> [rate]]"
+                "unknown mode '{other}'. usage: hs-bench [synth | chan | hedge | file <path> [rate]]"
             );
             std::process::exit(2);
         }
