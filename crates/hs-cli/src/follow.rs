@@ -132,9 +132,12 @@ pub fn report_call(c: &Call, cat: Option<&hs_core::catalog::CsvCatalog>, n: usiz
         format!("  (patched with {:?})", c.patched_with)
     };
     println!(
-        "  CALL  {name:<20} unit {:<9} {:.4} MHz  {m:5}  {secs:.1}s{patch}",
+        "  CALL  {name:<20} unit {:<9} {:.4} MHz  {m:5}  {secs:.1}s  \
+         (c4fm {} / cqpsk {} syncs){patch}",
         c.source_unit,
-        c.freq_hz as f64 / 1e6
+        c.freq_hz as f64 / 1e6,
+        c.syncs_c4fm,
+        c.syncs_cqpsk
     );
     if c.pcm.is_empty() {
         return;
