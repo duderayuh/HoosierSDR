@@ -172,13 +172,31 @@ pub fn run_file(
             report_call(c, cat, n);
         }
     }
+    // A recording ends mid-transmission far more often than not, so close out
+    // whatever was still in flight rather than discarding its audio.
+    let mut truncated = 0usize;
+    for c in &f.finish() {
+        n += 1;
+        truncated += 1;
+        report_call(c, cat, n);
+    }
+
     println!("\ncontrol channel: {syncs} frame syncs");
     println!("calls completed: {n}");
-    if n == 0 {
+    if truncated > 0 {
+        println!("({truncated} still in progress when the recording ended)");
+    }
+    if syncs == 0 {
         println!(
-            "\nNo calls completed. If the control channel decoded but nothing followed, the\n\
-             granted traffic channels are probably outside this capture — widen the sample\n\
-             rate so the band the system actually uses fits inside it."
+            "\nThe control channel never decoded. Either it is not at {:.4} MHz, or it is\n\
+             outside this capture. --scan finds the control channels a recording contains.",
+            control_hz / 1e6
+        );
+    } else if n == 0 {
+        println!(
+            "\nThe control channel decoded but no call followed it. The granted traffic\n\
+             channels are probably outside this capture — widen the sample rate so the\n\
+             band the system actually uses fits inside it."
         );
     }
 }

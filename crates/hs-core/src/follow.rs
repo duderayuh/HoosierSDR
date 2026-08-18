@@ -133,6 +133,60 @@ impl TrunkFollower {
         self.control.diagnostics()
     }
 
+    /// Close out an in-progress call at end of stream.
+    ///
+    /// A live radio runs until stopped, so a call always ends by going quiet.
+    /// A recording does not: the file simply stops, usually mid-transmission,
+    /// and without this the call in flight — often the only one — is discarded
+    /// along with every second of audio already decoded from it. Draining here
+    /// means a short capture reports what it actually heard.
+    pub fn finish(&mut self) -> Vec<Call> {
+        let active = core::mem::take(&mut self.active);
+        active.into_iter().map(|c| self.retire(c)).collect()
+    }
+
+    /// Turn a finished call into its reported form: pick the modulation that
+    /// produced audio, and name the radio from Link Control when the grant
+    /// did not.
+    fn retire(&mut self, c: ActiveCall) -> Call {
+        // Choose on decoded audio, not on frame syncs. The two counts run
+        // close on a strong channel — 110 against 116 on the first real
+        // capture — so syncs do not separate them, and the modulation that
+        // syncs marginally more often can still produce visibly less
+        // audio. Audio is what a scanner is for, so it decides.
+        let (modulation, pcm, lc) = match (c.pcm_c4fm.len(), c.pcm_cqpsk.len()) {
+            (0, 0) => (None, Vec::new(), None),
+            (a, b) if a >= b => (
+                Some(Modulation::C4fm),
+                c.pcm_c4fm,
+                c.c4fm.diagnostics().link_control.first().cloned(),
+            ),
+            _ => (
+                Some(Modulation::Cqpsk),
+                c.pcm_cqpsk,
+                c.cqpsk.diagnostics().link_control.first().cloned(),
+            ),
+        };
+        // A grant does not always name the radio; Link Control, which the
+        // traffic channel sends about itself, usually does. Take the first
+        // confirmed word — the radio that opened the transmission — rather
+        // than the last, which on a shared talkgroup may be someone else.
+        let source_unit = match (c.source_unit, lc.as_ref()) {
+            (0, Some(l)) => l.source_unit,
+            (s, _) => s,
+        };
+        Call {
+            syncs_c4fm: c.syncs_c4fm,
+            syncs_cqpsk: c.syncs_cqpsk,
+            talkgroup: c.talkgroup,
+            source_unit,
+            freq_hz: c.freq_hz,
+            modulation,
+            patched_with: self.control.patches().siblings(c.talkgroup),
+            pcm,
+        }
+    }
+
     /// Feed wideband IQ; returns the calls that started and finished.
     pub fn process(&mut self, iq: &[f32]) -> FollowOutput {
         let mut out = FollowOutput::default();
@@ -176,42 +230,7 @@ impl TrunkFollower {
             }
         }
         for c in finished {
-            // Choose on decoded audio, not on frame syncs. The two counts run
-            // close on a strong channel — 110 against 116 on the first real
-            // capture — so syncs do not separate them, and the modulation that
-            // syncs marginally more often can still produce visibly less
-            // audio. Audio is what a scanner is for, so it decides.
-            let (modulation, pcm, lc) = match (c.pcm_c4fm.len(), c.pcm_cqpsk.len()) {
-                (0, 0) => (None, Vec::new(), None),
-                (a, b) if a >= b => (
-                    Some(Modulation::C4fm),
-                    c.pcm_c4fm,
-                    c.c4fm.diagnostics().link_control.first().cloned(),
-                ),
-                _ => (
-                    Some(Modulation::Cqpsk),
-                    c.pcm_cqpsk,
-                    c.cqpsk.diagnostics().link_control.first().cloned(),
-                ),
-            };
-            // A grant does not always name the radio; Link Control, which the
-            // traffic channel sends about itself, usually does. Take the first
-            // confirmed word — the radio that opened the transmission — rather
-            // than the last, which on a shared talkgroup may be someone else.
-            let source_unit = match (c.source_unit, lc.as_ref()) {
-                (0, Some(l)) => l.source_unit,
-                (s, _) => s,
-            };
-            out.completed.push(Call {
-                syncs_c4fm: c.syncs_c4fm,
-                syncs_cqpsk: c.syncs_cqpsk,
-                talkgroup: c.talkgroup,
-                source_unit,
-                freq_hz: c.freq_hz,
-                modulation,
-                patched_with: self.control.patches().siblings(c.talkgroup),
-                pcm,
-            });
+            out.completed.push(self.retire(c));
         }
 
         // Start calls the control channel just granted.
