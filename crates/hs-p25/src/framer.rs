@@ -54,6 +54,11 @@ pub enum FramerEvent {
         /// Raw ALGID from LDU2 encryption sync (None for LDU1).
         algid: Option<u8>,
     },
+    /// The undecoded Link Control slot bits from an LDU1, for studying the
+    /// codes that protect them.
+    LinkControlRaw {
+        raw: [u8; 30],
+    },
     /// Link Control from an LDU1: the call's own account of itself.
     LinkControl {
         nac: u16,
@@ -222,6 +227,9 @@ impl Framer {
                         let hard: Vec<u8> = self.buf.iter().map(|d| d.bits).collect();
                         let bits = crate::bits::dibits_to_bits(&hard);
                         if nid.duid == Duid::LogicalLinkDataUnit1 {
+                            if let Some(raw) = crate::lc::raw_slots(&bits) {
+                                events.push(FramerEvent::LinkControlRaw { raw });
+                            }
                             if let Some(lcw) = crate::lc::extract_lcw(&bits) {
                                 events.push(FramerEvent::LinkControl { nac: nid.nac, lcw });
                             }

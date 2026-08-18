@@ -134,6 +134,56 @@ Voice FEC (Golay/Hamming on the IMBE frames) and the NID's BCH decoder are
 still hard-decision; algebraic decoders need Chase-style soft decoding, which
 is the next increment.
 
+## Link Control and its Hamming code — derived from the air
+
+Each LDU1 embeds a 72-bit Link Control Word naming the talkgroup and the
+transmitting radio, so a traffic channel identifies its own call with no
+control channel present. Cross-validated on the Marion County captures: the
+control channel issued 12 grants onto 857.7625 MHz for talkgroup 10255, and
+that traffic channel — decoded separately, at a different frequency, in a
+different modulation — reports talkgroup 10255 in its own Link Control.
+
+Each hexbit of that word is protected by Hamming(10,6,3). **The parity
+equations were derived from real traffic rather than taken from a
+specification.** Parity is a linear function of the data bits, so for each of
+the four parity positions the 6-bit mask best predicting it was found by
+exhaustive search over 744 hexbits captured off air:
+
+| parity bit | data bits | fits |
+|---|---|---:|
+| 0 | d0 ⊕ d1 ⊕ d2 ⊕ d5 | 92.9% |
+| 1 | d0 ⊕ d1 ⊕ d3 ⊕ d5 | 94.8% |
+| 2 | d0 ⊕ d2 ⊕ d3 ⊕ d4 | 91.9% |
+| 3 | d1 ⊕ d2 ⊕ d3 ⊕ d4 | 93.0% |
+
+A wrong mask would fit near 50%; the residual few percent are the channel
+errors the code exists to correct. The derivation is then checked rather than
+trusted: the 64 codewords these masks generate have a minimum Hamming distance
+of exactly **3**, which is what Hamming(10,6,3) must have and what a mistaken
+derivation would not produce. That property is asserted in a test.
+
+Measured on 744 hexbits from 31 link-control words:
+
+| | count | share |
+|---|---:|---:|
+| already correct | 655 | 88.0% |
+| corrected by Hamming | 75 | 10.1% |
+| beyond correction | 14 | 1.9% |
+
+| Words with all 12 data hexbits sound | |
+|---|---:|
+| without correction | 14 / 31 |
+| **with Hamming** | **24 / 31** |
+
+Words containing a hexbit beyond correction are refused. Allowing two such
+hexbits through was tried, on the reasoning that the repetition check would
+sort them out; it recovered no additional call and let corrupted words leaking
+through as bogus vendor messages rise from 6 to 9, so the strict rule stands.
+
+The remaining 7-in-31 need the outer RS(24,12,13) layer, which is not decoded
+yet — and unlike the Hamming code its generator cannot be recovered by a linear
+fit, so it needs the specification rather than more captures.
+
 ## Synthetic self-benchmark (no external corpus)
 
 `hs-bench` synthesizes a P25 control-channel + voice transmission

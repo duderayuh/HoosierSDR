@@ -138,6 +138,9 @@ pub struct Diagnostics {
     pub vendor_lc: Vec<(u8, u8, u32)>,
     /// Raw arguments from vendor Link Control words, for offline analysis.
     pub vendor_lc_samples: Vec<(u8, u8, [u8; 7])>,
+    /// Raw 240-bit Link Control slot payloads, one per LDU1, packed MSB-first.
+    /// Kept so the codes protecting them can be studied against real traffic.
+    pub lc_raw: Vec<[u8; 30]>,
     pub grants: Vec<GrantStat>,
     pub encrypted_skips: Vec<u16>,
     pub voice_frames: u64,
@@ -248,6 +251,16 @@ impl Diagnostics {
             s.push_str(&format!(
                 "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
             ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"lc_raw\": [");
+        for (i, r) in self.lc_raw.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let hex: String = r.iter().map(|b| format!("{b:02X}")).collect();
+            s.push_str(&format!("\"{hex}\""));
         }
         s.push_str("],\n");
 

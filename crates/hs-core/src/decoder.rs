@@ -325,6 +325,11 @@ impl ChannelDecoder {
                     out.locations.push(r);
                 }
             }
+            FramerEvent::LinkControlRaw { raw } => {
+                if self.diag.lc_raw.len() < 4000 {
+                    self.diag.lc_raw.push(raw);
+                }
+            }
             FramerEvent::LinkControl { lcw, .. } => {
                 // A voice channel naming its own call: this is what lets a
                 // traffic channel be identified without the control channel.
