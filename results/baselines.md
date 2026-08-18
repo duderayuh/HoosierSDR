@@ -6,8 +6,9 @@ synthetic table with `cargo run -p hs-bench`.
 
 ## Status of the Phase 1 gate
 
-**Not yet passed on real recordings** — but the core mechanism is now proven
-in a controlled experiment (see "Thesis experiment" below). The full gate is
+**Not yet passed on real recordings** — but the core mechanism is proven in a
+controlled experiment (see "Thesis experiment" below), and the receiver now
+decodes real off-air P25 (see "First field decode"). The full gate is
 "measurably lower BER and sync-loss than SDRTrunk on real simulcast
 recordings," which still requires (a) the field-IQ corpus, not yet captured,
 and (b) wiring the proven complex equalizer behind live carrier/timing
@@ -31,6 +32,157 @@ makes ISI unrecoverable, so removing it *before* that step is a categorical
 win, not a marginal one. The complex echo here is exactly the class of
 distortion the real post-discriminator equalizer *cannot* touch (next
 section) — which is why the CQPSK front end is the path that matters.
+
+## First field decode — Marion County, 2026-08
+
+The first real off-air capture decodes. An RTL-SDR recording made in Marion
+County, Indiana (`rtl_sdr -f 858937500 -s 240000 -g 40`, 27.3 s, cu8) was
+decoded end to end by `hoosier-sdr` with no offline preprocessing:
+
+```sh
+hoosier-sdr --rate 240000 --offset 50k --cqpsk capture.cf32
+```
+
+| Measure | Value |
+|---|---|
+| Modulation | **CQPSK / LSM** (simulcast) |
+| NAC | **0x261**, on 149/149 decoded NIDs |
+| Frame syncs | 151 in 27.3 s |
+| Mean sync bit errors (of 48) | **0.07** — 143/151 with zero |
+| NID BCH errors | mean 0.39; 130/149 with zero |
+| DUIDs seen | TDULC 88, LDU2 30, LDU1 29, TDU 1, HDU 1 |
+| Voice | 531 IMBE frames → 10.6 s of 8 kHz PCM |
+| Grants | 0 — this is a **traffic channel**, not the control channel |
+
+Two things this capture established, both now fixed in code:
+
+1. **The tuned frequency was not the P25 channel.** 858.9375 MHz was picked
+   from an `rtl_power` sweep on received power alone; the actual P25 carrier
+   is 50 kHz up, at **858.9875 MHz**. Sweeping the capture across every
+   12.5 kHz grid offset found it — 4th-power differential-phase concentration
+   peaks sharply at +50.0 kHz (0.79, versus <0.10 everywhere else), which is
+   an unambiguous π/4-DQPSK signature. The `--offset` downconverter exists so
+   a wideband capture can be re-tuned in software rather than re-recorded.
+2. **Native SDR rates were unusable.** The demodulators are tuned per symbol
+   at ~10 samples/symbol; a 240 kHz capture is 50, which detunes the matched
+   filter, timing loop and equalizer simultaneously. `hs-dsp::decimate` now
+   resamples at the front of the chain.
+
+### Equalizer A/B on this capture
+
+| Path | Syncs | Mean sync bit errors | Voice frames |
+|---|:--:|:--:|:--:|
+| CMA equalizer before differential detection | 151 | **0.073** | 531 |
+| Conventional detect-first (`--no-equalizer`) | 150 | 0.153 | 522 |
+
+Read this honestly: the equalizer roughly halves the residual sync bit-error
+rate and recovers nine more voice frames, but on a signal this strong
+(~40 dB SNR, near-perfect decode either way) there is very little ISI to
+remove and therefore very little to win. This capture does **not** test the
+thesis — it validates the receiver. The thesis targets the degraded simulcast
+regime, and confirming it needs captures where the conventional path actually
+fails: weak signal, deep multipath, or a site with overlapping transmitters at
+comparable strength.
+
+## Soft-decision decoding — measured on the field capture
+
+Hard slicing discards the demodulator's confidence: a C4FM symbol at +2.9 and
+one at +2.05 both become the same bits, and every stage downstream treats them
+as equal evidence. Carrying per-bit confidence into the frame-sync correlator
+and the trellis Viterbi decoder recovers most of what the hard path was losing.
+
+Same 27.3 s Marion County capture, same everything else:
+
+| | hard decision | soft decision |
+|---|:--:|:--:|
+| Frame syncs | 151 | **161** |
+| Voice frames | 531 | **585** |
+| Decoded audio | 10.62 s | **11.70 s** |
+| Missed LDU frames (gap analysis) | 7 | **1** |
+
+**+1.08 s of recovered audio, and 6 of 7 dropped voice frames recovered.**
+
+The new syncs are real, not false locks — three independent checks agree:
+all 158 NIDs still decode to NAC 0x261 (a false sync yields a garbage NAC),
+the NID BCH error rate is unchanged (0.39 → 0.41 mean, ~87% clean either way),
+and LDU1/LDU2 gained *equally* (+3 each), which is the signature of genuine
+voice frames since the two alternate through a call.
+
+Mean sync bit-errors rises (0.073 → 0.385) and that is the mechanism working,
+not a regression: the correlator is now *accepting* windows with more hard bit
+errors, because the confidence pattern says those errors sit on bits the
+demodulator never trusted.
+
+### Coding gain in isolation
+
+`cargo test -p hs-p25 --lib soft_decoding` runs 300 TSBK frames through a C4FM
+symbol channel with Gaussian noise and decodes each twice from the *same*
+received symbols:
+
+| noise σ | hard | soft |
+|---|:--:|:--:|
+| 0.9 | 299/300 | 300/300 |
+| 1.1 | 290/300 | 300/300 |
+| 1.3 | 258/300 | 298/300 |
+| 1.5 | 175/300 | **291/300** |
+
+Soft decoding does not rescue a trellis stage that noise destroyed outright —
+no decoder does. It wins on the many marginal frames where the confidence
+pattern says which way to lean, which is exactly how coding gain works.
+
+Voice FEC (Golay/Hamming on the IMBE frames) and the NID's BCH decoder are
+still hard-decision; algebraic decoders need Chase-style soft decoding, which
+is the next increment.
+
+## Link Control and its Hamming code — derived from the air
+
+Each LDU1 embeds a 72-bit Link Control Word naming the talkgroup and the
+transmitting radio, so a traffic channel identifies its own call with no
+control channel present. Cross-validated on the Marion County captures: the
+control channel issued 12 grants onto 857.7625 MHz for talkgroup 10255, and
+that traffic channel — decoded separately, at a different frequency, in a
+different modulation — reports talkgroup 10255 in its own Link Control.
+
+Each hexbit of that word is protected by Hamming(10,6,3). **The parity
+equations were derived from real traffic rather than taken from a
+specification.** Parity is a linear function of the data bits, so for each of
+the four parity positions the 6-bit mask best predicting it was found by
+exhaustive search over 744 hexbits captured off air:
+
+| parity bit | data bits | fits |
+|---|---|---:|
+| 0 | d0 ⊕ d1 ⊕ d2 ⊕ d5 | 92.9% |
+| 1 | d0 ⊕ d1 ⊕ d3 ⊕ d5 | 94.8% |
+| 2 | d0 ⊕ d2 ⊕ d3 ⊕ d4 | 91.9% |
+| 3 | d1 ⊕ d2 ⊕ d3 ⊕ d4 | 93.0% |
+
+A wrong mask would fit near 50%; the residual few percent are the channel
+errors the code exists to correct. The derivation is then checked rather than
+trusted: the 64 codewords these masks generate have a minimum Hamming distance
+of exactly **3**, which is what Hamming(10,6,3) must have and what a mistaken
+derivation would not produce. That property is asserted in a test.
+
+Measured on 744 hexbits from 31 link-control words:
+
+| | count | share |
+|---|---:|---:|
+| already correct | 655 | 88.0% |
+| corrected by Hamming | 75 | 10.1% |
+| beyond correction | 14 | 1.9% |
+
+| Words with all 12 data hexbits sound | |
+|---|---:|
+| without correction | 14 / 31 |
+| **with Hamming** | **24 / 31** |
+
+Words containing a hexbit beyond correction are refused. Allowing two such
+hexbits through was tried, on the reasoning that the repetition check would
+sort them out; it recovered no additional call and let corrupted words leaking
+through as bogus vendor messages rise from 6 to 9, so the strict rule stands.
+
+The remaining 7-in-31 need the outer RS(24,12,13) layer, which is not decoded
+yet — and unlike the Hamming code its generator cannot be recovered by a linear
+fit, so it needs the specification rather than more captures.
 
 ## Synthetic self-benchmark (no external corpus)
 

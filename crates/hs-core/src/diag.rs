@@ -19,6 +19,21 @@ pub struct SyncStat {
 
 /// One NID decode.
 #[derive(Debug, Clone, Copy)]
+pub struct LcStat {
+    pub talkgroup: u16,
+    pub source_unit: u32,
+    pub emergency: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocationStat {
+    /// Logical Link ID of the reporting radio.
+    pub llid: u32,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct NidStat {
     pub nac: u16,
     pub duid: u8,
@@ -100,6 +115,32 @@ pub struct Diagnostics {
     pub symbols_processed: u64,
     pub syncs: Vec<SyncStat>,
     pub nids: Vec<NidStat>,
+    /// Packet data units reassembled.
+    pub packets: u64,
+    /// Manufacturer-specific TSBKs seen, counted by (MFID, opcode). Which
+    /// vendor messages a system emits says a lot about what features it runs.
+    pub vendor_tsbks: Vec<(u8, u8, u32)>,
+    /// Channel plans announced by IDEN_UP: (iden, base Hz, spacing Hz).
+    pub idens: Vec<(u8, u64, u64)>,
+    /// Talkgroup patches: supergroup and its member talkgroups.
+    pub patches: Vec<(u16, Vec<u16>)>,
+    /// A sample of raw argument words from vendor TSBKs. Manufacturer-specific
+    /// opcodes are not decoded, but their arguments are the evidence needed to
+    /// work out what they mean from a shared log — which is how the Motorola
+    /// Group Regroup blocks on the Marion County control channel were
+    /// identified as patch messages rather than corrupt grants.
+    pub vendor_samples: Vec<(u8, u8, u64)>,
+    /// Radio position reports decoded from packet data.
+    pub locations: Vec<LocationStat>,
+    /// Link Control words naming calls on a traffic channel.
+    pub link_control: Vec<LcStat>,
+    /// Vendor-defined Link Control opcodes, counted by (MFID, LCO).
+    pub vendor_lc: Vec<(u8, u8, u32)>,
+    /// Raw arguments from vendor Link Control words, for offline analysis.
+    pub vendor_lc_samples: Vec<(u8, u8, [u8; 7])>,
+    /// Raw 240-bit Link Control slot payloads, one per LDU1, packed MSB-first.
+    /// Kept so the codes protecting them can be studied against real traffic.
+    pub lc_raw: Vec<[u8; 30]>,
     pub grants: Vec<GrantStat>,
     pub encrypted_skips: Vec<u16>,
     pub voice_frames: u64,
@@ -197,6 +238,108 @@ impl Diagnostics {
             s.push_str(&format!(
                 "{{\"nac\":\"{:03X}\",\"duid\":\"{:X}\",\"bch_err\":{}}}",
                 n.nac, n.duid, n.bch_errors
+            ));
+        }
+        s.push_str("],\n");
+
+        // Manufacturer-specific TSBKs, by (MFID, opcode).
+        s.push_str("  \"vendor_tsbks\": [");
+        for (i, (mfid, op, n)) in self.vendor_tsbks.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"lc_raw\": [");
+        for (i, r) in self.lc_raw.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let hex: String = r.iter().map(|b| format!("{b:02X}")).collect();
+            s.push_str(&format!("\"{hex}\""));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"link_control\": [");
+        for (i, l) in self.link_control.iter().take(2000).enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"tg\":{},\"src\":{},\"emergency\":{}}}",
+                l.talkgroup, l.source_unit, l.emergency
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_lc\": [");
+        for (i, (m, o, n)) in self.vendor_lc.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"mfid\":\"{m:02X}\",\"lco\":\"{o:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_lc_samples\": [");
+        for (i, (m, o, a)) in self.vendor_lc_samples.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let hex: String = a.iter().map(|b| format!("{b:02X}")).collect();
+            s.push_str(&format!("[\"{m:02X}\",\"{o:02X}\",\"{hex}\"]"));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"idens\": [");
+        for (i, (id, base, sp)) in self.idens.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"iden\":{id},\"base_hz\":{base},\"spacing_hz\":{sp}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"patches\": [");
+        for (i, (sg, members)) in self.patches.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let list: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+            s.push_str(&format!(
+                "{{\"supergroup\":{sg},\"talkgroups\":[{}]}}",
+                list.join(",")
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_samples\": [");
+        for (i, (m, o, a)) in self.vendor_samples.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("[\"{m:02X}\",\"{o:02X}\",\"{a:016X}\"]"));
+        }
+        s.push_str("],\n");
+
+        // Radio position reports (LRRP over packet data).
+        s.push_str(&format!("  \"packets\": {},\n", self.packets));
+        s.push_str("  \"locations\": [");
+        for (i, l) in self.locations.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"llid\":{},\"lat\":{:.6},\"lon\":{:.6}}}",
+                l.llid, l.lat, l.lon
             ));
         }
         s.push_str("],\n");

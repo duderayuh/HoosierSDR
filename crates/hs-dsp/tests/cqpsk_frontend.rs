@@ -53,20 +53,31 @@ fn ber(a: &[u8], b: &[u8]) -> f64 {
     bits as f64 / (2 * n) as f64
 }
 
-/// Align `recovered` against `reference` by sliding over ALL valid delays
-/// (differential detection + filter latency introduce an unknown constant
-/// offset) and return the best BER.
+/// Align `recovered` against `reference` and return the best BER, searching
+/// over both unknowns the receiver legitimately leaves behind:
+///
+/// * **delay** — differential detection and filter latency shift the stream by
+///   an unknown constant;
+/// * **rotation** — blind carrier acquisition resolves the differential-phase
+///   bias only modulo π/2, so the dibits come out under one of four fixed
+///   permutations. Downstream this is pinned by the Frame Sync Word; here we
+///   search it, because the front end alone cannot know it.
 fn best_ber(recovered: &[u8], reference: &[u8]) -> f64 {
     let n = recovered.len().min(300);
-    let recovered = &recovered[..n];
     let mut best = 1.0;
     if reference.len() < n {
         return best;
     }
-    for delay in 0..=(reference.len() - n) {
-        let e = ber(recovered, &reference[delay..delay + n]);
-        if e < best {
-            best = e;
+    for k in 0..4u8 {
+        let derot: Vec<u8> = recovered[..n]
+            .iter()
+            .map(|&d| hs_dsp::cqpsk::rotate_dibit(d, k))
+            .collect();
+        for delay in 0..=(reference.len() - n) {
+            let e = ber(&derot, &reference[delay..delay + n]);
+            if e < best {
+                best = e;
+            }
         }
     }
     best
@@ -74,9 +85,11 @@ fn best_ber(recovered: &[u8], reference: &[u8]) -> f64 {
 
 #[test]
 fn full_receiver_locks_and_recovers_on_offset_signal() {
-    // Random dibit payload.
+    // Random dibit payload. Long enough to cover the receiver's blind
+    // acquisition window (it emits nothing for the first ~465 symbols while it
+    // settles timing and averages out the carrier bias) plus a settled tail.
     let mut s = 0x1234_5678u64;
-    let dibits: Vec<u8> = (0..1500)
+    let dibits: Vec<u8> = (0..2400)
         .map(|_| {
             s ^= s << 13;
             s ^= s >> 7;

@@ -42,23 +42,46 @@ pub fn encode(data: &[u8; 12]) -> [u8; 98] {
     out
 }
 
-/// Viterbi-decode 98 received dibits into 12 data bytes.
+/// Viterbi-decode 98 received hard dibits into 12 data bytes.
 /// Returns (data, path_bit_errors) or None if hopeless.
 pub fn decode(rx: &[u8; 98]) -> Option<([u8; 12], u32)> {
-    let mut deint = [0u8; 98];
-    for i in 0..98 {
-        deint[INTERLEAVE[i]] = rx[i] & 3;
+    let mut soft = [crate::soft::SoftDibit::default(); 98];
+    for (o, &d) in soft.iter_mut().zip(rx.iter()) {
+        *o = crate::soft::SoftDibit::hard(d);
     }
-    let mut nibs = [0u8; 49];
-    for (i, n) in nibs.iter_mut().enumerate() {
-        *n = (deint[i * 2] << 2) | deint[i * 2 + 1];
+    // Path cost comes back scaled by CERTAIN; report it in bit errors so the
+    // hard-decision contract is unchanged.
+    decode_soft(&soft).map(|(d, c)| (d, c / crate::soft::CERTAIN as u32))
+}
+
+/// Viterbi-decode 98 received dibits **with per-bit confidence**.
+///
+/// The only change from the hard decoder is the branch metric: instead of
+/// counting how many bits differ from the expected constellation nibble, each
+/// disagreement is charged by how much the demodulator trusted that bit. A
+/// path that contradicts four barely-decided bits then costs less than one
+/// contradicting two confident bits — which is the right ordering, and the one
+/// hard decoding cannot express. This is where most of the coding gain in a
+/// soft-decision receiver comes from.
+///
+/// Returns (data, path_cost) with the cost in confidence units; with
+/// all-certain inputs it is exactly `CERTAIN ×` the hard-decision bit errors.
+pub fn decode_soft(rx: &[crate::soft::SoftDibit; 98]) -> Option<([u8; 12], u32)> {
+    use crate::soft::SoftDibit;
+
+    let mut deint = [SoftDibit::default(); 98];
+    for i in 0..98 {
+        deint[INTERLEAVE[i]] = rx[i];
     }
 
     const INF: u32 = u32::MAX / 2;
     let mut metric = [INF; 4];
     metric[0] = 0; // encoder starts in state 0
     let mut paths: Vec<[u8; 4]> = Vec::with_capacity(49);
-    for &rx_nib in nibs.iter() {
+    for t in 0..49usize {
+        // A constellation nibble is carried by two consecutive dibits, each
+        // with its own confidence.
+        let (hi, lo) = (deint[t * 2], deint[t * 2 + 1]);
         let mut next = [INF; 4];
         let mut back = [0u8; 4];
         for s in 0..4usize {
@@ -67,7 +90,7 @@ pub fn decode(rx: &[u8; 98]) -> Option<([u8; 12], u32)> {
             }
             for d in 0..4usize {
                 let expect = DTM[s * 4 + d];
-                let cost = (expect ^ rx_nib).count_ones();
+                let cost = hi.cost_against(expect >> 2) + lo.cost_against(expect & 3);
                 let m = metric[s] + cost;
                 if m < next[d] {
                     next[d] = m;
@@ -119,5 +142,96 @@ mod tests {
         let (rx2, cost2) = decode(&bad).unwrap();
         assert_eq!(rx2, data);
         assert!(cost2 > 0);
+    }
+
+    #[test]
+    fn soft_decoding_beats_hard_decoding_on_a_noisy_channel() {
+        use crate::soft::{soft_slice_c4fm, SoftDibit};
+
+        // Coding gain is statistical, not per-frame: soft decoding does not
+        // rescue a stage that noise destroyed outright, it wins on the many
+        // marginal frames where the confidence pattern says which way to lean.
+        // So measure it the way it is actually claimed -- as a success rate
+        // over many frames through a realistic symbol channel.
+        //
+        // The channel here is the real one: dibits become C4FM levels
+        // (nominal +/-1, +/-3), pick up Gaussian noise, and are then either
+        // hard-sliced (throwing the confidence away) or soft-sliced (keeping
+        // it). Both decoders see exactly the same received symbols.
+        // Chosen so hard decoding is clearly stressed but not collapsing; the
+        // gap widens further as noise rises (at 1.5: hard 175/300, soft 291/300).
+        const TRIALS: u32 = 300;
+        const NOISE: f32 = 1.3;
+
+        let mut rng = 0x243F_6A88_85A3_08D3u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        // Sum of uniforms -> approximately Gaussian.
+        let mut noise = move || {
+            let mut acc = 0.0f32;
+            for _ in 0..4 {
+                acc += (next() >> 40) as f32 / (1u64 << 24) as f32;
+            }
+            (acc - 2.0) / 1.15
+        };
+
+        let level = |d: u8| match d & 3 {
+            0b01 => 3.0f32,
+            0b00 => 1.0,
+            0b10 => -1.0,
+            _ => -3.0,
+        };
+
+        let (mut hard_ok, mut soft_ok) = (0u32, 0u32);
+        for t in 0..TRIALS {
+            let mut data = [0u8; 12];
+            for (i, b) in data.iter_mut().enumerate() {
+                *b = ((t as usize * 7 + i * 31) % 251) as u8;
+            }
+            let tx = encode(&data);
+
+            let mut hard = [0u8; 98];
+            let mut soft = [SoftDibit::default(); 98];
+            for i in 0..98 {
+                let rx = level(tx[i]) + NOISE * noise();
+                let sd = soft_slice_c4fm(rx);
+                hard[i] = sd.bits;
+                soft[i] = sd;
+            }
+
+            if decode(&hard).map(|(d, _)| d) == Some(data) {
+                hard_ok += 1;
+            }
+            if decode_soft(&soft).map(|(d, _)| d) == Some(data) {
+                soft_ok += 1;
+            }
+        }
+
+        eprintln!("trellis @ noise {NOISE}: hard {hard_ok}/{TRIALS}, soft {soft_ok}/{TRIALS}");
+        // The channel must be hard enough to distinguish the two.
+        assert!(
+            hard_ok < TRIALS,
+            "channel too easy: hard decoding already perfect"
+        );
+        assert!(
+            soft_ok > hard_ok,
+            "soft decoding did not beat hard: soft {soft_ok} vs hard {hard_ok} of {TRIALS}"
+        );
+    }
+
+    #[test]
+    fn soft_decoding_matches_hard_when_every_bit_is_certain() {
+        use crate::soft::SoftDibit;
+        let data: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let tx = encode(&data);
+        let mut soft = [SoftDibit::default(); 98];
+        for (o, &d) in soft.iter_mut().zip(tx.iter()) {
+            *o = SoftDibit::hard(d);
+        }
+        assert_eq!(decode_soft(&soft).map(|(d, _)| d), Some(data));
     }
 }

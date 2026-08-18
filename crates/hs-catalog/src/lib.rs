@@ -2,12 +2,21 @@
 //! order): CSV import (Phase 3) → RadioReference SOAP (Phase 4) → on-air
 //! self-discovery.
 //!
-//! Hard rules: user credentials go to the OS keyring, never plaintext; no
-//! RadioReference table data is ever committed to this repository.
+//! Hard rules: user credentials never touch this repository or its output —
+//! they come from the environment today (`RR_APP_KEY`, `RR_USERNAME`,
+//! `RR_PASSWORD`) and the OS keyring eventually, are redacted from `Debug`, and
+//! are never written to the cache. No RadioReference table data is ever
+//! committed here; every fixture below is synthetic.
 
 pub mod csv;
+pub mod xml;
+
+#[cfg(feature = "radioreference")]
+pub mod radioreference;
 
 pub use csv::CsvCatalog;
+#[cfg(feature = "radioreference")]
+pub use radioreference::{Credentials, RrClient, RrSystem};
 
 #[derive(Debug, Clone, Default)]
 pub struct Talkgroup {

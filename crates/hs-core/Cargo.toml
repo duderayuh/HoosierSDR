@@ -13,3 +13,7 @@ hs-vocoder = { path = "../hs-vocoder" }
 hs-trunk = { path = "../hs-trunk" }
 hs-catalog = { path = "../hs-catalog" }
 hs-transcribe = { path = "../hs-transcribe" }
+
+[features]
+# RadioReference database web service (see hs-catalog).
+radioreference = ["hs-catalog/radioreference"]

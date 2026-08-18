@@ -4,7 +4,10 @@
 
 Desktop-first (macOS primary, Windows port planned). Built for Indiana's Hoosier SAFE-T system (P25 Phase I), useful for any P25 Phase I network.
 
-> Status: **pre-alpha, but it decodes.** A complete offline P25 Phase I decode chain works end to end today — control-channel trunking, voice grants, and IMBE audio. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design doc and roadmap, and [`results/baselines.md`](results/baselines.md) for measured decode quality.
+> Status: **pre-alpha, and it decodes real off-air P25.** A 27-second RTL-SDR
+> capture from Marion County, Indiana decodes end to end — NAC 0x261, 151 frame
+> syncs at a mean 0.07 bit errors, 10.6 s of IMBE voice. See
+> [`results/baselines.md`](results/baselines.md#first-field-decode--marion-county-2026-08). A complete offline P25 Phase I decode chain works end to end today — control-channel trunking, voice grants, and IMBE audio. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design doc and roadmap, and [`results/baselines.md`](results/baselines.md) for measured decode quality.
 
 ## Try it now
 
@@ -12,7 +15,10 @@ Desktop-first (macOS primary, Windows port planned). Built for Indiana's Hoosier
 cargo run -p hs-cli -- --demo
 ```
 
-Synthesizes a P25 control-channel + clear-voice transmission, runs it through the whole pipeline (C4FM demod → framer → BCH/trellis/CRC FEC → trunking state machine → IMBE vocoder), resolves the voice grant to its downlink frequency, and writes decoded audio to `hoosier_out.wav`. To decode a real recording: `cargo run -p hs-cli -- --rate 48000 capture.cf32`.
+Synthesizes a P25 control-channel + clear-voice transmission, runs it through the whole pipeline (C4FM demod → framer → BCH/trellis/CRC FEC → trunking state machine → IMBE vocoder), resolves the voice grant to its downlink frequency, and writes decoded audio to `hoosier_out.wav`. To decode a real recording at an RTL-SDR's native rate: `cargo run -p hs-cli --
+--rate 240000 --offset 50k --cqpsk capture.cf32`. The front end decimates to the
+demodulators' working rate and `--offset` tunes to any 12.5 kHz channel inside
+the captured band, so one wideband recording covers a whole slice of spectrum.
 
 ## What works today
 
@@ -35,6 +41,51 @@ cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 
 ## Desktop app
 
+## Finding the control channel
+
+A power sweep won't find it. That method put the first field capture 50 kHz off
+the real carrier, locked onto a strong signal that wasn't P25 at all — a
+spectrum plot can't tell a control channel from an analog repeater. There are
+two reliable ways instead.
+
+**Scan by decoding.** `--scan` sweeps every channel position in a wideband
+capture, runs the real decoder at each, and reports what actually carries P25:
+
+```sh
+hoosier-sdr --rate 240000 --freq 858.9375M --scan capture.cf32
+```
+
+```text
+Found 1 P25 channel(s):
+
+  voice    858.9875 MHz  CQPSK  NAC 0x261    20 syncs  err 0.30
+```
+
+One 240 kHz recording covers ~19 channels, and each hit is labelled control vs
+voice, with its modulation and NAC. Frequencies are snapped to the P25 channel
+raster, so they're ready to paste into `--freq`.
+
+**Or ask RadioReference**, which already knows every site's control and
+alternate channels:
+
+```sh
+export RR_APP_KEY=... RR_USERNAME=... RR_PASSWORD=...
+cargo run -p hs-cli --features radioreference -- --rr-system 7804
+```
+
+prints each site with its NAC, RFSS and control channels (primary first, ready
+to paste into `--freq`), and writes a talkgroup CSV that `--catalog` reads
+back. The NAC it prints is the same one the decoder reports off the air, so a
+capture can be matched to the exact site it was hearing.
+
+This needs an **application key** — register the app once at
+[radioreference.com/apps/account](https://www.radioreference.com/apps/account/?tab=api)
+— and each user supplies their own RadioReference login with an active premium
+subscription; the service authenticates the end user on every call. HoosierSDR
+deliberately ships no key of its own. Without a subscription, export the
+talkgroup CSV from the website by hand and use `--catalog` — that path needs no
+credentials and always works.
+
 A Tauri v2 desktop app lives in [`app/`](app/) (its own workspace, built on
 macOS/Windows — see [`app/README.md`](app/README.md)): tune an RTL-SDR, watch
 calls decode live with talkgroup names, a spectrum waterfall, and one-click
@@ -47,8 +98,16 @@ cd app && cargo tauri dev      # macOS: brew install libusb; cargo install tauri
 
 ## What's not done yet
 
-Field validation against a real SAFE-T signal, the RadioReference SOAP API
-(CSV import works today), and transcription. These are the Phase 4–5 roadmap.
+The thesis is still unproven *in the field*. The Marion County capture decodes
+cleanly either way — at ~40 dB SNR there is almost no ISI to remove — so it
+validates the receiver, not the equalizer. Confirming the thesis needs captures
+where the conventional detect-first path actually fails: weak signal, deep
+multipath, or overlapping simulcast transmitters at comparable strength.
+Also outstanding: control-channel capture (the one recorded so far is a traffic
+channel) and transcription. The RadioReference client is written but has not yet
+run against the live service — the response field mapping is built from
+published documentation and may need one correction pass against a real payload
+(`--rr-dump` captures it). These are the Phase 4–5 roadmap.
 
 ## The thesis
 

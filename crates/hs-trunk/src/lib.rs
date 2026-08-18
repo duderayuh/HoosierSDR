@@ -70,14 +70,31 @@ impl SiteModel {
     }
 
     /// Resolve a 16-bit channel field (4-bit IDEN + 12-bit number) to the
-    /// downlink (mobile receive) frequency in Hz, if the IDEN is known.
+    /// **downlink** (base transmit / mobile receive) frequency in Hz, if the
+    /// IDEN is known. This is the frequency a receiver tunes.
+    ///
+    /// The channel plan's base frequency is already the downlink base, so the
+    /// downlink is simply `base + number × spacing`. The IDEN_UP transmit
+    /// offset is *not* part of it — that offset converts a downlink to the
+    /// matching uplink (see [`SiteModel::channel_to_uplink`]), and adding it
+    /// here produced frequencies in the 806–824 MHz mobile-transmit band
+    /// instead of the 851–869 MHz base-transmit band.
     pub fn channel_to_freq(&self, channel: u16) -> Option<u64> {
         let iden = (channel >> 12) as u8;
         let number = (channel & 0x0FFF) as u64;
         let plan = self.idens.get(&iden)?;
-        let base = plan.base_freq_hz as i64 + (number * plan.spacing_hz) as i64;
-        // Downlink = base + transmit offset (offset is signed, MHz-scale).
-        Some((base + plan.tx_offset_hz) as u64)
+        Some(plan.base_freq_hz + number * plan.spacing_hz)
+    }
+
+    /// The uplink (mobile transmit) frequency for a channel: the downlink
+    /// shifted by the channel plan's signed transmit offset. Not what a
+    /// scanner tunes, but the other half of the pair the plan describes.
+    pub fn channel_to_uplink(&self, channel: u16) -> Option<u64> {
+        let down = self.channel_to_freq(channel)? as i64;
+        let iden = (channel >> 12) as u8;
+        let plan = self.idens.get(&iden)?;
+        let up = down + plan.tx_offset_hz;
+        (up > 0).then_some(up as u64)
     }
 
     /// Build a resolved grant, or None if the channel plan isn't known yet.
@@ -102,6 +119,47 @@ impl SiteModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real 800 MHz plan: the downlink base sits in the 851–869 MHz
+    /// base-transmit band and the transmit offset is −45 MHz, pointing at the
+    /// 806–824 MHz mobile-transmit band.
+    ///
+    /// This case is the one that mattered. With the offset left at zero (as
+    /// the test below had it) a grant resolved correctly by accident, because
+    /// adding zero is harmless. Against a real Marion County control channel
+    /// the same code produced 812.7625 MHz — a mobile transmit frequency no
+    /// receiver should tune — where three independently-decoded voice channels
+    /// said the answer was 857.7625 MHz, exactly 45 MHz up.
+    #[test]
+    fn downlink_excludes_the_transmit_offset() {
+        let mut site = SiteModel::new();
+        site.set_iden(
+            1,
+            IdenPlan {
+                base_freq_hz: 851_006_250,
+                spacing_hz: 6_250,
+                tx_offset_hz: -45_000_000,
+            },
+        );
+        let channel = (1u16 << 12) | 1080;
+        let down = site.channel_to_freq(channel).unwrap();
+        assert_eq!(
+            down, 857_756_250,
+            "downlink must ignore the transmit offset"
+        );
+        assert!(
+            (851_000_000..=869_000_000).contains(&down),
+            "downlink {down} is outside the base-transmit band"
+        );
+        // The offset is not wrong, just not part of the downlink: it names the
+        // matching mobile transmit frequency.
+        let up = site.channel_to_uplink(channel).unwrap();
+        assert_eq!(up, down - 45_000_000);
+        assert!(
+            (806_000_000..=824_000_000).contains(&up),
+            "uplink {up} is outside the mobile-transmit band"
+        );
+    }
 
     #[test]
     fn resolves_channel_to_downlink() {
@@ -130,5 +188,91 @@ mod tests {
     fn unknown_iden_is_none() {
         let site = SiteModel::new();
         assert!(site.channel_to_freq(0x100A).is_none());
+    }
+}
+
+/// Tracks dynamic talkgroup patches (Motorola Group Regroup).
+///
+/// Dispatch can merge talkgroups so they share audio. A scanner that ignores
+/// this mis-attributes calls: traffic for a patched talkgroup shows up under
+/// whichever member the grant names, so two talkgroups that a listener thinks
+/// are separate are in fact one conversation.
+#[derive(Debug, Default, Clone)]
+pub struct PatchTracker {
+    /// supergroup → member talkgroups, in first-seen order.
+    patches: Vec<(u16, Vec<u16>)>,
+}
+
+impl PatchTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `talkgroup` belongs to `supergroup`.
+    pub fn add(&mut self, supergroup: u16, talkgroup: u16) {
+        match self.patches.iter_mut().find(|(s, _)| *s == supergroup) {
+            Some((_, members)) => {
+                if !members.contains(&talkgroup) {
+                    members.push(talkgroup);
+                }
+            }
+            None => self.patches.push((supergroup, vec![talkgroup])),
+        }
+    }
+
+    /// The patch a talkgroup belongs to, if any.
+    pub fn patch_of(&self, talkgroup: u16) -> Option<u16> {
+        self.patches
+            .iter()
+            .find(|(_, m)| m.contains(&talkgroup))
+            .map(|(s, _)| *s)
+    }
+
+    /// Talkgroups sharing a patch with this one — the other labels the same
+    /// audio may appear under.
+    pub fn siblings(&self, talkgroup: u16) -> Vec<u16> {
+        self.patches
+            .iter()
+            .find(|(_, m)| m.contains(&talkgroup))
+            .map(|(_, m)| m.iter().copied().filter(|&t| t != talkgroup).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every patch and its members.
+    pub fn patches(&self) -> &[(u16, Vec<u16>)] {
+        &self.patches
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn groups_talkgroups_under_a_patch() {
+        let mut p = PatchTracker::new();
+        p.add(957, 10204);
+        p.add(957, 10203);
+        p.add(949, 10118);
+        assert_eq!(p.patch_of(10204), Some(957));
+        assert_eq!(p.patch_of(10118), Some(949));
+        assert_eq!(p.patch_of(99), None);
+        assert_eq!(p.siblings(10204), vec![10203]);
+        assert!(p.siblings(10118).is_empty(), "sole member has no siblings");
+    }
+
+    #[test]
+    fn repeated_announcements_do_not_duplicate_members() {
+        // Patch messages repeat continuously on a control channel; the same
+        // pair arriving hundreds of times must not grow the member list.
+        let mut p = PatchTracker::new();
+        for _ in 0..100 {
+            p.add(957, 10204);
+        }
+        assert_eq!(p.patches()[0].1, vec![10204]);
     }
 }

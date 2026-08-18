@@ -41,12 +41,26 @@ pub enum Tsbk {
         site: u8,
         channel: u16,
     },
+    /// A Motorola Group Regroup (talkgroup patch) message.
+    MotoRegroup(crate::moto::MotoRegroup),
+    /// A manufacturer-specific block. The opcode space belongs to the vendor,
+    /// so the standard meanings do not apply and the arguments are left raw.
+    VendorSpecific {
+        mfid: u8,
+        opcode: u8,
+        args: u64,
+    },
     Unknown {
         opcode: u8,
         mfid: u8,
         args: u64,
     },
 }
+
+/// Manufacturer IDs whose blocks follow the standard opcode assignments.
+/// Everything else redefines the opcode space for its own use.
+const MFID_STANDARD: u8 = 0x00;
+const MFID_STANDARD_ALT: u8 = 0x01;
 
 #[derive(Debug)]
 pub struct TsbkBlock {
@@ -65,6 +79,25 @@ pub fn parse(bits96: &[u8]) -> Option<TsbkBlock> {
     let opcode = read_bits(bits96, 2, 6) as u8;
     let mfid = read_bits(bits96, 8, 8) as u8;
     let args = read_bits(bits96, 16, 64);
+
+    // Opcodes are only standard when the manufacturer ID says so. A vendor
+    // block carries a perfectly valid CRC -- it is a real message -- but its
+    // arguments mean something else entirely, so interpreting one as a
+    // standard grant yields a confident, plausible-looking lie: a real
+    // talkgroup number pointing at a frequency nothing is transmitting on.
+    if mfid != MFID_STANDARD && mfid != MFID_STANDARD_ALT {
+        // Motorola's Group Regroup messages are understood well enough to
+        // decode (see `moto`); every other vendor block keeps its raw
+        // arguments so it can be identified later from a shared log.
+        let tsbk = match (mfid == crate::moto::MFID_MOTOROLA)
+            .then(|| crate::moto::parse(opcode, args))
+            .flatten()
+        {
+            Some(r) => Tsbk::MotoRegroup(r),
+            None => Tsbk::VendorSpecific { mfid, opcode, args },
+        };
+        return Some(TsbkBlock { last_block, tsbk });
+    }
 
     let tsbk = match opcode {
         0x00 => Tsbk::GroupVoiceGrant {
@@ -124,6 +157,76 @@ pub fn build(last_block: bool, opcode: u8, mfid: u8, args: u64) -> [u8; 96] {
 
 #[cfg(test)]
 mod tests {
+    /// Build a TSBK with a valid CRC so it reaches the opcode dispatch.
+    fn tsbk_bits(opcode: u8, mfid: u8, args: u64) -> Vec<u8> {
+        let mut bits = vec![0u8; 96];
+        bits[0] = 1; // last block
+        for k in 0..6 {
+            bits[2 + k] = (opcode >> (5 - k)) & 1;
+        }
+        for k in 0..8 {
+            bits[8 + k] = (mfid >> (7 - k)) & 1;
+        }
+        for k in 0..64 {
+            bits[16 + k] = ((args >> (63 - k)) & 1) as u8;
+        }
+        let crc = crc16_ccitt(&bits[..80]);
+        for k in 0..16 {
+            bits[80 + k] = ((crc >> (15 - k)) & 1) as u8;
+        }
+        bits
+    }
+
+    #[test]
+    fn a_vendor_block_is_not_read_as_a_standard_grant() {
+        // Same opcode and arguments, two manufacturer IDs. Under the standard
+        // MFID this is a group voice grant; under a vendor MFID the opcode
+        // space belongs to the vendor and these bits mean something else.
+        //
+        // This mattered on a real control channel: vendor blocks carry valid
+        // CRCs, so they were parsed as grants and produced real-looking
+        // talkgroups pointing at frequencies measured to be below the noise
+        // floor -- nothing was transmitting there at all.
+        let args: u64 = (0x1234u64 << 40) | (0x2F93u64 << 24) | 0xBEEF1;
+
+        let std = parse(&tsbk_bits(0x00, 0x00, args)).expect("standard parses");
+        assert!(
+            matches!(std.tsbk, Tsbk::GroupVoiceGrant { group: 0x2F93, .. }),
+            "standard MFID must still decode a grant: {:?}",
+            std.tsbk
+        );
+
+        // Under Motorola's MFID the same opcode is a Group Regroup message.
+        // What matters is that it is not a grant: the talkgroup and frequency
+        // a standard read would have produced were fiction.
+        let moto = parse(&tsbk_bits(0x00, 0x90, args)).expect("motorola block parses");
+        assert!(
+            matches!(moto.tsbk, Tsbk::MotoRegroup(_)),
+            "motorola block should decode as regroup, got {:?}",
+            moto.tsbk
+        );
+        assert!(
+            !matches!(moto.tsbk, Tsbk::GroupVoiceGrant { .. }),
+            "a vendor block must never be read as a standard grant"
+        );
+
+        // A manufacturer we have no parser for keeps its arguments raw rather
+        // than being forced through the nearest known layout.
+        let other = parse(&tsbk_bits(0x00, 0xA4, args)).expect("vendor block parses");
+        assert!(
+            matches!(
+                other.tsbk,
+                Tsbk::VendorSpecific {
+                    mfid: 0xA4,
+                    opcode: 0x00,
+                    ..
+                }
+            ),
+            "unknown vendor MFID must stay raw: {:?}",
+            other.tsbk
+        );
+    }
+
     use super::*;
 
     #[test]

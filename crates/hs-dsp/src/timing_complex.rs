@@ -82,6 +82,20 @@ impl ComplexGardner {
                     // Clamp the integrator so a transient can't run the rate away.
                     self.integ = self.integ.clamp(-0.5 * self.w0, 0.5 * self.w0);
                     self.w = self.w0 + self.kp * e + self.integ;
+                    // Hard-limit the NCO rate. The proportional term is
+                    // unbounded in the TED output, so one transient — an AGC
+                    // step, a dropout, a saturated front end — can drive `w`
+                    // negative or non-finite, after which the accumulator
+                    // never reaches the strobe threshold again and the
+                    // receiver goes silent for the rest of the capture with no
+                    // error reported. Real tuner clock error is well under 1%,
+                    // so ±20% of nominal is generous and makes that failure
+                    // unreachable.
+                    if !self.w.is_finite() {
+                        self.integ = 0.0;
+                        self.w = self.w0;
+                    }
+                    self.w = self.w.clamp(0.8 * self.w0, 1.2 * self.w0);
                 }
                 self.seen_sym = true;
                 self.y_prev_sym = y;

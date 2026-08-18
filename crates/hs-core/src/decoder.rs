@@ -10,13 +10,15 @@
 
 use hs_dsp::c4fm::slice;
 use hs_dsp::cqpsk::CqpskReceiver;
+use hs_dsp::decimate::{DecimationPlan, Decimator, TARGET_SPS};
 use hs_dsp::equalizer::RealLmsEq;
 use hs_dsp::receiver::C4fmReceiver;
 use hs_dsp::C32;
 use hs_p25::framer::{Framer, FramerEvent};
+use hs_p25::moto::MotoRegroup;
 use hs_p25::tsbk::Tsbk;
 use hs_p25::{AlgId, Duid};
-use hs_trunk::{Grant, IdenPlan, SiteModel};
+use hs_trunk::{Grant, IdenPlan, PatchTracker, SiteModel};
 use hs_vocoder::imbe::ImbeDecoder;
 use hs_vocoder::Vocoder;
 
@@ -44,6 +46,8 @@ pub struct DecodeOutput {
     pub encrypted_skips: Vec<u16>,
     /// Frame-sync detections (for diagnostics / bench metrics).
     pub syncs: u32,
+    /// Radio position reports decoded from packet data this block.
+    pub locations: Vec<hs_p25::lrrp::LrrpReport>,
 }
 
 /// Whether the equalizer sits in the symbol path.
@@ -63,12 +67,22 @@ pub enum EqMode {
 
 pub struct ChannelDecoder {
     modulation: Modulation,
+    /// Front-end resampler: native SDR rates (240 kHz on an RTL-SDR) down to
+    /// the ~10 samples/symbol the demodulators are tuned for.
+    decim: Decimator,
+    plan: DecimationPlan,
     rx: C4fmReceiver,
     cqpsk: Option<CqpskReceiver>,
+    /// Resolves the π/2 rotation ambiguity of blind CQPSK acquisition.
+    derot: crate::derotate::Derotator,
     eq: RealLmsEq,
     eq_mode: EqMode,
     framer: Framer,
     site: SiteModel,
+    /// Dynamic talkgroup patches (Motorola Group Regroup).
+    patches: PatchTracker,
+    /// Confirms Link Control readings by repetition (they are not FEC-corrected).
+    lc_confirm: hs_p25::lc::LcConfirmer,
     vocoder: ImbeDecoder,
     /// Rolling buffer of recent RAW receiver symbols (pre-equalizer), used to
     /// train the equalizer on the Frame Sync Word once the framer confirms
@@ -83,41 +97,66 @@ pub struct ChannelDecoder {
 }
 
 impl ChannelDecoder {
-    /// C4FM decoder with the symbol-domain equalizer mode.
+    /// C4FM decoder with the symbol-domain equalizer mode. `sample_rate` is
+    /// the **capture** rate; anything above ~10 samples/symbol is decimated
+    /// down internally, so native SDR rates can be passed straight in.
     pub fn new(sample_rate: f64, eq_mode: EqMode) -> Self {
-        Self::build(sample_rate, Modulation::C4fm, eq_mode)
+        Self::build(sample_rate, Modulation::C4fm, eq_mode, 0.0)
     }
 
     /// CQPSK / LSM decoder: carrier + timing recovery with the CMA equalizer
     /// before differential detection (simulcast sites). `sample_rate` must be
     /// an integer multiple of the 4800-baud symbol rate.
     pub fn new_cqpsk(sample_rate: f64) -> Self {
-        Self::build(sample_rate, Modulation::Cqpsk, EqMode::Bypass)
+        Self::build(sample_rate, Modulation::Cqpsk, EqMode::Enabled, 0.0)
     }
 
-    fn build(sample_rate: f64, modulation: Modulation, eq_mode: EqMode) -> Self {
+    /// Decode the channel `offset_hz` away from the capture centre. A
+    /// wideband capture holds many 12.5 kHz P25 channels; this selects one
+    /// without re-tuning the radio, which also rescues a recording made on the
+    /// wrong channel.
+    pub fn with_offset(
+        sample_rate: f64,
+        modulation: Modulation,
+        eq_mode: EqMode,
+        offset_hz: f64,
+    ) -> Self {
+        Self::build(sample_rate, modulation, eq_mode, offset_hz)
+    }
+
+    fn build(sample_rate: f64, modulation: Modulation, eq_mode: EqMode, offset_hz: f64) -> Self {
         let fsw_levels = hs_p25::synth::sync_dibits()
             .into_iter()
             .map(hs_dsp::c4fm::dibit_to_level)
             .collect();
+        let plan = DecimationPlan::for_rate(sample_rate, TARGET_SPS);
+        // On the CQPSK path `EqMode` selects the thesis A/B directly: the
+        // equalizer is the CMA stage ahead of differential detection, and
+        // bypassing it gives exactly the conventional receiver every other
+        // open-source P25 decoder implements. That makes the comparison
+        // measurable on field captures, not just synthetic ones.
         let cqpsk = match modulation {
-            Modulation::Cqpsk => {
-                let sps = (sample_rate / hs_dsp::P25_SYMBOL_RATE).round() as usize;
-                assert!(sps >= 4, "CQPSK needs >= 4 samples/symbol");
-                Some(CqpskReceiver::new(sps, 0.2))
+            Modulation::Cqpsk if eq_mode == EqMode::Enabled => {
+                Some(CqpskReceiver::new(plan.sps, 0.2))
             }
+            Modulation::Cqpsk => Some(CqpskReceiver::new_bare(plan.sps, 0.2)),
             Modulation::C4fm => None,
         };
         let mut diag = crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled);
         diag.modulation = modulation;
         Self {
             modulation,
-            rx: C4fmReceiver::new(sample_rate),
+            decim: Decimator::with_offset(sample_rate, TARGET_SPS, offset_hz),
+            plan,
+            rx: C4fmReceiver::new(plan.working_rate),
             cqpsk,
+            derot: crate::derotate::Derotator::default(),
             eq: RealLmsEq::new(7, 0.5),
             eq_mode,
             framer: Framer::new(),
             site: SiteModel::new(),
+            patches: PatchTracker::new(),
+            lc_confirm: hs_p25::lc::LcConfirmer::new(),
             vocoder: ImbeDecoder::new(),
             raw_hist: Vec::with_capacity(48),
             fsw_levels,
@@ -129,6 +168,18 @@ impl ChannelDecoder {
 
     pub fn modulation(&self) -> Modulation {
         self.modulation
+    }
+
+    /// How the capture rate is reduced before demodulation.
+    pub fn decimation(&self) -> DecimationPlan {
+        self.plan
+    }
+
+    /// Talkgroup patches observed so far. Traffic for a patched talkgroup can
+    /// appear under any of its members, so this is needed to attribute calls
+    /// correctly.
+    pub fn patches(&self) -> &PatchTracker {
+        &self.patches
     }
 
     pub fn site(&self) -> &SiteModel {
@@ -143,10 +194,15 @@ impl ChannelDecoder {
     /// Process a slice of interleaved-IQ f32 samples.
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
+        let mut derot_buf: Vec<u8> = Vec::new();
         let mut i = 0;
         while i + 1 < iq.len() {
             let s = C32::new(iq[i], iq[i + 1]);
             i += 2;
+            // Resample to the working rate first; at 1× this is a no-op.
+            let Some(s) = self.decim.push(s) else {
+                continue;
+            };
             match self.modulation {
                 Modulation::C4fm => {
                     if let Some(sym) = self.rx.push(s) {
@@ -154,10 +210,22 @@ impl ChannelDecoder {
                     }
                 }
                 Modulation::Cqpsk => {
-                    // The CQPSK front end (matched filter → Gardner → CMA →
-                    // differential detection) emits dibits directly.
-                    if let Some(dibit) = self.cqpsk.as_mut().unwrap().push(s) {
-                        self.feed_dibit(dibit, None, &mut out);
+                    // The CQPSK front end (DC block → AGC → matched filter →
+                    // Gardner → CMA → differential detection) emits dibits
+                    // directly, but blind carrier acquisition leaves them
+                    // rotated by an unknown quarter turn; the derotator pins
+                    // that against the Frame Sync Word before the framer.
+                    if let Some((raw, dphi)) = self.cqpsk.as_mut().unwrap().push_phase(s) {
+                        derot_buf.clear();
+                        self.derot.push(raw, &mut derot_buf);
+                        // Confidence comes from the differential phase's
+                        // distance to its decision boundaries. Derotation
+                        // permutes which dibit is meant but not how well the
+                        // symbol was resolved, so the confidences carry over.
+                        let conf = hs_p25::soft::soft_slice_cqpsk(dphi).conf;
+                        for &d in &derot_buf {
+                            self.feed_dibit(hs_p25::soft::SoftDibit::new(d, conf), None, &mut out);
+                        }
                     }
                 }
             }
@@ -186,21 +254,30 @@ impl ChannelDecoder {
             EqMode::Enabled => self.eq.push(sym),
             EqMode::Bypass => sym,
         };
-        let dibit = slice(eq_sym);
-        self.feed_dibit(dibit, Some(eq_sym), out);
+        // Soft-slice: keep how far the symbol sits from each decision
+        // threshold, so the sync correlator and the trellis decoder can weigh
+        // a marginal symbol differently from a confident one.
+        let sd = hs_p25::soft::soft_slice_c4fm(eq_sym);
+        debug_assert_eq!(sd.bits, slice(eq_sym));
+        self.feed_dibit(sd, Some(eq_sym), out);
     }
 
     /// Shared dibit-domain path: diagnostics + framer + event handling. Both
     /// front ends (C4FM symbol slicing, CQPSK differential detection) converge
     /// here. `soft` is the real soft-symbol value for eye diagnostics when the
     /// front end has one (C4FM); the CQPSK path passes None.
-    fn feed_dibit(&mut self, dibit: u8, soft: Option<f32>, out: &mut DecodeOutput) {
+    fn feed_dibit(
+        &mut self,
+        sd: hs_p25::soft::SoftDibit,
+        soft: Option<f32>,
+        out: &mut DecodeOutput,
+    ) {
         self.diag.symbols_processed += 1;
         if let Some(s) = soft {
-            self.diag.health.observe(s, dibit);
+            self.diag.health.observe(s, sd.bits);
         }
         let mut events = Vec::new();
-        self.framer.push(dibit, &mut events);
+        self.framer.push_soft(sd, &mut events);
         for ev in events {
             self.on_event(ev, out);
         }
@@ -230,6 +307,55 @@ impl ChannelDecoder {
                     let mut desired = vec![f32::NAN; ctx]; // no ground truth
                     desired.extend_from_slice(&self.fsw_levels);
                     self.eq.train_sequence(raw, &desired);
+                }
+            }
+            FramerEvent::PacketData { packet, .. } => {
+                self.diag.packets += 1;
+                // Packet data carries IP; a location report is one particular
+                // UDP payload inside it. Anything else — and anything
+                // encrypted — simply fails to parse and is dropped.
+                if let Some(r) =
+                    hs_p25::lrrp::report_from_packet(packet.header.llid, &packet.payload)
+                {
+                    self.diag.locations.push(crate::diag::LocationStat {
+                        llid: r.llid,
+                        lat: r.lat,
+                        lon: r.lon,
+                    });
+                    out.locations.push(r);
+                }
+            }
+            FramerEvent::LinkControlRaw { raw } => {
+                if self.diag.lc_raw.len() < 4000 {
+                    self.diag.lc_raw.push(raw);
+                }
+            }
+            FramerEvent::LinkControl { lcw, .. } => {
+                // A voice channel naming its own call: this is what lets a
+                // traffic channel be identified without the control channel.
+                if let Some((tg, src)) = self.lc_confirm.observe(&lcw) {
+                    self.diag.link_control.push(crate::diag::LcStat {
+                        talkgroup: tg,
+                        source_unit: src,
+                        emergency: lcw.emergency(),
+                    });
+                    self.active_tg = Some(tg);
+                } else if !lcw.is_standard() {
+                    let key = (lcw.mfid, lcw.lco);
+                    match self
+                        .diag
+                        .vendor_lc
+                        .iter_mut()
+                        .find(|(m, o, _)| (*m, *o) == key)
+                    {
+                        Some((_, _, n)) => *n += 1,
+                        None => self.diag.vendor_lc.push((lcw.mfid, lcw.lco, 1)),
+                    }
+                    if self.diag.vendor_lc_samples.len() < 64 {
+                        self.diag
+                            .vendor_lc_samples
+                            .push((lcw.mfid, lcw.lco, lcw.args));
+                    }
                 }
             }
             FramerEvent::Nid { nid, bch_errors } => {
@@ -275,6 +401,48 @@ impl ChannelDecoder {
 
     fn on_tsbk(&mut self, tsbk: Tsbk, out: &mut DecodeOutput) {
         match tsbk {
+            Tsbk::MotoRegroup(r) => {
+                match r {
+                    // A patch definition names a supergroup and its members.
+                    MotoRegroup::RegroupUpdate { pairs } => {
+                        for (sg, tg) in pairs {
+                            self.patches.add(sg, tg);
+                        }
+                    }
+                    // A unit operating on a patched talkgroup confirms the
+                    // same association from the traffic side.
+                    MotoRegroup::RegroupGrant {
+                        supergroup,
+                        talkgroup,
+                        ..
+                    } => self.patches.add(supergroup, talkgroup),
+                    // The status list says which talkgroups are regrouped but
+                    // not under which supergroup, so it adds no association.
+                    MotoRegroup::RegroupAdd { .. } => {}
+                }
+                self.diag.patches = self
+                    .patches
+                    .patches()
+                    .iter()
+                    .map(|(s, m)| (*s, m.clone()))
+                    .collect();
+            }
+            Tsbk::VendorSpecific { mfid, opcode, args } => {
+                // A few raw examples per vendor opcode are enough to work out
+                // its structure offline; the counts above carry the rest.
+                if self.diag.vendor_samples.len() < 64 {
+                    self.diag.vendor_samples.push((mfid, opcode, args));
+                }
+                match self
+                    .diag
+                    .vendor_tsbks
+                    .iter_mut()
+                    .find(|(m, o, _)| *m == mfid && *o == opcode)
+                {
+                    Some((_, _, n)) => *n += 1,
+                    None => self.diag.vendor_tsbks.push((mfid, opcode, 1)),
+                }
+            }
             Tsbk::IdenUp {
                 iden,
                 spacing_khz,
@@ -282,6 +450,11 @@ impl ChannelDecoder {
                 base_freq_hz,
                 ..
             } => {
+                if !self.diag.idens.iter().any(|(i, _, _)| *i == iden) {
+                    self.diag
+                        .idens
+                        .push((iden, base_freq_hz, (spacing_khz * 1000.0) as u64));
+                }
                 self.site.set_iden(
                     iden,
                     IdenPlan {
@@ -328,6 +501,13 @@ impl ChannelDecoder {
             }
             _ => {}
         }
+    }
+
+    /// Unvoiced synthesis quality passed to the vocoder (1-64). Higher gives
+    /// fricatives more high-frequency detail; it changes only how decoded
+    /// parameters are rendered to audio, never what was decoded.
+    pub fn set_uv_quality(&mut self, q: i32) {
+        self.vocoder.set_uv_quality(q);
     }
 
     pub fn vocoder_name(&self) -> &'static str {
