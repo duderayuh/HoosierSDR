@@ -15,9 +15,10 @@ use hs_dsp::equalizer::RealLmsEq;
 use hs_dsp::receiver::C4fmReceiver;
 use hs_dsp::C32;
 use hs_p25::framer::{Framer, FramerEvent};
+use hs_p25::moto::MotoRegroup;
 use hs_p25::tsbk::Tsbk;
 use hs_p25::{AlgId, Duid};
-use hs_trunk::{Grant, IdenPlan, SiteModel};
+use hs_trunk::{Grant, IdenPlan, PatchTracker, SiteModel};
 use hs_vocoder::imbe::ImbeDecoder;
 use hs_vocoder::Vocoder;
 
@@ -78,6 +79,8 @@ pub struct ChannelDecoder {
     eq_mode: EqMode,
     framer: Framer,
     site: SiteModel,
+    /// Dynamic talkgroup patches (Motorola Group Regroup).
+    patches: PatchTracker,
     vocoder: ImbeDecoder,
     /// Rolling buffer of recent RAW receiver symbols (pre-equalizer), used to
     /// train the equalizer on the Frame Sync Word once the framer confirms
@@ -150,6 +153,7 @@ impl ChannelDecoder {
             eq_mode,
             framer: Framer::new(),
             site: SiteModel::new(),
+            patches: PatchTracker::new(),
             vocoder: ImbeDecoder::new(),
             raw_hist: Vec::with_capacity(48),
             fsw_levels,
@@ -166,6 +170,13 @@ impl ChannelDecoder {
     /// How the capture rate is reduced before demodulation.
     pub fn decimation(&self) -> DecimationPlan {
         self.plan
+    }
+
+    /// Talkgroup patches observed so far. Traffic for a patched talkgroup can
+    /// appear under any of its members, so this is needed to attribute calls
+    /// correctly.
+    pub fn patches(&self) -> &PatchTracker {
+        &self.patches
     }
 
     pub fn site(&self) -> &SiteModel {
@@ -354,6 +365,32 @@ impl ChannelDecoder {
 
     fn on_tsbk(&mut self, tsbk: Tsbk, out: &mut DecodeOutput) {
         match tsbk {
+            Tsbk::MotoRegroup(r) => {
+                match r {
+                    // A patch definition names a supergroup and its members.
+                    MotoRegroup::PatchAdd { pairs } => {
+                        for (sg, tg) in pairs {
+                            self.patches.add(sg, tg);
+                        }
+                    }
+                    // A unit operating on a patched talkgroup confirms the
+                    // same association from the traffic side.
+                    MotoRegroup::PatchUser {
+                        supergroup,
+                        talkgroup,
+                        ..
+                    } => self.patches.add(supergroup, talkgroup),
+                    // The status list says which talkgroups are regrouped but
+                    // not under which supergroup, so it adds no association.
+                    MotoRegroup::PatchStatus { .. } => {}
+                }
+                self.diag.patches = self
+                    .patches
+                    .patches()
+                    .iter()
+                    .map(|(s, m)| (*s, m.clone()))
+                    .collect();
+            }
             Tsbk::VendorSpecific { mfid, opcode, args } => {
                 // A few raw examples per vendor opcode are enough to work out
                 // its structure offline; the counts above carry the rest.

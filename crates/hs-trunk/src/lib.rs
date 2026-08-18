@@ -190,3 +190,89 @@ mod tests {
         assert!(site.channel_to_freq(0x100A).is_none());
     }
 }
+
+/// Tracks dynamic talkgroup patches (Motorola Group Regroup).
+///
+/// Dispatch can merge talkgroups so they share audio. A scanner that ignores
+/// this mis-attributes calls: traffic for a patched talkgroup shows up under
+/// whichever member the grant names, so two talkgroups that a listener thinks
+/// are separate are in fact one conversation.
+#[derive(Debug, Default, Clone)]
+pub struct PatchTracker {
+    /// supergroup → member talkgroups, in first-seen order.
+    patches: Vec<(u16, Vec<u16>)>,
+}
+
+impl PatchTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `talkgroup` belongs to `supergroup`.
+    pub fn add(&mut self, supergroup: u16, talkgroup: u16) {
+        match self.patches.iter_mut().find(|(s, _)| *s == supergroup) {
+            Some((_, members)) => {
+                if !members.contains(&talkgroup) {
+                    members.push(talkgroup);
+                }
+            }
+            None => self.patches.push((supergroup, vec![talkgroup])),
+        }
+    }
+
+    /// The patch a talkgroup belongs to, if any.
+    pub fn patch_of(&self, talkgroup: u16) -> Option<u16> {
+        self.patches
+            .iter()
+            .find(|(_, m)| m.contains(&talkgroup))
+            .map(|(s, _)| *s)
+    }
+
+    /// Talkgroups sharing a patch with this one — the other labels the same
+    /// audio may appear under.
+    pub fn siblings(&self, talkgroup: u16) -> Vec<u16> {
+        self.patches
+            .iter()
+            .find(|(_, m)| m.contains(&talkgroup))
+            .map(|(_, m)| m.iter().copied().filter(|&t| t != talkgroup).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every patch and its members.
+    pub fn patches(&self) -> &[(u16, Vec<u16>)] {
+        &self.patches
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn groups_talkgroups_under_a_patch() {
+        let mut p = PatchTracker::new();
+        p.add(957, 10204);
+        p.add(957, 10203);
+        p.add(949, 10118);
+        assert_eq!(p.patch_of(10204), Some(957));
+        assert_eq!(p.patch_of(10118), Some(949));
+        assert_eq!(p.patch_of(99), None);
+        assert_eq!(p.siblings(10204), vec![10203]);
+        assert!(p.siblings(10118).is_empty(), "sole member has no siblings");
+    }
+
+    #[test]
+    fn repeated_announcements_do_not_duplicate_members() {
+        // Patch messages repeat continuously on a control channel; the same
+        // pair arriving hundreds of times must not grow the member list.
+        let mut p = PatchTracker::new();
+        for _ in 0..100 {
+            p.add(957, 10204);
+        }
+        assert_eq!(p.patches()[0].1, vec![10204]);
+    }
+}

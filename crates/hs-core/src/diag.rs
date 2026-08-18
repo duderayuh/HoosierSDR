@@ -113,6 +113,8 @@ pub struct Diagnostics {
     /// Manufacturer-specific TSBKs seen, counted by (MFID, opcode). Which
     /// vendor messages a system emits says a lot about what features it runs.
     pub vendor_tsbks: Vec<(u8, u8, u32)>,
+    /// Talkgroup patches: supergroup and its member talkgroups.
+    pub patches: Vec<(u16, Vec<u16>)>,
     /// A sample of raw argument words from vendor TSBKs. Manufacturer-specific
     /// opcodes are not decoded, but their arguments are the evidence needed to
     /// work out what they mean from a shared log — which is how the Motorola
@@ -230,6 +232,19 @@ impl Diagnostics {
             }
             s.push_str(&format!(
                 "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"patches\": [");
+        for (i, (sg, members)) in self.patches.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let list: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+            s.push_str(&format!(
+                "{{\"supergroup\":{sg},\"talkgroups\":[{}]}}",
+                list.join(",")
             ));
         }
         s.push_str("],\n");

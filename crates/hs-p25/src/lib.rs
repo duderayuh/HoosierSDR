@@ -8,6 +8,7 @@ pub mod bits;
 pub mod crc;
 pub mod framer;
 pub mod lrrp;
+pub mod moto;
 pub mod nid;
 pub mod pdu;
 pub mod soft;

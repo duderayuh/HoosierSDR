@@ -481,6 +481,16 @@ fn main() {
     let out = dec.process(&iq);
     report(&out, &dec, catalog.as_ref());
 
+    let patches = dec.patches();
+    if !patches.is_empty() {
+        println!("\ntalkgroup patches (Motorola Group Regroup):");
+        for (sg, members) in patches.patches() {
+            let list: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+            println!("  patch {sg:<6} <- TG {}", list.join(", "));
+        }
+        println!("  (audio for any member can appear under the others)");
+    }
+
     if !out.locations.is_empty() {
         println!("\nradio positions (LRRP):");
         for l in &out.locations {
