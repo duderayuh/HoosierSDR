@@ -12,6 +12,8 @@ mod wav;
 
 use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
 
+mod follow;
+
 #[cfg(feature = "radioreference")]
 mod rr;
 use std::io::Read;
@@ -35,6 +37,9 @@ struct Args {
     gain: Option<f64>,
     offset: f64,
     no_equalizer: bool,
+    follow: bool,
+    control: f64,
+    control_measured: Option<f64>,
     rr_system: Option<u32>,
     rr_dump: Option<String>,
     scan: bool,
@@ -59,6 +64,9 @@ fn parse_args() -> Args {
         gain: None,
         offset: 0.0,
         no_equalizer: false,
+        follow: false,
+        control: 0.0,
+        control_measured: None,
         rr_system: None,
         rr_dump: None,
         scan: false,
@@ -83,6 +91,9 @@ fn parse_args() -> Args {
             "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
             "--rr-dump" => a.rr_dump = it.next(),
             "--uv-quality" => a.uv_quality = it.next().and_then(|s| s.parse().ok()),
+            "--follow" => a.follow = true,
+            "--control" => a.control = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
+            "--control-measured" => a.control_measured = it.next().and_then(|s| parse_freq(&s)),
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
@@ -147,6 +158,12 @@ fn print_help() {
              --uv-quality <N> Vocoder unvoiced synthesis detail, 1-64 (default 3).\n\
              \x20              Affects only how audio is rendered, never what is\n\
              \x20              decoded. Higher is smoother but not brighter; A/B by ear.\n\
+             --follow       Trunk-follow: decode the control channel and every call\n\
+             \x20              it grants, from one wideband capture. Needs --control\n\
+             \x20              and --freq (the capture centre).\n\
+             --control <HZ> Nominal control-channel frequency to follow.\n\
+             --control-measured <HZ>  Where it actually is, if the tuner is far\n\
+             \x20              enough off that auto-detection struggles.\n\
              --scan         Sweep the whole captured band and report which channels\n\
              \x20              actually carry P25 — by decoding, not by signal power.\n\
              \x20              Marks control vs voice channels and reports each NAC.\n\
@@ -473,6 +490,23 @@ fn main() {
         return;
     }
 
+    if args.follow {
+        if args.control <= 0.0 {
+            eprintln!("--follow needs --control <HZ> (the control-channel frequency)");
+            std::process::exit(2);
+        }
+        let catalog = args.catalog.as_deref().and_then(load_catalog);
+        follow::run_file(
+            &iq,
+            args.rate,
+            args.freq,
+            args.control,
+            args.control_measured,
+            catalog.as_ref(),
+        );
+        return;
+    }
+
     let catalog = args.catalog.as_deref().and_then(load_catalog);
     let mut dec = build_decoder(&args);
     if let Some(q) = args.uv_quality {
@@ -581,6 +615,23 @@ fn run_sdr(args: &Args) {
             std::process::exit(1);
         }
     };
+    if args.follow {
+        if args.control <= 0.0 {
+            eprintln!("--follow needs --control <HZ> (the control-channel frequency)");
+            std::process::exit(2);
+        }
+        let catalog = args.catalog.as_deref().and_then(load_catalog);
+        follow::run_live(
+            &mut src,
+            args.rate,
+            args.freq,
+            args.control,
+            args.control_measured,
+            catalog.as_ref(),
+        );
+        return;
+    }
+
     println!(
         "Capturing {} at {:.4} MHz, {} Hz{}… Ctrl-C to stop.",
         if args.cqpsk { "CQPSK/LSM" } else { "C4FM" },
