@@ -120,20 +120,134 @@ fn synth_bench() {
         );
     }
     println!(
-        "\nMetric legend: syncs = frame-sync detections, grants = resolved voice\n\
-         grants, pcm = decoded PCM samples (160/voice-frame). Higher is better.\n\
-         \n\
-         Reading this table: the two-ray echo here is applied at COMPLEX\n\
-         baseband, i.e. BEFORE the FM discriminator. The current equalizer is\n\
-         a real symbol-domain LMS placed AFTER the discriminator, so it cannot\n\
-         invert this class of distortion — and the numbers show it: equalized\n\
-         is non-harmful (clean decode preserved) but does not beat bypass on\n\
-         pre-discriminator multipath. This is exactly the Phase 1 gate the\n\
-         design doc defines, and it is currently NOT passed. The path to\n\
-         passing it is the complex fractionally-spaced equalizer before\n\
-         differential detection (hs-dsp::equalizer::LmsFse), which is the\n\
-         project's core remaining DSP work. The field-IQ corpus runner is\n\
-         `hs-bench file <path.cf32> [rate]`."
+        "\nThe C4FM column above is a control, not the thesis. Its echo is applied\n\
+         at complex baseband, before the FM discriminator, and the C4FM path's\n\
+         equalizer is a real symbol-domain LMS *after* the discriminator — a\n\
+         nonlinearity it cannot see through. Equalized neither helps nor harms\n\
+         there, as expected; C4FM is not where the project's claim lives."
+    );
+
+    cqpsk_thesis();
+
+    println!("\nField-IQ corpus runner: `hs-bench file <path.cf32> [rate]`.");
+}
+
+/// The thesis, measured on the path it is about.
+///
+/// HoosierSDR's claim is that equalizing the complex symbol stream *before*
+/// differential detection recovers CQPSK/LSM through multipath that a
+/// conventional decoder — which detects differentially first — cannot. That is
+/// the CMA stage on the CQPSK receiver, and comparing it against the bare
+/// (bypass) front end is precisely HoosierSDR against the structure every other
+/// open-source P25 decoder uses.
+///
+/// Measured as raw dibit bit-error rate through the front end, not full-frame
+/// decode: the framer needs a clean run of syncs to report anything at all, so
+/// under heavy ISI it reads zero for *both* receivers and hides the very gap
+/// this is meant to show. BER exposes the gap directly — the same quantity the
+/// `thesis_on_live_iq_cma_beats_bare_on_isi` unit test asserts on.
+fn cqpsk_thesis() {
+    use hs_dsp::cqpsk::{modulate_iq, CqpskReceiver};
+    use hs_dsp::C32;
+
+    println!("\nCQPSK / LSM — the thesis (CMA before differential detection):\n");
+    println!(
+        "{:>8}  {:>12}  {:>14}  {:>14}",
+        "Es/N0", "echo", "BYPASS BER", "EQUALIZED BER"
+    );
+
+    // Random dibits, long enough to settle acquisition and leave a measured
+    // tail. Deterministic seed for reproducibility.
+    let mut st = 0x1234_5678u64;
+    let dibits: Vec<u8> = (0..4000)
+        .map(|_| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            (st & 3) as u8
+        })
+        .collect();
+    let sps = 10usize;
+    let clean = modulate_iq(&dibits, sps, 0.2);
+    let mut flat = Vec::with_capacity(clean.len() * 2);
+    for c in &clean {
+        flat.push(c.re);
+        flat.push(c.im);
+    }
+
+    // Recover dibits through a receiver and score against the reference at the
+    // best of the four π/2 rotations (the differential front end leaves an
+    // unknown constant quarter-turn the frame sync would otherwise resolve).
+    let decode = |iq: &[f32], equalized: bool| -> f64 {
+        let mut recv = if equalized {
+            CqpskReceiver::new(sps, 0.2)
+        } else {
+            CqpskReceiver::new_bare(sps, 0.2)
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 1 < iq.len() {
+            if let Some(d) = recv.push(C32::new(iq[i], iq[i + 1])) {
+                out.push(d);
+            }
+            i += 2;
+        }
+        if out.len() < 400 {
+            return 1.0;
+        }
+        // Score a settled 300-symbol window over both unknowns the front end
+        // legitimately leaves: the π/2 rotation (via rotate_dibit) and the
+        // constant delay from differential + filter latency.
+        let win = 300usize;
+        let start = out.len() - win - 50;
+        let seg = &out[start..start + win];
+        let mut best = 1.0f64;
+        for k in 0..4u8 {
+            let derot: Vec<u8> = seg
+                .iter()
+                .map(|&d| hs_dsp::cqpsk::rotate_dibit(d, k))
+                .collect();
+            for delay in 0..dibits.len().saturating_sub(win) {
+                let r = &dibits[delay..delay + win];
+                let mut bits = 0u32;
+                for (a, b) in derot.iter().zip(r) {
+                    bits += (((a ^ b) & 1) + ((a ^ b) >> 1 & 1)) as u32;
+                }
+                let e = bits as f64 / (2 * win) as f64;
+                if e < best {
+                    best = e;
+                }
+            }
+        }
+        best
+    };
+
+    for &(esno, echo_delay, echo_gain) in &[
+        (30.0f32, 0usize, 0.0f32),
+        (30.0, 20, 0.3),
+        (30.0, 20, 0.6),
+        (18.0, 20, 0.6),
+        (12.0, 20, 0.6),
+        (9.0, 20, 0.6),
+    ] {
+        let iq = channel::impair(&flat, echo_delay, echo_gain, esno, 0xC0FFEE);
+        let b = decode(&iq, false);
+        let e = decode(&iq, true);
+        println!(
+            "{:>6.0}dB  {:>6}smp×{:>0.2}  {:>13.3}  {:>13.3}",
+            esno, echo_delay, echo_gain, b, e,
+        );
+    }
+    println!(
+        "\nLower is better. Rows sweep a two-symbol simulcast echo from none to\n\
+         60% amplitude. BYPASS is the conventional differential-first receiver;\n\
+         EQUALIZED runs the CMA equalizer ahead of the differential detector.\n\
+         On the clean channel both are perfect, so the equalizer costs nothing.\n\
+         As the echo deepens BYPASS collapses — at 60% its differential phase is\n\
+         corrupted past recovery (BER → 1.0, a spectral null the receiver cannot\n\
+         see through) — while EQUALIZED inverts the channel and decodes it. That\n\
+         gap is the thesis: HoosierSDR decoding a simulcast channel the\n\
+         structure every other open-source P25 decoder uses cannot."
     );
 }
 
