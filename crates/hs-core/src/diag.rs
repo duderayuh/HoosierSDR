@@ -110,6 +110,15 @@ pub struct Diagnostics {
     pub nids: Vec<NidStat>,
     /// Packet data units reassembled.
     pub packets: u64,
+    /// Manufacturer-specific TSBKs seen, counted by (MFID, opcode). Which
+    /// vendor messages a system emits says a lot about what features it runs.
+    pub vendor_tsbks: Vec<(u8, u8, u32)>,
+    /// A sample of raw argument words from vendor TSBKs. Manufacturer-specific
+    /// opcodes are not decoded, but their arguments are the evidence needed to
+    /// work out what they mean from a shared log — which is how the Motorola
+    /// Group Regroup blocks on the Marion County control channel were
+    /// identified as patch messages rather than corrupt grants.
+    pub vendor_samples: Vec<(u8, u8, u64)>,
     /// Radio position reports decoded from packet data.
     pub locations: Vec<LocationStat>,
     pub grants: Vec<GrantStat>,
@@ -210,6 +219,27 @@ impl Diagnostics {
                 "{{\"nac\":\"{:03X}\",\"duid\":\"{:X}\",\"bch_err\":{}}}",
                 n.nac, n.duid, n.bch_errors
             ));
+        }
+        s.push_str("],\n");
+
+        // Manufacturer-specific TSBKs, by (MFID, opcode).
+        s.push_str("  \"vendor_tsbks\": [");
+        for (i, (mfid, op, n)) in self.vendor_tsbks.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_samples\": [");
+        for (i, (m, o, a)) in self.vendor_samples.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("[\"{m:02X}\",\"{o:02X}\",\"{a:016X}\"]"));
         }
         s.push_str("],\n");
 

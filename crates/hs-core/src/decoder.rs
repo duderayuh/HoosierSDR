@@ -354,6 +354,22 @@ impl ChannelDecoder {
 
     fn on_tsbk(&mut self, tsbk: Tsbk, out: &mut DecodeOutput) {
         match tsbk {
+            Tsbk::VendorSpecific { mfid, opcode, args } => {
+                // A few raw examples per vendor opcode are enough to work out
+                // its structure offline; the counts above carry the rest.
+                if self.diag.vendor_samples.len() < 64 {
+                    self.diag.vendor_samples.push((mfid, opcode, args));
+                }
+                match self
+                    .diag
+                    .vendor_tsbks
+                    .iter_mut()
+                    .find(|(m, o, _)| *m == mfid && *o == opcode)
+                {
+                    Some((_, _, n)) => *n += 1,
+                    None => self.diag.vendor_tsbks.push((mfid, opcode, 1)),
+                }
+            }
             Tsbk::IdenUp {
                 iden,
                 spacing_khz,
