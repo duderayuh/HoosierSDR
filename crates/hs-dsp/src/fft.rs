@@ -178,3 +178,123 @@ mod tests {
         assert_eq!(median(&v), 1.0);
     }
 }
+
+/// Forward FFT for **any** length, not just powers of two.
+///
+/// A channelizer needs this. Extracting a 48 kHz channel from a 2.4 MHz
+/// capture is a decimation by 50, and 50 has a factor of 5 that no power-of-two
+/// transform can express: with a radix-2 FFT the only achievable ratios from
+/// 2.4 MHz that stay an integer number of samples per symbol are 1, 2 and 4,
+/// which is nowhere near enough. Supporting sizes like 4000 = 2⁵·5³ makes the
+/// exact rate reachable in one step.
+///
+/// Recursive mixed-radix Cooley–Tukey: split off the smallest prime factor,
+/// transform the interleaved sub-sequences, and combine them with a direct
+/// DFT over that factor. Powers of two take the specialized path above.
+pub fn fft_any(buf: &mut [C32]) {
+    let n = buf.len();
+    if n <= 1 {
+        return;
+    }
+    if n.is_power_of_two() {
+        fft(buf);
+        return;
+    }
+    let r = smallest_factor(n);
+    let m = n / r;
+
+    // Decimation in time: r interleaved sub-sequences of length m.
+    let mut sub: Vec<Vec<C32>> = (0..r)
+        .map(|j| (0..m).map(|k| buf[k * r + j]).collect())
+        .collect();
+    for s in sub.iter_mut() {
+        fft_any(s);
+    }
+
+    let two_pi = 2.0 * core::f32::consts::PI;
+    for k in 0..m {
+        for q in 0..r {
+            let idx = k + q * m;
+            let mut acc = C32::ZERO;
+            for (j, s) in sub.iter().enumerate() {
+                let ang = -two_pi * (idx as f32) * (j as f32) / (n as f32);
+                acc = acc + s[k] * C32::new(ang.cos(), ang.sin());
+            }
+            buf[idx] = acc;
+        }
+    }
+}
+
+/// Inverse FFT for any length, scaled so `ifft_any(fft_any(x)) == x`.
+pub fn ifft_any(buf: &mut [C32]) {
+    for v in buf.iter_mut() {
+        *v = v.conj();
+    }
+    fft_any(buf);
+    let s = 1.0 / buf.len() as f32;
+    for v in buf.iter_mut() {
+        *v = v.conj().scale(s);
+    }
+}
+
+fn smallest_factor(n: usize) -> usize {
+    let mut d = 2;
+    while d * d <= n {
+        if n.is_multiple_of(d) {
+            return d;
+        }
+        d += 1;
+    }
+    n
+}
+
+#[cfg(test)]
+mod any_tests {
+    use super::*;
+
+    fn naive_dft(x: &[C32]) -> Vec<C32> {
+        let n = x.len();
+        (0..n)
+            .map(|k| {
+                let mut acc = C32::ZERO;
+                for (j, &v) in x.iter().enumerate() {
+                    let a = -2.0 * core::f32::consts::PI * (k * j) as f32 / n as f32;
+                    acc = acc + v * C32::new(a.cos(), a.sin());
+                }
+                acc
+            })
+            .collect()
+    }
+
+    #[test]
+    fn matches_a_direct_dft_at_awkward_lengths() {
+        // 100 = 2²·5², 60 = 2²·3·5, 7 prime: none are powers of two.
+        for n in [7usize, 12, 60, 100] {
+            let x: Vec<C32> = (0..n)
+                .map(|i| C32::new((i as f32 * 0.37).sin(), (i as f32 * 0.11).cos()))
+                .collect();
+            let want = naive_dft(&x);
+            let mut got = x.clone();
+            fft_any(&mut got);
+            for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
+                let err = (*a - *b).norm_sq().sqrt();
+                assert!(err < 1e-2, "n={n} bin {i}: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_round_trips_at_the_channelizer_size() {
+        // 4000 = 2⁵·5³ is the block size a 2.4 MHz capture uses.
+        let n = 4000usize;
+        let x: Vec<C32> = (0..n)
+            .map(|i| C32::new((i as f32 * 0.013).cos(), (i as f32 * 0.007).sin()))
+            .collect();
+        let mut y = x.clone();
+        fft_any(&mut y);
+        ifft_any(&mut y);
+        for (a, b) in x.iter().zip(y.iter()) {
+            assert!((*a - *b).norm_sq().sqrt() < 1e-3, "{a:?} vs {b:?}");
+        }
+    }
+}

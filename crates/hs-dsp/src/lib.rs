@@ -8,6 +8,7 @@
 
 pub mod agc;
 pub mod c4fm;
+pub mod channelizer;
 pub mod costas;
 pub mod cqpsk;
 pub mod decimate;
