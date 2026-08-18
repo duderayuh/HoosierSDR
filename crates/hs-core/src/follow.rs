@@ -9,11 +9,31 @@
 //!
 //! ## Two things real captures forced into this design
 //!
-//! **Modulation is per channel, not per system.** On the observed system the
-//! control channel is CQPSK while the traffic channel carrying its calls is
-//! C4FM. A follower that assumed one modulation would hear the announcements
-//! and none of the audio, so each call is decoded both ways and whichever
-//! produces frame syncs is believed.
+//! **Modulation belongs to the site, not to the channel's job.** C4FM and
+//! CQPSK are not "voice" and "control" modulations: a scan of one 2.4 MHz
+//! slice found a CQPSK control channel and a C4FM one, and traffic channels of
+//! both kinds. What actually decides is simulcast — several towers radiating
+//! the same signal on the same frequency need a linear modulation, so
+//! simulcast sites run CQPSK and others run C4FM — which is a property of the
+//! transmitter. Every channel of one site therefore tends to agree, and
+//! measurement bears that out: across the traffic channels of NAC 0x261 the
+//! winner was CQPSK every time, matching its CQPSK control channel, while
+//! NAC 0x6B6's traffic channel was C4FM, matching its C4FM control channel.
+//!
+//! So a call is decoded with the modulation its control channel uses. The
+//! other one is started alongside it and dropped as soon as the first has
+//! produced real audio, because the site rule is a strong guide rather than a
+//! guarantee and the wrong guess would otherwise cost the whole call. This is
+//! not a cosmetic saving: decoding every call twice for its full duration
+//! doubled the per-call cost, and the answer is settled within a fraction of a
+//! second.
+//!
+//! An earlier version of this comment claimed the opposite — control CQPSK,
+//! traffic C4FM — and it was simply wrong. What misled it is worth recording:
+//! a C4FM demodulator on a CQPSK signal does not fail cleanly. The two share a
+//! symbol rate and a frame structure, so it syncs and yields *some* audio
+//! (29 syncs and 2.34 s against CQPSK's 33 and 2.88 s on the same recording).
+//! Frame syncs alone do not separate them; decoded audio does.
 //!
 //! **Tuner error is larger than the receiver's tolerance.** The demodulators
 //! hold lock within roughly ±1 kHz, and an uncalibrated dongle can sit 6 kHz
@@ -25,6 +45,15 @@
 
 use crate::decoder::{ChannelDecoder, EqMode, Modulation};
 use hs_dsp::channelizer::Channelizer;
+
+/// The equalizer is the point of the project on CQPSK, where a simulcast
+/// channel is what it exists to correct; on C4FM it has nothing to do.
+fn eq_for(m: Modulation) -> EqMode {
+    match m {
+        Modulation::Cqpsk => EqMode::Enabled,
+        Modulation::C4fm => EqMode::Bypass,
+    }
+}
 
 /// A call in progress on a traffic channel.
 struct ActiveCall {
@@ -42,6 +71,11 @@ struct ActiveCall {
     syncs_cqpsk: u32,
     /// Blocks seen with no frame sync, used to retire a finished call.
     quiet: u32,
+    /// Modulation inherited from the control channel, tried first.
+    primary: Modulation,
+    /// Whether the other modulation is still being decoded as a hedge. Cleared
+    /// once `primary` has produced enough audio to have proven itself.
+    hedging: bool,
 }
 
 /// A call the follower has finished with.
@@ -70,10 +104,16 @@ pub struct FollowOutput {
     pub completed: Vec<Call>,
     /// Frame syncs on the control channel, a health signal.
     pub control_syncs: u32,
+    /// Calls that confirmed the site's modulation this block and stopped
+    /// decoding the alternative. Reported so the saving can be tested rather
+    /// than assumed.
+    pub hedges_dropped: u32,
 }
 
 pub struct TrunkFollower {
     chan: Channelizer,
+    /// Modulation this site uses, and hence what each call is decoded with.
+    modulation: Modulation,
     control: ChannelDecoder,
     active: Vec<ActiveCall>,
     center_hz: f64,
@@ -92,11 +132,14 @@ impl TrunkFollower {
     /// capture — from `scan`, or from a spectrum peak. The difference between
     /// the two is the tuner's error, and it is applied to every frequency the
     /// control channel later names.
+    /// `modulation` is what the control channel uses, which is also what its
+    /// traffic channels are decoded with — see the note on simulcast above.
     pub fn new(
         sample_rate: f64,
         center_hz: f64,
         control_nominal_hz: f64,
         control_measured_hz: f64,
+        modulation: Modulation,
     ) -> Self {
         let correction_hz = control_measured_hz - control_nominal_hz;
         let control_offset = control_measured_hz - center_hz;
@@ -104,9 +147,10 @@ impl TrunkFollower {
         let rate = chan.output_rate();
         Self {
             chan,
-            // The control channel of a trunked system is continuous, so the
-            // CQPSK front end's blind acquisition has something to lock to.
-            control: ChannelDecoder::with_offset(rate, Modulation::Cqpsk, EqMode::Enabled, 0.0),
+            modulation,
+            // A control channel is continuous, so the CQPSK front end's blind
+            // acquisition always has something to lock to.
+            control: ChannelDecoder::with_offset(rate, modulation, eq_for(modulation), 0.0),
             active: Vec::new(),
             center_hz,
             correction_hz,
@@ -204,17 +248,47 @@ impl TrunkFollower {
             let Some(samples) = chans.get(i + 1) else {
                 continue;
             };
-            let a = call.c4fm.process(samples);
-            let b = call.cqpsk.process(samples);
-            call.syncs_c4fm += a.syncs;
-            call.syncs_cqpsk += b.syncs;
-            call.pcm_c4fm.extend_from_slice(&a.pcm);
-            call.pcm_cqpsk.extend_from_slice(&b.pcm);
-            let syncs = a.syncs.max(b.syncs);
+            // The site's modulation always runs. The other one runs only
+            // until the first has proven itself.
+            let want_c4fm = call.hedging || call.primary == Modulation::C4fm;
+            let want_cqpsk = call.hedging || call.primary == Modulation::Cqpsk;
+            let mut syncs = 0;
+            if want_c4fm {
+                let a = call.c4fm.process(samples);
+                syncs = syncs.max(a.syncs);
+                call.syncs_c4fm += a.syncs;
+                call.pcm_c4fm.extend_from_slice(&a.pcm);
+            }
+            if want_cqpsk {
+                let b = call.cqpsk.process(samples);
+                syncs = syncs.max(b.syncs);
+                call.syncs_cqpsk += b.syncs;
+                call.pcm_cqpsk.extend_from_slice(&b.pcm);
+            }
             if syncs == 0 {
                 call.quiet += 1;
             } else {
                 call.quiet = 0;
+            }
+
+            // Two voice frames is past any accident: the inherited modulation
+            // is decoding, so stop paying for the alternative. Dropping the
+            // hedge only ever happens *after* the primary is confirmed
+            // working, so it cannot cost audio — if the primary never
+            // confirms, both keep running and the end-of-call comparison
+            // decides exactly as it did before.
+            const CONFIRM_SAMPLES: usize = 2 * 1440;
+            if call.hedging {
+                let (kept, dropped) = match call.primary {
+                    Modulation::C4fm => (call.pcm_c4fm.len(), &mut call.pcm_cqpsk),
+                    Modulation::Cqpsk => (call.pcm_cqpsk.len(), &mut call.pcm_c4fm),
+                };
+                if kept >= CONFIRM_SAMPLES {
+                    dropped.clear();
+                    dropped.shrink_to_fit();
+                    call.hedging = false;
+                    out.hedges_dropped += 1;
+                }
             }
         }
 
@@ -263,6 +337,8 @@ impl TrunkFollower {
                 syncs_c4fm: 0,
                 syncs_cqpsk: 0,
                 quiet: 0,
+                primary: self.modulation,
+                hedging: true,
             });
             out.started.push((g.talkgroup, g.freq_hz));
         }

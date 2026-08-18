@@ -12,7 +12,13 @@ fn main() {
     let ctl_nominal: f64 = a[3].parse().unwrap();
     let ctl_measured: f64 = a[4].parse().unwrap();
 
-    let mut f = TrunkFollower::new(rate, center, ctl_nominal, ctl_measured);
+    let mut f = TrunkFollower::new(
+        rate,
+        center,
+        ctl_nominal,
+        ctl_measured,
+        hs_core::decoder::Modulation::Cqpsk,
+    );
     println!(
         "following control {:.4} MHz (measured {:.4}, tuner error {:+.0} Hz)\n",
         ctl_nominal / 1e6,

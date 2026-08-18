@@ -5,6 +5,7 @@
 //! the frequency it names, and come back with that call's audio — without ever
 //! being told where the traffic channel is.
 
+use hs_core::decoder::Modulation;
 use hs_core::follow::TrunkFollower;
 use hs_dsp::cqpsk::modulate_iq;
 use hs_p25::synth::{build_ldu1, build_tsdu};
@@ -96,21 +97,38 @@ fn follows_a_grant_onto_its_traffic_channel() {
 
     // The follower is told where the control channel *actually* is; every
     // other frequency it works out for itself.
-    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR);
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
     assert_eq!(f.correction_hz(), TUNER_ERROR);
 
     let block = (RATE as usize / 10) * 2;
     let mut started = Vec::new();
     let mut completed = Vec::new();
     let mut control_syncs = 0;
+    let mut hedges_dropped = 0;
     for chunk in band.chunks(block) {
         let out = f.process(chunk);
         control_syncs += out.control_syncs;
+        hedges_dropped += out.hedges_dropped;
         started.extend(out.started);
         completed.extend(out.completed);
     }
 
     assert!(control_syncs > 0, "control channel never decoded");
+
+    // The traffic channel here is CQPSK, the same as the control channel, so
+    // the follower's inherited guess is right and it must stop decoding the
+    // alternative. If this stops holding, every call silently costs twice what
+    // it should — a regression with no visible symptom.
+    assert_eq!(
+        hedges_dropped, 1,
+        "the call never confirmed its modulation, so both decoders ran the whole way"
+    );
     assert!(
         started
             .iter()
@@ -142,7 +160,13 @@ fn ignores_grants_outside_the_captured_band() {
         CONTROL + TUNER_ERROR,
     );
 
-    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR);
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
     let block = (RATE as usize / 10) * 2;
     for chunk in band.chunks(block) {
         // The granted channel sits ~6.5 MHz away, far outside a 288 kHz capture.

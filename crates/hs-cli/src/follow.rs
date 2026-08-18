@@ -7,6 +7,16 @@
 use hs_core::decoder::Modulation;
 use hs_core::follow::{Call, TrunkFollower};
 
+/// Network identifiers that passed their BCH check — the evidence that a
+/// candidate is genuinely decoding rather than merely correlating.
+fn clean_nids(f: &TrunkFollower) -> u32 {
+    f.control_diagnostics()
+        .nids
+        .iter()
+        .filter(|n| n.bch_errors == 0)
+        .count() as u32
+}
+
 /// Find where a channel really is, given where it should be.
 ///
 /// An uncalibrated tuner can sit several kilohertz off, which is more than the
@@ -23,16 +33,28 @@ use hs_core::follow::{Call, TrunkFollower};
 /// answer.
 ///
 /// So measure the thing we actually care about instead of a proxy for it: try
-/// each candidate correction and keep whichever one lets the control channel
-/// decode. A frequency that is wrong produces no frame syncs at all, so the
-/// signal is unmistakable and no threshold has to be guessed.
-pub fn measure_carrier(iq: &[f32], sample_rate: f64, center_hz: f64, nominal_hz: f64) -> f64 {
+/// each candidate and keep whichever one lets the control channel decode.
+///
+/// "Decode" has to mean more than frame syncs, though. Scoring on sync count
+/// picked C4FM at zero offset over the correct CQPSK at −1 kHz, and followed
+/// the system to zero calls — because a C4FM demodulator on a CQPSK signal
+/// still syncs. The two modulations share a symbol rate and a frame structure,
+/// so the sync correlator is not what separates them. What does is the network
+/// identifier behind each sync: it carries a BCH code, so a wrong modulation
+/// produces syncs whose NIDs do not check out. Counting *clean* NIDs scores
+/// the thing that has to be right for anything downstream to work.
+pub fn measure_carrier(
+    iq: &[f32],
+    sample_rate: f64,
+    center_hz: f64,
+    nominal_hz: f64,
+) -> (f64, Modulation) {
     // Half a channel either way. Sweeping that whole span at the precision the
     // demodulators want would mean a hundred trial decodes, and each one
-    // channelizes the probe from scratch — minutes of work on a wideband
-    // capture. Coarse-then-fine gets the same answer for a third of the cost:
-    // a kilohertz grid is tight enough that the right slot still decodes
-    // something, and the refinement only has to search its neighbourhood.
+    // channelizes the probe from scratch. Coarse-then-fine gets the same
+    // answer for a fraction of the cost: a kilohertz grid is tight enough that
+    // the right slot still decodes something, and the refinement only has to
+    // search its neighbourhood.
     const SEARCH_HZ: f64 = 12_500.0;
     const COARSE_HZ: f64 = 1_000.0;
     const FINE_HZ: f64 = 250.0;
@@ -42,40 +64,55 @@ pub fn measure_carrier(iq: &[f32], sample_rate: f64, center_hz: f64, nominal_hz:
     let want = sample_rate as usize;
     let probe = &iq[..want.min(iq.len())];
 
-    let try_at = |cand: f64| -> u32 {
+    let try_at = |cand: f64, m: Modulation| -> u32 {
         if (cand - center_hz).abs() >= sample_rate / 2.0 {
             return 0;
         }
-        TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand)
-            .process(probe)
-            .control_syncs
+        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand, m);
+        f.process(probe);
+        clean_nids(&f)
     };
 
-    let mut best = (0u32, nominal_hz);
+    // Modulation is swept alongside frequency rather than asked for. It is not
+    // knowable from the frequency — a scan of one band found control channels
+    // of both kinds — and getting it wrong looks exactly like being tuned to
+    // the wrong place, so guessing would produce a confident silence.
+    let mods = [Modulation::Cqpsk, Modulation::C4fm];
+    let mut best = (0u32, nominal_hz, Modulation::Cqpsk);
     let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
     for k in -coarse..=coarse {
         let cand = nominal_hz + k as f64 * COARSE_HZ;
-        let syncs = try_at(cand);
-        if syncs > best.0 {
-            best = (syncs, cand);
+        for m in mods {
+            let syncs = try_at(cand, m);
+            if syncs > best.0 {
+                best = (syncs, cand, m);
+            }
         }
     }
     if best.0 == 0 {
-        // Nothing decoded anywhere in the window. Hand back the nominal
-        // frequency; the caller reports the resulting silence, which is a
-        // truer signal than a refined guess at a channel that is not there.
-        return nominal_hz;
+        // Nothing decoded anywhere in the window, either way. Hand back the
+        // nominal frequency; the caller reports the resulting silence, which
+        // is a truer signal than a refined guess at a channel that is not
+        // there.
+        return (nominal_hz, Modulation::Cqpsk);
     }
-    let centre = best.1;
+    let (centre, m) = (best.1, best.2);
     let fine = (COARSE_HZ / FINE_HZ) as i32;
     for k in -fine..=fine {
         let cand = centre + k as f64 * FINE_HZ;
-        let syncs = try_at(cand);
+        let syncs = try_at(cand, m);
         if syncs > best.0 {
-            best = (syncs, cand);
+            best = (syncs, cand, m);
         }
     }
-    best.1
+    (best.1, best.2)
+}
+
+fn mod_name(m: Modulation) -> &'static str {
+    match m {
+        Modulation::C4fm => "C4FM",
+        Modulation::Cqpsk => "CQPSK",
+    }
 }
 
 /// Report a completed call and save its audio.
@@ -84,11 +121,7 @@ pub fn report_call(c: &Call, cat: Option<&hs_core::catalog::CsvCatalog>, n: usiz
         Some(k) => k.label(c.talkgroup),
         None => format!("TG {}", c.talkgroup),
     };
-    let m = match c.modulation {
-        Some(Modulation::C4fm) => "C4FM",
-        Some(Modulation::Cqpsk) => "CQPSK",
-        None => "?",
-    };
+    let m = c.modulation.map(mod_name).unwrap_or("?");
     let secs = c.pcm.len() as f64 / 8000.0;
     let patch = if c.patched_with.is_empty() {
         String::new()
@@ -107,6 +140,30 @@ pub fn report_call(c: &Call, cat: Option<&hs_core::catalog::CsvCatalog>, n: usiz
     match crate::wav::write_wav(&path, crate::VOICE_RATE, &c.pcm) {
         Ok(()) => println!("        audio → {path}"),
         Err(e) => eprintln!("        could not write {path}: {e}"),
+    }
+}
+
+/// Decide the modulation at a frequency the user supplied.
+///
+/// `--control-measured` names where the channel is but not what it speaks, and
+/// the two are independent, so the shorter sweep still has to run.
+pub fn pick_modulation(
+    iq: &[f32],
+    sample_rate: f64,
+    center_hz: f64,
+    nominal_hz: f64,
+    measured_hz: f64,
+) -> Modulation {
+    let probe = &iq[..(sample_rate as usize).min(iq.len())];
+    let score = |m: Modulation| {
+        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
+        f.process(probe);
+        clean_nids(&f)
+    };
+    if score(Modulation::C4fm) > score(Modulation::Cqpsk) {
+        Modulation::C4fm
+    } else {
+        Modulation::Cqpsk
     }
 }
 
@@ -142,12 +199,18 @@ pub fn run_file(
     cat: Option<&hs_core::catalog::CsvCatalog>,
 ) {
     check_in_band(sample_rate, center_hz, control_hz);
-    let measured =
-        measured_hz.unwrap_or_else(|| measure_carrier(iq, sample_rate, center_hz, control_hz));
-    let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured);
+    let (measured, modulation) = match measured_hz {
+        Some(m) => (
+            m,
+            pick_modulation(iq, sample_rate, center_hz, control_hz, m),
+        ),
+        None => measure_carrier(iq, sample_rate, center_hz, control_hz),
+    };
+    let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured, modulation);
     println!(
-        "Following control {:.4} MHz (found at {:.4}, tuner error {:+.0} Hz)\n",
+        "Following control {:.4} MHz {} (found at {:.4}, tuner error {:+.0} Hz)\n",
         control_hz / 1e6,
+        mod_name(modulation),
         measured / 1e6,
         f.correction_hz()
     );
@@ -224,7 +287,7 @@ pub fn run_live<S: hs_source::SdrSource>(
     let mut buf = vec![0.0f32; block];
 
     let measured = match measured_hz {
-        Some(m) => m,
+        Some(m) => (m, Modulation::Cqpsk),
         None => {
             // Half a second of air is plenty to see a continuously-keyed
             // control channel; accumulate it a block at a time.
@@ -243,11 +306,12 @@ pub fn run_live<S: hs_source::SdrSource>(
         }
     };
 
-    let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured);
+    let mut f = TrunkFollower::new(sample_rate, center_hz, control_hz, measured.0, measured.1);
     println!(
-        "Following control {:.4} MHz (found at {:.4}, tuner error {:+.0} Hz). Ctrl-C to stop.\n",
+        "Following control {:.4} MHz {} (found at {:.4}, tuner error {:+.0} Hz). Ctrl-C to stop.\n",
         control_hz / 1e6,
-        measured / 1e6,
+        mod_name(measured.1),
+        measured.0 / 1e6,
         f.correction_hz()
     );
 
