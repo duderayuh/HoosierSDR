@@ -181,10 +181,61 @@ fn file_bench(path: &str, rate: f64) {
     }
 }
 
+/// Time the channelizer against real time.
+///
+/// `--follow` on a live radio only works if the channelizer keeps up with the
+/// air, and at 2.4 MHz it did not: this reported 1.6x slower than real time
+/// when it was written. That is the number the optimisation work has to move,
+/// so it lives here as a permanent instrument rather than in a shell one-liner.
+fn chan_bench() {
+    use hs_dsp::channelizer::Channelizer;
+
+    // One control channel plus a couple of traffic channels — what following a
+    // busy system actually costs, not the best case of a single channel.
+    for (rate, channels) in [
+        (240_000.0f64, 1usize),
+        (2_400_000.0, 1),
+        (2_400_000.0, 3),
+        (2_400_000.0, 8),
+    ] {
+        let offsets: Vec<f64> = (0..channels).map(|i| i as f64 * 25_000.0).collect();
+        let mut ch = Channelizer::new(rate, &offsets);
+
+        // Four seconds of noise; content does not affect the cost.
+        let secs = 4.0;
+        let n = (rate * secs) as usize;
+        let mut iq = Vec::with_capacity(n * 2);
+        let mut x = 12345u32;
+        for _ in 0..n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            iq.push((x >> 16) as f32 / 32768.0 - 1.0);
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            iq.push((x >> 16) as f32 / 32768.0 - 1.0);
+        }
+
+        let t0 = std::time::Instant::now();
+        let out = ch.process(&iq);
+        let dt = t0.elapsed().as_secs_f64();
+        let produced = out[0].len() / 2;
+
+        println!(
+            "{:>9.0} Hz  {} channel(s):  {:.3}s cpu for {:.1}s of air  =  {:.2}x real time{}",
+            rate,
+            channels,
+            dt,
+            secs,
+            secs / dt,
+            if dt > secs { "   TOO SLOW" } else { "" }
+        );
+        assert!(produced > 0, "channelizer produced nothing");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         None | Some("synth") => synth_bench(),
+        Some("chan") => chan_bench(),
         Some("file") => {
             let path = args
                 .get(2)
@@ -193,7 +244,9 @@ fn main() {
             file_bench(path, rate);
         }
         Some(other) => {
-            eprintln!("unknown mode '{other}'. usage: hs-bench [synth | file <path> [rate]]");
+            eprintln!(
+                "unknown mode '{other}'. usage: hs-bench [synth | chan | file <path> [rate]]"
+            );
             std::process::exit(2);
         }
     }

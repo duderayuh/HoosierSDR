@@ -35,10 +35,13 @@
 //! Sizes are chosen so the output lands exactly on the decoder's working rate:
 //! `W = 800` and `N = sample_rate / 60` give 48 kHz out, which is 10 samples
 //! per symbol. That needs a transform length like 4000 = 2⁵·5³, hence the
-//! mixed-radix [`fft_any`](crate::fft::fft_any) — the factor of five is not
-//! reachable with a radix-2 transform.
+//! mixed-radix [`FftPlan`](crate::fft::FftPlan) — the factor of five is not
+//! reachable with a radix-2 transform. The plan is built once and held, not
+//! rebuilt per block: at 2.4 MHz this runs a 40000-point transform 120 times a
+//! second, and recomputing its twiddle factors every time was the difference
+//! between following a system in real time and falling behind the air.
 
-use crate::fft::{fft_any, ifft_any};
+use crate::fft::FftPlan;
 use crate::C32;
 
 /// Output samples per symbol, and hence the working rate (4800 × this).
@@ -66,6 +69,11 @@ pub struct Channelizer {
     actual_hz: Vec<f64>,
     /// Unconsumed input.
     pending: Vec<C32>,
+    /// Transforms held across blocks: the twiddle tables and scratch are the
+    /// same every block, and rebuilding them each time cost more than the
+    /// arithmetic did.
+    fwd: FftPlan,
+    inv: FftPlan,
     out_rate: f64,
     sample_rate: f64,
 }
@@ -118,6 +126,8 @@ impl Channelizer {
             bins,
             actual_hz,
             pending: Vec::with_capacity(n * 2),
+            fwd: FftPlan::new(n),
+            inv: FftPlan::new(CHANNEL_BINS),
             out_rate,
             sample_rate,
         }
@@ -184,7 +194,7 @@ impl Channelizer {
         let mut consumed = 0usize;
         while consumed + self.n <= self.pending.len() {
             spectrum.copy_from_slice(&self.pending[consumed..consumed + self.n]);
-            fft_any(&mut spectrum);
+            self.fwd.forward(&mut spectrum);
 
             for (ch, &centre) in self.bins.iter().enumerate() {
                 // Take the bins around this channel, arranged so its centre
@@ -195,7 +205,7 @@ impl Channelizer {
                     *s = spectrum[idx];
                 }
                 slice.rotate_left(CHANNEL_BINS / 2);
-                ifft_any(&mut slice);
+                self.inv.inverse(&mut slice);
 
                 // Overlap-save: keep the middle half, where the block is free
                 // of the transform's circular wrap-around. Consecutive blocks

@@ -179,6 +179,146 @@ mod tests {
     }
 }
 
+/// A reusable transform for one length: twiddle factors computed once,
+/// scratch allocated once.
+///
+/// [`fft_any`] is fine for a one-off, but the channelizer runs the same
+/// transform over and over — 120 times a second at 2.4 MHz — and doing it the
+/// straightforward way is what made trunk-following slower than real time.
+/// Two things dominated, and neither is inherent to the algorithm:
+///
+/// * **Trig in the innermost loop.** Every butterfly called `sin` and `cos`
+///   to rebuild a root of unity that the previous block had already computed.
+///   The whole set fits in one table of `n` entries — 320 kB at the size the
+///   channelizer uses — and every root any recursion level needs is an entry
+///   of that one table, because `W_m^k = W_n^{k·n/m}` whenever `m` divides `n`.
+/// * **Allocation per recursion node.** Splitting into sub-transforms built a
+///   fresh `Vec` for each, thousands of them per block. Writing the
+///   sub-transforms into disjoint slices of the output removes every one.
+///
+/// What is left is the same Cooley–Tukey decomposition, doing arithmetic
+/// instead of bookkeeping.
+pub struct FftPlan {
+    n: usize,
+    /// `W_n^j = exp(-2πij/n)` for every `j`, shared by all recursion levels.
+    tw: Vec<C32>,
+    scratch: Vec<C32>,
+}
+
+/// Largest radix the fixed-size butterfly buffer handles. Sizes with a larger
+/// smallest prime factor fall back to a direct DFT — correct, just slower, and
+/// not a shape any capture rate produces.
+const MAX_RADIX: usize = 32;
+
+impl FftPlan {
+    pub fn new(n: usize) -> Self {
+        let n = n.max(1);
+        let tw = (0..n)
+            .map(|j| {
+                let a = -2.0 * core::f64::consts::PI * j as f64 / n as f64;
+                C32::new(a.cos() as f32, a.sin() as f32)
+            })
+            .collect();
+        Self {
+            n,
+            tw,
+            scratch: vec![C32::ZERO; n],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// In-place forward transform. `buf.len()` must equal [`FftPlan::len`].
+    pub fn forward(&mut self, buf: &mut [C32]) {
+        assert_eq!(
+            buf.len(),
+            self.n,
+            "buffer does not match the planned length"
+        );
+        // The recursion reads its input with a stride while writing the output
+        // linearly, so the two cannot be the same buffer.
+        self.scratch.copy_from_slice(buf);
+        transform(buf, &self.scratch, 1, &self.tw, self.n);
+    }
+
+    /// In-place inverse transform, scaled so `inverse(forward(x)) == x`.
+    pub fn inverse(&mut self, buf: &mut [C32]) {
+        for v in buf.iter_mut() {
+            *v = v.conj();
+        }
+        self.forward(buf);
+        let s = 1.0 / self.n as f32;
+        for v in buf.iter_mut() {
+            *v = v.conj().scale(s);
+        }
+    }
+}
+
+/// Transform `inp` (read with `stride`) into `out`, using roots drawn from the
+/// single table `tw` of length `n_total`.
+fn transform(out: &mut [C32], inp: &[C32], stride: usize, tw: &[C32], n_total: usize) {
+    let n = out.len();
+    let r = smallest_factor(n);
+    let step = n_total / n;
+
+    if r == n || r > MAX_RADIX {
+        // Prime length (or an awkward one): evaluate the DFT directly.
+        for (k, o) in out.iter_mut().enumerate() {
+            let mut acc = C32::ZERO;
+            for j in 0..n {
+                acc = acc + inp[j * stride] * tw[(j * k % n) * step];
+            }
+            *o = acc;
+        }
+        return;
+    }
+
+    let m = n / r;
+    for q in 0..r {
+        let (lo, hi) = (q * m, (q + 1) * m);
+        transform(
+            &mut out[lo..hi],
+            &inp[q * stride..],
+            stride * r,
+            tw,
+            n_total,
+        );
+    }
+
+    if r == 2 {
+        // The common case, worth not paying the general path for.
+        for k in 0..m {
+            let a = out[k];
+            let b = out[m + k] * tw[k * step];
+            out[k] = a + b;
+            out[m + k] = a - b;
+        }
+        return;
+    }
+
+    let mut t = [C32::ZERO; MAX_RADIX];
+    for k in 0..m {
+        // Twiddle each sub-transform's contribution: W_n^{qk}.
+        for (q, tq) in t.iter_mut().enumerate().take(r) {
+            *tq = out[q * m + k] * tw[(q * k * step) % n_total];
+        }
+        // Then an r-point DFT across them: W_r^{pq} = W_n_total^{pq·m·step}.
+        for p in 0..r {
+            let mut acc = C32::ZERO;
+            for (q, &tq) in t.iter().enumerate().take(r) {
+                acc = acc + tq * tw[(p * q * m * step) % n_total];
+            }
+            out[p * m + k] = acc;
+        }
+    }
+}
+
 /// Forward FFT for **any** length, not just powers of two.
 ///
 /// A channelizer needs this. Extracting a 48 kHz channel from a 2.4 MHz
@@ -281,6 +421,64 @@ mod any_tests {
                 assert!(err < 1e-2, "n={n} bin {i}: {a:?} vs {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn plan_agrees_with_the_recursive_transform() {
+        // The plan is an optimisation, so the bar is that it changes nothing.
+        // Sizes cover a prime, a power of two, the channelizer's output block
+        // (800 = 2⁵·5²) and a mixed length.
+        for n in [7usize, 12, 64, 100, 800] {
+            let x: Vec<C32> = (0..n)
+                .map(|i| C32::new((i as f32 * 0.37).sin(), (i as f32 * 0.11).cos()))
+                .collect();
+            let mut want = x.clone();
+            fft_any(&mut want);
+            let mut got = x.clone();
+            FftPlan::new(n).forward(&mut got);
+            for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (*a - *b).norm_sq().sqrt() < 1e-2,
+                    "n={n} bin {i}: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_round_trips_at_the_channelizer_block_size() {
+        // 40000 = 2⁶·5⁴ is the forward transform a 2.4 MHz capture runs 120
+        // times a second, and the one the whole optimisation is about.
+        let n = 40000usize;
+        let x: Vec<C32> = (0..n)
+            .map(|i| C32::new((i as f32 * 0.013).cos(), (i as f32 * 0.007).sin()))
+            .collect();
+        let mut plan = FftPlan::new(n);
+        let mut y = x.clone();
+        plan.forward(&mut y);
+        plan.inverse(&mut y);
+        for (a, b) in x.iter().zip(y.iter()) {
+            assert!((*a - *b).norm_sq().sqrt() < 1e-3, "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn plan_puts_a_tone_in_one_bin() {
+        // A round trip cannot catch an error that the inverse undoes, so pin
+        // the forward transform against something known independently.
+        let n = 4000usize;
+        let bin = 137usize;
+        let mut buf: Vec<C32> = (0..n)
+            .map(|i| {
+                let p = 2.0 * core::f32::consts::PI * bin as f32 * i as f32 / n as f32;
+                C32::new(p.cos(), p.sin())
+            })
+            .collect();
+        FftPlan::new(n).forward(&mut buf);
+        let peak = (0..n)
+            .max_by(|&a, &b| buf[a].norm_sq().partial_cmp(&buf[b].norm_sq()).unwrap())
+            .unwrap();
+        assert_eq!(peak, bin);
     }
 
     #[test]
