@@ -67,6 +67,7 @@ pub struct Channelizer {
     /// Unconsumed input.
     pending: Vec<C32>,
     out_rate: f64,
+    sample_rate: f64,
 }
 
 impl Channelizer {
@@ -118,12 +119,40 @@ impl Channelizer {
             actual_hz,
             pending: Vec::with_capacity(n * 2),
             out_rate,
+            sample_rate,
         }
+    }
+
+    /// Replace the set of channels being extracted, keeping any buffered
+    /// input.
+    ///
+    /// A trunked system grants calls onto channels at runtime, so the set has
+    /// to change while the stream keeps flowing. Only the bin list changes —
+    /// the transform, which is the expensive part, is unaffected.
+    pub fn set_channels(&mut self, offsets_hz: &[f64]) {
+        let nyquist = self.sample_rate / 2.0;
+        for &o in offsets_hz {
+            assert!(
+                o.abs() < nyquist,
+                "offset {o} Hz is outside the captured band (+/-{nyquist} Hz)"
+            );
+        }
+        let bin_hz = self.sample_rate / self.n as f64;
+        self.bins = offsets_hz
+            .iter()
+            .map(|&o| (o / bin_hz).round() as isize)
+            .collect();
+        self.actual_hz = self.bins.iter().map(|&b| b as f64 * bin_hz).collect();
     }
 
     /// Rate of every output channel.
     pub fn output_rate(&self) -> f64 {
         self.out_rate
+    }
+
+    /// Rate of the wideband input.
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
     }
 
     /// Offsets actually delivered, after snapping each to the nearest bin.
