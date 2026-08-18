@@ -19,6 +19,13 @@ pub struct SyncStat {
 
 /// One NID decode.
 #[derive(Debug, Clone, Copy)]
+pub struct LcStat {
+    pub talkgroup: u16,
+    pub source_unit: u32,
+    pub emergency: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct LocationStat {
     /// Logical Link ID of the reporting radio.
     pub llid: u32,
@@ -125,6 +132,12 @@ pub struct Diagnostics {
     pub vendor_samples: Vec<(u8, u8, u64)>,
     /// Radio position reports decoded from packet data.
     pub locations: Vec<LocationStat>,
+    /// Link Control words naming calls on a traffic channel.
+    pub link_control: Vec<LcStat>,
+    /// Vendor-defined Link Control opcodes, counted by (MFID, LCO).
+    pub vendor_lc: Vec<(u8, u8, u32)>,
+    /// Raw arguments from vendor Link Control words, for offline analysis.
+    pub vendor_lc_samples: Vec<(u8, u8, [u8; 7])>,
     pub grants: Vec<GrantStat>,
     pub encrypted_skips: Vec<u16>,
     pub voice_frames: u64,
@@ -235,6 +248,39 @@ impl Diagnostics {
             s.push_str(&format!(
                 "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
             ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"link_control\": [");
+        for (i, l) in self.link_control.iter().take(2000).enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"tg\":{},\"src\":{},\"emergency\":{}}}",
+                l.talkgroup, l.source_unit, l.emergency
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_lc\": [");
+        for (i, (m, o, n)) in self.vendor_lc.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"mfid\":\"{m:02X}\",\"lco\":\"{o:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"vendor_lc_samples\": [");
+        for (i, (m, o, a)) in self.vendor_lc_samples.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let hex: String = a.iter().map(|b| format!("{b:02X}")).collect();
+            s.push_str(&format!("[\"{m:02X}\",\"{o:02X}\",\"{hex}\"]"));
         }
         s.push_str("],\n");
 

@@ -481,6 +481,15 @@ fn main() {
     let out = dec.process(&iq);
     report(&out, &dec, catalog.as_ref());
 
+    let lc = &dec.diagnostics().link_control;
+    if !lc.is_empty() {
+        println!("\ncalls identified from the voice channel itself (Link Control):");
+        for l in lc {
+            let em = if l.emergency { "  [EMERGENCY]" } else { "" };
+            println!("  TG {:<7} unit {:<9}{em}", l.talkgroup, l.source_unit);
+        }
+    }
+
     let vendors = &dec.diagnostics().vendor_tsbks;
     if !vendors.is_empty() {
         println!("\nmanufacturer-specific messages seen (not acted on):");

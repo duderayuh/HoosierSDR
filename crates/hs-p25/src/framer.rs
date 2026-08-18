@@ -54,6 +54,11 @@ pub enum FramerEvent {
         /// Raw ALGID from LDU2 encryption sync (None for LDU1).
         algid: Option<u8>,
     },
+    /// Link Control from an LDU1: the call's own account of itself.
+    LinkControl {
+        nac: u16,
+        lcw: crate::lc::Lcw,
+    },
     /// A packet data unit completed: header plus reassembled payload.
     PacketData {
         nac: u16,
@@ -216,6 +221,11 @@ impl Framer {
                     Duid::LogicalLinkDataUnit1 | Duid::LogicalLinkDataUnit2 => {
                         let hard: Vec<u8> = self.buf.iter().map(|d| d.bits).collect();
                         let bits = crate::bits::dibits_to_bits(&hard);
+                        if nid.duid == Duid::LogicalLinkDataUnit1 {
+                            if let Some(lcw) = crate::lc::extract_lcw(&bits) {
+                                events.push(FramerEvent::LinkControl { nac: nid.nac, lcw });
+                            }
+                        }
                         if let Some(frames) = extract_imbe_frames(&bits) {
                             let algid = if nid.duid == Duid::LogicalLinkDataUnit2 {
                                 ldu2_algid_raw(&bits)

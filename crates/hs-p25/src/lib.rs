@@ -7,6 +7,7 @@ pub mod bch;
 pub mod bits;
 pub mod crc;
 pub mod framer;
+pub mod lc;
 pub mod lrrp;
 pub mod moto;
 pub mod nid;

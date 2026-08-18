@@ -81,6 +81,8 @@ pub struct ChannelDecoder {
     site: SiteModel,
     /// Dynamic talkgroup patches (Motorola Group Regroup).
     patches: PatchTracker,
+    /// Confirms Link Control readings by repetition (they are not FEC-corrected).
+    lc_confirm: hs_p25::lc::LcConfirmer,
     vocoder: ImbeDecoder,
     /// Rolling buffer of recent RAW receiver symbols (pre-equalizer), used to
     /// train the equalizer on the Frame Sync Word once the framer confirms
@@ -154,6 +156,7 @@ impl ChannelDecoder {
             framer: Framer::new(),
             site: SiteModel::new(),
             patches: PatchTracker::new(),
+            lc_confirm: hs_p25::lc::LcConfirmer::new(),
             vocoder: ImbeDecoder::new(),
             raw_hist: Vec::with_capacity(48),
             fsw_levels,
@@ -320,6 +323,34 @@ impl ChannelDecoder {
                         lon: r.lon,
                     });
                     out.locations.push(r);
+                }
+            }
+            FramerEvent::LinkControl { lcw, .. } => {
+                // A voice channel naming its own call: this is what lets a
+                // traffic channel be identified without the control channel.
+                if let Some((tg, src)) = self.lc_confirm.observe(&lcw) {
+                    self.diag.link_control.push(crate::diag::LcStat {
+                        talkgroup: tg,
+                        source_unit: src,
+                        emergency: lcw.emergency(),
+                    });
+                    self.active_tg = Some(tg);
+                } else if !lcw.is_standard() {
+                    let key = (lcw.mfid, lcw.lco);
+                    match self
+                        .diag
+                        .vendor_lc
+                        .iter_mut()
+                        .find(|(m, o, _)| (*m, *o) == key)
+                    {
+                        Some((_, _, n)) => *n += 1,
+                        None => self.diag.vendor_lc.push((lcw.mfid, lcw.lco, 1)),
+                    }
+                    if self.diag.vendor_lc_samples.len() < 64 {
+                        self.diag
+                            .vendor_lc_samples
+                            .push((lcw.mfid, lcw.lco, lcw.args));
+                    }
                 }
             }
             FramerEvent::Nid { nid, bch_errors } => {
