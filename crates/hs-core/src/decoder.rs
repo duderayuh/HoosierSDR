@@ -368,21 +368,21 @@ impl ChannelDecoder {
             Tsbk::MotoRegroup(r) => {
                 match r {
                     // A patch definition names a supergroup and its members.
-                    MotoRegroup::PatchAdd { pairs } => {
+                    MotoRegroup::RegroupUpdate { pairs } => {
                         for (sg, tg) in pairs {
                             self.patches.add(sg, tg);
                         }
                     }
                     // A unit operating on a patched talkgroup confirms the
                     // same association from the traffic side.
-                    MotoRegroup::PatchUser {
+                    MotoRegroup::RegroupGrant {
                         supergroup,
                         talkgroup,
                         ..
                     } => self.patches.add(supergroup, talkgroup),
                     // The status list says which talkgroups are regrouped but
                     // not under which supergroup, so it adds no association.
-                    MotoRegroup::PatchStatus { .. } => {}
+                    MotoRegroup::RegroupAdd { .. } => {}
                 }
                 self.diag.patches = self
                     .patches
@@ -414,6 +414,11 @@ impl ChannelDecoder {
                 base_freq_hz,
                 ..
             } => {
+                if !self.diag.idens.iter().any(|(i, _, _)| *i == iden) {
+                    self.diag
+                        .idens
+                        .push((iden, base_freq_hz, (spacing_khz * 1000.0) as u64));
+                }
                 self.site.set_iden(
                     iden,
                     IdenPlan {

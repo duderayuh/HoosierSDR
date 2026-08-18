@@ -113,6 +113,8 @@ pub struct Diagnostics {
     /// Manufacturer-specific TSBKs seen, counted by (MFID, opcode). Which
     /// vendor messages a system emits says a lot about what features it runs.
     pub vendor_tsbks: Vec<(u8, u8, u32)>,
+    /// Channel plans announced by IDEN_UP: (iden, base Hz, spacing Hz).
+    pub idens: Vec<(u8, u64, u64)>,
     /// Talkgroup patches: supergroup and its member talkgroups.
     pub patches: Vec<(u16, Vec<u16>)>,
     /// A sample of raw argument words from vendor TSBKs. Manufacturer-specific
@@ -232,6 +234,17 @@ impl Diagnostics {
             }
             s.push_str(&format!(
                 "{{\"mfid\":\"{mfid:02X}\",\"opcode\":\"{op:02X}\",\"count\":{n}}}"
+            ));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"idens\": [");
+        for (i, (id, base, sp)) in self.idens.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"iden\":{id},\"base_hz\":{base},\"spacing_hz\":{sp}}}"
             ));
         }
         s.push_str("],\n");

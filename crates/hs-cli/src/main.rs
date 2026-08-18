@@ -481,6 +481,21 @@ fn main() {
     let out = dec.process(&iq);
     report(&out, &dec, catalog.as_ref());
 
+    let vendors = &dec.diagnostics().vendor_tsbks;
+    if !vendors.is_empty() {
+        println!("\nmanufacturer-specific messages seen (not acted on):");
+        let mut v: Vec<_> = vendors.iter().collect();
+        v.sort_by_key(|(_, _, n)| std::cmp::Reverse(*n));
+        for (mfid, opcode, n) in v {
+            let name = if *mfid == hs_p25::moto::MFID_MOTOROLA {
+                hs_p25::moto::describe(*opcode).unwrap_or("unidentified")
+            } else {
+                "unidentified"
+            };
+            println!("  MFID 0x{mfid:02X} opcode 0x{opcode:02X}  x{n:<5} {name}");
+        }
+    }
+
     let patches = dec.patches();
     if !patches.is_empty() {
         println!("\ntalkgroup patches (Motorola Group Regroup):");
