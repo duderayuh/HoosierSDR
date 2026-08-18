@@ -42,6 +42,19 @@ impl CmaEqualizer {
         }
     }
 
+    /// Reset to the center-spike identity, discarding any diverged taps.
+    fn reset(&mut self) {
+        for t in self.taps.iter_mut() {
+            *t = C32::ZERO;
+        }
+        let mid = self.taps.len() / 2;
+        self.taps[mid] = C32::new(1.0, 0.0);
+        for d in self.delay.iter_mut() {
+            *d = C32::ZERO;
+        }
+        self.error_var = 0.0;
+    }
+
     fn output(&self) -> C32 {
         let n = self.taps.len();
         let mut acc = C32::ZERO;
@@ -61,15 +74,39 @@ impl CmaEqualizer {
         let y = self.output();
         if adapt {
             // CMA (Godard p=2): w[k] += mu · (R₂ − |y|²) · y · conj(x[k]).
+            //
+            // Normalize the step by the delay-line energy (NLMS). The plain
+            // rule diverges on the transient at the *start* of a transmission:
+            // a traffic channel is idle until a call keys up, and when it does,
+            // full-power samples arrive a few symbols before the AGC has
+            // caught up. Fed those, |y|² briefly explodes, g = R₂ − |y|² swings
+            // hugely negative, and the un-normalized tap update overshoots into
+            // a runaway that lands on NaN — after which every output is NaN and
+            // the whole receiver is dead for the rest of the capture (it never
+            // re-acquires, because NaN > threshold is false). Dividing the step
+            // by the input energy bounds it regardless of that transient, which
+            // is exactly the case NLMS exists for. `1e-6` keeps idle noise from
+            // dividing by zero.
+            let energy: f32 = self.delay.iter().map(|c| c.norm_sq()).sum::<f32>() + 1e-6;
             let g = self.r2 - y.norm_sq();
-            let ey = y.scale(g);
+            let ey = y.scale(g * self.mu / energy);
             let n = self.taps.len();
             for k in 0..n {
                 let xk = self.delay[(self.pos + n - k) % n];
                 // Gradient step in the same (conj-tap) convention as output().
-                self.taps[k] = self.taps[k] + (xk * ey.conj()).scale(self.mu);
+                self.taps[k] = self.taps[k] + xk * ey.conj();
             }
             self.error_var = 0.99 * self.error_var + 0.01 * (g * g);
+
+            // Belt and braces: if a pathological input still drove the taps
+            // non-finite, reset to the identity spike rather than stay dead.
+            if !self
+                .taps
+                .iter()
+                .all(|t| t.re.is_finite() && t.im.is_finite())
+            {
+                self.reset();
+            }
         }
         y
     }

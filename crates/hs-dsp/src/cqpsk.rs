@@ -225,6 +225,10 @@ pub struct CqpskReceiver {
 const SETTLE_SYMS: u32 = 64;
 /// Symbols averaged by the blind carrier-bias estimator (~90 ms at 4800 baud).
 const ACQ_SYMS: u32 = 400;
+/// Minimum coherence |Σ exp(j·(4Δφ−π))| / N for the acquisition to be believed.
+/// Real CQPSK approaches 1; noise sits near 1/√N ≈ 0.05 at N = 400. A threshold
+/// well above the noise floor but far below a real lock cleanly separates them.
+const ACQ_COHERENCE_MIN: f32 = 0.30;
 
 /// Decision-directed phase error, in radians, above which the receiver is
 /// judged unlocked.
@@ -259,7 +263,7 @@ impl CqpskReceiver {
             agc: crate::agc::Agc::new(1e-3, 1.0),
             mf: crate::fir::FirC::new(rrc_taps(sps, 6, beta), 1),
             gardner: crate::timing_complex::ComplexGardner::new(sps as f32, 0.004),
-            eq: eq_taps.map(|n| crate::equalizer::CmaEqualizer::new(n, 0.002)),
+            eq: eq_taps.map(|n| crate::equalizer::CmaEqualizer::new(n, 0.05)),
             prev_sym: None,
             freq_bias: 0.0,
             mu_freq: 0.02,
@@ -326,8 +330,25 @@ impl CqpskReceiver {
                 self.acq = self.acq + C32::new(a.cos(), a.sin());
                 self.acq_n += 1;
                 if self.acq_n >= ACQ_SYMS {
-                    self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
-                    self.acquired = true;
+                    // Only accept the estimate if the accumulator is coherent.
+                    // Σ exp(j·(4Δφ − π)) has magnitude ≈ acq_n on real CQPSK
+                    // (the modulation cancels, leaving the carrier bias in
+                    // phase) but only √acq_n on noise (a random walk). A
+                    // traffic channel is idle until a call keys up, so blind
+                    // acquisition would otherwise *complete on noise*, latch a
+                    // meaningless bias, and never revisit it — decoding the
+                    // real transmission that follows at chance. Requiring
+                    // coherence makes acquisition wait for signal instead.
+                    let coherence = self.acq.norm_sq().sqrt() / self.acq_n as f32;
+                    if coherence > ACQ_COHERENCE_MIN {
+                        self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
+                        self.acquired = true;
+                    } else {
+                        // Not signal yet. Slide the window forward rather than
+                        // restart cold, so onset is caught within one window.
+                        self.acq = C32::ZERO;
+                        self.acq_n = 0;
+                    }
                 }
             }
             return None;
