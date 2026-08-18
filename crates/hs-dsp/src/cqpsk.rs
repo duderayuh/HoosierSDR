@@ -214,12 +214,31 @@ pub struct CqpskReceiver {
     acq: C32,
     acq_n: u32,
     acquired: bool,
+    /// Smoothed magnitude of the decision-directed phase error, the receiver's
+    /// own measure of whether it is locked.
+    err_ewma: f32,
+    /// Consecutive symbols spent above the lock threshold.
+    bad_run: u32,
 }
 
 /// Symbols to let the timing loop settle before blind acquisition starts.
 const SETTLE_SYMS: u32 = 64;
 /// Symbols averaged by the blind carrier-bias estimator (~90 ms at 4800 baud).
 const ACQ_SYMS: u32 = 400;
+
+/// Decision-directed phase error, in radians, above which the receiver is
+/// judged unlocked.
+///
+/// The error is bounded by π/4 ≈ 0.785 by construction, since it is measured
+/// against whichever symbol was decided. Noise therefore averages around 0.39,
+/// half the bound, while a locked receiver sits far below it. The threshold
+/// splits those two populations.
+const LOCK_ERR_MAX: f32 = 0.33;
+
+/// Consecutive bad symbols before re-acquiring (~0.2 s). Long enough that a
+/// brief fade does not trigger a re-acquisition, short enough to catch the
+/// start of a transmission.
+const BAD_RUN_LIMIT: u32 = 1000;
 
 impl CqpskReceiver {
     /// Equalized front end: CMA equalizer before differential detection.
@@ -248,6 +267,8 @@ impl CqpskReceiver {
             acq: C32::ZERO,
             acq_n: 0,
             acquired: false,
+            err_ewma: 0.0,
+            bad_run: 0,
         }
     }
 
@@ -318,7 +339,27 @@ impl CqpskReceiver {
         // Decision-directed refinement: now that the bias is inside the
         // decision well, pull it toward the ideal phase of the decided dibit.
         let ideal = dibit_to_dphase(dibit);
-        self.freq_bias += self.mu_freq * wrap_pi(corr - ideal);
+        let err = wrap_pi(corr - ideal);
+        self.freq_bias += self.mu_freq * err;
+
+        // Watch the lock, and re-acquire if it is not real.
+        //
+        // Blind acquisition happens once, on whatever the receiver hears
+        // first. On a traffic channel that is silence: the channel is idle
+        // until a call is granted onto it, so the estimate is made from noise
+        // and is meaningless, and without this the receiver would keep that
+        // estimate through the entire transmission that follows. A control
+        // channel never exposes this because it transmits continuously.
+        self.err_ewma += 0.002 * (err.abs() - self.err_ewma);
+        if self.err_ewma > LOCK_ERR_MAX {
+            self.bad_run += 1;
+            if self.bad_run >= BAD_RUN_LIMIT {
+                self.reacquire();
+                return None;
+            }
+        } else {
+            self.bad_run = 0;
+        }
         Some((dibit, corr))
     }
 
@@ -334,6 +375,16 @@ impl CqpskReceiver {
         self.acq_n = 0;
         self.acquired = false;
         self.settle = 0;
+        self.err_ewma = 0.0;
+        self.bad_run = 0;
+        self.freq_bias = 0.0;
+        self.prev_sym = None;
+    }
+
+    /// Smoothed decision-directed phase error: low when locked, near 0.39 on
+    /// noise. Exposed for diagnostics.
+    pub fn lock_error(&self) -> f32 {
+        self.err_ewma
     }
 
     /// Current carrier-frequency estimate as a per-symbol differential-phase
