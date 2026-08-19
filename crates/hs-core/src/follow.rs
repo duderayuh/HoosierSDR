@@ -108,6 +108,13 @@ pub struct FollowOutput {
     /// decoding the alternative. Reported so the saving can be tested rather
     /// than assumed.
     pub hedges_dropped: u32,
+    /// Grants the control channel issued that this capture cannot follow
+    /// because the traffic channel is outside the tuned band. Reported so a
+    /// live listener sees the system *is* active — and learns the band it would
+    /// need to widen to reach those calls — rather than facing silence.
+    pub grants_out_of_band: Vec<(u16, u64)>,
+    /// Grants skipped because the call is encrypted.
+    pub grants_encrypted: Vec<(u16, u64)>,
 }
 
 pub struct TrunkFollower {
@@ -310,6 +317,7 @@ impl TrunkFollower {
         // Start calls the control channel just granted.
         for g in &control_out.grants {
             if g.encrypted {
+                out.grants_encrypted.push((g.talkgroup, g.freq_hz));
                 continue;
             }
             if self.active.iter().any(|c| c.freq_hz == g.freq_hz) {
@@ -323,6 +331,7 @@ impl TrunkFollower {
             // single tuner cannot see.
             let offset = g.freq_hz as f64 + self.correction_hz - self.center_hz;
             if offset.abs() >= self.nyquist() {
+                out.grants_out_of_band.push((g.talkgroup, g.freq_hz));
                 continue;
             }
             let rate = self.chan.output_rate();

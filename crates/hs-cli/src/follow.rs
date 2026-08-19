@@ -111,6 +111,40 @@ pub fn measure_carrier(
     Some((best.1, best.2))
 }
 
+/// De-noises repeated grant announcements. A control channel repeats a grant
+/// every cycle while its call is up, so the same out-of-band call is seen many
+/// times a second; this reports each frequency at most once per cooldown.
+struct GrantGate {
+    /// freq -> blocks remaining before it may be reported again.
+    seen: std::collections::HashMap<u64, u32>,
+    cooldown: u32,
+}
+
+impl GrantGate {
+    fn new(cooldown: u32) -> Self {
+        Self {
+            seen: std::collections::HashMap::new(),
+            cooldown,
+        }
+    }
+    /// True if this frequency should be reported now (and arms its cooldown).
+    fn fresh(&mut self, freq: u64) -> bool {
+        match self.seen.get_mut(&freq) {
+            Some(c) if *c > 0 => false,
+            _ => {
+                self.seen.insert(freq, self.cooldown);
+                true
+            }
+        }
+    }
+    /// Call once per processed block to age the cooldowns.
+    fn tick(&mut self) {
+        for c in self.seen.values_mut() {
+            *c = c.saturating_sub(1);
+        }
+    }
+}
+
 fn mod_name(m: Modulation) -> &'static str {
     match m {
         Modulation::C4fm => "C4FM",
@@ -245,20 +279,36 @@ pub fn run_file(
     let block = (sample_rate as usize / 10) * 2;
     let mut n = 0usize;
     let mut syncs = 0u32;
+    let name_of = |tg: u16| match cat {
+        Some(k) => k.label(tg),
+        None => format!("TG {tg}"),
+    };
+    let mut oob = 0usize;
+    let mut gate = GrantGate::new(50);
     for chunk in iq.chunks(block) {
         let out = f.process(chunk);
         syncs += out.control_syncs;
+        gate.tick();
         for (tg, hz) in &out.started {
-            let name = match cat {
-                Some(k) => k.label(*tg),
-                None => format!("TG {tg}"),
-            };
-            println!("  start {name} on {:.4} MHz", *hz as f64 / 1e6);
+            println!("  start {} on {:.4} MHz", name_of(*tg), *hz as f64 / 1e6);
+        }
+        for (tg, hz) in &out.grants_out_of_band {
+            if gate.fresh(*hz) {
+                oob += 1;
+                println!(
+                    "  (call {} on {:.4} MHz — outside the capture, not followed)",
+                    name_of(*tg),
+                    *hz as f64 / 1e6
+                );
+            }
         }
         for c in &out.completed {
             n += 1;
             report_call(c, cat, n);
         }
+    }
+    if oob > 0 {
+        println!("({oob} more calls were granted onto channels outside this capture)");
     }
     // A recording ends mid-transmission far more often than not, so close out
     // whatever was still in flight rather than discarding its audio.
@@ -349,8 +399,22 @@ pub fn run_live<S: hs_source::SdrSource>(
         f.correction_hz()
     );
 
+    let name_of = |tg: u16| match cat {
+        Some(k) => k.label(tg),
+        None => format!("TG {tg}"),
+    };
+
     let mut n = 0usize;
     let mut syncs = 0u32;
+    // Liveness: without a heartbeat, a control channel that is up but between
+    // calls looks identical to a hang. Track activity and print a status line
+    // every few seconds when nothing else has.
+    let mut blocks_since_print = 0u32;
+    let mut oob = 0u32;
+    let mut enc = 0u32;
+    let mut gate = GrantGate::new(50);
+    // ~10 blocks per second (each block is a tenth of a second of air).
+    const HEARTBEAT_BLOCKS: u32 = 30;
     loop {
         let got = match src.read(&mut buf) {
             Ok(0) => continue,
@@ -363,17 +427,45 @@ pub fn run_live<S: hs_source::SdrSource>(
         };
         let out = f.process(&buf[..got]);
         syncs += out.control_syncs;
+        gate.tick();
+        blocks_since_print += 1;
+        let mut printed = false;
         for (tg, hz) in &out.started {
-            let name = match cat {
-                Some(k) => k.label(*tg),
-                None => format!("TG {tg}"),
-            };
-            println!("  start {name} on {:.4} MHz", *hz as f64 / 1e6);
+            println!("  start {} on {:.4} MHz", name_of(*tg), *hz as f64 / 1e6);
+            printed = true;
+        }
+        for (tg, hz) in &out.grants_out_of_band {
+            if gate.fresh(*hz) {
+                oob += 1;
+                println!(
+                    "  (call {} on {:.4} MHz — outside the tuned band, not followed)",
+                    name_of(*tg),
+                    *hz as f64 / 1e6
+                );
+                printed = true;
+            }
+        }
+        for (tg, hz) in &out.grants_encrypted {
+            if gate.fresh(*hz) {
+                enc += 1;
+                println!("  (call {} encrypted — skipped)", name_of(*tg));
+                printed = true;
+            }
         }
         for c in &out.completed {
             n += 1;
             report_call(c, cat, n);
+            printed = true;
+        }
+        if printed {
+            blocks_since_print = 0;
+        } else if blocks_since_print >= HEARTBEAT_BLOCKS {
+            blocks_since_print = 0;
+            println!(
+                "  … control up: {syncs} frame syncs, {n} calls followed, \
+                 {oob} out of band, {enc} encrypted",
+            );
         }
     }
-    println!("\nstopped: {syncs} control frame syncs, {n} calls");
+    println!("\nstopped: {syncs} control frame syncs, {n} calls followed, {oob} out of band");
 }
