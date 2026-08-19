@@ -261,6 +261,39 @@ fn check_in_band(sample_rate: f64, center_hz: f64, control_hz: f64) {
     }
 }
 
+/// Print control-channel failover events; returns whether anything printed.
+fn report_control_moves(out: &hs_core::follow::FollowOutput) -> bool {
+    let mut printed = false;
+    if let Some((from, to)) = out.control_moved {
+        println!(
+            "  control channel moved: {:.4} MHz went quiet, following {:.4} MHz",
+            from as f64 / 1e6,
+            to as f64 / 1e6
+        );
+        printed = true;
+    }
+    if let Some(alternates) = &out.control_lost {
+        if alternates.is_empty() {
+            println!(
+                "  control channel lost, and the site announced no alternate.\n  \
+                 If this persists, re-run --scan to find where the system went."
+            );
+        } else {
+            let list = alternates
+                .iter()
+                .map(|hz| format!("{:.4} MHz", *hz as f64 / 1e6))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  control channel lost. Its announced alternates are outside this\n  \
+                 band — retune to one of: {list}"
+            );
+        }
+        printed = true;
+    }
+    printed
+}
+
 /// Follow a system in a recorded capture.
 pub fn run_file(
     iq: &[f32],
@@ -303,6 +336,7 @@ pub fn run_file(
         let out = f.process(chunk);
         syncs += out.control_syncs;
         gate.tick();
+        report_control_moves(&out);
         for (tg, hz) in &out.started {
             println!("  start {} on {:.4} MHz", name_of(*tg), *hz as f64 / 1e6);
         }
@@ -521,7 +555,7 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
         syncs += out.control_syncs;
         gate.tick();
         blocks_since_print += 1;
-        let mut printed = false;
+        let mut printed = report_control_moves(&out);
         for (tg, hz) in &out.started {
             println!("  start {} on {:.4} MHz", name_of(*tg), *hz as f64 / 1e6);
             printed = true;

@@ -46,6 +46,9 @@ pub struct DecodeOutput {
     pub encrypted_skips: Vec<u16>,
     /// Frame-sync detections (for diagnostics / bench metrics).
     pub syncs: u32,
+    /// Terminator frames (TDU) seen this block: the channel explicitly
+    /// ending a transmission.
+    pub terminators: u32,
     /// Radio position reports decoded from packet data this block.
     pub locations: Vec<hs_p25::lrrp::LrrpReport>,
 }
@@ -184,6 +187,16 @@ impl ChannelDecoder {
 
     pub fn site(&self) -> &SiteModel {
         &self.site
+    }
+
+    /// Adopt another decoder's accumulated trunking state — channel plans,
+    /// system identity, secondary control channels, and talkgroup patches.
+    /// Used when the control channel moves: the new channel belongs to the
+    /// same site, and waiting for the plans to be re-broadcast would drop
+    /// every grant issued in between.
+    pub fn adopt_trunk_state(&mut self, other: &ChannelDecoder) {
+        self.site = other.site.clone();
+        self.patches = other.patches.clone();
     }
 
     /// Accumulated decode diagnostics for real-signal export.
@@ -395,6 +408,19 @@ impl ChannelDecoder {
                     out.pcm.extend_from_slice(&pcm);
                 }
             }
+            FramerEvent::Skipped {
+                duid: Duid::TerminatorNoLc | Duid::TerminatorWithLc,
+                ..
+            } => {
+                // The channel saying its transmission is over. The frame
+                // carries nothing to decode (the with-LC variant's link
+                // control repeats what LDU1 already said), but the *event*
+                // matters: it is the explicit end of a transmission, seconds
+                // sooner than a quiet-channel timeout can conclude the same.
+                out.terminators += 1;
+                self.active_tg = None;
+                self.active_enc = false;
+            }
             _ => {}
         }
     }
@@ -463,6 +489,21 @@ impl ChannelDecoder {
                         tx_offset_hz: (tx_offset_mhz * 1_000_000.0) as i64,
                     },
                 );
+            }
+            Tsbk::SecondaryControl {
+                channel_a,
+                channel_b,
+                ..
+            } => {
+                // The site naming its alternate control channels. Kept in the
+                // site model so a follower that loses this channel knows where
+                // the control channel can reappear. A zero channel is an
+                // unused slot in the broadcast, not channel 0 of IDEN 0.
+                for ch in [channel_a, channel_b] {
+                    if ch != 0 {
+                        self.site.add_secondary_cc(ch);
+                    }
+                }
             }
             Tsbk::GroupVoiceGrant {
                 opts,

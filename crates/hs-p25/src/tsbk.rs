@@ -41,6 +41,20 @@ pub enum Tsbk {
         site: u8,
         channel: u16,
     },
+    /// 0x39 — Secondary Control Channel Broadcast: the site's alternate
+    /// control channels. A site announces where else its control channel can
+    /// appear, so a receiver that loses the primary knows where to look
+    /// instead of scanning blind.
+    SecondaryControl {
+        rfss: u8,
+        site: u8,
+        /// Up to two (channel, service class) pairs; a pair of zeros is an
+        /// unused slot.
+        channel_a: u16,
+        class_a: u8,
+        channel_b: u16,
+        class_b: u8,
+    },
     /// A Motorola Group Regroup (talkgroup patch) message.
     MotoRegroup(crate::moto::MotoRegroup),
     /// A manufacturer-specific block. The opcode space belongs to the vendor,
@@ -131,6 +145,14 @@ pub fn parse(bits96: &[u8]) -> Option<TsbkBlock> {
             wacn: ((args >> 24) & 0xF_FFFF) as u32,
             sys_id: ((args >> 12) & 0xFFF) as u16,
             channel: ((args) & 0xFFF) as u16,
+        },
+        0x39 => Tsbk::SecondaryControl {
+            rfss: (args >> 56) as u8,
+            site: ((args >> 48) & 0xFF) as u8,
+            channel_a: ((args >> 32) & 0xFFFF) as u16,
+            class_a: ((args >> 24) & 0xFF) as u8,
+            channel_b: ((args >> 8) & 0xFFFF) as u16,
+            class_b: (args & 0xFF) as u8,
         },
         0x3A => Tsbk::RfssStatus {
             rfss: ((args >> 32) & 0xFF) as u8,
@@ -228,6 +250,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn secondary_control_roundtrip() {
+        // RFSS 1, site 5, channel A 0x100A class 0x70, channel B unused.
+        let args: u64 = (1u64 << 56) | (5u64 << 48) | (0x100Au64 << 32) | (0x70u64 << 24);
+        let b = parse(&build(true, 0x39, 0, args)).unwrap();
+        assert_eq!(
+            b.tsbk,
+            Tsbk::SecondaryControl {
+                rfss: 1,
+                site: 5,
+                channel_a: 0x100A,
+                class_a: 0x70,
+                channel_b: 0,
+                class_b: 0,
+            }
+        );
+    }
 
     #[test]
     fn grant_roundtrip() {
