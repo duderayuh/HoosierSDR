@@ -648,7 +648,7 @@ fn run_sdr(args: &Args) {
         }
         let catalog = args.catalog.as_deref().and_then(load_catalog);
         follow::run_live(
-            &mut src,
+            src,
             args.rate,
             args.freq,
             args.control,

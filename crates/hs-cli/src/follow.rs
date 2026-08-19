@@ -355,16 +355,23 @@ pub fn run_file(
 
 /// Follow a system live, from a radio.
 ///
-/// The only difference from a recording is where the samples come from — and
-/// one extra step at the start: a short priming read, so the tuner's frequency
-/// error can be measured off real air before the follower is built. A radio
-/// that has just been tuned also needs a moment for its own AGC to settle, so
-/// the priming samples are measured and then discarded rather than decoded.
+/// The samples come from a background reader thread, not the processing loop.
+/// A single-threaded loop that read the radio and then decoded it dropped
+/// samples on a slower machine: the RTL delivers at a fixed rate, and any time
+/// spent decoding is time not spent draining its buffer, so the buffer
+/// overflowed and the payload behind each frame sync was lost. The offline
+/// decoder runs at more than ten times real time, so the decode was never the
+/// problem — keeping the radio drained was. A dedicated reader thread does
+/// nothing but read, handing blocks to the decoder through a bounded queue; if
+/// the decoder ever falls behind, the queue drops its oldest block rather than
+/// letting the radio's own buffer overflow, which also keeps latency bounded.
+/// The reader runs during the startup measurement too, so that no longer
+/// stalls the radio either.
 // Only reachable from the live-capture path; a headless build still compiles
 // it so the two paths cannot drift apart unnoticed.
 #[cfg_attr(not(feature = "rtlsdr"), allow(dead_code))]
-pub fn run_live<S: hs_source::SdrSource>(
-    src: &mut S,
+pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
+    mut src: S,
     sample_rate: f64,
     center_hz: f64,
     control_hz: f64,
@@ -372,15 +379,18 @@ pub fn run_live<S: hs_source::SdrSource>(
     cat: Option<&hs_core::catalog::CsvCatalog>,
     dump_iq: Option<&str>,
 ) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{sync_channel, TrySendError};
+    use std::sync::Arc;
+
     check_in_band(sample_rate, center_hz, control_hz);
     let block = (sample_rate as usize / 10) * 2;
-    let mut buf = vec![0.0f32; block];
 
-    // Prime on a second of live air before building anything. A freshly tuned
-    // dongle needs a moment for its AGC to settle, and the control channel's
-    // real frequency and modulation both have to be measured off that air —
-    // the sweep is not instant, so say so rather than look hung.
+    // Prime on a second of live air before building anything, so a freshly
+    // tuned dongle's AGC has settled and the control channel's real frequency
+    // and modulation can be measured off it.
     println!("Measuring the control channel (a few seconds)…");
+    let mut buf = vec![0.0f32; block];
     let target = block * 30;
     let mut prime: Vec<f32> = Vec::with_capacity(target);
     while prime.len() < target {
@@ -394,8 +404,39 @@ pub fn run_live<S: hs_source::SdrSource>(
         }
     }
 
-    // Same decision run_file makes: if the caller supplied the measured
-    // frequency, only the modulation is unknown; otherwise sweep for both.
+    // Hand the radio to a reader thread now — before the sweep — so it keeps
+    // draining while the (several-second) measurement runs on this thread.
+    // A queue of ~6 seconds; if the decoder ever falls behind, the reader
+    // drops the oldest block to keep the radio's own buffer empty.
+    let (tx, rx) = sync_channel::<Vec<f32>>(64);
+    let drops = Arc::new(AtomicU64::new(0));
+    let reader_drops = Arc::clone(&drops);
+    let reader = std::thread::spawn(move || {
+        let mut buf = vec![0.0f32; block];
+        loop {
+            match src.read(&mut buf) {
+                Ok(0) => continue,
+                Ok(n) => match tx.try_send(buf[..n].to_vec()) {
+                    Ok(()) => {}
+                    // Queue full: the decoder is behind. Drop this block rather
+                    // than block the reader — the whole point is to keep the
+                    // radio drained so its own buffer never overflows. A drop
+                    // here is one clean lost block; a stall there corrupts the
+                    // stream. Newest data keeps flowing.
+                    Err(TrySendError::Full(_)) => {
+                        reader_drops.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Disconnected(_)) => return,
+                },
+                Err(hs_source::SourceError::Eof) => return,
+                Err(e) => {
+                    eprintln!("capture error: {e:?}");
+                    return;
+                }
+            }
+        }
+    });
+
     let found = match measured_hz {
         Some(m) => pick_modulation(&prime, sample_rate, center_hz, control_hz, m).map(|md| (m, md)),
         None => measure_carrier(&prime, sample_rate, center_hz, control_hz),
@@ -421,42 +462,25 @@ pub fn run_live<S: hs_source::SdrSource>(
 
     let mut n = 0usize;
     let mut syncs = 0u32;
-    // Liveness: without a heartbeat, a control channel that is up but between
-    // calls looks identical to a hang. Track activity and print a status line
-    // every few seconds when nothing else has.
     let mut blocks_since_print = 0u32;
     let mut oob = 0u32;
     let mut enc = 0u32;
     let mut gate = GrantGate::new(50);
-    // Throughput check: if the follower cannot process samples as fast as the
-    // radio delivers them, the driver's buffer overflows and drops samples —
-    // which preserves the short frame sync but shreds the longer payload that
-    // carries grants, the exact "syncs climb, zero grants" signature. Compare
-    // achieved sample rate against the requested one to catch it.
     let start = std::time::Instant::now();
     let mut total_pairs: u64 = 0;
-    // Optional capture of exactly what the live path received, so it can be
-    // decoded offline and compared against a clean recording. Capped so it
-    // cannot grow without bound.
     let mut dump: Vec<f32> = Vec::new();
-    let dump_cap = (sample_rate as usize) * 2 * 10; // ~10 s
-                                                    // ~10 blocks per second (each block is a tenth of a second of air).
+    let dump_cap = (sample_rate as usize) * 2 * 10;
     const HEARTBEAT_BLOCKS: u32 = 30;
-    loop {
-        let got = match src.read(&mut buf) {
-            Ok(0) => continue,
-            Ok(k) => k,
-            Err(hs_source::SourceError::Eof) => break,
-            Err(e) => {
-                eprintln!("capture error: {e:?}");
-                break;
-            }
-        };
+
+    // The reader owns the radio now; blocks arrive through the queue until it
+    // ends (EOF or error), at which point the sender drops and recv errors.
+    while let Ok(chunk) = rx.recv() {
+        let got = chunk.len();
         total_pairs += (got / 2) as u64;
         if dump_iq.is_some() && dump.len() < dump_cap {
-            dump.extend_from_slice(&buf[..got.min(dump_cap - dump.len())]);
+            dump.extend_from_slice(&chunk[..got.min(dump_cap - dump.len())]);
         }
-        let out = f.process(&buf[..got]);
+        let out = f.process(&chunk);
         syncs += out.control_syncs;
         gate.tick();
         blocks_since_print += 1;
@@ -495,17 +519,20 @@ pub fn run_live<S: hs_source::SdrSource>(
             let secs = start.elapsed().as_secs_f64().max(1e-3);
             let achieved = total_pairs as f64 / secs / 1e6;
             let want = sample_rate / 1e6;
-            let drop_flag = if achieved < want * 0.95 {
-                "  ⚠ SAMPLES DROPPING (can't keep up)"
+            let dropped = drops.load(Ordering::Relaxed);
+            let warn = if dropped > 0 {
+                "  ⚠ decoder behind"
             } else {
                 ""
             };
             println!(
                 "  … control up: {syncs} frame syncs, {n} calls followed, {oob} out of band, \
-                 {enc} encrypted  |  {achieved:.2}/{want:.2} Msps{drop_flag}",
+                 {enc} encrypted  |  {achieved:.2}/{want:.2} Msps, {dropped} blocks dropped{warn}",
             );
         }
     }
+    let _ = reader.join();
+
     if let (Some(path), false) = (dump_iq, dump.is_empty()) {
         let mut bytes = Vec::with_capacity(dump.len() * 4);
         for v in &dump {
