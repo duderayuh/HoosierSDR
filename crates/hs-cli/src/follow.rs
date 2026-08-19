@@ -311,24 +311,29 @@ pub fn run_live<S: hs_source::SdrSource>(
     let block = (sample_rate as usize / 10) * 2;
     let mut buf = vec![0.0f32; block];
 
-    let found = match measured_hz {
-        Some(m) => Some((m, Modulation::Cqpsk)),
-        None => {
-            // Half a second of air is plenty to see a continuously-keyed
-            // control channel; accumulate it a block at a time.
-            let mut prime: Vec<f32> = Vec::with_capacity(block * 5);
-            while prime.len() < block * 5 {
-                match src.read(&mut buf) {
-                    Ok(0) => continue,
-                    Ok(n) => prime.extend_from_slice(&buf[..n]),
-                    Err(e) => {
-                        eprintln!("capture error while measuring: {e:?}");
-                        return;
-                    }
-                }
+    // Prime on a second of live air before building anything. A freshly tuned
+    // dongle needs a moment for its AGC to settle, and the control channel's
+    // real frequency and modulation both have to be measured off that air —
+    // the sweep is not instant, so say so rather than look hung.
+    println!("Measuring the control channel (a few seconds)…");
+    let target = block * 10;
+    let mut prime: Vec<f32> = Vec::with_capacity(target);
+    while prime.len() < target {
+        match src.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(n) => prime.extend_from_slice(&buf[..n]),
+            Err(e) => {
+                eprintln!("capture error while measuring: {e:?}");
+                return;
             }
-            measure_carrier(&prime, sample_rate, center_hz, control_hz)
         }
+    }
+
+    // Same decision run_file makes: if the caller supplied the measured
+    // frequency, only the modulation is unknown; otherwise sweep for both.
+    let found = match measured_hz {
+        Some(m) => pick_modulation(&prime, sample_rate, center_hz, control_hz, m).map(|md| (m, md)),
+        None => measure_carrier(&prime, sample_rate, center_hz, control_hz),
     };
     let Some(measured) = found else {
         report_not_found(control_hz);
