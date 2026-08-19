@@ -7,14 +7,24 @@
 use hs_core::decoder::Modulation;
 use hs_core::follow::{Call, TrunkFollower};
 
-/// Network identifiers that passed their BCH check — the evidence that a
-/// candidate is genuinely decoding rather than merely correlating.
-fn clean_nids(f: &TrunkFollower) -> u32 {
-    f.control_diagnostics()
-        .nids
-        .iter()
-        .filter(|n| n.bch_errors == 0)
-        .count() as u32
+/// How well a candidate frequency-and-modulation decodes the control channel,
+/// as a sortable score.
+///
+/// Grants dominate, then clean NIDs. A control channel's purpose is to issue
+/// grants, and — crucially — the modulation that produces them is not always
+/// the one with the most clean NIDs. At the right frequency, C4FM and CQPSK
+/// tie on clean NIDs, because the network identifier's BCH check survives the
+/// confusion between the two; but only the correct modulation decodes the TSBK
+/// payload behind it, so only it produces grants. Scoring on clean NIDs alone
+/// therefore picks the modulation by a coin toss and, half the time, follows a
+/// control channel that never grants anything. Counting grants first settles
+/// it. Clean NIDs still break ties and still catch a control channel that
+/// happened to be idle through the probe.
+fn control_score(f: &TrunkFollower) -> (usize, u32) {
+    let d = f.control_diagnostics();
+    let grants = d.grants.len();
+    let clean = d.nids.iter().filter(|n| n.bch_errors == 0).count() as u32;
+    (grants, clean)
 }
 
 /// Find where a channel really is, given where it should be.
@@ -66,18 +76,22 @@ pub fn measure_carrier(
     const COARSE_HZ: f64 = 1_000.0;
     const FINE_HZ: f64 = 250.0;
 
-    // Half a second is hundreds of control-channel frames — ample to separate
-    // a locked candidate from an unlocked one.
-    let want = sample_rate as usize;
+    // Grants are the discriminator between the two modulations (both decode the
+    // network identifier, only the right one decodes the grant behind it), and
+    // grants are sparse — a couple a second — so the probe has to be a few
+    // seconds, not one, or it catches none and the modulation choice falls back
+    // to a coin toss. Three seconds holds enough grants to be decisive while
+    // keeping the whole sweep to a few seconds of work at 13x real time.
+    let want = 3 * sample_rate as usize;
     let probe = &iq[..want.min(iq.len())];
 
-    let try_at = |cand: f64, m: Modulation| -> u32 {
+    let try_at = |cand: f64, m: Modulation| -> (usize, u32) {
         if (cand - center_hz).abs() >= sample_rate / 2.0 {
-            return 0;
+            return (0, 0);
         }
         let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand, m);
         f.process(probe);
-        clean_nids(&f)
+        control_score(&f)
     };
 
     // Modulation is swept alongside frequency rather than asked for. It is not
@@ -85,27 +99,27 @@ pub fn measure_carrier(
     // of both kinds — and getting it wrong looks exactly like being tuned to
     // the wrong place, so guessing would produce a confident silence.
     let mods = [Modulation::Cqpsk, Modulation::C4fm];
-    let mut best = (0u32, nominal_hz, Modulation::Cqpsk);
+    let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
     let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
     for k in -coarse..=coarse {
         let cand = nominal_hz + k as f64 * COARSE_HZ;
         for m in mods {
-            let syncs = try_at(cand, m);
-            if syncs > best.0 {
-                best = (syncs, cand, m);
+            let score = try_at(cand, m);
+            if score > best.0 {
+                best = (score, cand, m);
             }
         }
     }
-    if best.0 == 0 {
+    if best.0 == (0, 0) {
         return None;
     }
     let (centre, m) = (best.1, best.2);
     let fine = (COARSE_HZ / FINE_HZ) as i32;
     for k in -fine..=fine {
         let cand = centre + k as f64 * FINE_HZ;
-        let syncs = try_at(cand, m);
-        if syncs > best.0 {
-            best = (syncs, cand, m);
+        let score = try_at(cand, m);
+        if score > best.0 {
+            best = (score, cand, m);
         }
     }
     Some((best.1, best.2))
@@ -198,10 +212,10 @@ pub fn pick_modulation(
     let score = |m: Modulation| {
         let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
         f.process(probe);
-        clean_nids(&f)
+        control_score(&f)
     };
     let (c4, cq) = (score(Modulation::C4fm), score(Modulation::Cqpsk));
-    if c4 == 0 && cq == 0 {
+    if c4 == (0, 0) && cq == (0, 0) {
         None
     } else if c4 > cq {
         Some(Modulation::C4fm)
@@ -367,7 +381,7 @@ pub fn run_live<S: hs_source::SdrSource>(
     // real frequency and modulation both have to be measured off that air —
     // the sweep is not instant, so say so rather than look hung.
     println!("Measuring the control channel (a few seconds)…");
-    let target = block * 10;
+    let target = block * 30;
     let mut prime: Vec<f32> = Vec::with_capacity(target);
     while prime.len() < target {
         match src.read(&mut buf) {
