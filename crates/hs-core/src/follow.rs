@@ -35,6 +35,17 @@
 //! (29 syncs and 2.34 s against CQPSK's 33 and 2.88 s on the same recording).
 //! Frame syncs alone do not separate them; decoded audio does.
 //!
+//! **A call ends when the channel says so, not when it goes quiet.** A
+//! traffic channel closes every transmission with a terminator frame (TDU).
+//! Retiring on a quiet timeout alone did two bad things: each call dragged a
+//! couple of seconds of dead air, and a channel granted to a new talkgroup
+//! inside that window had its audio merged into the previous call. A
+//! terminator now retires the call after a short hang — long enough that a
+//! continuation of the same conversation keeps its decoders (and loses no
+//! re-acquisition time), short enough that calls report promptly — and a
+//! grant that reassigns an active channel retires the old call on the spot.
+//! The quiet timeout remains as the fallback for a terminator lost to noise.
+//!
 //! **The control channel does not stay put.** A site rotates its control
 //! channel among a set of frequencies — for maintenance, or on its own
 //! schedule — and announces the alternates over SCCB while it runs. A control
@@ -80,6 +91,11 @@ struct ActiveCall {
     syncs_cqpsk: u32,
     /// Blocks seen with no frame sync, used to retire a finished call.
     quiet: u32,
+    /// Nonzero once a terminator (TDU) has been seen: the channel said the
+    /// transmission is over, and this counts the hang blocks since. New voice
+    /// clears it — the conversation continued — and the decoders stay alive
+    /// through the hang, so a continuation costs no re-acquisition.
+    ending: u32,
 }
 
 /// A call the follower has finished with.
@@ -134,8 +150,13 @@ pub struct TrunkFollower {
     center_hz: f64,
     /// Added to every nominal frequency to find where it really is.
     correction_hz: f64,
-    /// Blocks without a sync before a call is considered over (~1 s).
+    /// Blocks without a sync before a call is considered over (~1 s). The
+    /// fallback for when the terminator is lost to noise.
     quiet_limit: u32,
+    /// Blocks a call lingers after its terminator before it is retired. Long
+    /// enough to bridge the gap to a continuation transmission of the same
+    /// conversation; short enough that the call reports promptly.
+    hang_limit: u32,
     /// Most calls the channelizer will follow at once.
     max_calls: usize,
     /// The control channel's modulation, which is also what a replacement
@@ -202,6 +223,7 @@ impl TrunkFollower {
             center_hz,
             correction_hz,
             quiet_limit: 20,
+            hang_limit: 3,
             max_calls: 6,
             modulation,
             control_nominal_hz: control_nominal_hz as u64,
@@ -354,14 +376,29 @@ impl TrunkFollower {
             } else {
                 call.quiet = 0;
             }
+            // A terminator ends the transmission explicitly; hold the call
+            // open for a short hang in case the conversation continues, then
+            // retire it. Both decoders watch the same RF, so a terminator
+            // from either is the channel's own word. New voice during the
+            // hang means the call carried on.
+            if a.terminators + b.terminators > 0 {
+                call.ending = call.ending.max(1);
+            } else if call.ending > 0 {
+                if a.pcm.is_empty() && b.pcm.is_empty() {
+                    call.ending += 1;
+                } else {
+                    call.ending = 0;
+                }
+            }
         }
 
-        // Retire finished calls.
-        let limit = self.quiet_limit;
+        // Retire finished calls: terminated and past the hang, or — when the
+        // terminator was lost — quiet past the timeout.
+        let (quiet_limit, hang_limit) = (self.quiet_limit, self.hang_limit);
         let mut finished = Vec::new();
         let mut i = 0;
         while i < self.active.len() {
-            if self.active[i].quiet >= limit {
+            if self.active[i].quiet >= quiet_limit || self.active[i].ending > hang_limit {
                 finished.push(self.active.remove(i));
             } else {
                 i += 1;
@@ -377,8 +414,24 @@ impl TrunkFollower {
                 out.grants_encrypted.push((g.talkgroup, g.freq_hz));
                 continue;
             }
-            if self.active.iter().any(|c| c.freq_hz == g.freq_hz) {
-                continue;
+            if let Some(pos) = self.active.iter().position(|c| c.freq_hz == g.freq_hz) {
+                if self.active[pos].talkgroup == g.talkgroup {
+                    // The same grant, repeated — grants are re-broadcast for
+                    // the whole life of a call.
+                    continue;
+                }
+                // The channel was reassigned to another talkgroup: whatever
+                // audio the old call still owes is over, and every frame
+                // decoded from here on belongs to the new one. Without this,
+                // back-to-back calls on one frequency merged into the first
+                // call's talkgroup. The new call starts fresh decoders — the
+                // CQPSK path re-acquires (~0.5 s) — but reusing the old ones
+                // would carry the old call's Link Control and clean-NID
+                // history into the new call's attribution, which is the very
+                // mistake this exists to fix.
+                let old = self.active.remove(pos);
+                let done = self.retire(old);
+                out.completed.push(done);
             }
             if self.active.len() >= self.max_calls {
                 continue;
@@ -412,6 +465,7 @@ impl TrunkFollower {
                 syncs_c4fm: 0,
                 syncs_cqpsk: 0,
                 quiet: 0,
+                ending: 0,
             });
             out.started.push((g.talkgroup, g.freq_hz));
         }

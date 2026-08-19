@@ -46,6 +46,9 @@ pub struct DecodeOutput {
     pub encrypted_skips: Vec<u16>,
     /// Frame-sync detections (for diagnostics / bench metrics).
     pub syncs: u32,
+    /// Terminator frames (TDU) seen this block: the channel explicitly
+    /// ending a transmission.
+    pub terminators: u32,
     /// Radio position reports decoded from packet data this block.
     pub locations: Vec<hs_p25::lrrp::LrrpReport>,
 }
@@ -404,6 +407,19 @@ impl ChannelDecoder {
                     self.diag.pcm_samples += pcm.len() as u64;
                     out.pcm.extend_from_slice(&pcm);
                 }
+            }
+            FramerEvent::Skipped {
+                duid: Duid::TerminatorNoLc | Duid::TerminatorWithLc,
+                ..
+            } => {
+                // The channel saying its transmission is over. The frame
+                // carries nothing to decode (the with-LC variant's link
+                // control repeats what LDU1 already said), but the *event*
+                // matters: it is the explicit end of a transmission, seconds
+                // sooner than a quiet-channel timeout can conclude the same.
+                out.terminators += 1;
+                self.active_tg = None;
+                self.active_enc = false;
             }
             _ => {}
         }

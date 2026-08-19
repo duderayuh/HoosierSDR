@@ -8,7 +8,7 @@
 use hs_core::decoder::Modulation;
 use hs_core::follow::TrunkFollower;
 use hs_dsp::cqpsk::modulate_iq;
-use hs_p25::synth::{build_ldu1, build_tsdu};
+use hs_p25::synth::{build_ldu1, build_tdu, build_tsdu};
 use hs_p25::voice::ImbeFrame;
 
 const RATE: f64 = 288_000.0;
@@ -41,28 +41,35 @@ fn iden_args(plan_base: u64) -> u64 {
     iden | bw | sign | spacing | (plan_base / 5)
 }
 
-/// Grant of TALKGROUP on channel 10 of IDEN 1.
-fn grant_args() -> u64 {
-    (((1u64 << 12) | 10) << 40) | ((TALKGROUP as u64) << 24) | 0xBEEF1
+/// Grant of `talkgroup` on channel 10 of IDEN 1.
+fn grant_args(talkgroup: u16) -> u64 {
+    (((1u64 << 12) | 10) << 40) | ((talkgroup as u64) << 24) | 0xBEEF1
 }
 
-/// A control-channel stream repeating the given TSBKs.
-fn tsdu_stream(tsbks: &[(u8, u8, u64)]) -> Vec<u8> {
+/// A control-channel stream repeating the given TSBKs `reps` times.
+fn tsdu_stream_n(tsbks: &[(u8, u8, u64)], reps: usize) -> Vec<u8> {
     let mut d = preamble(900);
-    for _ in 0..40 {
+    for _ in 0..reps {
         d.extend(build_tsdu(0x293, tsbks));
         d.extend(preamble(40));
     }
     d
 }
 
-/// Control channel: announce the channel plan, then grant a call on it.
-fn control_dibits(plan_base: u64) -> Vec<u8> {
-    tsdu_stream(&[(0x3D, 0, iden_args(plan_base)), (0x00, 0, grant_args())])
+/// A control-channel stream repeating the given TSBKs.
+fn tsdu_stream(tsbks: &[(u8, u8, u64)]) -> Vec<u8> {
+    tsdu_stream_n(tsbks, 40)
 }
 
-/// Traffic channel: silence, then voice frames.
-fn traffic_dibits() -> Vec<u8> {
+/// Control channel: announce the channel plan, then grant a call on it.
+fn control_dibits(plan_base: u64) -> Vec<u8> {
+    tsdu_stream(&[
+        (0x3D, 0, iden_args(plan_base)),
+        (0x00, 0, grant_args(TALKGROUP)),
+    ])
+}
+
+fn voice_frames() -> [ImbeFrame; 9] {
     let mut frames: [ImbeFrame; 9] = [[[0u8; 23]; 8]; 9];
     let widths = [23usize, 23, 23, 23, 15, 15, 15, 7];
     for (k, fr) in frames.iter_mut().enumerate() {
@@ -72,12 +79,23 @@ fn traffic_dibits() -> Vec<u8> {
             }
         }
     }
+    frames
+}
+
+/// Traffic channel: `reps` voice frames after a preamble.
+fn traffic_dibits_n(reps: usize) -> Vec<u8> {
+    let frames = voice_frames();
     let mut d = preamble(900);
-    for _ in 0..20 {
+    for _ in 0..reps {
         d.extend(build_ldu1(0x293, &frames));
         d.extend(preamble(40));
     }
     d
+}
+
+/// Traffic channel: silence, then voice frames.
+fn traffic_dibits() -> Vec<u8> {
+    traffic_dibits_n(20)
 }
 
 /// Modulate dibits and shift to `freq`, summing into a shared band.
@@ -156,6 +174,113 @@ fn follows_a_grant_onto_its_traffic_channel() {
 }
 
 #[test]
+fn a_terminator_ends_the_call_without_waiting_for_silence() {
+    // A traffic channel closes every transmission with a terminator (TDU).
+    // The call must retire a short hang after it — not a couple of seconds of
+    // quiet-timeout later — so this stream is sized to make the difference
+    // observable: after the traffic ends, the capture keeps running for less
+    // time than the quiet timeout needs, so only the terminator path can
+    // complete the call before the recording ends.
+    let mut traffic = traffic_dibits_n(6);
+    for _ in 0..4 {
+        traffic.extend(build_tdu(0x293));
+        traffic.extend(preamble(40));
+    }
+
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic, TRAFFIC + TUNER_ERROR);
+
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
+    let block = (RATE as usize / 10) * 2;
+    let mut completed_in_loop = Vec::new();
+    for chunk in band.chunks(block) {
+        completed_in_loop.extend(f.process(chunk).completed);
+    }
+
+    assert!(
+        completed_in_loop
+            .iter()
+            .any(|c| c.talkgroup == TALKGROUP && !c.pcm.is_empty()),
+        "terminator did not retire the call before the stream ended: {:?}",
+        completed_in_loop
+            .iter()
+            .map(|c| (c.talkgroup, c.pcm.len()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_regrant_for_another_talkgroup_splits_the_calls() {
+    // Two back-to-back transmissions on one traffic channel, granted to two
+    // different talkgroups. Skipping the second grant because the frequency
+    // was already active merged both into the first call — wrong talkgroup,
+    // wrong unit — so a reassignment must retire the old call on the spot.
+    const TALKGROUP2: u16 = 0x1111;
+    let mut control = tsdu_stream_n(
+        &[
+            (0x3D, 0, iden_args(PLAN_BASE)),
+            (0x00, 0, grant_args(TALKGROUP)),
+        ],
+        15,
+    );
+    control.extend(tsdu_stream_n(&[(0x00, 0, grant_args(TALKGROUP2))], 15));
+
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control, CONTROL + TUNER_ERROR);
+    // The voice runs continuously across the reassignment — exactly the case
+    // where a quiet timeout can never separate the two calls.
+    add_to_band(&mut band, &traffic_dibits_n(12), TRAFFIC + TUNER_ERROR);
+
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
+    let block = (RATE as usize / 10) * 2;
+    let mut started = Vec::new();
+    let mut completed = Vec::new();
+    for chunk in band.chunks(block) {
+        let out = f.process(chunk);
+        started.extend(out.started);
+        completed.extend(out.completed);
+    }
+    let in_loop = completed.len();
+    completed.extend(f.finish());
+
+    assert!(
+        started.iter().any(|(tg, _)| *tg == TALKGROUP)
+            && started.iter().any(|(tg, _)| *tg == TALKGROUP2),
+        "both grants must open calls: started {started:?}"
+    );
+    let first = completed
+        .iter()
+        .find(|c| c.talkgroup == TALKGROUP)
+        .expect("first call never completed");
+    assert!(
+        !first.pcm.is_empty(),
+        "first call lost its audio in the reassignment"
+    );
+    assert!(
+        in_loop >= 1,
+        "the reassignment must retire the first call mid-stream, not at finish()"
+    );
+    assert!(
+        completed.iter().any(|c| c.talkgroup == TALKGROUP2),
+        "second call missing: {:?}",
+        completed.iter().map(|c| c.talkgroup).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn hunts_onto_the_announced_alternate_when_the_control_channel_moves() {
     // A site rotates its control channel and announces the alternates over
     // SCCB while it runs. Here the primary broadcasts the channel plan and an
@@ -182,7 +307,7 @@ fn hunts_onto_the_announced_alternate_when_the_control_channel_moves() {
     let mut phase_b = Vec::new();
     add_to_band(
         &mut phase_b,
-        &tsdu_stream(&[(0x00, 0, grant_args())]),
+        &tsdu_stream(&[(0x00, 0, grant_args(TALKGROUP))]),
         ALT + TUNER_ERROR,
     );
     band.extend(phase_b);

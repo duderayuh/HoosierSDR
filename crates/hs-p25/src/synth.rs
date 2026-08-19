@@ -56,6 +56,16 @@ pub fn build_tsdu(nac: u16, tsbks: &[(u8, u8, u64)]) -> Vec<u8> {
     insert_status(&frame)
 }
 
+/// Build a terminator (TDU, no link control): sync and NID alone. This is
+/// how a traffic channel says a transmission is over.
+pub fn build_tdu(nac: u16) -> Vec<u8> {
+    let codec = NidCodec::new();
+    let mut frame = sync_dibits();
+    let nid = codec.encode(nac, 0x3);
+    frame.extend((0..32).rev().map(|i| ((nid >> (2 * i)) & 3) as u8));
+    insert_status(&frame)
+}
+
 /// Build a complete LDU1 stream carrying the given nine IMBE frames.
 /// Link-control bits are zeroed (v1 does not decode LC).
 pub fn build_ldu1(nac: u16, imbe: &[ImbeFrame; 9]) -> Vec<u8> {
