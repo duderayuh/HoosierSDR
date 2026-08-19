@@ -191,6 +191,13 @@ fn load_iq(path: &str) -> Vec<f32> {
     });
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes).expect("read IQ");
+    // `.cu8` is the RTL-SDR's native format: interleaved unsigned 8-bit, DC at
+    // 127.5. Load it directly so a raw `rtl_sdr` capture can be decoded without
+    // a conversion step. Everything else is interleaved little-endian f32
+    // (`.cf32`), the project's working format.
+    if path.ends_with(".cu8") || path.ends_with(".u8") {
+        return bytes.iter().map(|&b| (b as f32 - 127.5) / 127.5).collect();
+    }
     let n = bytes.len() / 4;
     (0..n)
         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
