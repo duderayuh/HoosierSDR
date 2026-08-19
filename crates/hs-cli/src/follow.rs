@@ -460,6 +460,13 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
         None => format!("TG {tg}"),
     };
 
+    // The reader has been filling the queue throughout the several-second
+    // measurement; those blocks are now stale. Discard them and start on live
+    // air, so the follower has no built-in latency and the drops that occurred
+    // while nothing was consuming do not read as a live problem.
+    while rx.try_recv().is_ok() {}
+    drops.store(0, Ordering::Relaxed);
+
     let mut n = 0usize;
     let mut syncs = 0u32;
     let mut blocks_since_print = 0u32;
@@ -468,6 +475,9 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
     let mut gate = GrantGate::new(50);
     let start = std::time::Instant::now();
     let mut total_pairs: u64 = 0;
+    // Drops seen at the previous heartbeat, so the warning reflects blocks lost
+    // *recently* rather than a stale one-time count.
+    let mut last_drops: u64 = 0;
     // Write the received IQ straight to disk, flushed per block, rather than
     // buffering it for the end: a live run ends with Ctrl-C, which terminates
     // the process before any end-of-loop write would run, so a buffered dump
@@ -547,14 +557,16 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
             let achieved = total_pairs as f64 / secs / 1e6;
             let want = sample_rate / 1e6;
             let dropped = drops.load(Ordering::Relaxed);
-            let warn = if dropped > 0 {
+            let recent = dropped - last_drops;
+            last_drops = dropped;
+            let warn = if recent > 0 {
                 "  ⚠ decoder behind"
             } else {
                 ""
             };
             println!(
                 "  … control up: {syncs} frame syncs, {n} calls followed, {oob} out of band, \
-                 {enc} encrypted  |  {achieved:.2}/{want:.2} Msps, {dropped} blocks dropped{warn}",
+                 {enc} encrypted  |  {achieved:.2}/{want:.2} Msps, {dropped} dropped{warn}",
             );
         }
     }
