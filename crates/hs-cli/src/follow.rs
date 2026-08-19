@@ -468,8 +468,17 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
     let mut gate = GrantGate::new(50);
     let start = std::time::Instant::now();
     let mut total_pairs: u64 = 0;
-    let mut dump: Vec<f32> = Vec::new();
-    let dump_cap = (sample_rate as usize) * 2 * 10;
+    // Write the received IQ straight to disk, flushed per block, rather than
+    // buffering it for the end: a live run ends with Ctrl-C, which terminates
+    // the process before any end-of-loop write would run, so a buffered dump
+    // was always lost. Flushing each block means whatever ran is on disk.
+    let mut dump_file = dump_iq.map(|path| {
+        let f = std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("could not create {path}: {e}");
+            std::process::exit(1);
+        });
+        (path.to_string(), std::io::BufWriter::new(f))
+    });
     const HEARTBEAT_BLOCKS: u32 = 30;
 
     // The reader owns the radio now; blocks arrive through the queue until it
@@ -477,8 +486,14 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
     while let Ok(chunk) = rx.recv() {
         let got = chunk.len();
         total_pairs += (got / 2) as u64;
-        if dump_iq.is_some() && dump.len() < dump_cap {
-            dump.extend_from_slice(&chunk[..got.min(dump_cap - dump.len())]);
+        if let Some((_, w)) = dump_file.as_mut() {
+            use std::io::Write;
+            let mut bytes = Vec::with_capacity(got * 4);
+            for v in &chunk[..got] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let _ = w.write_all(&bytes);
+            let _ = w.flush();
         }
         let out = f.process(&chunk);
         syncs += out.control_syncs;
@@ -532,19 +547,10 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
         }
     }
     let _ = reader.join();
-
-    if let (Some(path), false) = (dump_iq, dump.is_empty()) {
-        let mut bytes = Vec::with_capacity(dump.len() * 4);
-        for v in &dump {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        match std::fs::write(path, bytes) {
-            Ok(()) => println!(
-                "wrote {} s of received IQ to {path}",
-                dump.len() / 2 / sample_rate as usize
-            ),
-            Err(e) => eprintln!("could not write {path}: {e}"),
-        }
+    if let Some((path, mut w)) = dump_file {
+        use std::io::Write;
+        let _ = w.flush();
+        println!("received IQ saved to {path}");
     }
     println!("\nstopped: {syncs} control frame syncs, {n} calls followed, {oob} out of band");
 }
