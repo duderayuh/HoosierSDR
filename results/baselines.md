@@ -84,6 +84,44 @@ regime, and confirming it needs captures where the conventional path actually
 fails: weak signal, deep multipath, or a site with overlapping transmitters at
 comparable strength.
 
+### Equalizer A/B across a wideband capture — 8 simulcast channels, 2026-08-18
+
+A second Marion County capture (`marion.cu8`, 2.4 Msps, ~5.7 s) widens the
+sample from one channel to a whole band slice: `--scan` found **9 P25
+channels across three NACs** (0x260, 0x261, 0x6B6) — 8 CQPSK/LSM simulcast
+channels plus one marginal C4FM. Every CQPSK channel was decoded twice, with
+the CMA equalizer in and bypassed:
+
+```sh
+hoosier-sdr --rate 2400000 --offset <off> --cqpsk [--no-equalizer] --log out.json marion.cu8
+```
+
+| Offset | NAC | Type | Syncs eq/no-eq | Sync bit-err eq/no-eq | Voice frames eq/no-eq |
+|---:|:--:|:--|:--:|:--:|:--:|
+| +125.0 kHz | 0x6B6 | voice | 85 / 88 | **0.65** / 1.07 | 72 / 72 |
+| +550.0 kHz | 0x261 | control | 69 / 67 | **0.42** / 0.45 | — |
+| +100.0 kHz | 0x261 | voice | 68 / 70 | **0.10** / 0.24 | 135 / 135 |
+| −1175.0 kHz | 0x260 | voice | 63 / 63 | **0.17** / 0.57 | 126 / 126 |
+| −675.0 kHz | 0x261 | voice | 40 / 40 | **0.10** / 0.17 | 135 / 135 |
+| +250.0 kHz | 0x260 | voice | 32 / 32 | 0.31 / 0.28 | 270 / 279 |
+| +275.0 kHz | 0x260 | voice | 32 / 32 | **0.00** / 0.19 | 279 / 279 |
+| −125.0 kHz | 0x261 | voice | 32 / 32 | **0.03** / 0.09 | 279 / 279 |
+
+(Offsets are relative to the capture centre; a separate control-channel
+capture the same night, `live261.cu8`, gave the same picture: 74 vs 73 syncs,
+identical 10 grants either way.)
+
+The pattern is consistent with the single-channel A/B above, now across eight
+independent simulcast channels: **the equalizer lowers residual sync bit
+errors on 6 of 8 channels — often by 2–4×, twice to near zero — but decode
+outcomes (syncs, NIDs, voice frames) are unchanged.** At this receive
+location every channel is strong enough that the conventional path already
+survives its errors; the equalizer is demonstrably cleaning the symbols, but
+FEC was already absorbing the difference. The thesis-deciding capture is
+still the one from a degraded location — deep simulcast overlap between
+towers, where equal-strength multipath makes the detect-first path actually
+drop frames.
+
 ## Soft-decision decoding — measured on the field capture
 
 Hard slicing discards the demodulator's confidence: a C4FM symbol at +2.9 and
