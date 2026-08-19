@@ -400,6 +400,40 @@ tuner (else a live dongle covering the frequency is silently chosen), and
 count `TSBK` lines in the decoded-messages event log, normalized per
 5.83 s file pass (playback loops).
 
+### The remaining gap, characterized — burst phase hits
+
+What the last ~13 blocks per pass actually are, established by ground-truth
+matching: control channels repeat their broadcasts, so a failed block's true
+transmit pattern can be recovered by re-encoding every cleanly-decoded TSBK
+(111 unique on this capture) and taking the nearest in dibit Hamming
+distance. Four failed blocks matched within distance 19; their error maps
+share one signature:
+
+- **Errors arrive in bursts of 5–11 consecutive on-air symbols** (~1–2 ms),
+  several bursts per block, 17–19 dibit errors total — far beyond what the
+  rate-1/2 trellis or a 64-deep list can absorb.
+- **The demodulator is confidently wrong through the bursts**: per-dibit
+  confidence at the error positions runs 300–510 of 510. The soft
+  information *lies*, which is exactly why list-Viterbi recovery stops at
+  192 — the CRC-guided search is steered away from the real damage.
+- **The corruption is not a constant phase slip**: the truth→received dibit
+  mapping scatters within a burst, so no rotation hypothesis repairs it.
+
+That signature — short events where the differential phase is dragged
+around per-symbol while amplitude (and therefore confidence) stays healthy —
+is a **simulcast differential-phase hit**: the relative phase of two towers
+sweeping through a bad alignment. It is the thesis regime showing up in
+miniature on a strong channel. The stationary CMA equalizer doesn't help
+(equalizer on/off moves the count by 2), because the event is faster than
+its adaptation. Closing these blocks is demodulator work — a
+decision-feedback or fast-adapting equalizer through the burst (the
+roadmap's DFE/MLSE experiment), not framing or FEC work, and the
+degraded-location capture will amplify exactly these events.
+
+Reproduce: `HS_TSDU_DEBUG=1 hoosier-sdr … 2>` a log dumps every TSBK
+block's received dibits, confidences, ML cost and decode; the matching
+analysis is a ~60-line script over that dump.
+
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
 | _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |

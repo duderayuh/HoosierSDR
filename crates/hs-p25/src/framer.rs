@@ -83,6 +83,9 @@ enum State {
     Payload { nid: Nid, needed: usize },
 }
 
+/// Debug-only running dibit count, so HS_TSDU_DEBUG lines carry a timeline.
+static DIBIT_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct Framer {
     state: State,
     shift: u64,
@@ -157,6 +160,7 @@ impl Framer {
 
     /// Push one dibit with per-bit confidence; may emit events.
     pub fn push_soft(&mut self, sd: SoftDibit, events: &mut Vec<FramerEvent>) {
+        DIBIT_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dibit = sd.bits;
         match self.state {
             State::Search => {
@@ -327,6 +331,28 @@ impl Framer {
             let mut blocks = Vec::new();
             for k in 0..n_blocks {
                 let arr: [SoftDibit; 98] = self.buf[k * 98..(k + 1) * 98].try_into().unwrap();
+                if std::env::var_os("HS_TSDU_DEBUG").is_some() {
+                    let ml = crate::trellis::decode_soft(&arr);
+                    let ok = trellis_to_tsbk(&arr).is_some();
+                    let data_hex: String = ml
+                        .as_ref()
+                        .map(|(d, _)| d.iter().map(|b| format!("{b:02x}")).collect())
+                        .unwrap_or_default();
+                    let rx: String = arr.iter().map(|d| char::from(b'0' + d.bits)).collect();
+                    let confs: Vec<u32> =
+                        arr.iter().map(|d| d.conf[0] as u32 + d.conf[1] as u32).collect();
+                    eprintln!(
+                        "TSDU_DBG t={} blk={}/{} ok={} cost={:?} data={} rx={} confs={:?}",
+                        DIBIT_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
+                        k,
+                        n_blocks,
+                        ok,
+                        ml.map(|(_, c)| c),
+                        data_hex,
+                        rx,
+                        confs
+                    );
+                }
                 if let Some(b) = trellis_to_tsbk(&arr) {
                     blocks.push(b);
                 }
