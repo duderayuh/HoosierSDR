@@ -708,8 +708,12 @@ fn run_sdr(args: &Args) {
 fn run_sdr(_args: &Args) {
     eprintln!(
         "Live SDR capture needs a build with the rtlsdr feature:\n\
-         \n    cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M\n\
-         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)"
+         \n    RUSTFLAGS=\"-C target-cpu=native\" \\\n\
+         \n      cargo run -p hs-cli --release --features rtlsdr -- --sdr --freq 851.0125M\n\
+         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)\n\
+         \nThe target-cpu=native flag matters for --follow at 2.4 MHz: without it\n\
+         the pipeline can run just under real time and the radio drops samples.\n\
+         Pass a fixed --gain (e.g. 40) rather than relying on the tuner's AGC."
     );
     std::process::exit(2);
 }
