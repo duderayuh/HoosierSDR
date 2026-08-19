@@ -342,35 +342,53 @@ GopherTrunk reports `tsbk decoded` net of `crc_failed`).
 
 | Decoder | Input | Frame syncs | TSBKs (CRC-passed) | Voice grants |
 |---|---|:--:|:--:|:--:|
-| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | **152** | 21 |
-| **HoosierSDR** | 48k channelized | 69 | **147** | 19 |
+| **SDRTrunk 0.6.1** (P25P1 CQPSK/LSM, recording-tuner playback) | 2.4M s16 wav | n/r | **~205** | n/r |
+| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | 152 | 21 |
+| **HoosierSDR** | 48k channelized | 69 | 147 | 19 |
 | OP25 boatbod `28f2c40` (2026-08-13), `-D cqpsk` | 48k channelized | n/r | 21 | 1 |
 | GopherTrunk `09b0014` (2026-08-18), `-demod cqpsk` | 48k channelized | 8 | 17 | 7 |
 | GopherTrunk, same, wideband `-auto-tune` | 2.4M cu8 | 4 | 12 | — |
-| SDRTrunk 0.6.1 | _pending — GUI playback session_ | | | |
 
-**7× the TSBK throughput of the best external decoder on the same bits.**
-OP25 was given a parameter sweep (`-C`, `-G`, `-b`, `-X` around defaults);
-its defaults were its best run, and `-D fsk4` decoded nothing. GopherTrunk's
-best was the pre-centered single channel; its own `-auto-tune` found the
-carrier within 150 Hz of our estimate but decoded fewer frames.
+**SDRTrunk wins this recording, and the loss is localized.** Its playback
+looped the file (~2.4 passes, 484 TSBKs over 13.5 s, steady 35–36/s); per
+5.83 s pass that is ~205, and its first cold pass was already ~200. Loop
+playback was verified real, not a live dongle: the same grants repeat with
+the file's 5.8 s period, and sync-loss events cluster at the loop seams.
+The channel carries 69 TSDU frames × 3 blocks ≈ 207 TSBKs, so SDRTrunk
+decodes essentially every block. HoosierSDR syncs on **all 69 frames** but
+recovers only 152 blocks (147 channelized) — the deficit is not sync, not
+timing, not the front end: **~25% of TSBK blocks die in trellis/CRC after a
+good sync.** That is a specific, findable bug-or-gap (block 2/3 handling,
+status-symbol stripping, or soft-decision quality late in the frame), not a
+thesis problem. Two more honest notes: `--no-equalizer` scored 160, so the
+CMA equalizer slightly *hurts* TSBK decode on this strong channel; and this
+channel's distortion is mild (mean sync bit errors 0.42/48), so the
+equalizer-attribution test still needs the degraded capture described above.
 
-Read the attribution honestly: this channel's distortion is mild (mean sync
-bit errors 0.42/48), and HoosierSDR's `--no-equalizer` run scored 160 TSBKs —
-so on *this* recording the margin comes from the whole front end (timing
-recovery, soft-decision framing/FEC, sync tolerance), not specifically from
-the CMA equalizer. The equalizer-attribution test still needs the degraded
-capture described above. What this table does establish is the external
-baseline the roadmap's Phase 1 gate asks for: on real SAFE-T simulcast IQ,
-conventional detect-first receivers recover a small fraction of the control
-channel that HoosierSDR decodes.
+Against the detect-first CLI decoders the picture inverts: OP25 was given a
+parameter sweep (`-C`, `-G`, `-b`, `-X` around defaults; defaults won, and
+`-D fsk4` decoded nothing) and still managed 21; GopherTrunk's best was 17
+on the pre-centered single channel (its `-auto-tune` found the carrier
+within 150 Hz of our estimate but decoded fewer frames). HoosierSDR decodes
+7–9× either of them on the same bits.
+
+The Phase 1 gate ("measurably lower BER and sync-loss than SDRTrunk
+nightly") is therefore **not yet met on this recording**: sync is at parity
+(69/69 frames vs SDRTrunk's ~100% block recovery implies it missed no
+frames either) and block FEC is behind. The next unit of work is the TSBK
+block-decode gap — rerun this table after it closes.
 
 Reproduce: `docker build` boatbod op25 (gr3.10, Ubuntu 22.04), then
 `rx.py -F <48k.cf32> -S 48000 -D cqpsk -T trunk.tsv -v 10` and count
 `TSBK: op=` lines; `gophertrunk replay -in marion.cu8 -format u8
 -sample-rate 2400000 -protocol p25p1 -demod cqpsk -tune-hz 550000`;
 `hoosier-sdr --rate 2400000 --offset 550k --cqpsk marion.cu8` ("TSBKs
-decoded" line in the summary).
+decoded" line in the summary); SDRTrunk 0.6.1 → Add Recording Tuner on a
+16-bit stereo IQ wav of the capture (center 851.000 MHz), a P25P1 channel
+at 851.550 MHz with modulation CQPSK, preferred tuner = the recording
+tuner (else a live dongle covering the frequency is silently chosen), and
+count `TSBK` lines in the decoded-messages event log, normalized per
+5.83 s file pass (playback loops).
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
