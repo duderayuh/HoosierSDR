@@ -316,7 +316,12 @@ impl Framer {
         let decoded = trellis_to_tsbk(&arr);
         let done = match &decoded {
             Some(b) => b.last_block || n_blocks >= 3,
-            None => true,
+            // An undecodable block says nothing about whether it was the
+            // last one. Keep collecting to the 3-block maximum: control
+            // channels run full TSDUs back-to-back, so the blocks after a
+            // corrupt one are usually intact and worth decoding — giving
+            // up here silently discarded them.
+            None => n_blocks >= 3,
         };
         if done {
             let mut blocks = Vec::new();
@@ -343,11 +348,52 @@ impl Framer {
     }
 }
 
-fn trellis_to_tsbk(dibits: &[SoftDibit; 98]) -> Option<TsbkBlock> {
-    let (data, _cost) = crate::trellis::decode_soft(dibits)?;
+/// How many list-Viterbi candidates to test against the TSBK CRC when the
+/// maximum-likelihood path fails it. Chosen on the Marion County
+/// control-channel capture; deeper lists stopped paying past this.
+const TSBK_LIST: usize = 64;
+
+/// Only paths at most this far (in confidence units) above the ML path are
+/// worth testing. A genuine near-miss sits close to the ML cost; a block
+/// that is really noise has *every* path expensive, and testing 64 CRCs
+/// against noise is how a false TSBK — and a false grant — gets in.
+const TSBK_LIST_COST_MARGIN: u32 = 8 * CERTAIN as u32;
+
+/// Above this ML cost the block is noise, not a near-miss; don't go fishing.
+/// ≈18 confident bit errors in 196 — beyond anything the list ever recovers.
+const TSBK_LIST_COST_MAX: u32 = 18 * CERTAIN as u32;
+
+fn parse_trellis_data(data: &[u8; 12]) -> Option<TsbkBlock> {
     let mut bits = [0u8; 96];
     for (i, b) in bits.iter_mut().enumerate() {
         *b = (data[i / 8] >> (7 - i % 8)) & 1;
     }
     tsbk::parse(&bits)
+}
+
+fn trellis_to_tsbk(dibits: &[SoftDibit; 98]) -> Option<TsbkBlock> {
+    // Fast path: the maximum-likelihood decode, exactly as before.
+    let (data, ml_cost) = crate::trellis::decode_soft(dibits)?;
+    if let Some(b) = parse_trellis_data(&data) {
+        return Some(b);
+    }
+    if ml_cost > TSBK_LIST_COST_MAX {
+        return None;
+    }
+    // CRC-guided list recovery: the correct codeword is usually one of the
+    // next few paths — a couple of low-confidence dibits decided the other
+    // way. The CRC arbitrates (a wrong candidate passes at ~2⁻¹⁶ per try),
+    // and the cost bounds keep the search among genuine near-misses.
+    for (data, cost) in crate::trellis::decode_list_soft(dibits, TSBK_LIST)
+        .into_iter()
+        .skip(1)
+    {
+        if cost > ml_cost + TSBK_LIST_COST_MARGIN {
+            break;
+        }
+        if let Some(b) = parse_trellis_data(&data) {
+            return Some(b);
+        }
+    }
+    None
 }

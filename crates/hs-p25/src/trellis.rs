@@ -119,6 +119,81 @@ pub fn decode_soft(rx: &[crate::soft::SoftDibit; 98]) -> Option<([u8; 12], u32)>
     Some((data, total_cost))
 }
 
+/// K-best list Viterbi: like [`decode_soft`], but returns up to `list`
+/// lowest-cost decodes, best first (the first entry is the ML path).
+///
+/// The point is CRC-guided recovery: when the maximum-likelihood path fails
+/// the TSBK CRC, the correct codeword is usually one of the next few paths —
+/// a couple of low-confidence dibits decided the other way. Trying list
+/// candidates against the CRC turns those near-misses into decodes, and the
+/// CRC arbitrates: a wrong candidate passes with probability ~2⁻¹⁶ per try.
+pub fn decode_list_soft(
+    rx: &[crate::soft::SoftDibit; 98],
+    list: usize,
+) -> Vec<([u8; 12], u32)> {
+    use crate::soft::SoftDibit;
+
+    let k = list.max(1);
+    let mut deint = [SoftDibit::default(); 98];
+    for i in 0..98 {
+        deint[INTERLEAVE[i]] = rx[i];
+    }
+
+    // survivors[s]: up to k paths ending in state s, as (cost, prev_state,
+    // prev_rank). back[t][s] mirrors them for traceback.
+    let mut survivors: [Vec<(u32, u8, u8)>; 4] = Default::default();
+    survivors[0].push((0, 0, 0)); // encoder starts in state 0
+    let mut back: Vec<[Vec<(u32, u8, u8)>; 4]> = Vec::with_capacity(49);
+
+    for t in 0..49usize {
+        let (hi, lo) = (deint[t * 2], deint[t * 2 + 1]);
+        let mut next: [Vec<(u32, u8, u8)>; 4] = Default::default();
+        for d in 0..4usize {
+            let mut cands: Vec<(u32, u8, u8)> = Vec::with_capacity(4 * k);
+            for s in 0..4usize {
+                let expect = DTM[s * 4 + d];
+                let branch = hi.cost_against(expect >> 2) + lo.cost_against(expect & 3);
+                for (r, &(cost, _, _)) in survivors[s].iter().enumerate() {
+                    cands.push((cost + branch, s as u8, r as u8));
+                }
+            }
+            cands.sort_unstable();
+            cands.truncate(k);
+            next[d] = cands;
+        }
+        back.push(next.clone());
+        survivors = next;
+    }
+
+    // Rank all finishing paths, best first, and trace each back.
+    let mut finals: Vec<(u32, u8, u8)> = Vec::new();
+    for s in 0..4usize {
+        for (r, &(cost, _, _)) in survivors[s].iter().enumerate() {
+            finals.push((cost, s as u8, r as u8));
+        }
+    }
+    finals.sort_unstable();
+    finals.truncate(list);
+
+    let mut out = Vec::with_capacity(finals.len());
+    for &(cost, fs, fr) in &finals {
+        let (mut state, mut rank) = (fs, fr);
+        let mut dibits = [0u8; 49];
+        for t in (0..49).rev() {
+            dibits[t] = state;
+            let (_, ps, pr) = back[t][state as usize][rank as usize];
+            state = ps;
+            rank = pr;
+        }
+        let mut data = [0u8; 12];
+        for i in 0..48 {
+            data[i / 4] |= dibits[i] << (6 - 2 * (i % 4));
+        }
+        out.push((data, cost));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +217,52 @@ mod tests {
         let (rx2, cost2) = decode(&bad).unwrap();
         assert_eq!(rx2, data);
         assert!(cost2 > 0);
+    }
+
+    #[test]
+    fn list_decoding_recovers_blocks_the_ml_path_gets_wrong() {
+        use crate::soft::SoftDibit;
+
+        let data: [u8; 12] = [
+            0x00, 0x2F, 0x93, 0xAB, 0x00, 0x01, 0x00, 0x64, 0x00, 0x00, 0xBE, 0xEF,
+        ];
+        let tx = encode(&data);
+
+        // The list must lead with the ML decode and never lower a cost.
+        let clean: Vec<SoftDibit> = tx.iter().map(|&d| SoftDibit::hard(d)).collect();
+        let clean: [SoftDibit; 98] = clean.try_into().unwrap();
+        let list = decode_list_soft(&clean, 8);
+        assert_eq!(list[0].0, data);
+        assert_eq!(list[0].1, decode_soft(&clean).unwrap().1);
+        assert!(list.windows(2).all(|w| w[0].1 <= w[1].1));
+
+        // Find a corruption dense enough that the ML path decodes to the
+        // wrong data (adjacent-stage errors exceed the 4-state code), then
+        // show the true codeword still appears in the list — that is the
+        // candidate the TSBK CRC picks out. Deterministic search, no RNG.
+        let mut found = false;
+        'outer: for a in 0..96usize {
+            let mut bad = tx;
+            bad[a] ^= 3;
+            bad[a + 1] ^= 3;
+            bad[a + 2] ^= 1;
+            let soft: Vec<SoftDibit> = bad.iter().map(|&d| SoftDibit::hard(d)).collect();
+            let soft: [SoftDibit; 98] = soft.try_into().unwrap();
+            let (ml, _) = decode_soft(&soft).unwrap();
+            if ml == data {
+                continue; // ML already right; not the case under test
+            }
+            for (cand, _) in decode_list_soft(&soft, 64) {
+                if cand == data {
+                    found = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(
+            found,
+            "no corruption produced an ML miss that the list recovered"
+        );
     }
 
     #[test]
