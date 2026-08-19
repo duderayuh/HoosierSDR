@@ -44,7 +44,6 @@
 //! be found before anything can be followed anyway, so the correction is free.
 
 use crate::decoder::{ChannelDecoder, EqMode, Modulation};
-use hs_dsp::channelizer::Channelizer;
 
 /// The equalizer is the point of the project on CQPSK, where a simulcast
 /// channel is what it exists to correct; on C4FM it has nothing to do.
@@ -71,11 +70,6 @@ struct ActiveCall {
     syncs_cqpsk: u32,
     /// Blocks seen with no frame sync, used to retire a finished call.
     quiet: u32,
-    /// Modulation inherited from the control channel, tried first.
-    primary: Modulation,
-    /// Whether the other modulation is still being decoded as a hedge. Cleared
-    /// once `primary` has produced enough audio to have proven itself.
-    hedging: bool,
 }
 
 /// A call the follower has finished with.
@@ -104,10 +98,6 @@ pub struct FollowOutput {
     pub completed: Vec<Call>,
     /// Frame syncs on the control channel, a health signal.
     pub control_syncs: u32,
-    /// Calls that confirmed the site's modulation this block and stopped
-    /// decoding the alternative. Reported so the saving can be tested rather
-    /// than assumed.
-    pub hedges_dropped: u32,
     /// Grants the control channel issued that this capture cannot follow
     /// because the traffic channel is outside the tuned band. Reported so a
     /// live listener sees the system *is* active — and learns the band it would
@@ -118,9 +108,9 @@ pub struct FollowOutput {
 }
 
 pub struct TrunkFollower {
-    chan: Channelizer,
-    /// Modulation this site uses, and hence what each call is decoded with.
-    modulation: Modulation,
+    /// Capture rate. Each channel is decimated straight out of the wideband
+    /// stream at this rate — see the note on `new`.
+    sample_rate: f64,
     control: ChannelDecoder,
     active: Vec<ActiveCall>,
     center_hz: f64,
@@ -141,6 +131,14 @@ impl TrunkFollower {
     /// control channel later names.
     /// `modulation` is what the control channel uses, which is also what its
     /// traffic channels are decoded with — see the note on simulcast above.
+    ///
+    /// Each channel is pulled out of the wideband stream by its own decimator
+    /// inside a [`ChannelDecoder`], not by a shared FFT channelizer. A
+    /// channelizer transforms the whole band every block, a cost paid whether
+    /// one channel is wanted or a hundred; it wins only past several channels.
+    /// A trunk follower watches one control channel and a handful of calls, so
+    /// direct decimation is far cheaper — measured at ~6x on one channel — and
+    /// that headroom is what lets the follower keep up with a live radio.
     pub fn new(
         sample_rate: f64,
         center_hz: f64,
@@ -150,19 +148,22 @@ impl TrunkFollower {
     ) -> Self {
         let correction_hz = control_measured_hz - control_nominal_hz;
         let control_offset = control_measured_hz - center_hz;
-        let chan = Channelizer::new(sample_rate, &[control_offset]);
-        let rate = chan.output_rate();
         Self {
-            chan,
-            modulation,
+            sample_rate,
             // A control channel is continuous, so the CQPSK front end's blind
-            // acquisition always has something to lock to.
-            control: ChannelDecoder::with_offset(rate, modulation, eq_for(modulation), 0.0),
+            // acquisition always has something to lock to. Each decoder
+            // decimates its own channel straight out of the wideband stream.
+            control: ChannelDecoder::with_offset(
+                sample_rate,
+                modulation,
+                eq_for(modulation),
+                control_offset,
+            ),
             active: Vec::new(),
             center_hz,
             correction_hz,
             quiet_limit: 20,
-            max_calls: 8,
+            max_calls: 6,
         }
     }
 
@@ -200,23 +201,37 @@ impl TrunkFollower {
     /// produced audio, and name the radio from Link Control when the grant
     /// did not.
     fn retire(&mut self, c: ActiveCall) -> Call {
-        // Choose on decoded audio, not on frame syncs. The two counts run
-        // close on a strong channel — 110 against 116 on the first real
-        // capture — so syncs do not separate them, and the modulation that
-        // syncs marginally more often can still produce visibly less
-        // audio. Audio is what a scanner is for, so it decides.
-        let (modulation, pcm, lc) = match (c.pcm_c4fm.len(), c.pcm_cqpsk.len()) {
-            (0, 0) => (None, Vec::new(), None),
-            (a, b) if a >= b => (
+        // Choose on BCH-clean network identifiers, not on decoded audio.
+        // Both C4FM and CQPSK partially decode each other's signals — a C4FM
+        // discriminator on a CQPSK channel still emits audio, of similar
+        // length — so audio length does not tell the correct modulation from
+        // the incorrect one on a borderline channel. A clean NID has passed
+        // its BCH check, so it is decode correctness measured directly; the
+        // modulation that produces more of them is the one actually locked.
+        // Audio length breaks a tie only when neither is cleaner.
+        let clean = |d: &crate::diag::Diagnostics| -> usize {
+            d.nids.iter().filter(|n| n.bch_errors == 0).count()
+        };
+        let (n_c4, n_cq) = (clean(c.c4fm.diagnostics()), clean(c.cqpsk.diagnostics()));
+        let pick_c4fm = match n_c4.cmp(&n_cq) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => c.pcm_c4fm.len() >= c.pcm_cqpsk.len(),
+        };
+        let (modulation, pcm, lc) = if c.pcm_c4fm.is_empty() && c.pcm_cqpsk.is_empty() {
+            (None, Vec::new(), None)
+        } else if pick_c4fm {
+            (
                 Some(Modulation::C4fm),
                 c.pcm_c4fm,
                 c.c4fm.diagnostics().link_control.first().cloned(),
-            ),
-            _ => (
+            )
+        } else {
+            (
                 Some(Modulation::Cqpsk),
                 c.pcm_cqpsk,
                 c.cqpsk.diagnostics().link_control.first().cloned(),
-            ),
+            )
         };
         // A grant does not always name the radio; Link Control, which the
         // traffic channel sends about itself, usually does. Take the first
@@ -241,61 +256,35 @@ impl TrunkFollower {
     /// Feed wideband IQ; returns the calls that started and finished.
     pub fn process(&mut self, iq: &[f32]) -> FollowOutput {
         let mut out = FollowOutput::default();
-        let chans = self.chan.process(iq);
-        if chans.is_empty() {
-            return out;
-        }
 
-        // Channel 0 is always the control channel.
-        let control_out = self.control.process(&chans[0]);
+        // The control channel decimates itself out of the wideband stream.
+        let control_out = self.control.process(iq);
         out.control_syncs = control_out.syncs;
 
-        // Traffic channels follow, in the order `retune` laid them out.
-        for (i, call) in self.active.iter_mut().enumerate() {
-            let Some(samples) = chans.get(i + 1) else {
-                continue;
-            };
-            // The site's modulation always runs. The other one runs only
-            // until the first has proven itself.
-            let want_c4fm = call.hedging || call.primary == Modulation::C4fm;
-            let want_cqpsk = call.hedging || call.primary == Modulation::Cqpsk;
-            let mut syncs = 0;
-            if want_c4fm {
-                let a = call.c4fm.process(samples);
-                syncs = syncs.max(a.syncs);
-                call.syncs_c4fm += a.syncs;
-                call.pcm_c4fm.extend_from_slice(&a.pcm);
-            }
-            if want_cqpsk {
-                let b = call.cqpsk.process(samples);
-                syncs = syncs.max(b.syncs);
-                call.syncs_cqpsk += b.syncs;
-                call.pcm_cqpsk.extend_from_slice(&b.pcm);
-            }
-            if syncs == 0 {
+        // Each active call does the same, at its own offset.
+        for call in self.active.iter_mut() {
+            let samples: &[f32] = iq;
+            // Both modulations run for the whole call, and `retire` picks the
+            // winner on total decoded audio at the end. Deciding early is
+            // tempting for the CPU it would save, but it cannot be done on
+            // accumulated audio: CQPSK's blind carrier acquisition takes about
+            // half a second during which it emits nothing, while the C4FM
+            // discriminator locks in one frame, so early audio always favours
+            // C4FM even on a CQPSK signal. A mis-detected control channel plus
+            // an early drop killed the correct modulation exactly this way. The
+            // per-channel decimation this follower now uses is cheap enough
+            // that running both to the end is affordable, and it is the only
+            // unbiased comparison.
+            let a = call.c4fm.process(samples);
+            let b = call.cqpsk.process(samples);
+            call.syncs_c4fm += a.syncs;
+            call.syncs_cqpsk += b.syncs;
+            call.pcm_c4fm.extend_from_slice(&a.pcm);
+            call.pcm_cqpsk.extend_from_slice(&b.pcm);
+            if a.syncs.max(b.syncs) == 0 {
                 call.quiet += 1;
             } else {
                 call.quiet = 0;
-            }
-
-            // Two voice frames is past any accident: the inherited modulation
-            // is decoding, so stop paying for the alternative. Dropping the
-            // hedge only ever happens *after* the primary is confirmed
-            // working, so it cannot cost audio — if the primary never
-            // confirms, both keep running and the end-of-call comparison
-            // decides exactly as it did before.
-            const CONFIRM_SAMPLES: usize = 2 * 1440;
-            if call.hedging {
-                let (kept, dropped) = match call.primary {
-                    Modulation::C4fm => (call.pcm_c4fm.len(), &mut call.pcm_cqpsk),
-                    Modulation::Cqpsk => (call.pcm_cqpsk.len(), &mut call.pcm_c4fm),
-                };
-                if kept >= CONFIRM_SAMPLES {
-                    dropped.clear();
-                    dropped.shrink_to_fit();
-                    call.hedging = false;
-                    out.hedges_dropped += 1;
-                }
             }
         }
 
@@ -334,43 +323,37 @@ impl TrunkFollower {
                 out.grants_out_of_band.push((g.talkgroup, g.freq_hz));
                 continue;
             }
-            let rate = self.chan.output_rate();
             self.active.push(ActiveCall {
                 freq_hz: g.freq_hz,
                 talkgroup: g.talkgroup,
                 source_unit: g.source_unit,
-                c4fm: ChannelDecoder::with_offset(rate, Modulation::C4fm, EqMode::Bypass, 0.0),
-                cqpsk: ChannelDecoder::with_offset(rate, Modulation::Cqpsk, EqMode::Enabled, 0.0),
+                c4fm: ChannelDecoder::with_offset(
+                    self.sample_rate,
+                    Modulation::C4fm,
+                    EqMode::Bypass,
+                    offset,
+                ),
+                cqpsk: ChannelDecoder::with_offset(
+                    self.sample_rate,
+                    Modulation::Cqpsk,
+                    EqMode::Enabled,
+                    offset,
+                ),
                 pcm_c4fm: Vec::new(),
                 pcm_cqpsk: Vec::new(),
                 syncs_c4fm: 0,
                 syncs_cqpsk: 0,
                 quiet: 0,
-                primary: self.modulation,
-                hedging: true,
             });
             out.started.push((g.talkgroup, g.freq_hz));
         }
 
-        self.retune();
         out
     }
 
     fn nyquist(&self) -> f64 {
-        // The channelizer refuses offsets at or beyond this.
-        self.chan.sample_rate() / 2.0 - 12_500.0
-    }
-
-    /// Point the channelizer at the control channel plus every active call.
-    fn retune(&mut self) {
-        let mut offsets = vec![self.control_offset()];
-        for c in &self.active {
-            offsets.push(c.freq_hz as f64 + self.correction_hz - self.center_hz);
-        }
-        self.chan.set_channels(&offsets);
-    }
-
-    fn control_offset(&self) -> f64 {
-        self.chan.actual_offsets_hz()[0]
+        // Leave a channel's width of margin from the band edge, where the
+        // decimator's filter rolls off.
+        self.sample_rate / 2.0 - 12_500.0
     }
 }

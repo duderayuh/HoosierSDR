@@ -110,25 +110,24 @@ fn follows_a_grant_onto_its_traffic_channel() {
     let mut started = Vec::new();
     let mut completed = Vec::new();
     let mut control_syncs = 0;
-    let mut hedges_dropped = 0;
     for chunk in band.chunks(block) {
         let out = f.process(chunk);
         control_syncs += out.control_syncs;
-        hedges_dropped += out.hedges_dropped;
         started.extend(out.started);
         completed.extend(out.completed);
     }
 
     assert!(control_syncs > 0, "control channel never decoded");
 
-    // The traffic channel here is CQPSK, the same as the control channel, so
-    // the follower's inherited guess is right and it must stop decoding the
-    // alternative. If this stops holding, every call silently costs twice what
-    // it should — a regression with no visible symptom.
-    assert_eq!(
-        hedges_dropped, 1,
-        "the call never confirmed its modulation, so both decoders ran the whole way"
-    );
+    // The traffic channel here is CQPSK, so a completed call must report CQPSK
+    // — the follower runs both modulations and keeps whichever decodes cleanly.
+    if let Some(call) = completed.iter().find(|c| c.talkgroup == TALKGROUP) {
+        assert_eq!(
+            call.modulation,
+            Some(Modulation::Cqpsk),
+            "CQPSK traffic decoded as the wrong modulation"
+        );
+    }
     assert!(
         started
             .iter()
