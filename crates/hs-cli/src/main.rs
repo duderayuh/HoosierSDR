@@ -12,6 +12,8 @@ mod wav;
 
 use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
 
+mod follow;
+
 #[cfg(feature = "radioreference")]
 mod rr;
 use std::io::Read;
@@ -35,6 +37,9 @@ struct Args {
     gain: Option<f64>,
     offset: f64,
     no_equalizer: bool,
+    follow: bool,
+    control: f64,
+    control_measured: Option<f64>,
     rr_system: Option<u32>,
     rr_dump: Option<String>,
     scan: bool,
@@ -59,6 +64,9 @@ fn parse_args() -> Args {
         gain: None,
         offset: 0.0,
         no_equalizer: false,
+        follow: false,
+        control: 0.0,
+        control_measured: None,
         rr_system: None,
         rr_dump: None,
         scan: false,
@@ -83,6 +91,9 @@ fn parse_args() -> Args {
             "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
             "--rr-dump" => a.rr_dump = it.next(),
             "--uv-quality" => a.uv_quality = it.next().and_then(|s| s.parse().ok()),
+            "--follow" => a.follow = true,
+            "--control" => a.control = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
+            "--control-measured" => a.control_measured = it.next().and_then(|s| parse_freq(&s)),
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
@@ -147,6 +158,12 @@ fn print_help() {
              --uv-quality <N> Vocoder unvoiced synthesis detail, 1-64 (default 3).\n\
              \x20              Affects only how audio is rendered, never what is\n\
              \x20              decoded. Higher is smoother but not brighter; A/B by ear.\n\
+             --follow       Trunk-follow: decode the control channel and every call\n\
+             \x20              it grants, from one wideband capture. Needs --control\n\
+             \x20              and --freq (the capture centre).\n\
+             --control <HZ> Nominal control-channel frequency to follow.\n\
+             --control-measured <HZ>  Where it actually is, if the tuner is far\n\
+             \x20              enough off that auto-detection struggles.\n\
              --scan         Sweep the whole captured band and report which channels\n\
              \x20              actually carry P25 — by decoding, not by signal power.\n\
              \x20              Marks control vs voice channels and reports each NAC.\n\
@@ -174,6 +191,13 @@ fn load_iq(path: &str) -> Vec<f32> {
     });
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes).expect("read IQ");
+    // `.cu8` is the RTL-SDR's native format: interleaved unsigned 8-bit, DC at
+    // 127.5. Load it directly so a raw `rtl_sdr` capture can be decoded without
+    // a conversion step. Everything else is interleaved little-endian f32
+    // (`.cf32`), the project's working format.
+    if path.ends_with(".cu8") || path.ends_with(".u8") {
+        return bytes.iter().map(|&b| (b as f32 - 127.5) / 127.5).collect();
+    }
     let n = bytes.len() / 4;
     (0..n)
         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
@@ -439,8 +463,27 @@ fn load_catalog(path: &str) -> Option<hs_core::catalog::CsvCatalog> {
     }
 }
 
+/// Warn about a sample rate that decodes a continuous carrier but mangles
+/// voice.
+///
+/// The RTL-SDR's 225–300 kHz range is its lowest-quality mode, with aggressive
+/// internal decimation. Measured against a live P25 system, a control channel
+/// captured there decoded cleanly (its carrier is continuous) while a voice
+/// call on the same capture produced 0.2 s of audio out of 7 s — the framer
+/// starved of usable symbols — that at 1.2 MHz decoded in full. The rate is not
+/// rejected, because control-only work there is fine, but voice needs headroom.
+fn warn_low_rate(rate: f64) {
+    if (225_001.0..=300_000.0).contains(&rate) {
+        eprintln!(
+            "note: {:.0} kHz is the RTL-SDR's lowest-quality mode. A control channel\n             decodes there, but voice frames are marginal — capture voice at >=900 kHz.",
+            rate / 1000.0
+        );
+    }
+}
+
 fn main() {
     let args = parse_args();
+    warn_low_rate(args.rate);
 
     if let Some(sys_id) = args.rr_system {
         std::process::exit(run_rr(
@@ -470,6 +513,23 @@ fn main() {
 
     if args.scan {
         run_scan(&iq, &args);
+        return;
+    }
+
+    if args.follow {
+        if args.control <= 0.0 {
+            eprintln!("--follow needs --control <HZ> (the control-channel frequency)");
+            std::process::exit(2);
+        }
+        let catalog = args.catalog.as_deref().and_then(load_catalog);
+        follow::run_file(
+            &iq,
+            args.rate,
+            args.freq,
+            args.control,
+            args.control_measured,
+            catalog.as_ref(),
+        );
         return;
     }
 
@@ -581,6 +641,24 @@ fn run_sdr(args: &Args) {
             std::process::exit(1);
         }
     };
+    if args.follow {
+        if args.control <= 0.0 {
+            eprintln!("--follow needs --control <HZ> (the control-channel frequency)");
+            std::process::exit(2);
+        }
+        let catalog = args.catalog.as_deref().and_then(load_catalog);
+        follow::run_live(
+            src,
+            args.rate,
+            args.freq,
+            args.control,
+            args.control_measured,
+            catalog.as_ref(),
+            args.save_iq.as_deref(),
+        );
+        return;
+    }
+
     println!(
         "Capturing {} at {:.4} MHz, {} Hz{}… Ctrl-C to stop.",
         if args.cqpsk { "CQPSK/LSM" } else { "C4FM" },
@@ -630,8 +708,12 @@ fn run_sdr(args: &Args) {
 fn run_sdr(_args: &Args) {
     eprintln!(
         "Live SDR capture needs a build with the rtlsdr feature:\n\
-         \n    cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M\n\
-         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)"
+         \n    RUSTFLAGS=\"-C target-cpu=native\" \\\n\
+         \n      cargo run -p hs-cli --release --features rtlsdr -- --sdr --freq 851.0125M\n\
+         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)\n\
+         \nThe target-cpu=native flag matters for --follow at 2.4 MHz: without it\n\
+         the pipeline can run just under real time and the radio drops samples.\n\
+         Pass a fixed --gain (e.g. 40) rather than relying on the tuner's AGC."
     );
     std::process::exit(2);
 }

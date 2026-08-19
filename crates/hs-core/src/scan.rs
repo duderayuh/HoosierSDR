@@ -8,10 +8,33 @@
 //! an analog repeater or a data link; only a decoder can.
 //!
 //! So this sweeps every channel position inside the captured band, runs the
-//! real decoder at each, and reports the offsets where P25 frame syncs
-//! actually appear — with the NAC, the modulation, and the frame types seen.
-//! An RTL-SDR at 240 kHz covers nineteen 12.5 kHz channels at once, so one
-//! recording is enough to survey a whole slice of spectrum.
+//! real decoder at each, and reports the offsets where P25 actually decodes —
+//! with the NAC, the modulation, and the frame types seen. An RTL-SDR at
+//! 240 kHz covers nineteen 12.5 kHz channels at once, so one recording is
+//! enough to survey a whole slice of spectrum.
+//!
+//! ## Frame syncs are not the evidence
+//!
+//! This originally ranked candidates by how many frame syncs they produced,
+//! and that was wrong in a way that took a field capture to expose. On a real
+//! recording the sweep reported a channel at 857.6688 MHz with NAC 0xFFF and
+//! 108 syncs, and concluded the capture held no control channel at all — while
+//! the trunk follower, pointed at 857.6625 MHz, decoded that same control
+//! channel cleanly and followed three calls off it.
+//!
+//! A *mistuned* decode produces **more** syncs, not fewer. The sync correlator
+//! fires on a 48-bit pattern in a noisy symbol stream, and detuning by half a
+//! channel raises its false-alarm rate; nothing downstream of it works, but the
+//! count goes up. So the garbage position outranked the true one, and
+//! `dedupe_adjacent` — which keeps the strongest entry of each cluster — then
+//! absorbed the real channel into it as a duplicate. One bad metric produced a
+//! wrong frequency, a wrong NAC, a wrong modulation, and a confidently wrong
+//! conclusion.
+//!
+//! What separates a real lock from a false one is the network identifier
+//! behind each sync: it carries a BCH code, so a wrong frequency or the wrong
+//! modulation yields syncs whose NIDs do not check out. Everything here now
+//! ranks, filters and reports on NIDs that pass that check.
 
 use crate::decoder::{ChannelDecoder, EqMode, Modulation};
 
@@ -71,6 +94,9 @@ pub struct Found {
     pub syncs: u32,
     /// Mean sync-correlation bit errors (of 48). Lower is a stronger lock.
     pub mean_sync_errors: f64,
+    /// Network identifiers that passed their BCH check. This, not `syncs`, is
+    /// what says a candidate is genuinely decoding — see the note above.
+    pub clean_nids: u32,
     /// NAC, if any NID decoded. Identifies the system, and matches the `nac`
     /// field RadioReference reports per site.
     pub nac: Option<u16>,
@@ -99,14 +125,16 @@ impl Found {
         };
         match self.freq_hz {
             Some(f) => format!(
-                "{what}  {:.4} MHz  {modl}  {nac}  {:>4} syncs  err {:.2}",
+                "{what}  {:.4} MHz  {modl}  {nac}  {:>4} nid  {:>4} syncs  err {:.2}",
                 f / 1e6,
+                self.clean_nids,
                 self.syncs,
                 self.mean_sync_errors
             ),
             None => format!(
-                "{what}  {:+8.1} kHz  {modl}  {nac}  {:>4} syncs  err {:.2}",
+                "{what}  {:+8.1} kHz  {modl}  {nac}  {:>4} nid  {:>4} syncs  err {:.2}",
                 self.offset_hz / 1e3,
+                self.clean_nids,
                 self.syncs,
                 self.mean_sync_errors
             ),
@@ -123,6 +151,10 @@ pub struct ScanConfig {
     /// can appear by chance in noise across a long sweep; a real channel
     /// transmits one every 180 ms.
     pub min_syncs: u32,
+    /// Ignore a candidate that never produced this many BCH-clean network
+    /// identifiers. A mistuned position can manufacture frame syncs by the
+    /// hundred, but it cannot manufacture NIDs that pass their check.
+    pub min_clean_nids: u32,
     /// Seconds of the capture to analyse at each offset. A sweep decodes the
     /// band once per offset per modulation, so the whole cost scales with this
     /// — and a few seconds already carries tens of frame syncs, which is
@@ -136,6 +168,7 @@ impl ScanConfig {
             sample_rate,
             center_hz: None,
             min_syncs: 4,
+            min_clean_nids: 2,
             secs: 4.0,
         }
     }
@@ -211,7 +244,7 @@ pub fn scan(iq: &[f32], cfg: &ScanConfig) -> Vec<Found> {
         for modulation in [Modulation::Cqpsk, Modulation::C4fm] {
             if let Some(f) = try_offset(iq, cfg, offset, modulation) {
                 let better = match &best {
-                    Some(b) => f.syncs > b.syncs,
+                    Some(b) => (f.clean_nids, f.syncs) > (b.clean_nids, b.syncs),
                     None => true,
                 };
                 if better {
@@ -227,9 +260,13 @@ pub fn scan(iq: &[f32], cfg: &ScanConfig) -> Vec<Found> {
     // A single transmitter shows up at several adjacent grid steps (the
     // channel is wider than the step). Keep only the strongest of each
     // cluster, so the report names channels rather than sweep positions.
-    out.sort_by(|a, b| b.syncs.cmp(&a.syncs));
+    // Rank by clean NIDs so the entry kept from each cluster is the
+    // best-tuned position, not the one whose detuning generated the most
+    // false syncs.
+    let rank = |f: &Found| (f.clean_nids, f.syncs);
+    out.sort_by_key(|f| std::cmp::Reverse(rank(f)));
     dedupe_adjacent(&mut out);
-    out.sort_by(|a, b| b.syncs.cmp(&a.syncs));
+    out.sort_by_key(|f| std::cmp::Reverse(rank(f)));
     out
 }
 
@@ -240,12 +277,17 @@ fn try_offset(iq: &[f32], cfg: &ScanConfig, offset: f64, modulation: Modulation)
         return None;
     }
     let diag = dec.diagnostics();
+    let clean_nids = diag.nids.iter().filter(|n| n.bch_errors == 0).count() as u32;
+    if clean_nids < cfg.min_clean_nids {
+        return None;
+    }
     Some(Found {
         offset_hz: offset,
         freq_hz: cfg.center_hz.map(|c| snap_to_channel(c + offset)),
         modulation,
         syncs: out.syncs,
         mean_sync_errors: diag.mean_sync_errors(),
+        clean_nids,
         nac: dominant_nac(diag),
         // A resolved grant, or any trunking traffic, marks the control channel.
         control_channel: !out.grants.is_empty() || !diag.grants.is_empty(),
@@ -253,11 +295,13 @@ fn try_offset(iq: &[f32], cfg: &ScanConfig, offset: f64, modulation: Modulation)
     })
 }
 
-/// The most frequently seen NAC. A stray NID error can invent a value, so the
-/// mode across the capture is more trustworthy than the first one decoded.
+/// The most frequently seen NAC, counting only identifiers that passed their
+/// BCH check. A stray NID error can invent a value — 0xFFF turned up all over
+/// a real sweep this way — so the mode across the *verified* words is the only
+/// trustworthy answer.
 fn dominant_nac(diag: &crate::diag::Diagnostics) -> Option<u16> {
     let mut counts: Vec<(u16, u32)> = Vec::new();
-    for n in &diag.nids {
+    for n in diag.nids.iter().filter(|n| n.bch_errors == 0) {
         match counts.iter_mut().find(|(v, _)| *v == n.nac) {
             Some((_, c)) => *c += 1,
             None => counts.push((n.nac, 1)),

@@ -128,6 +128,70 @@ fn full_receiver_locks_and_recovers_on_offset_signal() {
     );
 }
 
+/// A traffic channel is idle until a call keys up, so the equalized receiver
+/// meets a long run of near-silence and then a sudden full-power onset. That
+/// transient once drove the CMA equalizer's taps to NaN — the un-normalized
+/// update overshot on samples the AGC had not yet levelled — and a single NaN
+/// killed the receiver for the rest of the capture: every output NaN, and no
+/// re-acquisition, because `NaN > threshold` is false. The NLMS-normalized
+/// update is what keeps that transient bounded. This reproduces the exact
+/// shape (idle → signal) and requires a clean decode of the part that carries
+/// data.
+#[test]
+fn recovers_from_a_cold_idle_then_signal_onset() {
+    // ~0.4 s of idle: low-level noise, no signal at all.
+    let mut n = xorshift(0xC0FFEE);
+    // Idle is the band's noise floor, not silence — comparable in level to
+    // the signal that follows, as a channelized idle channel actually is.
+    let idle: Vec<C32> = (0..4000).map(|_| C32::new(0.5 * n(), 0.5 * n())).collect();
+
+    // Then a real transmission at an offset, exactly as a keyed-up call looks.
+    let mut s = 0x9E37_79B9u64;
+    let dibits: Vec<u8> = (0..4000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let sig = impair(&modulate_iq(&dibits, SPS, BETA), 0.01, 0.6, 0.05, 7);
+
+    let mut rx = idle;
+    rx.extend_from_slice(&sig);
+
+    let mut recv = CqpskReceiver::new(SPS, BETA);
+    let mut out = Vec::new();
+    for &x in &rx {
+        if let Some(d) = recv.push(x) {
+            out.push(d);
+        }
+    }
+
+    // Every emitted symbol must be finite — the NaN bug produced a stream that
+    // was technically present but all-NaN downstream.
+    assert!(
+        recv.freq_bias().is_finite(),
+        "carrier estimate went non-finite"
+    );
+
+    // The tail (well into the transmission) must decode cleanly. Before the
+    // fix this was 100% errors, because the receiver never recovered from the
+    // onset transient.
+    assert!(
+        out.len() > 1000,
+        "too few symbols after onset: {}",
+        out.len()
+    );
+    let tail = &out[out.len() - 800..];
+    let e = best_ber(tail, &dibits);
+    eprintln!("cold idle → onset BER = {e:.4}");
+    assert!(
+        e < 0.05,
+        "receiver did not recover from the onset: BER {e:.4}"
+    );
+}
+
 /// Resample `iq` at a slightly wrong clock (linear interpolation) to inject a
 /// fractional, drifting timing offset — the timing recovery must track it.
 fn clock_skew(iq: &[C32], ratio: f32) -> Vec<C32> {
