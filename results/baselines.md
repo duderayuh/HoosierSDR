@@ -343,40 +343,50 @@ GopherTrunk reports `tsbk decoded` net of `crc_failed`).
 | Decoder | Input | Frame syncs | TSBKs (CRC-passed) | Voice grants |
 |---|---|:--:|:--:|:--:|
 | **SDRTrunk 0.6.1** (P25P1 CQPSK/LSM, recording-tuner playback) | 2.4M s16 wav | n/r | **~205** | n/r |
-| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | 152 | 21 |
-| **HoosierSDR** | 48k channelized | 69 | 147 | 19 |
+| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | **192** | 27 |
+| **HoosierSDR** | 48k channelized | 69 | 191 | 25 |
 | OP25 boatbod `28f2c40` (2026-08-13), `-D cqpsk` | 48k channelized | n/r | 21 | 1 |
 | GopherTrunk `09b0014` (2026-08-18), `-demod cqpsk` | 48k channelized | 8 | 17 | 7 |
 | GopherTrunk, same, wideband `-auto-tune` | 2.4M cu8 | 4 | 12 | — |
 
-**SDRTrunk wins this recording, and the loss is localized.** Its playback
-looped the file (~2.4 passes, 484 TSBKs over 13.5 s, steady 35–36/s); per
-5.83 s pass that is ~205, and its first cold pass was already ~200. Loop
-playback was verified real, not a live dongle: the same grants repeat with
-the file's 5.8 s period, and sync-loss events cluster at the loop seams.
-The channel carries 69 TSDU frames × 3 blocks ≈ 207 TSBKs, so SDRTrunk
-decodes essentially every block. HoosierSDR syncs on **all 69 frames** but
-recovers only 152 blocks (147 channelized) — the deficit is not sync, not
-timing, not the front end: **~25% of TSBK blocks die in trellis/CRC after a
-good sync.** That is a specific, findable bug-or-gap (block 2/3 handling,
-status-symbol stripping, or soft-decision quality late in the frame), not a
-thesis problem. Two more honest notes: `--no-equalizer` scored 160, so the
-CMA equalizer slightly *hurts* TSBK decode on this strong channel; and this
-channel's distortion is mild (mean sync bit errors 0.42/48), so the
-equalizer-attribution test still needs the degraded capture described above.
+**SDRTrunk set the bar, and chasing it fixed two real defects.** Its
+playback looped the file (~2.4 passes, 484 TSBKs over 13.5 s, steady
+35–36/s); per 5.83 s pass that is ~205, verified to be the recording and
+not a live dongle (the same grants repeat with the file's 5.8 s period, and
+sync losses cluster at the loop seams). The channel carries 69 TSDU frames
+× 3 blocks ≈ 207 TSBKs — SDRTrunk decodes essentially every block, and
+HoosierSDR's first run managed only **152** despite syncing on **all 69
+frames**: the deficit was entirely TSBK blocks dying in trellis/CRC after a
+good sync, at a uniform ~13% per block position. Instrumenting on this
+capture found two fixes:
+
+1. **A failed block no longer aborts the TSDU.** The framer treated an
+   undecodable block as end-of-frame and silently discarded the intact
+   blocks behind it — 28 blocks on this capture. 152 → 173.
+2. **CRC-guided list Viterbi.** When the maximum-likelihood trellis path
+   fails the CRC, a K-best list tries the next candidates and the CRC
+   arbitrates; cost bounds keep the search among genuine near-misses so a
+   noise block cannot fish a lucky CRC out of 64 tries. 173 → **192**, and
+   grants 21 → 27. Syncs unchanged throughout — nothing was traded away.
+
+The same fixes took the `live261.cu8` control capture from 190 → 203 TSBKs
+and 10 → 14 grants. A residual note: pre-fix, `--no-equalizer` beat the
+equalizer 160 to 152 on this strong channel; post-fix the order rights
+itself (192 vs 190). And this channel's distortion is mild (mean sync bit
+errors 0.42/48), so the equalizer-attribution test still needs the degraded
+capture described above.
 
 Against the detect-first CLI decoders the picture inverts: OP25 was given a
 parameter sweep (`-C`, `-G`, `-b`, `-X` around defaults; defaults won, and
 `-D fsk4` decoded nothing) and still managed 21; GopherTrunk's best was 17
 on the pre-centered single channel (its `-auto-tune` found the carrier
 within 150 Hz of our estimate but decoded fewer frames). HoosierSDR decodes
-7–9× either of them on the same bits.
+~9–11× either of them on the same bits.
 
 The Phase 1 gate ("measurably lower BER and sync-loss than SDRTrunk
-nightly") is therefore **not yet met on this recording**: sync is at parity
-(69/69 frames vs SDRTrunk's ~100% block recovery implies it missed no
-frames either) and block FEC is behind. The next unit of work is the TSBK
-block-decode gap — rerun this table after it closes.
+nightly") is **not yet met on this recording**: sync is at parity and block
+recovery is now 94% of SDRTrunk's (192 vs ~205). The remaining ~13 blocks
+per pass are the next unit of work — rerun this table as it closes.
 
 Reproduce: `docker build` boatbod op25 (gr3.10, Ubuntu 22.04), then
 `rx.py -F <48k.cf32> -S 48000 -D cqpsk -T trunk.tsv -v 10` and count
