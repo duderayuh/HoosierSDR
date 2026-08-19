@@ -456,8 +456,27 @@ fn load_catalog(path: &str) -> Option<hs_core::catalog::CsvCatalog> {
     }
 }
 
+/// Warn about a sample rate that decodes a continuous carrier but mangles
+/// voice.
+///
+/// The RTL-SDR's 225–300 kHz range is its lowest-quality mode, with aggressive
+/// internal decimation. Measured against a live P25 system, a control channel
+/// captured there decoded cleanly (its carrier is continuous) while a voice
+/// call on the same capture produced 0.2 s of audio out of 7 s — the framer
+/// starved of usable symbols — that at 1.2 MHz decoded in full. The rate is not
+/// rejected, because control-only work there is fine, but voice needs headroom.
+fn warn_low_rate(rate: f64) {
+    if (225_001.0..=300_000.0).contains(&rate) {
+        eprintln!(
+            "note: {:.0} kHz is the RTL-SDR's lowest-quality mode. A control channel\n             decodes there, but voice frames are marginal — capture voice at >=900 kHz.",
+            rate / 1000.0
+        );
+    }
+}
+
 fn main() {
     let args = parse_args();
+    warn_low_rate(args.rate);
 
     if let Some(sys_id) = args.rr_system {
         std::process::exit(run_rr(
