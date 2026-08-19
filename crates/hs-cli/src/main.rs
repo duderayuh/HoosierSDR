@@ -274,6 +274,7 @@ fn report(out: &DecodeOutput, dec: &ChannelDecoder, cat: Option<&hs_core::catalo
     println!("modulation:       {:?}", dec.modulation());
     println!("vocoder:          {}", dec.vocoder_name());
     println!("frame syncs:      {}", out.syncs);
+    println!("TSBKs decoded:    {}", dec.diagnostics().tsbks);
     println!("voice grants:     {}", out.grants.len());
     for g in &out.grants {
         println!(

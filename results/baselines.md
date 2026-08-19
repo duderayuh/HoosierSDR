@@ -327,13 +327,51 @@ theory: run live SDR capture (`hs-source` + Seify) into the decoder, and re-run
 the whole thing on a captured SAFE-T corpus against SDRTrunk / OP25 to fill in
 the external-baseline table below.
 
-## External-decoder baselines (to be filled during Phase 0)
+## External-decoder baselines — first numbers, Marion County control channel
 
-Once the SAFE-T IQ corpus is captured, run the same recordings through
-SDRTrunk (nightly), OP25, and GopherTrunk and record their
-sync-loss / BER / TSBK-decode / voice-FER numbers here as the comparison
-baseline. No numbers yet — no corpus yet.
+First head-to-head, 2026-08-19. Input: the Marion County wideband capture
+(`marion.cu8`, 2.4 Msps u8, 5.83 s), control channel at +550 kHz — NAC 0x261,
+CQPSK/LSM simulcast (WACN BEE00, SYS 262, RFSS 1, Site 10, per GopherTrunk's
+own site decode). Every decoder saw the same signal; where a decoder needed a
+single channel, all got the *identical* file: the channel mixed to DC and
+decimated to 48 ksps (windowed-sinc FIR, then fine-centered by a 4th-power
+carrier estimate to −198 Hz residual). The metric is **CRC-passed TSBKs**,
+the one number all three report with the same semantics (OP25 dumps TSBKs
+only after `crc16` passes; HoosierSDR counts blocks after trellis+CRC;
+GopherTrunk reports `tsbk decoded` net of `crc_failed`).
+
+| Decoder | Input | Frame syncs | TSBKs (CRC-passed) | Voice grants |
+|---|---|:--:|:--:|:--:|
+| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | **152** | 21 |
+| **HoosierSDR** | 48k channelized | 69 | **147** | 19 |
+| OP25 boatbod `28f2c40` (2026-08-13), `-D cqpsk` | 48k channelized | n/r | 21 | 1 |
+| GopherTrunk `09b0014` (2026-08-18), `-demod cqpsk` | 48k channelized | 8 | 17 | 7 |
+| GopherTrunk, same, wideband `-auto-tune` | 2.4M cu8 | 4 | 12 | — |
+| SDRTrunk 0.6.1 | _pending — GUI playback session_ | | | |
+
+**7× the TSBK throughput of the best external decoder on the same bits.**
+OP25 was given a parameter sweep (`-C`, `-G`, `-b`, `-X` around defaults);
+its defaults were its best run, and `-D fsk4` decoded nothing. GopherTrunk's
+best was the pre-centered single channel; its own `-auto-tune` found the
+carrier within 150 Hz of our estimate but decoded fewer frames.
+
+Read the attribution honestly: this channel's distortion is mild (mean sync
+bit errors 0.42/48), and HoosierSDR's `--no-equalizer` run scored 160 TSBKs —
+so on *this* recording the margin comes from the whole front end (timing
+recovery, soft-decision framing/FEC, sync tolerance), not specifically from
+the CMA equalizer. The equalizer-attribution test still needs the degraded
+capture described above. What this table does establish is the external
+baseline the roadmap's Phase 1 gate asks for: on real SAFE-T simulcast IQ,
+conventional detect-first receivers recover a small fraction of the control
+channel that HoosierSDR decodes.
+
+Reproduce: `docker build` boatbod op25 (gr3.10, Ubuntu 22.04), then
+`rx.py -F <48k.cf32> -S 48000 -D cqpsk -T trunk.tsv -v 10` and count
+`TSBK: op=` lines; `gophertrunk replay -in marion.cu8 -format u8
+-sample-rate 2400000 -protocol p25p1 -demod cqpsk -tune-hz 550000`;
+`hoosier-sdr --rate 2400000 --offset 550k --cqpsk marion.cu8` ("TSBKs
+decoded" line in the summary).
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
-| _pending_ | | | | | |
+| _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |

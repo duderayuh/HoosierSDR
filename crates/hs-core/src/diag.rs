@@ -117,6 +117,10 @@ pub struct Diagnostics {
     pub nids: Vec<NidStat>,
     /// Packet data units reassembled.
     pub packets: u64,
+    /// TSBKs that survived trellis decode and CRC — the raw control-channel
+    /// throughput number external decoders report, so A/B tables can compare
+    /// like for like.
+    pub tsbks: u64,
     /// Manufacturer-specific TSBKs seen, counted by (MFID, opcode). Which
     /// vendor messages a system emits says a lot about what features it runs.
     pub vendor_tsbks: Vec<(u8, u8, u32)>,
@@ -185,6 +189,7 @@ impl Diagnostics {
         s.push_str(&format!("  \"voice_frames\": {},\n", self.voice_frames));
         s.push_str(&format!("  \"pcm_samples\": {},\n", self.pcm_samples));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
+        s.push_str(&format!("  \"tsbks\": {},\n", self.tsbks));
         s.push_str(&format!(
             "  \"mean_sync_bit_errors\": {:.4},\n",
             self.mean_sync_errors()

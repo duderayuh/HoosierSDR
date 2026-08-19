@@ -379,6 +379,7 @@ impl ChannelDecoder {
                 });
             }
             FramerEvent::Tsdu { blocks, .. } => {
+                self.diag.tsbks += blocks.len() as u64;
                 for b in blocks {
                     self.on_tsbk(b.tsbk, out);
                 }
