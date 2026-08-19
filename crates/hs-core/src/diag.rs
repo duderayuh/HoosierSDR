@@ -143,6 +143,11 @@ pub struct Diagnostics {
     pub lc_raw: Vec<[u8; 30]>,
     pub grants: Vec<GrantStat>,
     pub encrypted_skips: Vec<u16>,
+    /// NIDs that decoded with zero BCH errors. Decode correctness measured
+    /// directly, which is what separates the right modulation from a
+    /// cross-decode — kept as a counter so the comparison is O(1) however
+    /// long the channel has run.
+    pub clean_nids: u64,
     pub voice_frames: u64,
     pub pcm_samples: u64,
     pub health: SymbolHealth,
@@ -184,6 +189,7 @@ impl Diagnostics {
         ));
         s.push_str(&format!("  \"voice_frames\": {},\n", self.voice_frames));
         s.push_str(&format!("  \"pcm_samples\": {},\n", self.pcm_samples));
+        s.push_str(&format!("  \"clean_nids\": {},\n", self.clean_nids));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
         s.push_str(&format!(
             "  \"mean_sync_bit_errors\": {:.4},\n",

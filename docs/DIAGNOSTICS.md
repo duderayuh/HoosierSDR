@@ -36,6 +36,7 @@ pass to `--rate` must match the capture and be a multiple of 4800.
 | `equalizer` | whether the experimental equalizer was enabled |
 | `symbols_processed` | total C4FM symbols recovered |
 | `voice_frames` / `pcm_samples` | decoded IMBE frames and audio samples |
+| `clean_nids` | NIDs that decoded with zero BCH errors — decode correctness measured directly |
 | `sync_count` | frame-sync detections |
 | `mean_sync_bit_errors` | avg bit errors in the 48-bit sync correlation (↓ better) |
 | `symbol_health.level_counts` | histogram of sliced dibits `[+3,+1,-1,-3]` |

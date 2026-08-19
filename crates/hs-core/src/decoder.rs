@@ -372,6 +372,9 @@ impl ChannelDecoder {
                 }
             }
             FramerEvent::Nid { nid, bch_errors } => {
+                if bch_errors == 0 {
+                    self.diag.clean_nids += 1;
+                }
                 self.diag.nids.push(crate::diag::NidStat {
                     nac: nid.nac,
                     duid: nid.duid.code(),

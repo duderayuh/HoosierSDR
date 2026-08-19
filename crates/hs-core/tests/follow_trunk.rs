@@ -98,10 +98,21 @@ fn traffic_dibits() -> Vec<u8> {
     traffic_dibits_n(20)
 }
 
-/// Modulate dibits and shift to `freq`, summing into a shared band.
-fn add_to_band(band: &mut Vec<f32>, dibits: &[u8], freq: f64) {
+/// Modulate dibits, optionally pass them through a two-ray (simulcast) echo,
+/// and shift to `freq`, summing into a shared band. `echo` is (delay in
+/// samples, gain, phase) — the second tower's copy of the same transmission,
+/// the same channel the hs-dsp thesis test uses.
+fn add_to_band_via(band: &mut Vec<f32>, dibits: &[u8], freq: f64, echo: Option<(usize, f32, f32)>) {
     let sps = (RATE / 4800.0) as usize;
-    let base = modulate_iq(dibits, sps, 0.2);
+    let mut base = modulate_iq(dibits, sps, 0.2);
+    if let Some((delay, gain, theta)) = echo {
+        let (er, ei) = (gain * theta.cos(), gain * theta.sin());
+        for n in (delay..base.len()).rev() {
+            let d = base[n - delay];
+            base[n].re += er * d.re - ei * d.im;
+            base[n].im += er * d.im + ei * d.re;
+        }
+    }
     let offset = freq - CENTER;
     if band.len() < base.len() * 2 {
         band.resize(base.len() * 2, 0.0);
@@ -112,6 +123,11 @@ fn add_to_band(band: &mut Vec<f32>, dibits: &[u8], freq: f64) {
         band[n * 2] += s.re * cos - s.im * sin;
         band[n * 2 + 1] += s.re * sin + s.im * cos;
     }
+}
+
+/// Modulate dibits and shift to `freq`, summing into a shared band.
+fn add_to_band(band: &mut Vec<f32>, dibits: &[u8], freq: f64) {
+    add_to_band_via(band, dibits, freq, None);
 }
 
 #[test]
@@ -171,6 +187,54 @@ fn follows_a_grant_onto_its_traffic_channel() {
         );
         assert!(audio > 0, "call completed with no audio");
     }
+}
+
+#[test]
+fn settles_modulation_on_a_simulcast_channel() {
+    // On a clean synthetic channel both demodulators decode everything, so
+    // nothing separates them — but a clean channel is not what the project is
+    // for. Give the traffic channel the hs-dsp thesis channel — a two-ray
+    // echo one symbol out at 0.6 gain — and the C4FM discriminator's eye
+    // closes while the CMA-equalized CQPSK path keeps decoding: exactly the
+    // one-sided clean-NID evidence the settle step needs to drop the losing
+    // decoder mid-call and halve the call's cost.
+    let sps = (RATE / 4800.0) as usize;
+    let echo = Some((sps, 0.6f32, std::f32::consts::FRAC_PI_4));
+
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band_via(&mut band, &traffic_dibits(), TRAFFIC + TUNER_ERROR, echo);
+
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
+    let block = (RATE as usize / 10) * 2;
+    let mut settled = None;
+    let mut completed = Vec::new();
+    for chunk in band.chunks(block) {
+        completed.extend(f.process(chunk).completed);
+        settled = settled.or(f.settled_modulation(TRAFFIC as u64));
+    }
+    completed.extend(f.finish());
+
+    assert_eq!(
+        settled,
+        Some(Modulation::Cqpsk),
+        "the echoed CQPSK call never settled its modulation mid-call"
+    );
+    let call = completed
+        .iter()
+        .find(|c| c.talkgroup == TALKGROUP)
+        .expect("call never completed");
+    assert_eq!(call.modulation, Some(Modulation::Cqpsk));
+    assert!(
+        !call.pcm.is_empty(),
+        "the settled call produced no audio through the echo"
+    );
 }
 
 #[test]

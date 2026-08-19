@@ -20,20 +20,26 @@
 //! winner was CQPSK every time, matching its CQPSK control channel, while
 //! NAC 0x6B6's traffic channel was C4FM, matching its C4FM control channel.
 //!
-//! So a call is decoded with the modulation its control channel uses. The
-//! other one is started alongside it and dropped as soon as the first has
-//! produced real audio, because the site rule is a strong guide rather than a
-//! guarantee and the wrong guess would otherwise cost the whole call. This is
-//! not a cosmetic saving: decoding every call twice for its full duration
-//! doubled the per-call cost, and the answer is settled within a fraction of a
-//! second.
+//! So every call starts with both modulations decoding, the site rule being
+//! a strong guide rather than a guarantee, and the loser is dropped once the
+//! evidence is one-sided: after the CQPSK front end's blind acquisition
+//! window has passed, whichever decoder dominates on BCH-clean NIDs — decode
+//! correctness measured directly — has settled the question, and running the
+//! other to the end would double the call's cost for nothing. A genuinely
+//! borderline channel keeps both to the end, where `retire` decides on the
+//! same evidence. This is not a cosmetic saving: per-call cost is what
+//! bounds how many calls a live radio can follow in real time.
 //!
-//! An earlier version of this comment claimed the opposite — control CQPSK,
-//! traffic C4FM — and it was simply wrong. What misled it is worth recording:
-//! a C4FM demodulator on a CQPSK signal does not fail cleanly. The two share a
-//! symbol rate and a frame structure, so it syncs and yields *some* audio
-//! (29 syncs and 2.34 s against CQPSK's 33 and 2.88 s on the same recording).
-//! Frame syncs alone do not separate them; decoded audio does.
+//! An earlier version of this comment claimed the opposite site rule —
+//! control CQPSK, traffic C4FM — and it was simply wrong. What misled it is
+//! worth recording: a C4FM demodulator on a CQPSK signal does not fail
+//! cleanly. The two share a symbol rate and a frame structure, so it syncs
+//! and yields *some* audio (29 syncs and 2.34 s against CQPSK's 33 and
+//! 2.88 s on the same recording). Neither frame syncs nor decoded audio
+//! separate the modulations; BCH-clean NIDs do — and early decision must
+//! also wait out the acquisition window, because CQPSK emits nothing for its
+//! first half second while C4FM locks in one frame, a bias that killed the
+//! correct modulation when the choice was made on early audio.
 //!
 //! **A call ends when the channel says so, not when it goes quiet.** A
 //! traffic channel closes every transmission with a terminator frame (TDU).
@@ -75,14 +81,25 @@ fn eq_for(m: Modulation) -> EqMode {
     }
 }
 
+/// Blocks a call must age before its modulation may be settled: past the
+/// CQPSK front end's blind acquisition (~0.5 s), with margin, so the
+/// comparison is between two decoders that have both had their chance.
+const SETTLE_AFTER_BLOCKS: u32 = 15;
+/// Clean NIDs the winner needs before the loser is dropped.
+const SETTLE_MIN_CLEAN: u64 = 6;
+
 /// A call in progress on a traffic channel.
 struct ActiveCall {
     freq_hz: u64,
     talkgroup: u16,
     source_unit: u32,
-    /// Both modulations, because only the channel knows which it uses.
-    c4fm: ChannelDecoder,
-    cqpsk: ChannelDecoder,
+    /// Both modulations, because only the channel knows which it uses. One is
+    /// dropped (None) once the clean-NID evidence settles the question — see
+    /// the settle step in [`TrunkFollower::process`].
+    c4fm: Option<ChannelDecoder>,
+    cqpsk: Option<ChannelDecoder>,
+    /// Blocks this call has been running, gating the settle decision.
+    age: u32,
     /// Audio from each modulation, kept separately so the choice between them
     /// can be made on the thing that matters rather than guessed early.
     pcm_c4fm: Vec<i16>,
@@ -255,6 +272,18 @@ impl TrunkFollower {
             .collect()
     }
 
+    /// The modulation an active call has settled on, once the clean-NID
+    /// evidence has eliminated one decoder; None while both still run, or if
+    /// no call is active on that frequency.
+    pub fn settled_modulation(&self, freq_hz: u64) -> Option<Modulation> {
+        let c = self.active.iter().find(|c| c.freq_hz == freq_hz)?;
+        match (&c.c4fm, &c.cqpsk) {
+            (Some(_), None) => Some(Modulation::C4fm),
+            (None, Some(_)) => Some(Modulation::Cqpsk),
+            _ => None,
+        }
+    }
+
     /// Diagnostics from the control channel.
     pub fn control_diagnostics(&self) -> &crate::diag::Diagnostics {
         self.control.diagnostics()
@@ -283,11 +312,11 @@ impl TrunkFollower {
         // the incorrect one on a borderline channel. A clean NID has passed
         // its BCH check, so it is decode correctness measured directly; the
         // modulation that produces more of them is the one actually locked.
-        // Audio length breaks a tie only when neither is cleaner.
-        let clean = |d: &crate::diag::Diagnostics| -> usize {
-            d.nids.iter().filter(|n| n.bch_errors == 0).count()
-        };
-        let (n_c4, n_cq) = (clean(c.c4fm.diagnostics()), clean(c.cqpsk.diagnostics()));
+        // Audio length breaks a tie only when neither is cleaner. A decoder
+        // dropped by the settle step keeps the count it had earned, which the
+        // survivor has already overtaken by construction.
+        let n_c4 = c.c4fm.as_ref().map_or(0, |d| d.diagnostics().clean_nids);
+        let n_cq = c.cqpsk.as_ref().map_or(0, |d| d.diagnostics().clean_nids);
         let pick_c4fm = match n_c4.cmp(&n_cq) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
@@ -299,13 +328,17 @@ impl TrunkFollower {
             (
                 Some(Modulation::C4fm),
                 c.pcm_c4fm,
-                c.c4fm.diagnostics().link_control.first().cloned(),
+                c.c4fm
+                    .as_ref()
+                    .and_then(|d| d.diagnostics().link_control.first().cloned()),
             )
         } else {
             (
                 Some(Modulation::Cqpsk),
                 c.pcm_cqpsk,
-                c.cqpsk.diagnostics().link_control.first().cloned(),
+                c.cqpsk
+                    .as_ref()
+                    .and_then(|d| d.diagnostics().link_control.first().cloned()),
             )
         };
         // A grant does not always name the radio; Link Control, which the
@@ -354,23 +387,44 @@ impl TrunkFollower {
         // Each active call does the same, at its own offset.
         for call in self.active.iter_mut() {
             let samples: &[f32] = iq;
-            // Both modulations run for the whole call, and `retire` picks the
-            // winner on total decoded audio at the end. Deciding early is
-            // tempting for the CPU it would save, but it cannot be done on
-            // accumulated audio: CQPSK's blind carrier acquisition takes about
-            // half a second during which it emits nothing, while the C4FM
-            // discriminator locks in one frame, so early audio always favours
-            // C4FM even on a CQPSK signal. A mis-detected control channel plus
-            // an early drop killed the correct modulation exactly this way. The
-            // per-channel decimation this follower now uses is cheap enough
-            // that running both to the end is affordable, and it is the only
-            // unbiased comparison.
-            let a = call.c4fm.process(samples);
-            let b = call.cqpsk.process(samples);
+            call.age += 1;
+            // Both modulations run until the evidence settles which one the
+            // channel uses. Deciding early on accumulated *audio* was tried
+            // and killed the correct modulation: CQPSK's blind carrier
+            // acquisition takes about half a second during which it emits
+            // nothing, while the C4FM discriminator locks in one frame, so
+            // early audio always favours C4FM even on a CQPSK signal.
+            // BCH-clean NIDs — the same evidence `retire` trusts — carry no
+            // such bias once the acquisition window has passed, and the
+            // settle step below uses them to drop the losing decoder and
+            // halve the call's cost for the rest of its life.
+            let a = call
+                .c4fm
+                .as_mut()
+                .map(|d| d.process(samples))
+                .unwrap_or_default();
+            let b = call
+                .cqpsk
+                .as_mut()
+                .map(|d| d.process(samples))
+                .unwrap_or_default();
             call.syncs_c4fm += a.syncs;
             call.syncs_cqpsk += b.syncs;
             call.pcm_c4fm.extend_from_slice(&a.pcm);
             call.pcm_cqpsk.extend_from_slice(&b.pcm);
+            // Settle the modulation once the call is old enough that both
+            // decoders have had their chance and one dominates on clean
+            // NIDs. The margin (4:1, with a floor) keeps a genuinely
+            // borderline channel running both to the end, exactly as before.
+            if call.age >= SETTLE_AFTER_BLOCKS && call.c4fm.is_some() && call.cqpsk.is_some() {
+                let n_c4 = call.c4fm.as_ref().unwrap().diagnostics().clean_nids;
+                let n_cq = call.cqpsk.as_ref().unwrap().diagnostics().clean_nids;
+                if n_c4 >= SETTLE_MIN_CLEAN && n_cq * 4 <= n_c4 {
+                    call.cqpsk = None;
+                } else if n_cq >= SETTLE_MIN_CLEAN && n_c4 * 4 <= n_cq {
+                    call.c4fm = None;
+                }
+            }
             if a.syncs.max(b.syncs) == 0 {
                 call.quiet += 1;
             } else {
@@ -448,18 +502,19 @@ impl TrunkFollower {
                 freq_hz: g.freq_hz,
                 talkgroup: g.talkgroup,
                 source_unit: g.source_unit,
-                c4fm: ChannelDecoder::with_offset(
+                c4fm: Some(ChannelDecoder::with_offset(
                     self.sample_rate,
                     Modulation::C4fm,
                     EqMode::Bypass,
                     offset,
-                ),
-                cqpsk: ChannelDecoder::with_offset(
+                )),
+                cqpsk: Some(ChannelDecoder::with_offset(
                     self.sample_rate,
                     Modulation::Cqpsk,
                     EqMode::Enabled,
                     offset,
-                ),
+                )),
+                age: 0,
                 pcm_c4fm: Vec::new(),
                 pcm_cqpsk: Vec::new(),
                 syncs_c4fm: 0,
