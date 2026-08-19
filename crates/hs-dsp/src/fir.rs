@@ -33,8 +33,18 @@ impl Fir {
 }
 
 /// Real-tapped FIR over complex samples, with integer decimation.
+///
+/// The delay line is stored doubled — every sample written at both `pos` and
+/// `pos + n` — so the convolution reads a single contiguous window with no
+/// per-tap modulo. On a wideband capture this filter is the follower's hottest
+/// loop (a ~440-tap dot product per output sample, per channel), and the
+/// modulo the ring buffer used to need in that inner loop both cost cycles and
+/// blocked the compiler from vectorizing it. Taps are stored reversed so the
+/// window and the taps run in the same direction.
 pub struct FirC {
-    taps: Vec<f32>,
+    /// Taps in reverse order (oldest-sample-first), for a straight dot product.
+    taps_rev: Vec<f32>,
+    /// Doubled delay line: index i and i+n always hold the same sample.
     delay: Vec<C32>,
     pos: usize,
     decim: usize,
@@ -45,9 +55,11 @@ impl FirC {
     pub fn new(taps: Vec<f32>, decim: usize) -> Self {
         let n = taps.len();
         assert!(n > 0 && decim > 0);
+        let mut taps_rev = taps;
+        taps_rev.reverse();
         Self {
-            taps,
-            delay: vec![C32::ZERO; n],
+            taps_rev,
+            delay: vec![C32::ZERO; 2 * n],
             pos: 0,
             decim,
             phase: 0,
@@ -56,18 +68,23 @@ impl FirC {
 
     /// Push one sample; returns Some(filtered) on decimation instants.
     pub fn push(&mut self, x: C32) -> Option<C32> {
-        self.pos = (self.pos + 1) % self.delay.len();
+        let n = self.taps_rev.len();
+        self.pos = (self.pos + 1) % n;
+        // Write to both halves so a window of length n starting anywhere in
+        // [0, n) stays contiguous.
         self.delay[self.pos] = x;
+        self.delay[self.pos + n] = x;
         self.phase += 1;
         if self.phase < self.decim {
             return None;
         }
         self.phase = 0;
-        let n = self.taps.len();
+        // Window holds the last n samples oldest-first: index pos+1 is the
+        // oldest, pos+n the newest — the same order as taps_rev.
+        let window = &self.delay[self.pos + 1..self.pos + 1 + n];
         let mut acc = C32::ZERO;
-        for k in 0..n {
-            let s = self.delay[(self.pos + n - k) % n];
-            acc = acc + s.scale(self.taps[k]);
+        for (s, &t) in window.iter().zip(self.taps_rev.iter()) {
+            acc = acc + s.scale(t);
         }
         Some(acc)
     }
