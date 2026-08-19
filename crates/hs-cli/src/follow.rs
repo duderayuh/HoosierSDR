@@ -356,6 +356,7 @@ pub fn run_live<S: hs_source::SdrSource>(
     control_hz: f64,
     measured_hz: Option<f64>,
     cat: Option<&hs_core::catalog::CsvCatalog>,
+    dump_iq: Option<&str>,
 ) {
     check_in_band(sample_rate, center_hz, control_hz);
     let block = (sample_rate as usize / 10) * 2;
@@ -413,7 +414,19 @@ pub fn run_live<S: hs_source::SdrSource>(
     let mut oob = 0u32;
     let mut enc = 0u32;
     let mut gate = GrantGate::new(50);
-    // ~10 blocks per second (each block is a tenth of a second of air).
+    // Throughput check: if the follower cannot process samples as fast as the
+    // radio delivers them, the driver's buffer overflows and drops samples —
+    // which preserves the short frame sync but shreds the longer payload that
+    // carries grants, the exact "syncs climb, zero grants" signature. Compare
+    // achieved sample rate against the requested one to catch it.
+    let start = std::time::Instant::now();
+    let mut total_pairs: u64 = 0;
+    // Optional capture of exactly what the live path received, so it can be
+    // decoded offline and compared against a clean recording. Capped so it
+    // cannot grow without bound.
+    let mut dump: Vec<f32> = Vec::new();
+    let dump_cap = (sample_rate as usize) * 2 * 10; // ~10 s
+                                                    // ~10 blocks per second (each block is a tenth of a second of air).
     const HEARTBEAT_BLOCKS: u32 = 30;
     loop {
         let got = match src.read(&mut buf) {
@@ -425,6 +438,10 @@ pub fn run_live<S: hs_source::SdrSource>(
                 break;
             }
         };
+        total_pairs += (got / 2) as u64;
+        if dump_iq.is_some() && dump.len() < dump_cap {
+            dump.extend_from_slice(&buf[..got.min(dump_cap - dump.len())]);
+        }
         let out = f.process(&buf[..got]);
         syncs += out.control_syncs;
         gate.tick();
@@ -461,10 +478,31 @@ pub fn run_live<S: hs_source::SdrSource>(
             blocks_since_print = 0;
         } else if blocks_since_print >= HEARTBEAT_BLOCKS {
             blocks_since_print = 0;
+            let secs = start.elapsed().as_secs_f64().max(1e-3);
+            let achieved = total_pairs as f64 / secs / 1e6;
+            let want = sample_rate / 1e6;
+            let drop_flag = if achieved < want * 0.95 {
+                "  ⚠ SAMPLES DROPPING (can't keep up)"
+            } else {
+                ""
+            };
             println!(
-                "  … control up: {syncs} frame syncs, {n} calls followed, \
-                 {oob} out of band, {enc} encrypted",
+                "  … control up: {syncs} frame syncs, {n} calls followed, {oob} out of band, \
+                 {enc} encrypted  |  {achieved:.2}/{want:.2} Msps{drop_flag}",
             );
+        }
+    }
+    if let (Some(path), false) = (dump_iq, dump.is_empty()) {
+        let mut bytes = Vec::with_capacity(dump.len() * 4);
+        for v in &dump {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        match std::fs::write(path, bytes) {
+            Ok(()) => println!(
+                "wrote {} s of received IQ to {path}",
+                dump.len() / 2 / sample_rate as usize
+            ),
+            Err(e) => eprintln!("could not write {path}: {e}"),
         }
     }
     println!("\nstopped: {syncs} control frame syncs, {n} calls followed, {oob} out of band");

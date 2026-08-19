@@ -647,6 +647,7 @@ fn run_sdr(args: &Args) {
             args.control,
             args.control_measured,
             catalog.as_ref(),
+            args.save_iq.as_deref(),
         );
         return;
     }
