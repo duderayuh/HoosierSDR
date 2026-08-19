@@ -472,6 +472,10 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
     // buffering it for the end: a live run ends with Ctrl-C, which terminates
     // the process before any end-of-loop write would run, so a buffered dump
     // was always lost. Flushing each block means whatever ran is on disk.
+    // A `.cu8` path is written in the RTL's native unsigned-8-bit format (two
+    // bytes per complex sample, a quarter the size of f32), so a few seconds
+    // fits in a small upload; any other extension is interleaved f32.
+    let dump_cu8 = dump_iq.map(|p| p.ends_with(".cu8")).unwrap_or(false);
     let mut dump_file = dump_iq.map(|path| {
         let f = std::fs::File::create(path).unwrap_or_else(|e| {
             eprintln!("could not create {path}: {e}");
@@ -488,11 +492,19 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
         total_pairs += (got / 2) as u64;
         if let Some((_, w)) = dump_file.as_mut() {
             use std::io::Write;
-            let mut bytes = Vec::with_capacity(got * 4);
-            for v in &chunk[..got] {
-                bytes.extend_from_slice(&v.to_le_bytes());
+            if dump_cu8 {
+                let mut bytes = Vec::with_capacity(got);
+                for v in &chunk[..got] {
+                    bytes.push((v * 127.5 + 127.5).round().clamp(0.0, 255.0) as u8);
+                }
+                let _ = w.write_all(&bytes);
+            } else {
+                let mut bytes = Vec::with_capacity(got * 4);
+                for v in &chunk[..got] {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                let _ = w.write_all(&bytes);
             }
-            let _ = w.write_all(&bytes);
             let _ = w.flush();
         }
         let out = f.process(&chunk);
