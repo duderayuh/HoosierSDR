@@ -35,6 +35,16 @@
 //! (29 syncs and 2.34 s against CQPSK's 33 and 2.88 s on the same recording).
 //! Frame syncs alone do not separate them; decoded audio does.
 //!
+//! **The control channel does not stay put.** A site rotates its control
+//! channel among a set of frequencies — for maintenance, or on its own
+//! schedule — and announces the alternates over SCCB while it runs. A control
+//! channel transmits continuously, so silence on it means it moved (or
+//! faded), not that the system went idle. The follower watches for that
+//! silence and hunts the announced alternates that fall inside the capture,
+//! carrying the site's channel plans across so no grant is lost re-learning
+//! them; alternates outside the capture are reported so a live front end can
+//! retune the radio instead.
+//!
 //! **Tuner error is larger than the receiver's tolerance.** The demodulators
 //! hold lock within roughly ±1 kHz, and an uncalibrated dongle can sit 6 kHz
 //! off — enough that tuning a granted frequency by its nominal value finds
@@ -105,6 +115,14 @@ pub struct FollowOutput {
     pub grants_out_of_band: Vec<(u16, u64)>,
     /// Grants skipped because the call is encrypted.
     pub grants_encrypted: Vec<(u16, u64)>,
+    /// The control channel went quiet and the follower retuned to an
+    /// alternate: (old nominal Hz, new nominal Hz).
+    pub control_moved: Option<(u64, u64)>,
+    /// The control channel went quiet with nothing reachable to move to.
+    /// Any known alternates outside the captured band are listed, so a live
+    /// front end — or its operator — can retune the radio to one. Empty means
+    /// the site never announced an alternate.
+    pub control_lost: Option<Vec<u64>>,
 }
 
 pub struct TrunkFollower {
@@ -120,6 +138,27 @@ pub struct TrunkFollower {
     quiet_limit: u32,
     /// Most calls the channelizer will follow at once.
     max_calls: usize,
+    /// The control channel's modulation, which is also what a replacement
+    /// control channel on the same site is decoded with.
+    modulation: Modulation,
+    /// Nominal frequency of the control channel currently being decoded.
+    control_nominal_hz: u64,
+    /// Nominal frequency the follower was started on — kept in the hunt
+    /// rotation so a fade on the primary eventually retries it.
+    primary_hz: u64,
+    /// Consecutive blocks in which the control channel produced no frame
+    /// sync. A control channel transmits continuously, so silence here means
+    /// it is gone, not idle.
+    control_quiet: u32,
+    /// Quiet blocks before the control channel is declared lost (~2 s).
+    control_loss_limit: u32,
+    /// Rotation position over the known control channels, so repeated losses
+    /// hunt through all of them rather than retrying one forever.
+    hunt_next: usize,
+    /// `control_lost` has been reported and nothing has changed since: the
+    /// hunt keeps running quietly, but the caller is not told again until the
+    /// control channel is actually heard.
+    lost_reported: bool,
 }
 
 impl TrunkFollower {
@@ -164,12 +203,26 @@ impl TrunkFollower {
             correction_hz,
             quiet_limit: 20,
             max_calls: 6,
+            modulation,
+            control_nominal_hz: control_nominal_hz as u64,
+            primary_hz: control_nominal_hz as u64,
+            control_quiet: 0,
+            control_loss_limit: 20,
+            hunt_next: 0,
+            lost_reported: false,
         }
     }
 
     /// The tuner error being compensated for.
     pub fn correction_hz(&self) -> f64 {
         self.correction_hz
+    }
+
+    /// Nominal frequency of the control channel currently being followed.
+    /// Starts where `new` pointed it; changes when the follower hunts onto an
+    /// alternate control channel.
+    pub fn control_hz(&self) -> u64 {
+        self.control_nominal_hz
     }
 
     /// Calls currently being decoded.
@@ -261,6 +314,21 @@ impl TrunkFollower {
         let control_out = self.control.process(iq);
         out.control_syncs = control_out.syncs;
 
+        // A control channel transmits continuously, so a stretch with no
+        // frame sync means it is gone — the site rotated it onto one of the
+        // alternates it has been announcing (SCCB), or the signal faded. Hunt
+        // the known control channels rather than sitting deaf forever.
+        if control_out.syncs == 0 {
+            self.control_quiet += 1;
+            if self.control_quiet >= self.control_loss_limit {
+                self.control_quiet = 0;
+                self.hunt(&mut out);
+            }
+        } else {
+            self.control_quiet = 0;
+            self.lost_reported = false;
+        }
+
         // Each active call does the same, at its own offset.
         for call in self.active.iter_mut() {
             let samples: &[f32] = iq;
@@ -349,6 +417,56 @@ impl TrunkFollower {
         }
 
         out
+    }
+
+    /// The control channel has been silent past the loss limit: move to the
+    /// next known control channel this capture can reach.
+    ///
+    /// The candidates are the alternates the site announced over SCCB plus
+    /// the primary the follower started on, since a loss can also be a fade
+    /// and the rotation should eventually retry it. The replacement decoder
+    /// adopts the old one's site model, so the channel plans, patches, and
+    /// the alternate list itself survive the move — waiting for them to be
+    /// re-broadcast would drop every grant in between.
+    fn hunt(&mut self, out: &mut FollowOutput) {
+        let mut candidates: Vec<u64> = self.control.site().secondary_cc_freqs();
+        if !candidates.contains(&self.primary_hz) {
+            candidates.push(self.primary_hz);
+        }
+        candidates.retain(|&hz| hz != self.control_nominal_hz);
+
+        let in_band: Vec<u64> = candidates
+            .iter()
+            .copied()
+            .filter(|&hz| {
+                let offset = hz as f64 + self.correction_hz - self.center_hz;
+                offset.abs() < self.nyquist()
+            })
+            .collect();
+
+        let Some(&next_hz) = in_band.get(self.hunt_next % in_band.len().max(1)) else {
+            // Nothing reachable. Report the alternates this capture cannot
+            // see, so a live front end can retune the radio to one — once,
+            // not every couple of seconds while nothing changes.
+            if !self.lost_reported {
+                self.lost_reported = true;
+                out.control_lost = Some(candidates);
+            }
+            return;
+        };
+        self.hunt_next += 1;
+
+        let offset = next_hz as f64 + self.correction_hz - self.center_hz;
+        let mut next = ChannelDecoder::with_offset(
+            self.sample_rate,
+            self.modulation,
+            eq_for(self.modulation),
+            offset,
+        );
+        next.adopt_trunk_state(&self.control);
+        self.control = next;
+        out.control_moved = Some((self.control_nominal_hz, next_hz));
+        self.control_nominal_hz = next_hz;
     }
 
     fn nyquist(&self) -> f64 {

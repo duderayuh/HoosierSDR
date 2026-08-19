@@ -25,6 +25,7 @@ the captured band, so one wideband recording covers a whole slice of spectrum.
 - **Full C4FM modem** — FM discriminator, RRC matched filter, Gardner timing recovery, 4-level slicer, with a clean-channel modulator↔demodulator loopback test.
 - **P25 Phase I layer 2** — 48-bit frame sync, BCH(63,16) NID decode (Berlekamp–Massey + Chien, corrects 11 errors), 1/2-rate trellis Viterbi for TSBK, CRC-CCITT16, status-symbol handling.
 - **Trunking** — TSBK parsing (grants, IDEN_UP channel plans, network/RFSS status), channel→downlink-frequency resolution, grant tracking.
+- **Trunk following** — `--follow` watches a control channel and decodes the calls it grants, with per-call modulation detection and tuner-error correction; when the control channel goes quiet it hunts the alternates the site announced (SCCB), carrying the channel plan across so no grant is lost.
 - **IMBE voice** — Phase I vocoder via vendored ISC-licensed mbelib (FFI), producing 8 kHz PCM.
 - **Encryption gate** — ALGID detection wired through; encrypted grants/voice are flagged and never decoded, by architecture.
 - **Benchmark harness** — `hs-bench` runs synthetic or field IQ and reports decode metrics with the equalizer A/B.

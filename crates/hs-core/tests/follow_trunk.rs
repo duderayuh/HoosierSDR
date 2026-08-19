@@ -32,25 +32,33 @@ fn preamble(n: usize) -> Vec<u8> {
     (0..n).map(|i| ((i * 5 + i / 3) % 4) as u8).collect()
 }
 
-/// Control channel: announce the channel plan, then grant a call on it.
-fn control_dibits(plan_base: u64) -> Vec<u8> {
-    let iden_args: u64 = {
-        let iden = 1u64 << 60;
-        let bw = 100u64 << 51;
-        let sign = 1u64 << 50;
-        let spacing = 100u64 << 32;
-        iden | bw | sign | spacing | (plan_base / 5)
-    };
-    let grant_args: u64 = (((1u64 << 12) | 10) << 40) | ((TALKGROUP as u64) << 24) | 0xBEEF1;
+/// IDEN_UP announcing the 12.5 kHz plan rooted at `plan_base` as IDEN 1.
+fn iden_args(plan_base: u64) -> u64 {
+    let iden = 1u64 << 60;
+    let bw = 100u64 << 51;
+    let sign = 1u64 << 50;
+    let spacing = 100u64 << 32;
+    iden | bw | sign | spacing | (plan_base / 5)
+}
+
+/// Grant of TALKGROUP on channel 10 of IDEN 1.
+fn grant_args() -> u64 {
+    (((1u64 << 12) | 10) << 40) | ((TALKGROUP as u64) << 24) | 0xBEEF1
+}
+
+/// A control-channel stream repeating the given TSBKs.
+fn tsdu_stream(tsbks: &[(u8, u8, u64)]) -> Vec<u8> {
     let mut d = preamble(900);
     for _ in 0..40 {
-        d.extend(build_tsdu(
-            0x293,
-            &[(0x3D, 0, iden_args), (0x00, 0, grant_args)],
-        ));
+        d.extend(build_tsdu(0x293, tsbks));
         d.extend(preamble(40));
     }
     d
+}
+
+/// Control channel: announce the channel plan, then grant a call on it.
+fn control_dibits(plan_base: u64) -> Vec<u8> {
+    tsdu_stream(&[(0x3D, 0, iden_args(plan_base)), (0x00, 0, grant_args())])
 }
 
 /// Traffic channel: silence, then voice frames.
@@ -145,6 +153,68 @@ fn follows_a_grant_onto_its_traffic_channel() {
         );
         assert!(audio > 0, "call completed with no audio");
     }
+}
+
+#[test]
+fn hunts_onto_the_announced_alternate_when_the_control_channel_moves() {
+    // A site rotates its control channel and announces the alternates over
+    // SCCB while it runs. Here the primary broadcasts the channel plan and an
+    // SCCB naming channel 4 as an alternate, then goes silent; the alternate
+    // then starts issuing grants — *without* re-broadcasting the plan, so a
+    // grant only resolves if the follower carried the plan across the move.
+    const ALT_CHANNEL: u16 = (1 << 12) | 4;
+    const ALT: f64 = (PLAN_BASE + 4 * 12_500) as f64; // 25 kHz below centre
+    let sccb_args: u64 =
+        (1u64 << 56) | (1u64 << 48) | ((ALT_CHANNEL as u64) << 32) | (0x70u64 << 24);
+
+    let block = (RATE as usize / 10) * 2;
+    let mut band = Vec::new();
+    // Phase A: the primary announces the plan and the alternate.
+    add_to_band(
+        &mut band,
+        &tsdu_stream(&[(0x3D, 0, iden_args(PLAN_BASE)), (0x39, 0, sccb_args)]),
+        CONTROL + TUNER_ERROR,
+    );
+    // Silence: past the loss limit (20 blocks), with headroom.
+    band.extend(std::iter::repeat_n(0.0f32, block * 24));
+    // Phase B: the alternate takes over, granting a call with no IDEN_UP.
+    // Built in its own buffer because add_to_band sums from sample 0.
+    let mut phase_b = Vec::new();
+    add_to_band(
+        &mut phase_b,
+        &tsdu_stream(&[(0x00, 0, grant_args())]),
+        ALT + TUNER_ERROR,
+    );
+    band.extend(phase_b);
+
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
+    let mut moved = Vec::new();
+    let mut started = Vec::new();
+    for chunk in band.chunks(block) {
+        let out = f.process(chunk);
+        moved.extend(out.control_moved);
+        started.extend(out.started);
+    }
+
+    assert_eq!(
+        moved,
+        vec![(CONTROL as u64, ALT as u64)],
+        "follower did not move to the announced alternate exactly once"
+    );
+    assert_eq!(f.control_hz(), ALT as u64);
+    assert!(
+        started
+            .iter()
+            .any(|(tg, hz)| *tg == TALKGROUP && *hz == TRAFFIC as u64),
+        "grant from the alternate control channel not followed \
+         (the channel plan was lost in the move): started {started:?}"
+    );
 }
 
 #[test]

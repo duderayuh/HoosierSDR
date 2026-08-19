@@ -46,11 +46,14 @@ pub enum TrunkState {
 
 /// Site trunking model: holds the channel plan and resolves grants to
 /// tunable downlink frequencies.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SiteModel {
     pub state: TrunkState,
     pub system: Option<SystemId>,
     idens: HashMap<u8, IdenPlan>,
+    /// Alternate control channels announced by SCCB (opcode 0x39), in raw
+    /// channel form so they resolve against whichever IDEN plan applies.
+    secondary_ccs: Vec<u16>,
 }
 
 impl SiteModel {
@@ -67,6 +70,24 @@ impl SiteModel {
 
     pub fn set_system(&mut self, sys: SystemId) {
         self.system = Some(sys);
+    }
+
+    /// Record an alternate control channel from a Secondary Control Channel
+    /// Broadcast.
+    pub fn add_secondary_cc(&mut self, channel: u16) {
+        if !self.secondary_ccs.contains(&channel) {
+            self.secondary_ccs.push(channel);
+        }
+    }
+
+    /// The site's announced alternate control channels, resolved to downlink
+    /// frequencies. A channel whose IDEN plan has not been heard yet is
+    /// omitted — there is nothing to tune until the plan arrives.
+    pub fn secondary_cc_freqs(&self) -> Vec<u64> {
+        self.secondary_ccs
+            .iter()
+            .filter_map(|&c| self.channel_to_freq(c))
+            .collect()
     }
 
     /// Resolve a 16-bit channel field (4-bit IDEN + 12-bit number) to the
