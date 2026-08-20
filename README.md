@@ -9,6 +9,17 @@ Desktop-first (macOS primary, Windows port planned). Built for Indiana's Hoosier
 > syncs at a mean 0.07 bit errors, 10.6 s of IMBE voice. See
 > [`results/baselines.md`](results/baselines.md#first-field-decode--marion-county-2026-08). A complete offline P25 Phase I decode chain works end to end today — control-channel trunking, voice grants, and IMBE audio. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design doc and roadmap, and [`results/baselines.md`](results/baselines.md) for measured decode quality.
 
+## Install (macOS, one command)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duderayuh/HoosierSDR/main/tools/install-mac.sh | bash
+```
+
+Installs every dependency (Xcode CLT, Homebrew, Rust, airspy + libusb), clones
+to `~/HoosierSDR`, builds the release CLI, and verifies it with a no-hardware
+decode. Idempotent — safe to re-run. Linux/Windows: see [Building](#building)
+below.
+
 ## Try it now
 
 ```sh
