@@ -289,8 +289,12 @@ fn try_offset(iq: &[f32], cfg: &ScanConfig, offset: f64, modulation: Modulation)
         mean_sync_errors: diag.mean_sync_errors(),
         clean_nids,
         nac: dominant_nac(diag),
-        // A resolved grant, or any trunking traffic, marks the control channel.
-        control_channel: !out.grants.is_empty() || !diag.grants.is_empty(),
+        // Any decoded TSBK marks the control channel — only control channels
+        // carry trunking signalling (voice channels carry link control
+        // instead). Requiring a *grant* here misclassified a busy control
+        // channel as traffic: a short scan window can easily hold status,
+        // IDEN_UP and RFSS broadcasts but no grant.
+        control_channel: diag.tsbks > 0 || !out.grants.is_empty() || !diag.grants.is_empty(),
         voice: !out.pcm.is_empty(),
     })
 }
