@@ -434,6 +434,35 @@ Reproduce: `HS_TSDU_DEBUG=1 hoosier-sdr … 2>` a log dumps every TSBK
 block's received dibits, confidences, ML cost and decode; the matching
 analysis is a ~60-line script over that dump.
 
+### Decision-feedback equalizer — closes the gap on the strong channel
+
+The two-ray simulcast burst is a channel with a deep spectral null: a linear
+equalizer opens a null by inverting it, amplifying the noise that sits there,
+while a decision-feedback equalizer *cancels* the post-cursor echo from past
+decisions with no noise enhancement. `hs_dsp::equalizer::CmaDfe` implements
+that, staying phase-blind for the non-coherent π/4-DQPSK front end: both
+sections adapt by the constant-modulus criterion and the fed-back "decision"
+is the unit-circle projection `y/|y|` — amplitude normalization only, no hard
+slicing, no reference. It runs in the same pre-differential-detection slot as
+the CMA, selected with `--dfe`.
+
+| Control channel | bare | CMA (default) | **DFE (`--dfe`)** | SDRTrunk |
+|---|:--:|:--:|:--:|:--:|
+| Marion County (`marion.cu8`, +550 kHz) | 190 | 192 | **203** | ~205 |
+| `live261.cu8` (+537.5 kHz) | 210 | 203 | **207** | — |
+
+TSBKs per pass. On Marion County the DFE lifts 192 → **203 — matching
+SDRTrunk's ~205** and closing essentially the whole remaining gap on this
+recording; grants rise 27 → 28. It never regresses below the linear CMA on
+the near-clean `live261` either. Tuning that mattered: the feedback loop is
+recursive, so an aggressive step rings and *collapsed* the decode (6 syncs)
+until both sections were slowed (feedforward 0.001, feedback 0.0005,
+NLMS-normalized) — a jointly gentle convergence settles into a better
+minimum than a fast feedforward reaches. This is still measured on **strong**
+channels where the burst events are rare; the degraded-location capture is
+where the DFE is expected to pull decisively ahead of the linear path, and
+`--dfe` vs default is the A/B to run on it.
+
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
 | _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |

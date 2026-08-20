@@ -71,16 +71,18 @@ probe() {
   local off
   off=$(printf '%.0f' $(echo "($chan - $CENTER/1000000) * 1000000" | bc -l))
   echo "── decoding $chan MHz (offset $off Hz) — equalizer A/B:"
-  for eq in "" "--no-equalizer"; do
-    "$HS" --rate $RATE --offset $off --cqpsk $eq --no-wav "$f" 2>/dev/null \
+  for eq in "--no-equalizer:bare      " ":CMA       " "--dfe:DFE       "; do
+    flag=${eq%%:*}; label=${eq#*:}
+    "$HS" --rate $RATE --offset $off --cqpsk $flag --no-wav "$f" 2>/dev/null \
       | grep -E "frame syncs|TSBKs decoded" \
-      | sed "s/^/   ${eq:-equalized   }: /"
+      | sed "s/^/   $label: /"
   done
   echo ""
   echo "READ IT: home baseline is ~35 TSBKs/s (350 per 10 s) and scan err ~0.4."
   echo "  err still < 0.5, TSBKs near max  -> too clean, drive on"
-  echo "  err > 1, syncs land, TSBKs down, eq != no-eq -> RECORD HERE: $0 record <spotname>"
-  echo "  no syncs at all                  -> too deep, back toward a tower"
+  echo "  err > 1, syncs land, TSBKs down   -> RECORD HERE: $0 record <spotname>"
+  echo "  DFE >> CMA >> bare on this spot    -> the thesis regime; this is the capture to keep"
+  echo "  no syncs at all                   -> too deep, back toward a tower"
 }
 
 record() {

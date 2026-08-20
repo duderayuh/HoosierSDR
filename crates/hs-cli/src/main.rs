@@ -28,6 +28,7 @@ struct Args {
     log_out: Option<String>,
     save_iq: Option<String>,
     equalizer: bool,
+    dfe: bool,
     cqpsk: bool,
     play: bool,
     demo: bool,
@@ -55,6 +56,7 @@ fn parse_args() -> Args {
         log_out: None,
         save_iq: None,
         equalizer: false,
+        dfe: false,
         cqpsk: false,
         play: false,
         demo: false,
@@ -87,6 +89,7 @@ fn parse_args() -> Args {
             "--log" => a.log_out = it.next(),
             "--save-iq" => a.save_iq = it.next(),
             "--equalizer" => a.equalizer = true,
+            "--dfe" => a.dfe = true,
             "--no-equalizer" => a.no_equalizer = true,
             "--rr-system" => a.rr_system = it.next().and_then(|s| s.parse().ok()),
             "--rr-dump" => a.rr_dump = it.next(),
@@ -139,6 +142,9 @@ fn print_help() {
              --equalizer    Enable the experimental FSW-trained equalizer (C4FM)\n\
              --no-equalizer Bypass the CMA equalizer on the CQPSK path, giving the\n\
              \x20              conventional detect-first receiver — the thesis A/B\n\
+             --dfe          CQPSK decision-feedback equalizer before differential\n\
+             \x20              detection: cancels the deep-null simulcast echo the\n\
+             \x20              linear CMA leaves. Experimental; A/B against default.\n\
              --offset <HZ>  Decode the channel this far from the capture centre\n\
              \x20              (e.g. 50k). A wideband capture holds many 12.5 kHz\n\
              \x20              channels; this picks one without re-recording.\n\
@@ -454,7 +460,9 @@ fn build_decoder(args: &Args) -> ChannelDecoder {
     // C4FM: the symbol-domain equalizer is experimental and opt-in.
     // CQPSK: the CMA equalizer before differential detection IS the shipping
     // path (the project thesis), so it is on unless explicitly disabled.
-    let mode = if args.no_equalizer {
+    let mode = if args.dfe {
+        EqMode::Dfe
+    } else if args.no_equalizer {
         EqMode::Bypass
     } else if args.cqpsk || args.equalizer {
         EqMode::Enabled

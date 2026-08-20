@@ -19,9 +19,30 @@
 //! first, which is a nonlinearity that makes inter-symbol interference
 //! unrecoverable (docs/ARCHITECTURE.md §1). See `EqualizedCqpsk`.
 
-use crate::equalizer::LmsFse;
+use crate::equalizer::{CmaDfe, CmaEqualizer, LmsFse};
 use crate::C32;
 use core::f32::consts::PI;
+
+/// Which pre-detection equalizer the CQPSK receiver runs.
+///
+/// The thesis A/B is `Cma` vs `None`; `Dfe` adds decision feedback to cancel
+/// the deep-null simulcast echo the linear CMA leaves behind (see
+/// [`CmaDfe`](crate::equalizer::CmaDfe)).
+enum FrontEq {
+    None,
+    Cma(CmaEqualizer),
+    Dfe(CmaDfe),
+}
+
+impl FrontEq {
+    fn push(&mut self, x: C32, adapt: bool) -> C32 {
+        match self {
+            FrontEq::None => x,
+            FrontEq::Cma(eq) => eq.push(x, adapt),
+            FrontEq::Dfe(eq) => eq.push(x, adapt),
+        }
+    }
+}
 
 /// Differential phase increment for a dibit (radians).
 pub fn dibit_to_dphase(d: u8) -> f32 {
@@ -204,7 +225,7 @@ pub struct CqpskReceiver {
     agc: crate::agc::Agc,
     mf: crate::fir::FirC,
     gardner: crate::timing_complex::ComplexGardner,
-    eq: Option<crate::equalizer::CmaEqualizer>,
+    eq: FrontEq,
     prev_sym: Option<C32>,
     /// Tracked differential-phase bias from the carrier frequency offset.
     freq_bias: f32,
@@ -248,22 +269,34 @@ impl CqpskReceiver {
     /// Equalized front end: CMA equalizer before differential detection.
     /// `sps` samples/symbol; `beta` RRC rolloff.
     pub fn new(sps: usize, beta: f64) -> Self {
-        Self::build(sps, beta, Some(9))
+        Self::build(sps, beta, FrontEq::Cma(CmaEqualizer::new(9, 0.05)))
     }
 
     /// Baseline front end with no equalizer (for A/B measurement).
     pub fn new_bare(sps: usize, beta: f64) -> Self {
-        Self::build(sps, beta, None)
+        Self::build(sps, beta, FrontEq::None)
     }
 
-    fn build(sps: usize, beta: f64, eq_taps: Option<usize>) -> Self {
+    /// Decision-feedback front end: cancels the post-cursor simulcast echo the
+    /// linear CMA leaves in a deep spectral null. Same phase-blind placement
+    /// before differential detection (see [`CmaDfe`](crate::equalizer::CmaDfe)).
+    pub fn new_dfe(sps: usize, beta: f64) -> Self {
+        // 9 feedforward + 6 feedback taps. Both sections adapt gently — the
+        // recursive feedback loop rings and injects noise at an aggressive
+        // step, and a jointly slow convergence settles into a better minimum
+        // than a fast feedforward reaches. Swept on the Marion County and
+        // live261 control channels; this lifts 192 → 203 and 203 → 207 TSBKs.
+        Self::build(sps, beta, FrontEq::Dfe(CmaDfe::new(9, 6, 0.001, 0.0005)))
+    }
+
+    fn build(sps: usize, beta: f64, eq: FrontEq) -> Self {
         use crate::rrc::rrc_taps;
         Self {
             dc: crate::agc::DcBlocker::default(),
             agc: crate::agc::Agc::new(1e-3, 1.0),
             mf: crate::fir::FirC::new(rrc_taps(sps, 6, beta), 1),
             gardner: crate::timing_complex::ComplexGardner::new(sps as f32, 0.004),
-            eq: eq_taps.map(|n| crate::equalizer::CmaEqualizer::new(n, 0.05)),
+            eq,
             prev_sym: None,
             freq_bias: 0.0,
             mu_freq: 0.02,
@@ -301,12 +334,9 @@ impl CqpskReceiver {
         let filtered = self.mf.push(cleaned)?;
         let sym = self.gardner.push(filtered)?;
         self.settle = self.settle.saturating_add(1);
-        // Equalize before differential detection (the thesis). Freeze the CMA
+        // Equalize before differential detection (the thesis). Freeze the
         // taps until the timing loop has settled so it adapts on a real eye.
-        let sym = match self.eq.as_mut() {
-            Some(eq) => eq.push(sym, self.settle > 32),
-            None => sym,
-        };
+        let sym = self.eq.push(sym, self.settle > 32);
         let prev = match self.prev_sym {
             Some(p) => p,
             None => {
