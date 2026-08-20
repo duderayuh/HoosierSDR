@@ -312,9 +312,16 @@ if (TAURI) {
       $("rrPass").placeholder = st.has_password ? "saved in Keychain" : "";
       $("rrKeyField").style.display = st.embedded_key ? "none" : "";
       $("rrKey").placeholder = st.has_app_key ? "saved in Keychain" : "";
-      $("rrMeta").textContent = st.catalog_len
-        ? `${st.catalog_len} talkgroups loaded${st.system_name ? " · " + st.system_name : ""}`
-        : (st.has_password && st.has_app_key ? "ready" : "not signed in");
+      const missing = [];
+      if (!st.has_app_key) missing.push("app key");
+      if (!st.username) missing.push("username");
+      if (st.username && !st.has_password) missing.push("password");
+      $("rrMeta").textContent = missing.length
+        ? `missing: ${missing.join(", ")}`
+        : st.catalog_len
+          ? `${st.catalog_len} talkgroups loaded${st.system_name ? " · " + st.system_name : ""}`
+          : "signed in";
+      $("rrMeta").style.color = missing.length ? "var(--enc)" : "";
       if (st.catalog_len) $("loadcat").textContent = st.catalog_len + " TGs";
       return st;
     } catch (e) { log(`rr_settings: ${e}`); }
