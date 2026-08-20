@@ -452,7 +452,7 @@ the CMA, selected with `--dfe`.
 | `live261.cu8` (+537.5 kHz) | 210 | 203 | **207** | — |
 | Marion County, Airspy R2 (`airspy_marion.cs16`, 2.5 MSPS, +462.5 kHz, 6 s) | — | 209 | **216** | — |
 
-TSBKs per pass. On Marion County the DFE lifts 192 → **203 — matching
+TSBKs per pass. On Marion County the DFE lifts 192 → **202 — matching
 SDRTrunk's ~205** and closing essentially the whole remaining gap on this
 recording; grants rise 27 → 28. It never regresses below the linear CMA on
 the near-clean `live261` either. Tuning that mattered: the feedback loop is
