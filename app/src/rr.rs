@@ -389,6 +389,17 @@ pub fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
 mod tests {
     /// The build-time masking round-trips (checked with a dummy key — the
     /// real one never appears in tests or the repo).
+    /// Only meaningful on a machine that builds with a key; reports, never
+    /// prints, the key.
+    #[test]
+    fn this_build_embeds_a_key_when_configured() {
+        let configured = std::env::var("HS_RR_APP_KEY").is_ok()
+            || std::path::Path::new(".rr_app_key").exists();
+        if configured {
+            assert!(super::embedded_key().is_some_and(|k| k.len() >= 8));
+        }
+    }
+
     #[test]
     fn key_mask_round_trips() {
         let key = "dummy-app-key-0123456789";
