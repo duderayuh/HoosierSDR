@@ -278,7 +278,8 @@ impl Reporter<'_> {
         }
         for c in out.completed {
             self.calls += 1;
-            let wav = self.calls_dir.and_then(|dir| {
+            // A keyup with no voice leaves nothing worth a file.
+            let wav = self.calls_dir.filter(|_| !c.pcm.is_empty()).and_then(|dir| {
                 let path = dir.join(format!(
                     "{}_tg{}_{}.wav",
                     chrono_stamp(),
