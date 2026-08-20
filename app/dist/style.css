@@ -331,3 +331,12 @@ td.dl { color: var(--signal); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* lockout bar + per-row actions */
+.lockbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 18px; border-bottom:1px solid var(--line); }
+.lockbar .chip { font-family:"IBM Plex Mono",monospace; font-size:11px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--ink-dim); cursor:pointer; }
+.lockbar .chip:hover { color:var(--enc); border-color:var(--enc); }
+td.act { white-space:nowrap; text-align:right; }
+td.act button { background:none; border:1px solid var(--line); color:var(--ink-dim); border-radius:6px; padding:2px 7px; font-size:12px; cursor:pointer; margin-left:4px; }
+td.act button:hover { color:var(--ink); border-color:var(--ink-dim); }
+td.act button.on { color:var(--enc); border-color:var(--enc); }

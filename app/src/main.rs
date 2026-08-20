@@ -21,6 +21,35 @@ mod player;
 struct AppState {
     running: Arc<AtomicBool>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
+    /// Talkgroups the listener has locked out; read by the follower live.
+    lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
+    /// The audio thread, started on first use. `Some(None)` = no device.
+    audio: Mutex<Option<Option<std::sync::mpsc::Sender<Vec<i16>>>>>,
+}
+
+impl AppState {
+    fn audio(&self) -> Option<std::sync::mpsc::Sender<Vec<i16>>> {
+        self.audio
+            .lock()
+            .unwrap()
+            .get_or_insert_with(player::spawn)
+            .clone()
+    }
+}
+
+/// Replace the locked-out talkgroup set. Takes effect on the follower's next
+/// block — a call of a newly locked talkgroup already up is dropped.
+#[tauri::command]
+fn set_lockout(tgs: Vec<u16>, state: State<AppState>) {
+    *state.lockout.lock().unwrap() = tgs.into_iter().collect();
+}
+
+/// Replay a saved call through the default audio device.
+#[tauri::command]
+fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
+    let pcm = player::read_wav(&shellexpand_home(&path))?;
+    let tx = state.audio().ok_or("no audio output device")?;
+    tx.send(pcm).map_err(|_| "audio thread stopped".to_string())
 }
 
 #[derive(Serialize, Clone)]
@@ -148,6 +177,8 @@ fn start_follow(
     }
     let running = state.running.clone();
     let catalog = state.catalog.clone();
+    let lockout = state.lockout.clone();
+    let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
             let src = open_source(&source, freq, rate, gain)?;
@@ -165,7 +196,7 @@ fn start_follow(
                 control_hz: control,
                 calls_dir,
             };
-            let mut player = if play { player::Player::open() } else { None };
+            let player = if play { audio } else { None };
             if play && player.is_none() {
                 let _ = app.emit(
                     "follow",
@@ -175,9 +206,11 @@ fn start_follow(
                 );
             }
             let cat = catalog.lock().unwrap().clone();
-            follow::run(src, &params, cat.as_ref(), &running, &mut |ev| {
-                if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_mut(), &ev) {
-                    pl.play(pcm);
+            follow::run(src, &params, cat.as_ref(), &lockout, &running, &mut |ev| {
+                if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_ref(), &ev) {
+                    if !pcm.is_empty() {
+                        let _ = pl.send(pcm.clone());
+                    }
                 }
                 let _ = app.emit("follow", ev);
             })
@@ -412,7 +445,9 @@ fn main() {
             start_capture,
             stop_capture,
             decode_file,
-            start_follow
+            start_follow,
+            set_lockout,
+            play_wav
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

@@ -131,6 +131,8 @@ pub struct FollowOutput {
     pub grants_out_of_band: Vec<(u16, u64)>,
     /// Grants skipped because the call is encrypted.
     pub grants_encrypted: Vec<(u16, u64)>,
+    /// Grants skipped because the listener locked the talkgroup out.
+    pub grants_locked: Vec<(u16, u64)>,
     /// The control channel went quiet and the follower retuned to an
     /// alternate: (old nominal Hz, new nominal Hz).
     pub control_moved: Option<(u64, u64)>,
@@ -180,6 +182,9 @@ pub struct TrunkFollower {
     /// hunt keeps running quietly, but the caller is not told again until the
     /// control channel is actually heard.
     lost_reported: bool,
+    /// Talkgroups the listener does not want to hear. Their grants are
+    /// reported but never followed, and a call already up is dropped.
+    lockout: std::collections::HashSet<u16>,
 }
 
 impl TrunkFollower {
@@ -232,7 +237,20 @@ impl TrunkFollower {
             control_loss_limit: 20,
             hunt_next: 0,
             lost_reported: false,
+            lockout: std::collections::HashSet::new(),
         }
+    }
+
+    /// Replace the set of locked-out talkgroups. Takes effect on the next
+    /// block: pending grants for them are skipped and any call of theirs
+    /// already being followed is dropped without being reported.
+    pub fn set_lockout(&mut self, tgs: impl IntoIterator<Item = u16>) {
+        self.lockout = tgs.into_iter().collect();
+    }
+
+    /// The talkgroups currently locked out.
+    pub fn lockout(&self) -> &std::collections::HashSet<u16> {
+        &self.lockout
     }
 
     /// The tuner error being compensated for.
@@ -351,6 +369,13 @@ impl TrunkFollower {
             self.lost_reported = false;
         }
 
+        // A talkgroup locked out mid-call: stop following it now, silently —
+        // the listener asked not to hear it, so it gets no audio and no row.
+        if !self.lockout.is_empty() {
+            let lock = &self.lockout;
+            self.active.retain(|c| !lock.contains(&c.talkgroup));
+        }
+
         // Each active call does the same, at its own offset.
         for call in self.active.iter_mut() {
             let samples: &[f32] = iq;
@@ -412,6 +437,10 @@ impl TrunkFollower {
         for g in &control_out.grants {
             if g.encrypted {
                 out.grants_encrypted.push((g.talkgroup, g.freq_hz));
+                continue;
+            }
+            if self.lockout.contains(&g.talkgroup) {
+                out.grants_locked.push((g.talkgroup, g.freq_hz));
                 continue;
             }
             if let Some(pos) = self.active.iter().position(|c| c.freq_hz == g.freq_hz) {

@@ -59,6 +59,7 @@ pub enum FollowEvent {
         calls: usize,
         out_of_band: u32,
         encrypted: u32,
+        locked: u32,
         msps: f64,
         want_msps: f64,
         dropped: u64,
@@ -83,6 +84,7 @@ pub fn run<S: SdrSource + Send + 'static>(
     src: S,
     p: &FollowParams,
     catalog: Option<&CsvCatalog>,
+    lockout: &std::sync::Mutex<std::collections::HashSet<u16>>,
     running: &AtomicBool,
     emit: &mut dyn FnMut(FollowEvent),
 ) -> Result<(), String> {
@@ -135,8 +137,10 @@ pub fn run<S: SdrSource + Send + 'static>(
         calls: 0,
         oob: 0,
         enc: 0,
+        locked: 0,
         gate: GrantGate::new(50),
     };
+    f.set_lockout(lockout.lock().unwrap().iter().copied());
     // The primed IQ carries whatever the site granted while we measured;
     // decode it too, so a call that began during startup is not lost. The
     // follower runs far faster than real time, so this catches up quickly.
@@ -167,6 +171,13 @@ pub fn run<S: SdrSource + Send + 'static>(
         let chunk = &buf[..n];
         total_pairs += (n / 2) as u64;
         blocks += 1;
+        // The lockout set is tiny and the UI may change it any time.
+        {
+            let want = lockout.lock().unwrap();
+            if *want != *f.lockout() {
+                f.set_lockout(want.iter().copied());
+            }
+        }
         let out = f.process(chunk);
         rep.report(out, emit);
         if blocks.is_multiple_of(4) {
@@ -199,6 +210,7 @@ struct Reporter<'a> {
     calls: usize,
     oob: u32,
     enc: u32,
+    locked: u32,
     gate: GrantGate,
 }
 
@@ -216,6 +228,7 @@ impl Reporter<'_> {
             calls: self.calls,
             out_of_band: self.oob,
             encrypted: self.enc,
+            locked: self.locked,
             msps: total_pairs as f64 / secs / 1e6,
             want_msps: rate / 1e6,
             dropped,
@@ -266,6 +279,11 @@ impl Reporter<'_> {
                         *hz as f64 / 1e6
                     ),
                 });
+            }
+        }
+        for (_, hz) in &out.grants_locked {
+            if self.gate.fresh(*hz) {
+                self.locked += 1;
             }
         }
         for (tg, hz) in &out.grants_encrypted {
@@ -376,7 +394,8 @@ mod tests {
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
-        run(src, &p, None, &running, &mut |e| events.push(e)).expect("follow");
+        let lockout = std::sync::Mutex::new(Default::default());
+        run(src, &p, None, &lockout, &running, &mut |e| events.push(e)).expect("follow");
         let measured = events
             .iter()
             .find_map(|e| match e {
@@ -425,6 +444,41 @@ mod tests {
         );
     }
 
+    /// Lock out the one talkgroup that has an in-band call in the recording:
+    /// it must never start, and the skip must be counted.
+    #[test]
+    fn a_locked_out_talkgroup_is_never_followed() {
+        let path = std::env::var("HOME").unwrap()
+            + "/hoosier-field/live_airspy_851M_2500k_nac260.cs16";
+        let Some(src) = cs16_source(&path, 2_500_000.0) else {
+            eprintln!("no {path}; skipping");
+            return;
+        };
+        let p = FollowParams {
+            center_hz: 851e6,
+            control_hz: 851_537_500.0,
+            calls_dir: None,
+        };
+        let running = AtomicBool::new(true);
+        let mut events = Vec::new();
+        let lockout = std::sync::Mutex::new([20308u16].into_iter().collect());
+        run(src, &p, None, &lockout, &running, &mut |e| events.push(e)).expect("follow");
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, FollowEvent::CallStart { tg, .. } if *tg == 20308))
+            .count();
+        let locked = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                FollowEvent::Status { locked, .. } => Some(*locked),
+                _ => None,
+            })
+            .unwrap_or(0);
+        assert_eq!(starts, 0, "locked talkgroup was followed");
+        assert!(locked >= 1, "lockout skip not counted");
+    }
+
     /// Real hardware, no GUI: open an Airspy, follow the site for 25 s, play
     /// completed calls. `cargo test --release -- --ignored live_airspy`.
     #[test]
@@ -444,7 +498,8 @@ mod tests {
         });
         let mut player = crate::player::Player::open();
         let (mut starts, mut calls, mut last) = (0, 0, None);
-        run(src, &p, None, &running, &mut |e| match e {
+        let lockout = std::sync::Mutex::new(Default::default());
+        run(src, &p, None, &lockout, &running, &mut |e| match e {
             FollowEvent::Measured {
                 control_mhz,
                 modulation,

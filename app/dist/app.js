@@ -93,11 +93,39 @@ function addCall(g) {
     `<td class="tg">${g.name}<span class="num">TG ${g.tg}</span></td>` +
     `<td class="src">${g.source ? g.source : "—"}</td>` +
     `<td class="dl">${g.freq_mhz.toFixed(4)}<span style="color:var(--ink-faint);font-size:11px"> MHz</span></td>` +
-    `<td>${badge}</td>`;
+    `<td>${badge}</td>` +
+    `<td class="act">` +
+      (g.wav ? `<button title="Replay" data-wav="${g.wav}">▶</button>` : "") +
+      `<button title="Lock out TG ${g.tg}" data-lock="${g.tg}" class="${lockout.has(g.tg) ? "on" : ""}">⊘</button>` +
+    `</td>`;
+  tr.querySelectorAll("button[data-wav]").forEach((b) => b.onclick = () => replay(b.dataset.wav));
+  tr.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => toggleLock(+b.dataset.lock));
   tbody.prepend(tr);
   while (tbody.children.length > 200) tbody.removeChild(tbody.lastChild);
 }
 $("clear").onclick = () => { tbody.innerHTML = ""; $("empty").style.display = ""; };
+
+/* ---------- lockout: remembered across runs, pushed to the follower live ---------- */
+const lockout = new Set(JSON.parse(localStorage.getItem("hs.lockout") || "[]"));
+function renderLockout() {
+  const bar = $("lockbar"), chips = $("lockchips");
+  bar.style.display = lockout.size ? "" : "none";
+  chips.innerHTML = [...lockout].sort((a, b) => a - b)
+    .map((tg) => `<span class="chip" data-tg="${tg}" title="Unlock">TG ${tg} ✕</span>`).join(" ");
+  chips.querySelectorAll(".chip").forEach((c) => c.onclick = () => toggleLock(+c.dataset.tg));
+  tbody.querySelectorAll("button[data-lock]").forEach((b) => b.classList.toggle("on", lockout.has(+b.dataset.lock)));
+}
+function toggleLock(tg) {
+  if (lockout.has(tg)) lockout.delete(tg); else lockout.add(tg);
+  localStorage.setItem("hs.lockout", JSON.stringify([...lockout]));
+  renderLockout();
+  if (TAURI) invoke("set_lockout", { tgs: [...lockout] }).catch((e) => alert(e));
+}
+function replay(path) {
+  if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e));
+}
+renderLockout();
+if (TAURI) invoke("set_lockout", { tgs: [...lockout] }).catch(() => {});
 
 /* ---------- readouts ---------- */
 function setStatus(s) {
@@ -191,7 +219,7 @@ if (TAURI) {
       case "call":
         followVoice += ev.secs;
         addCall({ tg: ev.tg, name: ev.name, source: ev.source, freq_mhz: ev.freq_mhz,
-                  encrypted: false, secs: ev.secs, modulation: ev.modulation });
+                  encrypted: false, secs: ev.secs, modulation: ev.modulation, wav: ev.wav });
         $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
         $("followMeta").textContent = "following";
         break;
@@ -202,6 +230,7 @@ if (TAURI) {
         $("r-syncs").textContent = ev.control_syncs;
         $("r-grants").textContent = ev.calls;
         $("r-syncerr").textContent = ev.dropped ? `${ev.dropped} drop` : "0 drop";
+        if (ev.locked) $("followMeta").textContent = `${ev.locked} locked-out call${ev.locked === 1 ? "" : "s"} skipped`;
         $("rateMeta").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)} MSPS`;
         break;
       case "spectrum":
