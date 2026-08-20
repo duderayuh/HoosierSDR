@@ -65,7 +65,7 @@ fn parse_args() -> Args {
         play: false,
         demo: false,
         sdr: false,
-        source: "rtlsdr".into(),
+        source: String::new(),
         serial: None,
         secs: None,
         catalog: None,
@@ -165,7 +165,8 @@ fn print_help() {
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
              --sdr          Capture live from a radio (build --features rtlsdr,airspy)
---source <S>   Which radio: rtlsdr (default) or airspy. An Airspy R2 runs at
+--source <S>   Which radio: rtlsdr or airspy (default: whichever this
+               build has; rtlsdr when it has both). An Airspy R2 runs at
                --rate 2500000 or 10000000; the stream is normalized to
                2.4/9.6 MSPS on the fly. Its firmware takes no gain setting.
 --serial <HEX> Pick one of several Airspys by serial (see airspy_info)
@@ -694,7 +695,18 @@ fn save_iq(path: &str, iq: &[f32]) -> std::io::Result<()> {
 fn run_sdr(args: &Args) {
     use hs_core::stream::Normalized;
 
-    match args.source.as_str() {
+    // An unnamed source means "the radio this build knows"; with both
+    // compiled in, the RTL-SDR keeps its historical default.
+    let source = if args.source.is_empty() {
+        if cfg!(feature = "rtlsdr") {
+            "rtlsdr"
+        } else {
+            "airspy"
+        }
+    } else {
+        args.source.as_str()
+    };
+    match source {
         #[cfg(feature = "rtlsdr")]
         "rtlsdr" => {
             use hs_source::rtlsdr::RtlSdrSource;
@@ -801,7 +813,13 @@ fn run_sdr_with<S: hs_source::SdrSource + Send + 'static>(src: S, args: &Args) {
     // Drain the radio on its own thread (see `stream::Buffered`): read
     // synchronously from the decode loop, an RTL-SDR loses samples at every
     // block boundary and the control channel syncs but never yields a TSBK.
-    let mut src = stream::Buffered::new(src, 65536);
+    let src = stream::Buffered::new(src, 65536);
+    // --save-iq records exactly what the decoder sees — post-normalization,
+    // as .cf32 at `rate` — so `hoosier-sdr --rate <rate> <file>` replays it.
+    let mut src = Recorded::new(src, args.save_iq.as_deref());
+    if let Some(p) = src.path() {
+        println!("recording IQ to {p} ({:.1} MB/s)", rate * 8.0 / 1e6);
+    }
     let mut pcm: Vec<i16> = Vec::new();
     let stats = stream::run(&mut src, &mut dec, 65536, |out| {
         for g in &out.grants {
@@ -874,6 +892,63 @@ impl<S: hs_source::SdrSource> hs_source::SdrSource for Timed<S> {
             return Err(hs_source::SourceError::Eof);
         }
         self.inner.read(buf)
+    }
+}
+
+/// A source that tees everything it delivers into a `.cf32` file.
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+struct Recorded<S> {
+    inner: S,
+    out: Option<(String, std::io::BufWriter<std::fs::File>)>,
+}
+
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+impl<S> Recorded<S> {
+    fn new(inner: S, path: Option<&str>) -> Self {
+        let out = path.and_then(|p| {
+            let p = if p.ends_with(".cf32") {
+                p.to_string()
+            } else {
+                format!("{p}.cf32")
+            };
+            match std::fs::File::create(&p) {
+                Ok(f) => Some((p, std::io::BufWriter::new(f))),
+                Err(e) => {
+                    eprintln!("cannot record IQ to {p}: {e}");
+                    None
+                }
+            }
+        });
+        Self { inner, out }
+    }
+
+    fn path(&self) -> Option<&str> {
+        self.out.as_ref().map(|(p, _)| p.as_str())
+    }
+}
+
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+impl<S: hs_source::SdrSource> hs_source::SdrSource for Recorded<S> {
+    fn sample_rate(&self) -> f64 {
+        self.inner.sample_rate()
+    }
+    fn center_freq(&self) -> f64 {
+        self.inner.center_freq()
+    }
+    fn dropped(&self) -> u64 {
+        self.inner.dropped()
+    }
+    fn read(&mut self, buf: &mut [f32]) -> Result<usize, hs_source::SourceError> {
+        let n = self.inner.read(buf)?;
+        if let Some((_, w)) = self.out.as_mut() {
+            use std::io::Write;
+            let bytes: Vec<u8> = buf[..n].iter().flat_map(|v| v.to_le_bytes()).collect();
+            if let Err(e) = w.write_all(&bytes) {
+                eprintln!("IQ recording stopped: {e}");
+                self.out = None;
+            }
+        }
+        Ok(n)
     }
 }
 
