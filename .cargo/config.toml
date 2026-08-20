@@ -1,0 +1,8 @@
+# HoosierSDR is built on the machine that runs it (the installer clones and
+# builds locally), so compile for this CPU. It is not a nicety: following a
+# whole site from an Airspy at 10 MSPS needs it. Measured on an M-series Mac,
+# the same follow loop dropped 1118 blocks in 25 s without it and 0 with it.
+# Building a binary to copy to another machine? Override with
+# RUSTFLAGS="" or a --target.
+[build]
+rustflags = ["-C", "target-cpu=native"]

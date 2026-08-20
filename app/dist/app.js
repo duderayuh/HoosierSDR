@@ -45,6 +45,25 @@ function wireSeg(el, onPick) {
   });
 }
 wireSeg($("modSeg"), (v) => { modSel = v; syncTuned(); });
+
+/* ---------- mode: follow a site vs. decode one channel ---------- */
+let modeSel = "follow";
+function applyMode() {
+  const follow = modeSel === "follow";
+  $("centerField").style.display = follow ? "" : "none";
+  $("followOpts").style.display = follow ? "" : "none";
+  $("channelOpts").style.display = follow ? "none" : "";
+  // The follower picks modulation by measurement and uses the site's
+  // equalizer; those controls only apply to a single named channel.
+  $("modField").style.opacity = follow ? ".45" : "";
+  $("eqField").style.opacity = follow ? ".45" : "";
+  $("freqHint").textContent = follow ? "control ch" : "channel";
+  $("empty").lastChild.textContent = follow
+    ? "Press Start to follow the control channel, or decode a recording."
+    : "Press Start to decode the channel, or decode a recording.";
+}
+wireSeg($("modeSeg"), (v) => { modeSel = v; applyMode(); });
+applyMode();
 wireSeg($("eqSeg"), (v) => { eqSel = v; $("r-eq").textContent = v === "bypass" ? "BARE" : v.toUpperCase(); });
 
 /* ---------- state pill ---------- */
@@ -64,7 +83,11 @@ function addCall(g) {
   const t = new Date().toLocaleTimeString("en-US", { hour12: false });
   const badge = g.encrypted
     ? '<span class="badge enc">Encrypted</span>'
-    : '<span class="badge clear">Clear</span>';
+    : g.secs != null
+      ? `<span class="badge clear">${g.secs.toFixed(1)}s · ${g.modulation || "?"}</span>`
+      : g.live
+        ? '<span class="badge clear">On air</span>'
+        : '<span class="badge clear">Clear</span>';
   tr.innerHTML =
     `<td class="time">${t}</td>` +
     `<td class="tg">${g.name}<span class="num">TG ${g.tg}</span></td>` +
@@ -152,6 +175,40 @@ if (TAURI) {
   listen("status", (e) => setStatus(e.payload));
   listen("spectrum", (e) => { pushSpectrum(e.payload.bins_db); pushSymbols(0.2); });
   listen("stopped", () => setState("standby"));
+  let followVoice = 0;
+  listen("follow", (e) => {
+    const ev = e.payload;
+    switch (ev.kind) {
+      case "measured":
+        setState("locked");
+        $("tunedHz").textContent = ev.control_mhz.toFixed(4);
+        $("tunedSub").textContent = `CONTROL · ${ev.modulation} · tuner ${ev.correction_hz >= 0 ? "+" : ""}${ev.correction_hz.toFixed(0)} Hz`;
+        $("followMeta").textContent = "following";
+        break;
+      case "call_start":
+        $("followMeta").textContent = `on air: ${ev.name} · ${ev.freq_mhz.toFixed(4)} MHz`;
+        break;
+      case "call":
+        followVoice += ev.secs;
+        addCall({ tg: ev.tg, name: ev.name, source: ev.source, freq_mhz: ev.freq_mhz,
+                  encrypted: false, secs: ev.secs, modulation: ev.modulation });
+        $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
+        $("followMeta").textContent = "following";
+        break;
+      case "notice":
+        $("followMeta").textContent = ev.text;
+        break;
+      case "status":
+        $("r-syncs").textContent = ev.control_syncs;
+        $("r-grants").textContent = ev.calls;
+        $("r-syncerr").textContent = ev.dropped ? `${ev.dropped} drop` : "0 drop";
+        $("rateMeta").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)} MSPS`;
+        break;
+      case "spectrum":
+        pushSpectrum(ev.bins_db); pushSymbols(0.2);
+        break;
+    }
+  });
   listen("error", (e) => { setState("standby"); alert("Capture error:\n" + e.payload); });
 
   const opts = () => ({
@@ -163,12 +220,22 @@ if (TAURI) {
     eq: eqSel,
   });
   $("source").onchange = () => {
-    $("rate").value = $("source").value === "airspy" ? "2500000" : "2400000";
+    const a = $("source").value === "airspy";
+    $("rate").value = a ? (modeSel === "follow" ? "10000000" : "2500000") : "2400000";
+    syncTuned();
   };
   $("start").onclick = async () => {
     try { setState("capturing");
-      await invoke("start_capture", { ...opts(),
-        recordIq: $("reciq").value.trim() || null, recordLog: $("reclog").value.trim() || null }); }
+      if (modeSel === "follow") {
+        const o = opts(); followVoice = 0;
+        $("followMeta").textContent = "measuring the control channel…";
+        await invoke("start_follow", { source: o.source, freq: parseFreq($("center").value), rate: o.rate,
+          gain: o.gain, control: o.freq, callsDir: $("callsdir").value.trim() || null, play: $("play").checked });
+      } else {
+        await invoke("start_capture", { ...opts(),
+          recordIq: $("reciq").value.trim() || null, recordLog: $("reclog").value.trim() || null });
+      }
+    }
     catch (err) { setState("standby"); alert(err); }
   };
   $("stop").onclick = () => invoke("stop_capture");

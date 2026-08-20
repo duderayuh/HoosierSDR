@@ -14,6 +14,9 @@ use tauri::{AppHandle, Emitter, State};
 use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
+mod follow;
+mod player;
+
 #[derive(Default)]
 struct AppState {
     running: Arc<AtomicBool>,
@@ -89,8 +92,7 @@ fn start_capture(
     let catalog = state.catalog.clone();
     std::thread::spawn(move || {
         let res = capture_loop(
-            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq,
-            record_log,
+            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq, record_log,
         );
         if let Err(e) = res {
             let _ = app.emit("error", e);
@@ -99,6 +101,102 @@ fn start_capture(
         let _ = app.emit("stopped", ());
     });
     Ok(())
+}
+
+/// Open the radio the UI picked. `gain` is applied to an RTL-SDR; the Airspy
+/// R2's firmware takes none (see `hs_source::airspy`).
+fn open_source(
+    source: &str,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+) -> Result<Box<dyn hs_source::SdrSource + Send>, String> {
+    use hs_source::airspy::AirspySource;
+    use hs_source::rtlsdr::RtlSdrSource;
+    Ok(match source {
+        "airspy" => Box::new(
+            AirspySource::open(None, freq, rate, gain)
+                .map_err(|e| format!("open Airspy: {e:?}"))?,
+        ),
+        _ => Box::new(
+            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
+                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
+        ),
+    })
+}
+
+/// Follow a trunked site live: `freq` is the band centre the radio tunes to,
+/// `control` the control channel inside it. Emits `follow` events
+/// (`{kind: measured|call_start|call|notice|status|spectrum, ...}`), then
+/// `stopped`, or `error`. Completed calls are played as they finish when
+/// `play` is set, and written to `calls_dir` when given.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn start_follow(
+    app: AppHandle,
+    state: State<AppState>,
+    source: String,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+    control: f64,
+    calls_dir: Option<String>,
+    play: bool,
+) -> Result<(), String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("already running".into());
+    }
+    let running = state.running.clone();
+    let catalog = state.catalog.clone();
+    std::thread::spawn(move || {
+        let res = (|| -> Result<(), String> {
+            let src = open_source(&source, freq, rate, gain)?;
+            let calls_dir = match calls_dir.filter(|d| !d.trim().is_empty()) {
+                Some(d) => {
+                    let d = std::path::PathBuf::from(shellexpand_home(&d));
+                    std::fs::create_dir_all(&d)
+                        .map_err(|e| format!("calls dir {}: {e}", d.display()))?;
+                    Some(d)
+                }
+                None => None,
+            };
+            let params = follow::FollowParams {
+                center_hz: freq,
+                control_hz: control,
+                calls_dir,
+            };
+            let mut player = if play { player::Player::open() } else { None };
+            if play && player.is_none() {
+                let _ = app.emit(
+                    "follow",
+                    follow::FollowEvent::Notice {
+                        text: "no audio output device — calls are not being played".into(),
+                    },
+                );
+            }
+            let cat = catalog.lock().unwrap().clone();
+            follow::run(src, &params, cat.as_ref(), &running, &mut |ev| {
+                if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_mut(), &ev) {
+                    pl.play(pcm);
+                }
+                let _ = app.emit("follow", ev);
+            })
+        })();
+        if let Err(e) = res {
+            let _ = app.emit("error", e);
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = app.emit("stopped", ());
+    });
+    Ok(())
+}
+
+/// `~/x` → `$HOME/x`.
+fn shellexpand_home(p: &str) -> String {
+    match (p.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+        _ => p.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -116,20 +214,9 @@ fn capture_loop(
     record_log: Option<String>,
 ) -> Result<(), String> {
     use hs_core::stream::{Buffered, Normalized};
-    use hs_source::airspy::AirspySource;
-    use hs_source::rtlsdr::RtlSdrSource;
     use hs_source::SdrSource;
 
-    let raw: Box<dyn SdrSource + Send> = match source {
-        "airspy" => Box::new(
-            AirspySource::open(None, freq, rate, gain)
-                .map_err(|e| format!("open Airspy: {e:?}"))?,
-        ),
-        _ => Box::new(
-            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
-                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
-        ),
-    };
+    let raw = open_source(source, freq, rate, gain)?;
     // Normalize an Airspy's 2.5/10 MSPS to 2.4/9.6 on the fly, and drain the
     // radio on its own thread so a busy UI frame never costs samples.
     let mut src = Buffered::new(Normalized::new(raw), 65536);
@@ -324,7 +411,8 @@ fn main() {
             load_catalog,
             start_capture,
             stop_capture,
-            decode_file
+            decode_file,
+            start_follow
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

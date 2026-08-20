@@ -19,3 +19,4 @@ serde = { version = "1", features = ["derive"] }
 hs-core = { path = "../crates/hs-core" }
 hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy"] }
 hs-catalog = { path = "../crates/hs-catalog" }
+cpal = "0.15"

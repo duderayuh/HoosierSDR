@@ -57,9 +57,12 @@ cargo run --release -p hs-cli --features airspy -- --sdr --source airspy \
 cargo run --release -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 ```
 
-`--secs N` ends a live run after N seconds with the summary printed; `--serial <hex>` picks one of several Airspys. The Airspy R2's 2016 firmware takes no gain setting (it hangs), so it runs at its defaults — which decode fine. macOS: `brew install airspy libusb`. Without the feature, `--sdr` prints setup guidance. The normalizer preserves 0.8 of the output Nyquist: ±960 kHz around the centre at 2.5 MSPS, ±3.84 MHz at 10 MSPS — centre the band so every channel you need sits inside that.
+Builds compile for the host CPU by default (`.cargo/config.toml`); at 10 MSPS that is the difference between following a site drop-free and losing a third of the samples. `--secs N` ends a live run after N seconds with the summary printed; `--serial <hex>` picks one of several Airspys. The Airspy R2's 2016 firmware takes no gain setting (it hangs), so it runs at its defaults — which decode fine. macOS: `brew install airspy libusb`. Without the feature, `--sdr` prints setup guidance. The normalizer preserves 0.8 of the output Nyquist: ±960 kHz around the centre at 2.5 MSPS, ±3.84 MHz at 10 MSPS — centre the band so every channel you need sits inside that.
 
 ## Desktop app
+
+The app follows a site the same way the CLI does — **Follow site** mode takes a band centre and a control channel, measures where the control channel really is and which modulation it uses, then decodes every call it grants, listing each in the dispatch feed with its duration, playing completed calls through the default audio device, and (optionally) saving one WAV per call. **One channel** mode is the single-channel decoder with the equalizer selector. The follow loop is shared with the CLI (`hs_core::follow`) and is verified headless over a recorded Airspy capture in the app's tests.
+
 
 ## Finding the control channel
 
