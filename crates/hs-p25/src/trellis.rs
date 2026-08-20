@@ -127,10 +127,7 @@ pub fn decode_soft(rx: &[crate::soft::SoftDibit; 98]) -> Option<([u8; 12], u32)>
 /// a couple of low-confidence dibits decided the other way. Trying list
 /// candidates against the CRC turns those near-misses into decodes, and the
 /// CRC arbitrates: a wrong candidate passes with probability ~2⁻¹⁶ per try.
-pub fn decode_list_soft(
-    rx: &[crate::soft::SoftDibit; 98],
-    list: usize,
-) -> Vec<([u8; 12], u32)> {
+pub fn decode_list_soft(rx: &[crate::soft::SoftDibit; 98], list: usize) -> Vec<([u8; 12], u32)> {
     use crate::soft::SoftDibit;
 
     let k = list.max(1);
@@ -167,8 +164,8 @@ pub fn decode_list_soft(
 
     // Rank all finishing paths, best first, and trace each back.
     let mut finals: Vec<(u32, u8, u8)> = Vec::new();
-    for s in 0..4usize {
-        for (r, &(cost, _, _)) in survivors[s].iter().enumerate() {
+    for (s, survs) in survivors.iter().enumerate() {
+        for (r, &(cost, _, _)) in survs.iter().enumerate() {
             finals.push((cost, s as u8, r as u8));
         }
     }

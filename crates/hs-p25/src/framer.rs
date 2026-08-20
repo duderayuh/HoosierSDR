@@ -339,8 +339,10 @@ impl Framer {
                         .map(|(d, _)| d.iter().map(|b| format!("{b:02x}")).collect())
                         .unwrap_or_default();
                     let rx: String = arr.iter().map(|d| char::from(b'0' + d.bits)).collect();
-                    let confs: Vec<u32> =
-                        arr.iter().map(|d| d.conf[0] as u32 + d.conf[1] as u32).collect();
+                    let confs: Vec<u32> = arr
+                        .iter()
+                        .map(|d| d.conf[0] as u32 + d.conf[1] as u32)
+                        .collect();
                     eprintln!(
                         "TSDU_DBG t={} blk={}/{} ok={} cost={:?} data={} rx={} confs={:?}",
                         DIBIT_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
