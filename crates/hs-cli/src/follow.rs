@@ -5,159 +5,7 @@
 //! it announces is decoded and written out as its own audio file.
 
 use hs_core::decoder::Modulation;
-use hs_core::follow::{Call, TrunkFollower};
-
-/// How well a candidate frequency-and-modulation decodes the control channel,
-/// as a sortable score.
-///
-/// Grants dominate, then clean NIDs. A control channel's purpose is to issue
-/// grants, and — crucially — the modulation that produces them is not always
-/// the one with the most clean NIDs. At the right frequency, C4FM and CQPSK
-/// tie on clean NIDs, because the network identifier's BCH check survives the
-/// confusion between the two; but only the correct modulation decodes the TSBK
-/// payload behind it, so only it produces grants. Scoring on clean NIDs alone
-/// therefore picks the modulation by a coin toss and, half the time, follows a
-/// control channel that never grants anything. Counting grants first settles
-/// it. Clean NIDs still break ties and still catch a control channel that
-/// happened to be idle through the probe.
-fn control_score(f: &TrunkFollower) -> (usize, u32) {
-    let d = f.control_diagnostics();
-    let grants = d.grants.len();
-    let clean = d.nids.iter().filter(|n| n.bch_errors == 0).count() as u32;
-    (grants, clean)
-}
-
-/// Find where a channel really is, given where it should be.
-///
-/// An uncalibrated tuner can sit several kilohertz off, which is more than the
-/// demodulators tolerate, so the follower needs the control channel's measured
-/// frequency rather than its nominal one. Rather than ask the user for a ppm
-/// figure they have no easy way to obtain, find it here.
-///
-/// The obvious way — take the strongest spectral peak near the nominal
-/// frequency — does not survive contact with a real capture. Two things beat
-/// it: the tuner's own DC spike sits at the centre of the band and is often the
-/// tallest thing in it, and a busy traffic channel one 25 kHz slot away is
-/// routinely louder than the control channel itself. Both were observed on the
-/// first recording this was tried against, and both produced a confident wrong
-/// answer.
-///
-/// So measure the thing we actually care about instead of a proxy for it: try
-/// each candidate and keep whichever one lets the control channel decode.
-///
-/// "Decode" has to mean more than frame syncs, though. Scoring on sync count
-/// picked C4FM at zero offset over the correct CQPSK at −1 kHz, and followed
-/// the system to zero calls — because a C4FM demodulator on a CQPSK signal
-/// still syncs. The two modulations share a symbol rate and a frame structure,
-/// so the sync correlator is not what separates them. What does is the network
-/// identifier behind each sync: it carries a BCH code, so a wrong modulation
-/// produces syncs whose NIDs do not check out. Counting *clean* NIDs scores
-/// the thing that has to be right for anything downstream to work.
-/// Returns `None` when nothing decoded anywhere in the window, which the
-/// caller must report as such: a failure that prints like a successful
-/// detection at zero error is worse than no detection at all. This function
-/// used to return the nominal frequency in that case, and three control
-/// channels that were simply not on the air were duly reported as "found at
-/// nominal, tuner error +0 Hz" — indistinguishable from a real lock, and
-/// nearly recorded as a measurement.
-pub fn measure_carrier(
-    iq: &[f32],
-    sample_rate: f64,
-    center_hz: f64,
-    nominal_hz: f64,
-) -> Option<(f64, Modulation)> {
-    // Half a channel either way. Sweeping that whole span at the precision the
-    // demodulators want would mean a hundred trial decodes, and each one
-    // channelizes the probe from scratch. Coarse-then-fine gets the same
-    // answer for a fraction of the cost: a kilohertz grid is tight enough that
-    // the right slot still decodes something, and the refinement only has to
-    // search its neighbourhood.
-    const SEARCH_HZ: f64 = 12_500.0;
-    const COARSE_HZ: f64 = 1_000.0;
-    const FINE_HZ: f64 = 250.0;
-
-    // Grants are the discriminator between the two modulations (both decode the
-    // network identifier, only the right one decodes the grant behind it), and
-    // grants are sparse — a couple a second — so the probe has to be a few
-    // seconds, not one, or it catches none and the modulation choice falls back
-    // to a coin toss. Three seconds holds enough grants to be decisive while
-    // keeping the whole sweep to a few seconds of work at 13x real time.
-    let want = 3 * sample_rate as usize;
-    let probe = &iq[..want.min(iq.len())];
-
-    let try_at = |cand: f64, m: Modulation| -> (usize, u32) {
-        if (cand - center_hz).abs() >= sample_rate / 2.0 {
-            return (0, 0);
-        }
-        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand, m);
-        f.process(probe);
-        control_score(&f)
-    };
-
-    // Modulation is swept alongside frequency rather than asked for. It is not
-    // knowable from the frequency — a scan of one band found control channels
-    // of both kinds — and getting it wrong looks exactly like being tuned to
-    // the wrong place, so guessing would produce a confident silence.
-    let mods = [Modulation::Cqpsk, Modulation::C4fm];
-    let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
-    let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
-    for k in -coarse..=coarse {
-        let cand = nominal_hz + k as f64 * COARSE_HZ;
-        for m in mods {
-            let score = try_at(cand, m);
-            if score > best.0 {
-                best = (score, cand, m);
-            }
-        }
-    }
-    if best.0 == (0, 0) {
-        return None;
-    }
-    let (centre, m) = (best.1, best.2);
-    let fine = (COARSE_HZ / FINE_HZ) as i32;
-    for k in -fine..=fine {
-        let cand = centre + k as f64 * FINE_HZ;
-        let score = try_at(cand, m);
-        if score > best.0 {
-            best = (score, cand, m);
-        }
-    }
-    Some((best.1, best.2))
-}
-
-/// De-noises repeated grant announcements. A control channel repeats a grant
-/// every cycle while its call is up, so the same out-of-band call is seen many
-/// times a second; this reports each frequency at most once per cooldown.
-struct GrantGate {
-    /// freq -> blocks remaining before it may be reported again.
-    seen: std::collections::HashMap<u64, u32>,
-    cooldown: u32,
-}
-
-impl GrantGate {
-    fn new(cooldown: u32) -> Self {
-        Self {
-            seen: std::collections::HashMap::new(),
-            cooldown,
-        }
-    }
-    /// True if this frequency should be reported now (and arms its cooldown).
-    fn fresh(&mut self, freq: u64) -> bool {
-        match self.seen.get_mut(&freq) {
-            Some(c) if *c > 0 => false,
-            _ => {
-                self.seen.insert(freq, self.cooldown);
-                true
-            }
-        }
-    }
-    /// Call once per processed block to age the cooldowns.
-    fn tick(&mut self) {
-        for c in self.seen.values_mut() {
-            *c = c.saturating_sub(1);
-        }
-    }
-}
+use hs_core::follow::{measure_carrier, pick_modulation, Call, GrantGate, TrunkFollower};
 
 fn mod_name(m: Modulation) -> &'static str {
     match m {
@@ -197,33 +45,6 @@ pub fn report_call(c: &Call, cat: Option<&hs_core::catalog::CsvCatalog>, n: usiz
     }
 }
 
-/// Decide the modulation at a frequency the user supplied.
-///
-/// `--control-measured` names where the channel is but not what it speaks, and
-/// the two are independent, so the shorter sweep still has to run.
-pub fn pick_modulation(
-    iq: &[f32],
-    sample_rate: f64,
-    center_hz: f64,
-    nominal_hz: f64,
-    measured_hz: f64,
-) -> Option<Modulation> {
-    let probe = &iq[..(sample_rate as usize).min(iq.len())];
-    let score = |m: Modulation| {
-        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
-        f.process(probe);
-        control_score(&f)
-    };
-    let (c4, cq) = (score(Modulation::C4fm), score(Modulation::Cqpsk));
-    if c4 == (0, 0) && cq == (0, 0) {
-        None
-    } else if c4 > cq {
-        Some(Modulation::C4fm)
-    } else {
-        Some(Modulation::Cqpsk)
-    }
-}
-
 /// Say plainly that the control channel was not found, and why it might not
 /// have been.
 fn report_not_found(control_hz: f64) {
@@ -245,17 +66,8 @@ fn report_not_found(control_hz: f64) {
 /// a different one — but a mistyped `--freq` is an ordinary user error and
 /// deserves an ordinary message rather than a panic.
 fn check_in_band(sample_rate: f64, center_hz: f64, control_hz: f64) {
-    let nyquist = sample_rate / 2.0;
-    if (control_hz - center_hz).abs() >= nyquist {
-        eprintln!(
-            "control {:.4} MHz is outside the capture: centered at {:.4} MHz, \
-             {:.4} MHz wide (covers {:.4}–{:.4} MHz).",
-            control_hz / 1e6,
-            center_hz / 1e6,
-            sample_rate / 1e6,
-            (center_hz - nyquist) / 1e6,
-            (center_hz + nyquist) / 1e6,
-        );
+    if let Err(msg) = hs_core::follow::in_band(sample_rate, center_hz, control_hz) {
+        eprintln!("{msg}");
         eprintln!("Set --freq to the frequency the capture was tuned to.");
         std::process::exit(2);
     }
