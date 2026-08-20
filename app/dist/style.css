@@ -348,3 +348,20 @@ td.act button.on { color:var(--enc); border-color:var(--enc); }
 .sites .site .cc { border:1px solid var(--line); border-radius:6px; padding:2px 7px; cursor:pointer; color:var(--sig, var(--ink)); background:none; font:inherit; }
 .sites .site .cc:hover { border-color:var(--ink-dim); }
 .sites .site .tdma { color:var(--enc); }
+
+/* views + config */
+.seg.nav { margin-left: 18px; }
+.seg.nav button { padding: 6px 14px; }
+.config { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; margin-top: 18px; }
+.config .col { display: flex; flex-direction: column; gap: 18px; }
+@media (max-width: 900px) { .config { grid-template-columns: 1fr; } }
+.list { display: flex; flex-direction: column; gap: 5px; max-height: 260px; overflow: auto; }
+.list .row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 13px; }
+.list .row:hover { border-color: var(--ink-dim); }
+.list .row.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+.list .row .mono, .list .row small { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--ink-faint); }
+.list .row .grow { flex: 1; }
+.list .row .btn { padding: 4px 9px; font-size: 12px; }
+.tablewrap.tgs { max-height: 340px; overflow: auto; }
+.tablewrap.tgs td, .tablewrap.tgs th { padding: 5px 8px; font-size: 12.5px; }
+.tablewrap.tgs tr.enc td { opacity: .5; }

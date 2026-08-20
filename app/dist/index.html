@@ -13,6 +13,10 @@
   <header class="masthead">
     <div class="inner">
       <div class="brand">Hoosier<b>SDR</b><span class="dot">.</span></div>
+      <div class="seg nav" id="navSeg" role="tablist">
+        <button data-v="receiver" aria-pressed="true">Receiver</button>
+        <button data-v="config" aria-pressed="false">Config</button>
+      </div>
       <div class="tuned">
         <div>
           <span class="hz" id="tunedHz">857.6625</span><span class="unit"> MHz</span>
@@ -26,6 +30,7 @@
   </header>
 
   <div class="wrap">
+   <div class="view" id="view-receiver">
     <section class="console">
       <!-- LEFT: scopes + readouts -->
       <div class="scopes">
@@ -77,6 +82,10 @@
           <span class="meta" id="rateMeta">2.4 MSPS</span>
         </div>
         <div class="body">
+          <label class="field">
+            <span class="lab">Playlist <span class="mono" style="color:var(--ink-faint)">tunes + filters</span></span>
+            <select id="playlist"><option value="">— none: follow every talkgroup —</option></select>
+          </label>
           <div class="field">
             <span class="lab">Mode</span>
             <div class="seg" id="modeSeg" role="group" aria-label="Mode">
@@ -140,43 +149,8 @@
           </div>
 
           <div class="divider"></div>
-          <div class="subhead"><span class="eyebrow">Catalog &amp; capture</span><span class="line"></span></div>
+          <div class="subhead"><span class="eyebrow">Capture</span><span class="line"></span></div>
 
-          <div class="subhead"><span class="eyebrow">RadioReference</span><span class="line"></span></div>
-          <div class="row2">
-            <label class="field">
-              <span class="lab">Username</span>
-              <input id="rrUser" type="text" autocomplete="username" spellcheck="false" />
-            </label>
-            <label class="field">
-              <span class="lab">Password</span>
-              <input id="rrPass" type="password" autocomplete="current-password" placeholder="saved in Keychain" />
-            </label>
-          </div>
-          <div class="row2">
-            <label class="field">
-              <span class="lab">App key</span>
-              <input id="rrKey" type="password" placeholder="saved in Keychain" spellcheck="false" />
-            </label>
-            <label class="field">
-              <span class="lab">System ID <span class="mono" style="color:var(--ink-faint)">radioreference.com/db/sid/…</span></span>
-              <input id="rrSid" type="text" inputmode="numeric" placeholder="e.g. 11" spellcheck="false" />
-            </label>
-          </div>
-          <div class="actions" style="margin-top:2px">
-            <button class="btn ghost" id="rrSave">Save</button>
-            <button class="btn primary" id="rrDownload">Download system</button>
-            <span class="meta" id="rrMeta"></span>
-          </div>
-          <div id="rrSites" class="sites"></div>
-
-          <label class="field">
-            <span class="lab">Talkgroup catalog · RadioReference CSV</span>
-            <span class="inline">
-              <input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" />
-              <button class="btn ghost" id="loadcat">Load</button>
-            </span>
-          </label>
           <div class="row2" id="followOpts">
             <label class="field">
               <span class="lab">Save calls to</span>
@@ -242,6 +216,101 @@
       <span class="mark">◆</span>
       <span><b>Decodes unencrypted P25 only.</b> Encrypted talkgroups are detected by their ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC&nbsp;35-44.1-2-7). HoosierSDR equalizes the channel <b>before</b> differential detection — the front end no other open-source P25 decoder uses.</span>
     </p>
+   </div><!-- /view-receiver -->
+
+   <div class="view" id="view-config" style="display:none">
+    <section class="config">
+      <div class="col">
+        <div class="panel">
+          <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
+          <div class="body">
+            <div class="row2">
+              <label class="field"><span class="lab">Username</span>
+                <input id="rrUser" type="text" autocomplete="username" spellcheck="false" /></label>
+              <label class="field"><span class="lab">Password</span>
+                <input id="rrPass" type="password" autocomplete="current-password" /></label>
+            </div>
+            <label class="field" id="rrKeyField"><span class="lab">App key <span class="mono" style="color:var(--ink-faint)">this build has none embedded</span></span>
+              <input id="rrKey" type="password" spellcheck="false" /></label>
+            <div class="actions" style="margin-top:2px">
+              <button class="btn primary" id="rrSave">Save</button>
+              <span class="mono" style="font-size:11px;color:var(--ink-faint)">Premium account required. Secrets go to the Keychain on this Mac.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Find a system</span><span class="meta" id="findMeta"></span></div>
+          <div class="body">
+            <label class="field"><span class="lab">ZIP code</span>
+              <span class="inline"><input id="bZip" type="text" inputmode="numeric" placeholder="46204" spellcheck="false" />
+              <button class="btn ghost" id="bZipGo">Go</button></span></label>
+            <div class="row2">
+              <label class="field"><span class="lab">State</span>
+                <select id="bState"><option value="">—</option></select></label>
+              <label class="field"><span class="lab">County</span>
+                <select id="bCounty"><option value="">— statewide —</option></select></label>
+            </div>
+            <label class="field"><span class="lab">System ID <span class="mono" style="color:var(--ink-faint)">or paste radioreference.com/db/sid/…</span></span>
+              <span class="inline"><input id="rrSid" type="text" inputmode="numeric" placeholder="11" spellcheck="false" />
+              <button class="btn ghost" id="rrDownload">Load</button></span></label>
+            <div id="sysList" class="list"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="sysPanel" style="display:none">
+          <div class="head"><span class="eyebrow" id="sysName">System</span><span class="meta" id="sysMeta"></span></div>
+          <div class="body">
+            <span class="lab">Site</span>
+            <div id="siteList" class="list"></div>
+            <div class="row2" style="margin-top:10px">
+              <label class="field"><span class="lab">Filter talkgroups</span>
+                <input id="tgFilter" type="text" placeholder="dispatch, fire, …" spellcheck="false" /></label>
+              <label class="field"><span class="lab">Category</span>
+                <select id="tgCat"><option value="">all</option></select></label>
+            </div>
+            <div class="actions" style="margin:0 0 8px">
+              <button class="btn ghost" id="tgAll">Select shown</button>
+              <button class="btn ghost" id="tgNone">Clear</button>
+              <span class="meta" id="tgMeta"></span>
+            </div>
+            <div class="tablewrap tgs">
+              <table><thead><tr><th></th><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th></th></tr></thead>
+              <tbody id="tgBody"></tbody></table>
+            </div>
+            <div class="row2" style="margin-top:12px">
+              <label class="field"><span class="lab">Playlist name</span>
+                <input id="plName" type="text" placeholder="Marion County dispatch" spellcheck="false" /></label>
+              <label class="field"><span class="lab">&nbsp;</span>
+                <button class="btn primary" id="plSave" style="width:100%">Save playlist</button></label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Playlists</span><span class="meta" id="plMeta"></span></div>
+          <div class="body">
+            <div id="plList" class="list"></div>
+            <div class="empty" id="plEmpty" style="padding:18px 0"><span class="big">No playlists yet</span>Find a system, pick a site and talkgroups, and save.</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
+          <div class="body">
+            <label class="field">
+              <span class="lab">RadioReference CSV export (without an API login)</span>
+              <span class="inline">
+                <input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" />
+                <button class="btn ghost" id="loadcat">Load</button>
+              </span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+   </div><!-- /view-config -->
   </div>
 
   <script src="app.js"></script>

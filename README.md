@@ -61,6 +61,8 @@ Builds compile for the host CPU by default (`.cargo/config.toml`); at 10 MSPS th
 
 ## Desktop app
 
+**Config** holds the RadioReference login (premium account; secrets in the Keychain), a state → county → system browser (or a ZIP code), a talkgroup picker, and **playlists** — a saved system + site + talkgroup set that tunes the receiver and filters the feed in one click. The RadioReference *app key* is compiled in from `HS_RR_APP_KEY` at build time (`export HS_RR_APP_KEY=… ; cargo tauri build`) and lightly masked in the binary; it is never committed. A build without it shows an App-key field instead. Note what masking is and isn't: a key inside a desktop binary can always be extracted — RadioReference's revocable per-app key and each user's own login are the real controls.
+
 The app follows a site the same way the CLI does — **Follow site** mode takes a band centre and a control channel, measures where the control channel really is and which modulation it uses, then decodes every call it grants, listing each in the dispatch feed with its duration, playing completed calls through the default audio device, and (optionally) saving one WAV per call. **One channel** mode is the single-channel decoder with the equalizer selector. The follow loop is shared with the CLI (`hs_core::follow`) and is verified headless over a recorded Airspy capture in the app's tests.
 
 

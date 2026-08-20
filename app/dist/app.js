@@ -55,6 +55,14 @@ function wireSeg(el, onPick) {
 }
 wireSeg($("modSeg"), (v) => { modSel = v; syncTuned(); });
 
+/* ---------- views: Receiver / Config ---------- */
+function showView(v) {
+  $("view-receiver").style.display = v === "receiver" ? "" : "none";
+  $("view-config").style.display = v === "config" ? "" : "none";
+  $("navSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+}
+$("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
+
 /* ---------- mode: follow a site vs. decode one channel ---------- */
 let modeSel = "follow";
 function applyMode() {
@@ -295,58 +303,181 @@ if (TAURI) {
     try { await invoke("decode_file", { path, rate: parseFloat($("rate").value), cqpsk: modSel === "cqpsk", eq: eqSel }); }
     catch (err) { alert(err); }
   };
-  /* ---------- RadioReference ---------- */
+  /* ---------- RadioReference account ---------- */
   async function rrRefresh() {
     try {
       const st = await invoke("rr_settings");
       $("rrUser").value = st.username || "";
-      $("rrSid").value = st.sid ?? "";
+      if (st.sid && !$("rrSid").value) $("rrSid").value = st.sid;
       $("rrPass").placeholder = st.has_password ? "saved in Keychain" : "";
+      $("rrKeyField").style.display = st.embedded_key ? "none" : "";
       $("rrKey").placeholder = st.has_app_key ? "saved in Keychain" : "";
       $("rrMeta").textContent = st.catalog_len
         ? `${st.catalog_len} talkgroups loaded${st.system_name ? " · " + st.system_name : ""}`
-        : "";
+        : (st.has_password && st.has_app_key ? "ready" : "not signed in");
       if (st.catalog_len) $("loadcat").textContent = st.catalog_len + " TGs";
+      return st;
     } catch (e) { log(`rr_settings: ${e}`); }
   }
-  const sidVal = () => { const v = parseInt($("rrSid").value, 10); return Number.isFinite(v) ? v : null; };
+  async function rrSaveCreds() {
+    await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value,
+                              password: $("rrPass").value, sid: sidVal() });
+    $("rrPass").value = ""; $("rrKey").value = "";
+  }
+  const sidVal = () => {
+    const m = String($("rrSid").value).match(/(\d+)\s*$/); const v = m ? parseInt(m[1], 10) : NaN;
+    return Number.isFinite(v) ? v : null;
+  };
   $("rrSave").onclick = async () => {
-    try {
-      await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value,
-                                password: $("rrPass").value, sid: sidVal() });
-      $("rrPass").value = ""; $("rrKey").value = "";
-      $("rrMeta").textContent = "saved"; await rrRefresh();
-    } catch (e) { alert(e); }
+    try { await rrSaveCreds(); $("rrMeta").textContent = "saved"; await rrRefresh(); } catch (e) { alert(e); }
   };
-  $("rrDownload").onclick = async () => {
-    const sid = sidVal(); if (sid == null) { alert("Enter the system ID from the RadioReference URL."); return; }
-    $("rrDownload").disabled = true; $("rrMeta").textContent = "downloading…";
+
+  /* ---------- find a system ---------- */
+  let statesLoaded = false;
+  async function loadStates() {
+    if (statesLoaded) return;
+    const st = await invoke("rr_states", {});
+    $("bState").innerHTML = '<option value="">—</option>' +
+      st.map((s) => `<option value="${s.stid}">${s.name}</option>`).join("");
+    statesLoaded = true;
+  }
+  function renderSystems(list, label) {
+    $("findMeta").textContent = label || "";
+    $("sysList").innerHTML = list.length ? list.map((s) =>
+      `<div class="row" data-sid="${s.sid}"><span class="grow">${s.name}${s.city ? ` <small>· ${s.city}</small>` : ""}</span><span class="mono">sid ${s.sid}</span></div>`
+    ).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No trunked systems listed here.</span></div>';
+    $("sysList").querySelectorAll(".row[data-sid]").forEach((r) => r.onclick = () => { $("rrSid").value = r.dataset.sid; loadSystem(+r.dataset.sid); });
+  }
+  $("bState").onchange = async () => {
+    const stid = +$("bState").value; $("bCounty").innerHTML = '<option value="">— statewide —</option>'; if (!stid) return;
     try {
-      // Save first so a typed-but-unsaved password is used.
-      await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value,
-                                password: $("rrPass").value, sid });
-      $("rrPass").value = ""; $("rrKey").value = "";
-      const d = await invoke("rr_download", { sid });
-      $("rrMeta").textContent = `${d.name} · ${d.talkgroups} talkgroups`;
-      $("loadcat").textContent = d.talkgroups + " TGs";
-      $("rrSites").innerHTML = d.sites.map((s) =>
-        `<div class="site"><b>${s.site_id}</b> ${s.name}` +
-        (s.nac != null ? ` <span>NAC 0x${s.nac.toString(16).toUpperCase().padStart(3, "0")}</span>` : "") +
-        (s.tdma_control ? ` <span class="tdma">TDMA CC</span>` : "") +
-        (s.span_mhz ? ` <span>${s.span_mhz[0].toFixed(4)}–${s.span_mhz[1].toFixed(4)} MHz</span>` : "") +
-        s.control_mhz.map((f, i) =>
-          `<button class="cc" data-f="${f}" data-lo="${s.span_mhz ? s.span_mhz[0] : f}" data-hi="${s.span_mhz ? s.span_mhz[1] : f}" title="${i ? "alternate" : "primary"} control channel — tune">${f.toFixed(4)}</button>`).join("") +
-        `</div>`).join("");
-      $("rrSites").querySelectorAll(".cc").forEach((b) => b.onclick = () => {
-        $("freq").value = b.dataset.f + "M";
-        // Centre the band on the site's span so every granted channel fits.
-        const mid = (parseFloat(b.dataset.lo) + parseFloat(b.dataset.hi)) / 2;
-        $("center").value = mid.toFixed(4) + "M";
-        syncTuned();
-      });
-    } catch (e) { $("rrMeta").textContent = ""; alert(e); }
+      $("findMeta").textContent = "loading…";
+      const v = await invoke("rr_state", { stid });
+      $("bCounty").innerHTML += v.counties.map((c) => `<option value="${c.ctid}">${c.name}</option>`).join("");
+      renderSystems(v.systems, `${v.systems.length} statewide system${v.systems.length === 1 ? "" : "s"}`);
+    } catch (e) { $("findMeta").textContent = ""; alert(e); }
+  };
+  $("bCounty").onchange = async () => {
+    const ctid = +$("bCounty").value; if (!ctid) { $("bState").onchange(); return; }
+    try {
+      $("findMeta").textContent = "loading…";
+      const v = await invoke("rr_county", { ctid });
+      renderSystems(v, `${v.length} system${v.length === 1 ? "" : "s"} in this county`);
+    } catch (e) { $("findMeta").textContent = ""; alert(e); }
+  };
+  $("bZipGo").onclick = async () => {
+    const zip = parseInt($("bZip").value, 10); if (!Number.isFinite(zip)) return;
+    try {
+      $("findMeta").textContent = "looking up ZIP…";
+      await loadStates();
+      const z = await invoke("rr_zip", { zip });
+      $("bState").value = String(z.stid); await $("bState").onchange();
+      $("bCounty").value = String(z.ctid); await $("bCounty").onchange();
+      if (z.city) $("findMeta").textContent = `${z.city} · ` + $("findMeta").textContent;
+    } catch (e) { $("findMeta").textContent = ""; alert(e); }
+  };
+  $("bState").onfocus = () => loadStates().catch((e) => alert(e));
+
+  /* ---------- a loaded system: sites + talkgroups → playlist ---------- */
+  let sys = null, pickedSite = null, picked = new Set();
+  async function loadSystem(sid) {
+    try {
+      $("rrDownload").disabled = true; $("findMeta").textContent = "downloading system…";
+      if ($("rrPass").value || $("rrKey").value) await rrSaveCreds();
+      sys = await invoke("rr_download", { sid });
+      $("findMeta").textContent = "";
+      $("sysPanel").style.display = "";
+      $("sysName").textContent = sys.name;
+      $("sysMeta").textContent = `sid ${sys.sid} · ${sys.talkgroups} talkgroups · ${sys.sites.length} sites`;
+      $("loadcat").textContent = sys.talkgroups + " TGs";
+      pickedSite = sys.sites[0] || null; picked = new Set();
+      renderSites(); renderCats(); renderTgs();
+      $("plName").value = sys.name;
+      rrRefresh();
+      $("sysPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }
+  }
+  $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } loadSystem(sid); };
+  function siteRate(s) { const span = s.span_mhz ? s.span_mhz[1] - s.span_mhz[0] : 0; return span <= 1.9 ? 2500000 : 10000000; }
+  function renderSites() {
+    $("siteList").innerHTML = sys.sites.map((s) =>
+      `<div class="row ${pickedSite && s.site_id === pickedSite.site_id ? "on" : ""}" data-site="${s.site_id}">` +
+      `<span class="grow"><b>${s.site_id}</b> ${s.name}${s.tdma_control ? ' <small style="color:var(--enc)">TDMA CC — not decodable yet</small>' : ""}</span>` +
+      (s.nac != null ? `<span class="mono">NAC 0x${s.nac.toString(16).toUpperCase().padStart(3, "0")}</span>` : "") +
+      `<span class="mono">${s.control_mhz[0].toFixed(4)} MHz</span>` +
+      (s.span_mhz ? `<span class="mono">${(s.span_mhz[1] - s.span_mhz[0]).toFixed(2)} MHz span</span>` : "") +
+      `</div>`).join("");
+    $("siteList").querySelectorAll(".row").forEach((r) => r.onclick = () => { pickedSite = sys.sites.find((s) => s.site_id === +r.dataset.site); renderSites(); });
+  }
+  function renderCats() {
+    const cats = [...new Set(sys.tgs.map((t) => t.category).filter(Boolean))].sort();
+    $("tgCat").innerHTML = '<option value="">all</option>' + cats.map((c) => `<option>${c}</option>`).join("");
+  }
+  function shownTgs() {
+    const q = $("tgFilter").value.trim().toLowerCase(), cat = $("tgCat").value;
+    return sys.tgs.filter((t) => (!cat || t.category === cat) &&
+      (!q || `${t.id} ${t.alias} ${t.description} ${t.category}`.toLowerCase().includes(q)));
+  }
+  function renderTgs() {
+    const shown = shownTgs();
+    $("tgBody").innerHTML = shown.map((t) =>
+      `<tr class="${t.encrypted ? "enc" : ""}"><td><input type="checkbox" data-tg="${t.id}" ${picked.has(t.id) ? "checked" : ""} ${t.encrypted ? "disabled" : ""}></td>` +
+      `<td class="mono">${t.id}</td><td>${t.alias}</td><td>${t.description}</td><td><small>${t.category}</small></td>` +
+      `<td>${t.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}</td></tr>`).join("");
+    $("tgBody").querySelectorAll("input[data-tg]").forEach((c) => c.onchange = () => { c.checked ? picked.add(+c.dataset.tg) : picked.delete(+c.dataset.tg); tgMeta(); });
+    tgMeta();
+  }
+  function tgMeta() { $("tgMeta").textContent = picked.size ? `${picked.size} selected` : "none selected → playlist follows every clear talkgroup"; }
+  $("tgFilter").oninput = renderTgs; $("tgCat").onchange = renderTgs;
+  $("tgAll").onclick = () => { shownTgs().filter((t) => !t.encrypted).forEach((t) => picked.add(t.id)); renderTgs(); };
+  $("tgNone").onclick = () => { picked = new Set(); renderTgs(); };
+  $("plSave").onclick = async () => {
+    if (!sys || !pickedSite) { alert("Load a system and pick a site first."); return; }
+    const lo = pickedSite.span_mhz ? pickedSite.span_mhz[0] : pickedSite.control_mhz[0];
+    const hi = pickedSite.span_mhz ? pickedSite.span_mhz[1] : pickedSite.control_mhz[0];
+    const playlist = { id: "", name: $("plName").value.trim(), sid: sys.sid, system_name: sys.name,
+      site_id: pickedSite.site_id, site_name: pickedSite.name, nac: pickedSite.nac,
+      control_mhz: pickedSite.control_mhz[0], center_mhz: +((lo + hi) / 2).toFixed(4),
+      rate: siteRate(pickedSite), tgs: [...picked].sort((a, b) => a - b) };
+    try { renderPlaylists(await invoke("playlist_save", { playlist })); $("plMeta").textContent = "saved"; }
+    catch (e) { alert(e); }
   };
+
+  /* ---------- playlists ---------- */
+  let playlists = [];
+  function renderPlaylists(list) {
+    playlists = list;
+    $("plEmpty").style.display = list.length ? "none" : "";
+    $("plList").innerHTML = list.map((p) =>
+      `<div class="row" data-id="${p.id}"><span class="grow"><b>${p.name}</b><br><small>${p.system_name} · site ${p.site_id} ${p.site_name} · ${p.control_mhz.toFixed(4)} MHz · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</small></span>` +
+      `<button class="btn primary" data-act="${p.id}">Use</button><button class="btn ghost" data-del="${p.id}">Delete</button></div>`).join("");
+    $("plList").querySelectorAll("[data-act]").forEach((b) => b.onclick = () => activatePlaylist(b.dataset.act));
+    $("plList").querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+      if (!confirm("Delete this playlist?")) return;
+      try { renderPlaylists(await invoke("playlist_delete", { id: b.dataset.del })); } catch (e) { alert(e); }
+    });
+    const cur = $("playlist").value;
+    $("playlist").innerHTML = '<option value="">— none: follow every talkgroup —</option>' +
+      list.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
+    $("playlist").value = list.some((p) => p.id === cur) ? cur : "";
+  }
+  async function activatePlaylist(id) {
+    try {
+      const p = await invoke("playlist_activate", { id: id || null });
+      $("playlist").value = p ? p.id : "";
+      if (p) {
+        modeSel = "follow"; $("modeSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === "follow"))); applyMode();
+        $("freq").value = p.control_mhz.toFixed(4) + "M"; $("center").value = p.center_mhz.toFixed(4) + "M";
+        $("rate").value = String(p.rate); syncTuned();
+        $("followMeta").textContent = `playlist: ${p.name} · ${p.tgs.length ? p.tgs.length + " talkgroups" : "all talkgroups"}`;
+        showView("receiver");
+      } else { $("followMeta").textContent = ""; }
+    } catch (e) { alert(e); }
+  }
+  $("playlist").onchange = () => activatePlaylist($("playlist").value);
+  invoke("playlists_list").then(renderPlaylists).catch((e) => log(`playlists: ${e}`));
+
   rrRefresh();
 
   setInterval(drawScope, 55);

@@ -16,6 +16,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod follow;
 mod player;
+mod playlists;
 mod rr;
 
 #[derive(Default)]
@@ -478,7 +479,15 @@ fn main() {
             ui_log,
             rr::rr_settings,
             rr::rr_save,
-            rr::rr_download
+            rr::rr_download,
+            rr::rr_states,
+            rr::rr_state,
+            rr::rr_county,
+            rr::rr_zip,
+            playlists::playlists_list,
+            playlists::playlist_save,
+            playlists::playlist_delete,
+            playlists::playlist_activate
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

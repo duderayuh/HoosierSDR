@@ -16,6 +16,69 @@ use crate::AppState;
 
 const SERVICE: &str = "HoosierSDR RadioReference";
 
+include!(concat!(env!("OUT_DIR"), "/rr_key.rs"));
+const MASK: [u8; 16] = [
+    0x5a, 0xc3, 0x91, 0x2e, 0x77, 0xb8, 0x04, 0xe5, 0x3c, 0x6f, 0xd2, 0x19, 0x8b, 0x40, 0xa7, 0xf1,
+];
+
+fn unmask(masked: &[u8]) -> String {
+    masked
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b ^ MASK[i % MASK.len()]) as char)
+        .collect()
+}
+
+/// The key compiled into this build, if any (see `build.rs`).
+fn embedded_key() -> Option<String> {
+    let k = unmask(RR_KEY_MASKED);
+    (!k.is_empty()).then_some(k)
+}
+
+/// The app key to use: this build's embedded key, else one the user saved.
+fn app_key() -> Option<String> {
+    embedded_key().or_else(|| get_secret("app_key").filter(|k| !k.is_empty()))
+}
+
+fn client(app: &AppHandle) -> Result<RrClient, String> {
+    let p = load_prefs(app);
+    let key = app_key().ok_or("no RadioReference app key: this build has none embedded, so enter one in Config")?;
+    if p.username.is_empty() {
+        return Err("save your RadioReference username and password first".into());
+    }
+    let password = get_secret(&format!("password:{}", p.username))
+        .filter(|k| !k.is_empty())
+        .ok_or("save your RadioReference password first")?;
+    Ok(RrClient::new(Credentials::new(key, p.username, password)))
+}
+
+/// Small on-disk cache for browse responses: the geography tree barely
+/// changes and RadioReference rate-limits, so each lookup is fetched once
+/// unless the user asks to refresh.
+fn cached<T: Serialize + serde::de::DeserializeOwned>(
+    app: &AppHandle,
+    name: &str,
+    refresh: bool,
+    fetch: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let dir = config_dir(app)?.join("rr-cache");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{name}.json"));
+    if !refresh {
+        if let Some(v) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<T>(&t).ok())
+        {
+            return Ok(v);
+        }
+    }
+    let v = fetch()?;
+    if let Ok(t) = serde_json::to_string(&v) {
+        let _ = std::fs::write(&path, t);
+    }
+    Ok(v)
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Prefs {
     username: String,
@@ -75,6 +138,8 @@ pub struct RrSettings {
     username: String,
     sid: Option<u32>,
     has_app_key: bool,
+    /// The key is built in; the app-key field is not needed.
+    embedded_key: bool,
     has_password: bool,
     system_name: Option<String>,
     /// Talkgroups in the catalog currently loaded (from disk at start).
@@ -86,7 +151,8 @@ pub struct RrSettings {
 pub fn rr_settings(app: AppHandle, state: State<AppState>) -> RrSettings {
     let p = load_prefs(&app);
     RrSettings {
-        has_app_key: get_secret("app_key").is_some_and(|k| !k.is_empty()),
+        has_app_key: app_key().is_some(),
+        embedded_key: embedded_key().is_some(),
         has_password: !p.username.is_empty()
             && get_secret(&format!("password:{}", p.username)).is_some_and(|k| !k.is_empty()),
         username: p.username,
@@ -137,10 +203,21 @@ pub struct RrSiteInfo {
 }
 
 #[derive(Serialize)]
+pub struct RrTalkgroup {
+    id: u16,
+    alias: String,
+    description: String,
+    category: String,
+    encrypted: bool,
+}
+
+#[derive(Serialize)]
 pub struct RrDownload {
+    sid: u32,
     name: String,
     talkgroups: usize,
     sites: Vec<RrSiteInfo>,
+    tgs: Vec<RrTalkgroup>,
 }
 
 /// Download a system with the saved credentials: its talkgroups become the
@@ -149,14 +226,7 @@ pub struct RrDownload {
 #[tauri::command]
 pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<RrDownload, String> {
     let mut p = load_prefs(&app);
-    let app_key = get_secret("app_key").filter(|k| !k.is_empty()).ok_or("save your RadioReference app key first")?;
-    if p.username.is_empty() {
-        return Err("save your RadioReference username and password first".into());
-    }
-    let password = get_secret(&format!("password:{}", p.username))
-        .filter(|k| !k.is_empty())
-        .ok_or("save your RadioReference password first")?;
-    let client = RrClient::new(Credentials::new(app_key, p.username.clone(), password));
+    let client = client(&app)?;
     let sys = client.system(sid).map_err(|e| e.to_string())?;
 
     let csv = sys.talkgroup_csv();
@@ -192,9 +262,143 @@ pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<R
             }
         })
         .collect();
+    let tgs = sys
+        .talkgroups
+        .iter()
+        .map(|t| RrTalkgroup {
+            id: t.id,
+            alias: t.alias.clone().unwrap_or_default(),
+            description: t.description.clone().unwrap_or_default(),
+            category: t.category.clone().unwrap_or_default(),
+            encrypted: t.encrypted,
+        })
+        .collect();
     Ok(RrDownload {
+        sid,
         name: sys.name.clone().unwrap_or_else(|| format!("system {sid}")),
         talkgroups: n,
         sites,
+        tgs,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Browsing: state → county → systems, or straight from a ZIP code.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StateRow {
+    stid: u32,
+    name: String,
+    code: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CountyRow {
+    ctid: u32,
+    name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SystemRow {
+    sid: u32,
+    name: String,
+    stype: Option<u32>,
+    city: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StateView {
+    counties: Vec<CountyRow>,
+    systems: Vec<SystemRow>,
+}
+
+#[derive(Serialize)]
+pub struct ZipView {
+    city: Option<String>,
+    stid: u32,
+    ctid: u32,
+}
+
+fn sys_rows(v: Vec<hs_catalog::radioreference::RrSystemRef>) -> Vec<SystemRow> {
+    v.into_iter()
+        .map(|s| SystemRow {
+            sid: s.sid,
+            name: s.name,
+            stype: s.stype,
+            city: s.city,
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
+    cached(&app, "states", refresh.unwrap_or(false), || {
+        let c = client(&app)?;
+        Ok(c.states()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|s| StateRow {
+                stid: s.stid,
+                name: s.name,
+                code: s.code,
+            })
+            .collect())
+    })
+}
+
+#[tauri::command]
+pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<StateView, String> {
+    cached(&app, &format!("state_{stid}"), refresh.unwrap_or(false), || {
+        let c = client(&app)?;
+        let info = c.state_info(stid).map_err(|e| e.to_string())?;
+        Ok(StateView {
+            counties: info
+                .counties
+                .into_iter()
+                .map(|c| CountyRow {
+                    ctid: c.ctid,
+                    name: c.name,
+                })
+                .collect(),
+            systems: sys_rows(info.systems),
+        })
+    })
+}
+
+#[tauri::command]
+pub fn rr_county(app: AppHandle, ctid: u32, refresh: Option<bool>) -> Result<Vec<SystemRow>, String> {
+    cached(&app, &format!("county_{ctid}"), refresh.unwrap_or(false), || {
+        let c = client(&app)?;
+        Ok(sys_rows(c.county_systems(ctid).map_err(|e| e.to_string())?))
+    })
+}
+
+#[tauri::command]
+pub fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
+    let c = client(&app)?;
+    let z = c.zipcode(zip).map_err(|e| e.to_string())?;
+    Ok(ZipView {
+        city: z.city,
+        stid: z.stid,
+        ctid: z.ctid,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    /// The build-time masking round-trips (checked with a dummy key — the
+    /// real one never appears in tests or the repo).
+    #[test]
+    fn key_mask_round_trips() {
+        let key = "dummy-app-key-0123456789";
+        let masked: Vec<u8> = key
+            .bytes()
+            .enumerate()
+            .map(|(i, b)| b ^ super::MASK[i % super::MASK.len()])
+            .collect();
+        assert_eq!(super::unmask(&masked), key);
+        assert_ne!(masked, key.as_bytes());
+        assert_eq!(super::unmask(&[]), "");
+    }
 }
