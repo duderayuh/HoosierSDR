@@ -62,6 +62,10 @@ pub enum EqMode {
     /// complex pre-discriminator FSE is the path to the Phase 1 gate. Opt in
     /// for A/B measurement.
     Enabled,
+    /// CQPSK only: decision-feedback equalizer before differential detection,
+    /// which cancels the deep-null simulcast echo the linear CMA leaves (see
+    /// `hs_dsp::equalizer::CmaDfe`). On the C4FM path this behaves as `Bypass`.
+    Dfe,
     /// Shipping default: slice the receiver output directly. This is the
     /// proven decode path.
     #[default]
@@ -139,13 +143,14 @@ impl ChannelDecoder {
         // open-source P25 decoder implements. That makes the comparison
         // measurable on field captures, not just synthetic ones.
         let cqpsk = match modulation {
-            Modulation::Cqpsk if eq_mode == EqMode::Enabled => {
-                Some(CqpskReceiver::new(plan.sps, 0.2))
-            }
-            Modulation::Cqpsk => Some(CqpskReceiver::new_bare(plan.sps, 0.2)),
+            Modulation::Cqpsk => Some(match eq_mode {
+                EqMode::Enabled => CqpskReceiver::new(plan.sps, 0.2),
+                EqMode::Dfe => CqpskReceiver::new_dfe(plan.sps, 0.2),
+                EqMode::Bypass => CqpskReceiver::new_bare(plan.sps, 0.2),
+            }),
             Modulation::C4fm => None,
         };
-        let mut diag = crate::diag::Diagnostics::new(sample_rate, eq_mode == EqMode::Enabled);
+        let mut diag = crate::diag::Diagnostics::new(sample_rate, eq_mode != EqMode::Bypass);
         diag.modulation = modulation;
         Self {
             modulation,
@@ -265,7 +270,10 @@ impl ChannelDecoder {
         // updates on the known FSW via train_sequence() below.
         let eq_sym = match self.eq_mode {
             EqMode::Enabled => self.eq.push(sym),
-            EqMode::Bypass => sym,
+            // The DFE is a complex pre-differential-detection stage on the
+            // CQPSK path; on this real-symbol C4FM path there is nothing for it
+            // to do, so it slices the receiver output directly like Bypass.
+            EqMode::Dfe | EqMode::Bypass => sym,
         };
         // Soft-slice: keep how far the symbol sits from each decision
         // threshold, so the sync correlator and the trellis decoder can weigh
