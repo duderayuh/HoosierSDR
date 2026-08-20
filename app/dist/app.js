@@ -6,6 +6,15 @@ const TAURI = window.__TAURI__;
 const invoke = TAURI ? TAURI.core.invoke : null;
 const listen = TAURI ? TAURI.event.listen : null;
 
+/* ---------- diagnostics: every JS error and key event goes to the launching terminal ---------- */
+function log(m) {
+  try { console.log(m); } catch (_) {}
+  if (TAURI) invoke("ui_log", { msg: String(m) }).catch(() => {});
+}
+window.onerror = (m, src, line, col) => log(`JS error: ${m} @ ${line}:${col}`);
+window.onunhandledrejection = (e) => log(`unhandled rejection: ${e.reason}`);
+log(`page loaded; tauri=${!!TAURI}`);
+
 /* ---------- theme toggle ---------- */
 (() => {
   const root = document.documentElement;
@@ -204,11 +213,18 @@ if (TAURI) {
   listen("spectrum", (e) => { pushSpectrum(e.payload.bins_db); pushSymbols(0.2); });
   listen("stopped", () => setState("standby"));
   let followVoice = 0;
+  const evCounts = {};
   listen("follow", (e) => {
     const ev = e.payload;
+    evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
+    if (ev.kind !== "spectrum" && ev.kind !== "status") log(`follow ${ev.kind}: ${JSON.stringify(ev).slice(0, 160)}`);
+    else if (evCounts[ev.kind] % 20 === 1) log(`follow ${ev.kind} #${evCounts[ev.kind]}`);
     switch (ev.kind) {
       case "measured":
         setState("locked");
+        $("wfAxis").textContent = `${(parseFreq($("center").value) / 1e6).toFixed(2)} MHz ± ${(ev.rate / 2e6).toFixed(2)} MHz`;
+        $("r-eq").textContent = "SITE";
+        $("r-lock").textContent = "—"; $("r-lockbar").style.width = "0%";
         $("tunedHz").textContent = ev.control_mhz.toFixed(4);
         $("tunedSub").textContent = `CONTROL · ${ev.modulation} · tuner ${ev.correction_hz >= 0 ? "+" : ""}${ev.correction_hz.toFixed(0)} Hz`;
         $("followMeta").textContent = "following";
@@ -238,7 +254,7 @@ if (TAURI) {
         break;
     }
   });
-  listen("error", (e) => { setState("standby"); alert("Capture error:\n" + e.payload); });
+  listen("error", (e) => { log(`backend error: ${e.payload}`); setState("standby"); alert("Capture error:\n" + e.payload); });
 
   const opts = () => ({
     source: $("source").value,
@@ -255,6 +271,7 @@ if (TAURI) {
   };
   $("start").onclick = async () => {
     try { setState("capturing");
+      log(`start: mode=${modeSel} source=${$("source").value} rate=${$("rate").value} freq=${$("freq").value} center=${$("center").value}`);
       if (modeSel === "follow") {
         const o = opts(); followVoice = 0;
         $("followMeta").textContent = "measuring the control channel…";
@@ -278,7 +295,67 @@ if (TAURI) {
     try { await invoke("decode_file", { path, rate: parseFloat($("rate").value), cqpsk: modSel === "cqpsk", eq: eqSel }); }
     catch (err) { alert(err); }
   };
+  /* ---------- RadioReference ---------- */
+  async function rrRefresh() {
+    try {
+      const st = await invoke("rr_settings");
+      $("rrUser").value = st.username || "";
+      $("rrSid").value = st.sid ?? "";
+      $("rrPass").placeholder = st.has_password ? "saved in Keychain" : "";
+      $("rrKey").placeholder = st.has_app_key ? "saved in Keychain" : "";
+      $("rrMeta").textContent = st.catalog_len
+        ? `${st.catalog_len} talkgroups loaded${st.system_name ? " · " + st.system_name : ""}`
+        : "";
+      if (st.catalog_len) $("loadcat").textContent = st.catalog_len + " TGs";
+    } catch (e) { log(`rr_settings: ${e}`); }
+  }
+  const sidVal = () => { const v = parseInt($("rrSid").value, 10); return Number.isFinite(v) ? v : null; };
+  $("rrSave").onclick = async () => {
+    try {
+      await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value,
+                                password: $("rrPass").value, sid: sidVal() });
+      $("rrPass").value = ""; $("rrKey").value = "";
+      $("rrMeta").textContent = "saved"; await rrRefresh();
+    } catch (e) { alert(e); }
+  };
+  $("rrDownload").onclick = async () => {
+    const sid = sidVal(); if (sid == null) { alert("Enter the system ID from the RadioReference URL."); return; }
+    $("rrDownload").disabled = true; $("rrMeta").textContent = "downloading…";
+    try {
+      // Save first so a typed-but-unsaved password is used.
+      await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value,
+                                password: $("rrPass").value, sid });
+      $("rrPass").value = ""; $("rrKey").value = "";
+      const d = await invoke("rr_download", { sid });
+      $("rrMeta").textContent = `${d.name} · ${d.talkgroups} talkgroups`;
+      $("loadcat").textContent = d.talkgroups + " TGs";
+      $("rrSites").innerHTML = d.sites.map((s) =>
+        `<div class="site"><b>${s.site_id}</b> ${s.name}` +
+        (s.nac != null ? ` <span>NAC 0x${s.nac.toString(16).toUpperCase().padStart(3, "0")}</span>` : "") +
+        (s.tdma_control ? ` <span class="tdma">TDMA CC</span>` : "") +
+        (s.span_mhz ? ` <span>${s.span_mhz[0].toFixed(4)}–${s.span_mhz[1].toFixed(4)} MHz</span>` : "") +
+        s.control_mhz.map((f, i) =>
+          `<button class="cc" data-f="${f}" data-lo="${s.span_mhz ? s.span_mhz[0] : f}" data-hi="${s.span_mhz ? s.span_mhz[1] : f}" title="${i ? "alternate" : "primary"} control channel — tune">${f.toFixed(4)}</button>`).join("") +
+        `</div>`).join("");
+      $("rrSites").querySelectorAll(".cc").forEach((b) => b.onclick = () => {
+        $("freq").value = b.dataset.f + "M";
+        // Centre the band on the site's span so every granted channel fits.
+        const mid = (parseFloat(b.dataset.lo) + parseFloat(b.dataset.hi)) / 2;
+        $("center").value = mid.toFixed(4) + "M";
+        syncTuned();
+      });
+    } catch (e) { $("rrMeta").textContent = ""; alert(e); }
+    finally { $("rrDownload").disabled = false; }
+  };
+  rrRefresh();
+
   setInterval(drawScope, 55);
+  // Dev hook: open with #autostart=airspy to press Start for a 10 MSPS site follow.
+  if (location.hash.startsWith("#autostart")) {
+    $("source").value = location.hash.split("=")[1] || "airspy"; $("source").onchange();
+    setTimeout(() => $("start").click(), 800);
+    setTimeout(() => $("stop").click(), 40000);
+  }
 } else {
   /* ------- demo driver: realistic Marion County SAFE-T session ------- */
   const TGS = [

@@ -16,6 +16,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod follow;
 mod player;
+mod rr;
 
 #[derive(Default)]
 struct AppState {
@@ -35,6 +36,13 @@ impl AppState {
             .get_or_insert_with(player::spawn)
             .clone()
     }
+}
+
+/// Front-end diagnostics land in the terminal that launched the app, so a
+/// page that silently does nothing can say why.
+#[tauri::command]
+fn ui_log(msg: String) {
+    eprintln!("[ui] {msg}");
 }
 
 /// Replace the locked-out talkgroup set. Takes effect on the follower's next
@@ -440,6 +448,15 @@ fn power_spectrum(block: &[f32], n: usize) -> Vec<f32> {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            // A talkgroup catalog downloaded earlier is loaded on start.
+            use tauri::Manager;
+            let state = app.state::<AppState>();
+            if let Some(cat) = rr::saved_catalog(app.handle()) {
+                *state.catalog.lock().unwrap() = Some(cat);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_catalog,
             start_capture,
@@ -447,7 +464,11 @@ fn main() {
             decode_file,
             start_follow,
             set_lockout,
-            play_wav
+            play_wav,
+            ui_log,
+            rr::rr_settings,
+            rr::rr_save,
+            rr::rr_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

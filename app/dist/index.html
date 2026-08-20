@@ -142,6 +142,34 @@
           <div class="divider"></div>
           <div class="subhead"><span class="eyebrow">Catalog &amp; capture</span><span class="line"></span></div>
 
+          <div class="subhead"><span class="eyebrow">RadioReference</span><span class="line"></span></div>
+          <div class="row2">
+            <label class="field">
+              <span class="lab">Username</span>
+              <input id="rrUser" type="text" autocomplete="username" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">Password</span>
+              <input id="rrPass" type="password" autocomplete="current-password" placeholder="saved in Keychain" />
+            </label>
+          </div>
+          <div class="row2">
+            <label class="field">
+              <span class="lab">App key</span>
+              <input id="rrKey" type="password" placeholder="saved in Keychain" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">System ID <span class="mono" style="color:var(--ink-faint)">radioreference.com/db/sid/…</span></span>
+              <input id="rrSid" type="text" inputmode="numeric" placeholder="e.g. 11" spellcheck="false" />
+            </label>
+          </div>
+          <div class="actions" style="margin-top:2px">
+            <button class="btn ghost" id="rrSave">Save</button>
+            <button class="btn primary" id="rrDownload">Download system</button>
+            <span class="meta" id="rrMeta"></span>
+          </div>
+          <div id="rrSites" class="sites"></div>
+
           <label class="field">
             <span class="lab">Talkgroup catalog · RadioReference CSV</span>
             <span class="inline">

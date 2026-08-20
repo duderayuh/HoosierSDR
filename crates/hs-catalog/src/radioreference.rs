@@ -189,6 +189,35 @@ pub struct RrSystem {
 }
 
 impl RrSystem {
+    /// The talkgroups in RadioReference's CSV export format — the one
+    /// [`crate::CsvCatalog`] parses — so a download can be saved and reloaded
+    /// without the network.
+    pub fn talkgroup_csv(&self) -> String {
+        fn field(v: Option<&str>) -> String {
+            let v = v.unwrap_or("");
+            if v.contains(',') || v.contains('"') {
+                format!("\"{}\"", v.replace('"', "\"\""))
+            } else {
+                v.to_string()
+            }
+        }
+        let mut out =
+            String::from("Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority\n");
+        for tg in &self.talkgroups {
+            out.push_str(&format!(
+                "{},{:X},{},{},{},{},{},\n",
+                tg.id,
+                tg.id,
+                field(tg.alias.as_deref()),
+                if tg.encrypted { "DE" } else { "D" },
+                field(tg.description.as_deref()),
+                field(tg.category.as_deref()),
+                field(tg.category.as_deref()),
+            ));
+        }
+        out
+    }
+
     /// Every control channel across every site, primary channels first.
     ///
     /// This is the list to tune: each entry is a frequency the site is
