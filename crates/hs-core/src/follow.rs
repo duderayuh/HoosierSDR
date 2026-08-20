@@ -185,6 +185,9 @@ pub struct TrunkFollower {
     /// Talkgroups the listener does not want to hear. Their grants are
     /// reported but never followed, and a call already up is dropped.
     lockout: std::collections::HashSet<u16>,
+    /// When set, the only talkgroups followed — a playlist. Grants outside it
+    /// count as locked. The lockout still applies within it.
+    allowlist: Option<std::collections::HashSet<u16>>,
 }
 
 impl TrunkFollower {
@@ -238,7 +241,23 @@ impl TrunkFollower {
             hunt_next: 0,
             lost_reported: false,
             lockout: std::collections::HashSet::new(),
+            allowlist: None,
         }
+    }
+
+    /// Restrict following to these talkgroups (`None` = all). Takes effect
+    /// on the next block, like [`set_lockout`](Self::set_lockout).
+    pub fn set_allowlist(&mut self, tgs: Option<impl IntoIterator<Item = u16>>) {
+        self.allowlist = tgs.map(|t| t.into_iter().collect());
+    }
+
+    /// The playlist in force, if any.
+    pub fn allowlist(&self) -> Option<&std::collections::HashSet<u16>> {
+        self.allowlist.as_ref()
+    }
+
+    fn wanted(&self, tg: u16) -> bool {
+        self.allowlist.as_ref().is_none_or(|a| a.contains(&tg)) && !self.lockout.contains(&tg)
     }
 
     /// Replace the set of locked-out talkgroups. Takes effect on the next
@@ -371,9 +390,17 @@ impl TrunkFollower {
 
         // A talkgroup locked out mid-call: stop following it now, silently —
         // the listener asked not to hear it, so it gets no audio and no row.
-        if !self.lockout.is_empty() {
-            let lock = &self.lockout;
-            self.active.retain(|c| !lock.contains(&c.talkgroup));
+        if !self.lockout.is_empty() || self.allowlist.is_some() {
+            let keep: Vec<bool> = self
+                .active
+                .iter()
+                .map(|c| self.wanted(c.talkgroup))
+                .collect();
+            let mut i = 0;
+            self.active.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
         }
 
         // Each active call does the same, at its own offset.
@@ -439,7 +466,7 @@ impl TrunkFollower {
                 out.grants_encrypted.push((g.talkgroup, g.freq_hz));
                 continue;
             }
-            if self.lockout.contains(&g.talkgroup) {
+            if !self.wanted(g.talkgroup) {
                 out.grants_locked.push((g.talkgroup, g.freq_hz));
                 continue;
             }

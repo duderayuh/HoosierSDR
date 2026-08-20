@@ -85,6 +85,7 @@ pub fn run<S: SdrSource + Send + 'static>(
     p: &FollowParams,
     catalog: Option<&CsvCatalog>,
     lockout: &std::sync::Mutex<std::collections::HashSet<u16>>,
+    allowlist: &std::sync::Mutex<Option<std::collections::HashSet<u16>>>,
     running: &AtomicBool,
     emit: &mut dyn FnMut(FollowEvent),
 ) -> Result<(), String> {
@@ -141,6 +142,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         gate: GrantGate::new(50),
     };
     f.set_lockout(lockout.lock().unwrap().iter().copied());
+    f.set_allowlist(allowlist.lock().unwrap().clone());
     // The primed IQ carries whatever the site granted while we measured;
     // decode it too, so a call that began during startup is not lost. The
     // follower runs far faster than real time, so this catches up quickly.
@@ -176,6 +178,10 @@ pub fn run<S: SdrSource + Send + 'static>(
             let want = lockout.lock().unwrap();
             if *want != *f.lockout() {
                 f.set_lockout(want.iter().copied());
+            }
+            let want = allowlist.lock().unwrap();
+            if want.as_ref() != f.allowlist() {
+                f.set_allowlist(want.clone());
             }
         }
         let out = f.process(chunk);
@@ -395,7 +401,8 @@ mod tests {
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
         let lockout = std::sync::Mutex::new(Default::default());
-        run(src, &p, None, &lockout, &running, &mut |e| events.push(e)).expect("follow");
+        let allow = std::sync::Mutex::new(None);
+        run(src, &p, None, &lockout, &allow, &running, &mut |e| events.push(e)).expect("follow");
         let measured = events
             .iter()
             .find_map(|e| match e {
@@ -462,7 +469,8 @@ mod tests {
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
         let lockout = std::sync::Mutex::new([20308u16].into_iter().collect());
-        run(src, &p, None, &lockout, &running, &mut |e| events.push(e)).expect("follow");
+        let allow = std::sync::Mutex::new(None);
+        run(src, &p, None, &lockout, &allow, &running, &mut |e| events.push(e)).expect("follow");
         let starts = events
             .iter()
             .filter(|e| matches!(e, FollowEvent::CallStart { tg, .. } if *tg == 20308))
@@ -477,6 +485,39 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(starts, 0, "locked talkgroup was followed");
         assert!(locked >= 1, "lockout skip not counted");
+    }
+
+    /// A playlist that omits the in-band talkgroup never follows it; one that
+    /// includes it does.
+    #[test]
+    fn a_playlist_restricts_what_is_followed() {
+        let path = std::env::var("HOME").unwrap()
+            + "/hoosier-field/live_airspy_851M_2500k_nac260.cs16";
+        let starts_with = |allow: Option<Vec<u16>>| -> Option<usize> {
+            let src = cs16_source(&path, 2_500_000.0)?;
+            let p = FollowParams {
+                center_hz: 851e6,
+                control_hz: 851_537_500.0,
+                calls_dir: None,
+            };
+            let running = AtomicBool::new(true);
+            let mut n = 0;
+            let lockout = std::sync::Mutex::new(Default::default());
+            let allow = std::sync::Mutex::new(allow.map(|v| v.into_iter().collect()));
+            run(src, &p, None, &lockout, &allow, &running, &mut |e| {
+                if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
+                    n += 1;
+                }
+            })
+            .expect("follow");
+            Some(n)
+        };
+        let Some(without) = starts_with(Some(vec![1, 2, 3])) else {
+            eprintln!("no capture; skipping");
+            return;
+        };
+        assert_eq!(without, 0, "followed a talkgroup outside the playlist");
+        assert!(starts_with(Some(vec![20308])).unwrap() >= 1, "playlist member not followed");
     }
 
     /// Real hardware, no GUI: open an Airspy, follow the site for 25 s, play
@@ -499,7 +540,8 @@ mod tests {
         let mut player = crate::player::Player::open();
         let (mut starts, mut calls, mut last) = (0, 0, None);
         let lockout = std::sync::Mutex::new(Default::default());
-        run(src, &p, None, &lockout, &running, &mut |e| match e {
+        let allow = std::sync::Mutex::new(None);
+        run(src, &p, None, &lockout, &allow, &running, &mut |e| match e {
             FollowEvent::Measured {
                 control_mhz,
                 modulation,
