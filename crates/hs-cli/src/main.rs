@@ -483,7 +483,7 @@ fn warn_low_rate(rate: f64) {
 }
 
 fn main() {
-    let args = parse_args();
+    let mut args = parse_args();
     warn_low_rate(args.rate);
 
     if let Some(sys_id) = args.rr_system {
@@ -505,12 +505,29 @@ fn main() {
         std::process::exit(2);
     }
 
-    let iq = if args.demo {
+    let mut iq = if args.demo {
         println!("Decoding a synthesized P25 transmission (demo mode)…\n");
         demo_iq(args.rate, args.cqpsk)
     } else {
         load_iq(args.input.as_ref().unwrap())
     };
+
+    // Normalize a hardware rate that isn't a multiple of the symbol rate (an
+    // Airspy R2's 10 or 2.5 MSPS) to the nearest clean rate, once, before any
+    // channel processing. Everything downstream then treats it like a native
+    // capture — scan, offset tuning and the channelizer all assume rate % 4800.
+    if !args.demo {
+        if let Some((up, down, out_rate)) = hs_dsp::resample::normalize_ratio(args.rate) {
+            println!(
+                "normalizing {:.3} MSPS → {:.3} MSPS (×{up}/{down}) so the decoder's \
+                 front end can lock…\n",
+                args.rate / 1e6,
+                out_rate / 1e6
+            );
+            iq = hs_dsp::resample::resample_iq(&iq, up, down, args.rate);
+            args.rate = out_rate;
+        }
+    }
 
     if args.scan {
         run_scan(&iq, &args);
