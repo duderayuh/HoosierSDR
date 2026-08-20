@@ -510,6 +510,23 @@ took it from 0 to 69 grants in 30 s. The Airspy path was immune — its
 callback already queues — and the 10 MSPS run is the Phase 2 path: one radio
 spanning a whole SAFE-T site, calls followed as they are granted.
 
+**Phase 2 gate — one hour unattended (2026-08-20, 17:37–18:37).** Airspy R2
+at 10 MSPS centred 855 MHz, `--follow --control 851.5375M --secs 3600`, no
+catalog, stock gain:
+
+| | |
+|---|---|
+| Control channel | held the whole hour — 47,503 frame syncs, no hunts |
+| Calls followed | **173** (0 out of band, 0 encrypted), on 851.8125 / 857.3625 / 857.3875 / 858.3375 MHz |
+| Audio | 171 WAVs, 24 MB, none near-silent, none clipped |
+| Throughput | 9.59/9.60 Msps lifetime average (the shortfall is a cargo build that shared the CPU in minutes 5–12) |
+| Dropped samples | **0**, queue- and device-side |
+| Memory | 481 MB at 5 min → 484 MB at 60 min (flat) |
+| CPU | ~70% of one core idle, ~115% while a call decodes |
+
+Clean-audio-by-ear remains a human check; by the numbers the receiver ran a
+SAFE-T site unattended for an hour without a crash, a drop, or a leak.
+
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
 | _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |
