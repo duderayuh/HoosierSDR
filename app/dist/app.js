@@ -155,12 +155,16 @@ if (TAURI) {
   listen("error", (e) => { setState("standby"); alert("Capture error:\n" + e.payload); });
 
   const opts = () => ({
+    source: $("source").value,
     freq: parseFreq($("freq").value),
     rate: parseFloat($("rate").value),
     gain: $("gain").value.trim() === "" ? null : parseFloat($("gain").value),
     cqpsk: modSel === "cqpsk",
     eq: eqSel,
   });
+  $("source").onchange = () => {
+    $("rate").value = $("source").value === "airspy" ? "2500000" : "2400000";
+  };
   $("start").onclick = async () => {
     try { setState("capturing");
       await invoke("start_capture", { ...opts(),

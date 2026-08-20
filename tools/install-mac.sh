@@ -81,7 +81,8 @@ fi
 
 # ── 6. Build the release CLI ──
 say "Building the release CLI (first build takes a few minutes)"
-( cd "$DEST" && cargo build --release -p hs-cli )
+# libairspy is installed above, so build live Airspy capture in.
+( cd "$DEST" && cargo build --release -p hs-cli --features airspy )
 BIN="$DEST/target/release/hoosier-sdr"
 [ -x "$BIN" ] || die "build finished but $BIN is missing"
 ok "built $BIN"
@@ -113,6 +114,8 @@ cat <<EOF
     hoosier-sdr --demo                              # in a NEW terminal
     airspy_info                                     # check an Airspy R2 is seen
     SDR=airspy $DEST/tools/field-probe.sh probe     # capture + scan + decode
+    hoosier-sdr --sdr --source airspy --rate 10000000 --freq 855M \\
+                --follow --control 851.5375M         # follow a whole site live
 
   Optional extras:
     cd $DEST && cargo build --release -p hs-cli --features rtlsdr   # live RTL-SDR
