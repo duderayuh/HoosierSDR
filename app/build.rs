@@ -8,7 +8,15 @@
 //! build without the variable embeds nothing and the app asks for a key.
 fn main() {
     println!("cargo:rerun-if-env-changed=HS_RR_APP_KEY");
-    let key = std::env::var("HS_RR_APP_KEY").unwrap_or_default();
+    println!("cargo:rerun-if-changed=.rr_app_key");
+    // The variable wins; otherwise a git-ignored `.rr_app_key` file beside
+    // this crate, so every local build embeds it without exporting anything.
+    let key = std::env::var("HS_RR_APP_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::fs::read_to_string(".rr_app_key").ok())
+        .map(|k| k.trim().to_string())
+        .unwrap_or_default();
     const MASK: [u8; 16] = [
         0x5a, 0xc3, 0x91, 0x2e, 0x77, 0xb8, 0x04, 0xe5, 0x3c, 0x6f, 0xd2, 0x19, 0x8b, 0x40, 0xa7, 0xf1,
     ];
