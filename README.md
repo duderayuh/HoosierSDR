@@ -57,7 +57,7 @@ cargo run --release -p hs-cli --features airspy -- --sdr --source airspy \
 cargo run --release -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 ```
 
-`--secs N` ends a live run after N seconds with the summary printed; `--serial <hex>` picks one of several Airspys. The Airspy R2's 2016 firmware takes no gain setting (it hangs), so it runs at its defaults — which decode fine. macOS: `brew install airspy libusb`. Without the feature, `--sdr` prints setup guidance. At 2.5 MSPS the normalizer preserves ±960 kHz around the centre; put the channels you need inside that.
+`--secs N` ends a live run after N seconds with the summary printed; `--serial <hex>` picks one of several Airspys. The Airspy R2's 2016 firmware takes no gain setting (it hangs), so it runs at its defaults — which decode fine. macOS: `brew install airspy libusb`. Without the feature, `--sdr` prints setup guidance. The normalizer preserves 0.8 of the output Nyquist: ±960 kHz around the centre at 2.5 MSPS, ±3.84 MHz at 10 MSPS — centre the band so every channel you need sits inside that.
 
 ## Desktop app
 
