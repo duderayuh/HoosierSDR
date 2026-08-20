@@ -298,6 +298,50 @@ impl RrClient<HttpTransport> {
     }
 }
 
+/// A state (or province) in the database's geography tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RrState {
+    pub stid: u32,
+    pub name: String,
+    pub code: String,
+}
+
+/// A county within a state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RrCounty {
+    pub ctid: u32,
+    pub name: String,
+}
+
+/// A trunked system as listed under a state or county — enough to pick it;
+/// [`RrClient::system`] fetches the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RrSystemRef {
+    pub sid: u32,
+    pub name: String,
+    /// RadioReference system type id (its "Project 25" family has its own
+    /// ids). Kept raw; shown, not interpreted.
+    pub stype: Option<u32>,
+    pub sflavor: Option<u32>,
+    pub svoice: Option<u32>,
+    pub city: Option<String>,
+}
+
+/// What a state holds: its counties and its statewide systems.
+#[derive(Debug, Clone, Default)]
+pub struct RrStateInfo {
+    pub counties: Vec<RrCounty>,
+    pub systems: Vec<RrSystemRef>,
+}
+
+/// Where a ZIP code sits in the geography tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RrZip {
+    pub city: Option<String>,
+    pub stid: u32,
+    pub ctid: u32,
+}
+
 impl<T: SoapTransport> RrClient<T> {
     pub fn with_transport(creds: Credentials, transport: T) -> Self {
         Self {
@@ -400,6 +444,82 @@ impl<T: SoapTransport> RrClient<T> {
         }
         Ok(tgs)
     }
+    /// United States' states (RadioReference country id 1), for browsing.
+    pub fn states(&self) -> Result<Vec<RrState>, RrError> {
+        let root = self.call("getCountryInfo", "coid", "1")?;
+        let out: Vec<RrState> = collect_records(&root, "stid")
+            .iter()
+            .filter_map(|n| {
+                Some(RrState {
+                    stid: n.get_u64("stid")? as u32,
+                    name: n.get_any(&["stateName", "name"])?.to_string(),
+                    code: n.get_any(&["stateCode", "code"]).unwrap_or("").to_string(),
+                })
+            })
+            .collect();
+        if out.is_empty() {
+            return Err(RrError::Empty("states"));
+        }
+        Ok(out)
+    }
+
+    /// A state's counties and statewide systems.
+    pub fn state_info(&self, stid: u32) -> Result<RrStateInfo, RrError> {
+        let root = self.call("getStateInfo", "stid", &stid.to_string())?;
+        let counties: Vec<RrCounty> = collect_records(&root, "ctid")
+            .iter()
+            .filter_map(|n| {
+                Some(RrCounty {
+                    ctid: n.get_u64("ctid")? as u32,
+                    name: n.get_any(&["countyName", "name"])?.to_string(),
+                })
+            })
+            .collect();
+        let systems = parse_system_refs(&root);
+        if counties.is_empty() && systems.is_empty() {
+            return Err(RrError::Empty("state"));
+        }
+        Ok(RrStateInfo { counties, systems })
+    }
+
+    /// Trunked systems listed under a county.
+    pub fn county_systems(&self, ctid: u32) -> Result<Vec<RrSystemRef>, RrError> {
+        let root = self.call("getCountyInfo", "ctid", &ctid.to_string())?;
+        Ok(parse_system_refs(&root))
+    }
+
+    /// The state and county a ZIP code falls in — the quick way in.
+    pub fn zipcode(&self, zip: u32) -> Result<RrZip, RrError> {
+        let root = self.call("getZipcodeInfo", "zipcode", &zip.to_string())?;
+        let n = root.find("stid").map(|_| &root).unwrap_or(&root);
+        let stid = n.find("stid").and_then(|x| x.text.trim().parse().ok());
+        let ctid = n.find("ctid").and_then(|x| x.text.trim().parse().ok());
+        match (stid, ctid) {
+            (Some(stid), Some(ctid)) => Ok(RrZip {
+                city: root.find("city").map(|c| c.text.trim().to_string()),
+                stid,
+                ctid,
+            }),
+            _ => Err(RrError::Empty("zipcode")),
+        }
+    }
+}
+
+/// Every `sid`-bearing record under `root`, as a system reference.
+fn parse_system_refs(root: &Node) -> Vec<RrSystemRef> {
+    collect_records(root, "sid")
+        .iter()
+        .filter_map(|n| {
+            Some(RrSystemRef {
+                sid: n.get_u64("sid")? as u32,
+                name: n.get_any(&["sName", "name"])?.to_string(),
+                stype: n.get_u64("sType").map(|v| v as u32),
+                sflavor: n.get_u64("sFlavor").map(|v| v as u32),
+                svoice: n.get_u64("sVoice").map(|v| v as u32),
+                city: n.get("sCity").map(str::to_string).filter(|c| !c.is_empty()),
+            })
+        })
+        .collect()
 }
 
 /// Collect the parent element of every occurrence of `key` — i.e. every record
@@ -751,5 +871,75 @@ mod tests {
         assert!(body.contains("a&amp;b"));
         assert!(body.contains("u&lt;v"));
         assert!(!body.contains("p\"w"));
+    }
+
+    const COUNTRY: &str = r#"<Envelope><Body><getCountryInfoResponse><return>
+        <coid>1</coid><countryName>United States</countryName>
+        <stateList><item><stid>17</stid><stateName>Indiana</stateName><stateCode>IN</stateCode></item>
+                   <item><stid>18</stid><stateName>Iowa</stateName><stateCode>IA</stateCode></item></stateList>
+        </return></getCountryInfoResponse></Body></Envelope>"#;
+
+    const STATE: &str = r#"<Envelope><Body><getStateInfoResponse><return>
+        <stid>17</stid><stateName>Indiana</stateName>
+        <trsList><item><sid>100</sid><sName>Example Statewide</sName><sType>8</sType><sFlavor>1</sFlavor><sVoice>2</sVoice><sCity></sCity></item></trsList>
+        <countyList><item><ctid>901</ctid><countyName>Example County</countyName><countyHeader>Counties</countyHeader></item>
+                    <item><ctid>902</ctid><countyName>Other County</countyName></item></countyList>
+        </return></getStateInfoResponse></Body></Envelope>"#;
+
+    const COUNTY: &str = r#"<Envelope><Body><getCountyInfoResponse><return>
+        <ctid>901</ctid><countyName>Example County</countyName><stid>17</stid>
+        <trsList><item><sid>200</sid><sName>Example County Public Safety</sName><sType>9</sType><sCity>Exampleville</sCity></item></trsList>
+        </return></getCountyInfoResponse></Body></Envelope>"#;
+
+    const ZIP: &str = r#"<Envelope><Body><getZipcodeInfoResponse><return>
+        <zipCode>46000</zipCode><lat>39.9</lat><lon>-86.1</lon><city>Exampleville</city><stid>17</stid><ctid>901</ctid>
+        </return></getZipcodeInfoResponse></Body></Envelope>"#;
+
+    #[test]
+    fn browses_states_counties_systems_and_zipcodes() {
+        let st = client(COUNTRY).states().unwrap();
+        assert_eq!(st.len(), 2);
+        assert_eq!(
+            st[0],
+            RrState {
+                stid: 17,
+                name: "Indiana".into(),
+                code: "IN".into()
+            }
+        );
+
+        let info = client(STATE).state_info(17).unwrap();
+        assert_eq!(info.counties.len(), 2);
+        assert_eq!(
+            info.counties[0],
+            RrCounty {
+                ctid: 901,
+                name: "Example County".into()
+            }
+        );
+        assert_eq!(info.systems.len(), 1);
+        assert_eq!(info.systems[0].sid, 100);
+        assert_eq!(info.systems[0].stype, Some(8));
+        assert_eq!(info.systems[0].city, None);
+
+        let sys = client(COUNTY).county_systems(901).unwrap();
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0].name, "Example County Public Safety");
+        assert_eq!(sys[0].city.as_deref(), Some("Exampleville"));
+
+        let z = client(ZIP).zipcode(46000).unwrap();
+        assert_eq!(
+            z,
+            RrZip {
+                city: Some("Exampleville".into()),
+                stid: 17,
+                ctid: 901
+            }
+        );
+
+        let c = client(COUNTY);
+        c.county_systems(901).unwrap();
+        let body = c.transport.seen.borrow()[0].clone();
+        assert!(body.contains("getCountyInfo") && body.contains("<ctid>901</ctid>"));
     }
 }
