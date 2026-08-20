@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
 
 [features]
 # Live RTL-SDR capture via Seify. Off by default so the core build stays
 # pure-Rust and libusb-free (see docs/ARCHITECTURE.md §2).
 default = []
 rtlsdr = ["dep:seify", "dep:num-complex"]
+# Live Airspy (R2) capture over libairspy directly — `brew install airspy`.
+# Off by default for the same reason.
+airspy = []
 
 [dependencies]
 seify = { version = "0.23", default-features = false, features = ["rtlsdr"], optional = true }

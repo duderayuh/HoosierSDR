@@ -21,6 +21,7 @@ use std::io::Read;
 const DEFAULT_RATE: f64 = 48000.0;
 const VOICE_RATE: u32 = 8000;
 
+#[derive(Clone)]
 struct Args {
     input: Option<String>,
     rate: f64,
@@ -33,6 +34,9 @@ struct Args {
     play: bool,
     demo: bool,
     sdr: bool,
+    source: String,
+    serial: Option<u64>,
+    secs: Option<f64>,
     catalog: Option<String>,
     freq: f64,
     gain: Option<f64>,
@@ -61,6 +65,9 @@ fn parse_args() -> Args {
         play: false,
         demo: false,
         sdr: false,
+        source: "rtlsdr".into(),
+        serial: None,
+        secs: None,
         catalog: None,
         freq: 851_000_000.0,
         gain: None,
@@ -104,6 +111,13 @@ fn parse_args() -> Args {
             "--play" => a.play = true,
             "--demo" => a.demo = true,
             "--sdr" => a.sdr = true,
+            "--source" => a.source = it.next().unwrap_or_default(),
+            "--secs" => a.secs = it.next().and_then(|s| s.parse().ok()),
+            "--serial" => {
+                a.serial = it
+                    .next()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            }
             "--catalog" => a.catalog = it.next(),
             "--freq" => a.freq = it.next().and_then(|s| parse_freq(&s)).unwrap_or(a.freq),
             "--gain" => a.gain = it.next().and_then(|s| s.parse().ok()),
@@ -150,7 +164,13 @@ fn print_help() {
              \x20              channels; this picks one without re-recording.\n\
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
-             --sdr          Capture live from an RTL-SDR (build --features rtlsdr)\n\
+             --sdr          Capture live from a radio (build --features rtlsdr,airspy)
+--source <S>   Which radio: rtlsdr (default) or airspy. An Airspy R2 runs at
+               --rate 2500000 or 10000000; the stream is normalized to
+               2.4/9.6 MSPS on the fly. Its firmware takes no gain setting.
+--serial <HEX> Pick one of several Airspys by serial (see airspy_info)
+--secs <S>     Stop a live capture after S seconds and print the summary
+               (otherwise it runs until Ctrl-C)\n\
              --freq <HZ>    SDR center frequency (accepts 851M, 851.0125e6; default 851M)\n\
              --gain <DB>    SDR manual gain in dB (omit for hardware AGC)\n\
              --catalog <P>  RadioReference talkgroup CSV: show names instead of TG numbers\n\
@@ -670,18 +690,81 @@ fn save_iq(path: &str, iq: &[f32]) -> std::io::Result<()> {
 
 /// Live capture: stream from an RTL-SDR into the decoder until interrupted,
 /// printing grants as they resolve and accumulating decoded voice to a WAV.
-#[cfg(feature = "rtlsdr")]
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
 fn run_sdr(args: &Args) {
-    use hs_core::stream;
-    use hs_source::rtlsdr::RtlSdrSource;
+    use hs_core::stream::Normalized;
 
-    let mut src = match RtlSdrSource::open("driver=rtlsdr", args.freq, args.rate, args.gain) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("could not open RTL-SDR: {e:?}");
-            std::process::exit(1);
+    match args.source.as_str() {
+        #[cfg(feature = "rtlsdr")]
+        "rtlsdr" => {
+            use hs_source::rtlsdr::RtlSdrSource;
+            let src = match RtlSdrSource::open("driver=rtlsdr", args.freq, args.rate, args.gain) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("could not open RTL-SDR: {e:?}");
+                    std::process::exit(1);
+                }
+            };
+            run_sdr_with(Normalized::new(src), args);
         }
-    };
+        #[cfg(feature = "airspy")]
+        "airspy" => {
+            use hs_source::airspy::AirspySource;
+            let src = match AirspySource::open(args.serial, args.freq, args.rate, args.gain) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("could not open Airspy: {e:?}");
+                    std::process::exit(1);
+                }
+            };
+            if let Some(g) = src.gain_ignored() {
+                eprintln!(
+                    "note: --gain {g} ignored — the Airspy R2 firmware hangs on gain \
+                     commands, so it runs at its default gain"
+                );
+            }
+            let src = Normalized::new(src);
+            if src.is_resampling() {
+                use hs_source::SdrSource;
+                println!(
+                    "normalizing {:.3} MSPS → {:.3} MSPS (×24/25) on the fly",
+                    args.rate / 1e6,
+                    src.sample_rate() / 1e6
+                );
+            }
+            run_sdr_with(src, args);
+        }
+        other => {
+            eprintln!(
+                "unknown --source {other:?} (or not compiled in); this build supports:{}{}",
+                if cfg!(feature = "rtlsdr") {
+                    " rtlsdr"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "airspy") {
+                    " airspy"
+                } else {
+                    ""
+                },
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Live capture from an already-open, rate-normalized source: follow a trunk
+/// or decode one channel until interrupted, printing grants as they resolve
+/// and accumulating decoded voice to a WAV.
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+fn run_sdr_with<S: hs_source::SdrSource + Send + 'static>(src: S, args: &Args) {
+    use hs_core::stream;
+    use hs_source::SdrSource;
+
+    let src = Timed::new(src, args.secs);
+    // The decoder must be built for the rate the source *delivers*, which
+    // for an Airspy is the normalized one, not the hardware one.
+    let rate = src.sample_rate();
     if args.follow {
         if args.control <= 0.0 {
             eprintln!("--follow needs --control <HZ> (the control-channel frequency)");
@@ -690,7 +773,7 @@ fn run_sdr(args: &Args) {
         let catalog = args.catalog.as_deref().and_then(load_catalog);
         follow::run_live(
             src,
-            args.rate,
+            rate,
             args.freq,
             args.control,
             args.control_measured,
@@ -704,14 +787,21 @@ fn run_sdr(args: &Args) {
         "Capturing {} at {:.4} MHz, {} Hz{}… Ctrl-C to stop.",
         if args.cqpsk { "CQPSK/LSM" } else { "C4FM" },
         args.freq / 1e6,
-        args.rate as u64,
+        rate as u64,
         match args.gain {
             Some(g) => format!(", gain {g} dB"),
             None => " (AGC)".into(),
         },
     );
 
-    let mut dec = build_decoder(args);
+    let mut dec = build_decoder(&Args {
+        rate,
+        ..args.clone()
+    });
+    // Drain the radio on its own thread (see `stream::Buffered`): read
+    // synchronously from the decode loop, an RTL-SDR loses samples at every
+    // block boundary and the control channel syncs but never yields a TSBK.
+    let mut src = stream::Buffered::new(src, 65536);
     let mut pcm: Vec<i16> = Vec::new();
     let stats = stream::run(&mut src, &mut dec, 65536, |out| {
         for g in &out.grants {
@@ -731,11 +821,12 @@ fn run_sdr(args: &Args) {
     });
     match stats {
         Ok(s) => println!(
-            "\nstopped: {} blocks, {} syncs, {} grants, {:.1}s voice",
+            "\nstopped: {} blocks, {} syncs, {} grants, {:.1}s voice, {} dropped",
             s.blocks,
             s.syncs,
             s.grants,
-            s.pcm_samples as f64 / VOICE_RATE as f64
+            s.pcm_samples as f64 / VOICE_RATE as f64,
+            src.dropped()
         ),
         Err(e) => eprintln!("capture error: {e:?}"),
     }
@@ -745,13 +836,54 @@ fn run_sdr(args: &Args) {
     }
 }
 
-#[cfg(not(feature = "rtlsdr"))]
+/// A source that reports end-of-stream after a deadline, so `--secs` ends a
+/// live run the same way a file does — cleanly, with the summary printed.
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+struct Timed<S> {
+    inner: S,
+    deadline: Option<std::time::Instant>,
+}
+
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+impl<S> Timed<S> {
+    fn new(inner: S, secs: Option<f64>) -> Self {
+        Self {
+            inner,
+            deadline: secs
+                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s)),
+        }
+    }
+}
+
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+impl<S: hs_source::SdrSource> hs_source::SdrSource for Timed<S> {
+    fn sample_rate(&self) -> f64 {
+        self.inner.sample_rate()
+    }
+    fn center_freq(&self) -> f64 {
+        self.inner.center_freq()
+    }
+    fn dropped(&self) -> u64 {
+        self.inner.dropped()
+    }
+    fn read(&mut self, buf: &mut [f32]) -> Result<usize, hs_source::SourceError> {
+        if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return Err(hs_source::SourceError::Eof);
+        }
+        self.inner.read(buf)
+    }
+}
+
+#[cfg(not(any(feature = "rtlsdr", feature = "airspy")))]
 fn run_sdr(_args: &Args) {
     eprintln!(
-        "Live SDR capture needs a build with the rtlsdr feature:\n\
+        "Live SDR capture needs a build with the rtlsdr and/or airspy feature:\n\
          \n    RUSTFLAGS=\"-C target-cpu=native\" \\\n\
-         \n      cargo run -p hs-cli --release --features rtlsdr -- --sdr --freq 851.0125M\n\
-         \n(That pulls Seify + libusb. On macOS: `brew install libusb`.)\n\
+         \n      cargo run -p hs-cli --release --features rtlsdr,airspy -- --sdr --freq 851.0125M\n\
+         \n(rtlsdr pulls Seify + libusb; airspy links libairspy. On macOS: `brew install libusb airspy`.)\n\
          \nThe target-cpu=native flag matters for --follow at 2.4 MHz: without it\n\
          the pipeline can run just under real time and the radio drops samples.\n\
          Pass a fixed --gain (e.g. 40) rather than relying on the tuner's AGC."

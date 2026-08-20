@@ -16,6 +16,8 @@ default = []
 audio = ["dep:cpal"]
 # Live RTL-SDR capture (pulls Seify + libusb). Off by default.
 rtlsdr = ["hs-source/rtlsdr"]
+# Live Airspy capture over libairspy (`brew install airspy`). Off by default.
+airspy = ["hs-source/airspy"]
 # Download system/site/talkgroup data from RadioReference. Off by default:
 # it pulls an HTTPS client and needs an app key plus a premium login.
 radioreference = ["hs-core/radioreference"]

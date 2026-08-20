@@ -3,6 +3,8 @@
 
 use std::io::Read;
 
+#[cfg(feature = "airspy")]
+pub mod airspy;
 #[cfg(feature = "rtlsdr")]
 pub mod rtlsdr;
 
@@ -29,6 +31,26 @@ pub trait SdrSource {
     /// Fill `buf` with interleaved I/Q f32 samples. Returns samples written
     /// (pairs count as 2), or `Err(Eof)` when the stream ends.
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError>;
+    /// Samples or blocks lost so far on the way from the hardware (device-side
+    /// USB starvation, or a consumer that fell behind). A file never drops.
+    fn dropped(&self) -> u64 {
+        0
+    }
+}
+
+impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
+    fn sample_rate(&self) -> f64 {
+        (**self).sample_rate()
+    }
+    fn center_freq(&self) -> f64 {
+        (**self).center_freq()
+    }
+    fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        (**self).read(buf)
+    }
+    fn dropped(&self) -> u64 {
+        (**self).dropped()
+    }
 }
 
 /// Raw IQ file playback (interleaved f32 little-endian, `.cf32`).
