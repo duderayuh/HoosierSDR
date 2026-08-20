@@ -518,7 +518,7 @@ catalog, stock gain:
 |---|---|
 | Control channel | held the whole hour — 47,503 frame syncs, no hunts |
 | Calls followed | **173** (0 out of band, 0 encrypted), on 851.8125 / 857.3625 / 857.3875 / 858.3375 MHz |
-| Audio | 171 WAVs, 24 MB, none near-silent, none clipped |
+| Audio | 171 WAVs, 26.1 min of voice, 24 MB; 11 near-silent (RMS < 0.003), none clipped |
 | Throughput | 9.59/9.60 Msps lifetime average (the shortfall is a cargo build that shared the CPU in minutes 5–12) |
 | Dropped samples | **0**, queue- and device-side |
 | Memory | 481 MB at 5 min → 484 MB at 60 min (flat) |
