@@ -18,6 +18,7 @@ pub mod fir;
 pub mod fm;
 pub mod modulator;
 pub mod receiver;
+pub mod resample;
 pub mod rrc;
 pub mod timing;
 pub mod timing_complex;

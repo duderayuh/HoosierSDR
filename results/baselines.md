@@ -84,6 +84,44 @@ regime, and confirming it needs captures where the conventional path actually
 fails: weak signal, deep multipath, or a site with overlapping transmitters at
 comparable strength.
 
+### Equalizer A/B across a wideband capture — 8 simulcast channels, 2026-08-18
+
+A second Marion County capture (`marion.cu8`, 2.4 Msps, ~5.7 s) widens the
+sample from one channel to a whole band slice: `--scan` found **9 P25
+channels across three NACs** (0x260, 0x261, 0x6B6) — 8 CQPSK/LSM simulcast
+channels plus one marginal C4FM. Every CQPSK channel was decoded twice, with
+the CMA equalizer in and bypassed:
+
+```sh
+hoosier-sdr --rate 2400000 --offset <off> --cqpsk [--no-equalizer] --log out.json marion.cu8
+```
+
+| Offset | NAC | Type | Syncs eq/no-eq | Sync bit-err eq/no-eq | Voice frames eq/no-eq |
+|---:|:--:|:--|:--:|:--:|:--:|
+| +125.0 kHz | 0x6B6 | voice | 85 / 88 | **0.65** / 1.07 | 72 / 72 |
+| +550.0 kHz | 0x261 | control | 69 / 67 | **0.42** / 0.45 | — |
+| +100.0 kHz | 0x261 | voice | 68 / 70 | **0.10** / 0.24 | 135 / 135 |
+| −1175.0 kHz | 0x260 | voice | 63 / 63 | **0.17** / 0.57 | 126 / 126 |
+| −675.0 kHz | 0x261 | voice | 40 / 40 | **0.10** / 0.17 | 135 / 135 |
+| +250.0 kHz | 0x260 | voice | 32 / 32 | 0.31 / 0.28 | 270 / 279 |
+| +275.0 kHz | 0x260 | voice | 32 / 32 | **0.00** / 0.19 | 279 / 279 |
+| −125.0 kHz | 0x261 | voice | 32 / 32 | **0.03** / 0.09 | 279 / 279 |
+
+(Offsets are relative to the capture centre; a separate control-channel
+capture the same night, `live261.cu8`, gave the same picture: 74 vs 73 syncs,
+identical 10 grants either way.)
+
+The pattern is consistent with the single-channel A/B above, now across eight
+independent simulcast channels: **the equalizer lowers residual sync bit
+errors on 6 of 8 channels — often by 2–4×, twice to near zero — but decode
+outcomes (syncs, NIDs, voice frames) are unchanged.** At this receive
+location every channel is strong enough that the conventional path already
+survives its errors; the equalizer is demonstrably cleaning the symbols, but
+FEC was already absorbing the difference. The thesis-deciding capture is
+still the one from a degraded location — deep simulcast overlap between
+towers, where equal-strength multipath makes the detect-first path actually
+drop frames.
+
 ## Soft-decision decoding — measured on the field capture
 
 Hard slicing discards the demodulator's confidence: a C4FM symbol at +2.9 and
@@ -289,13 +327,113 @@ theory: run live SDR capture (`hs-source` + Seify) into the decoder, and re-run
 the whole thing on a captured SAFE-T corpus against SDRTrunk / OP25 to fill in
 the external-baseline table below.
 
-## External-decoder baselines (to be filled during Phase 0)
+## External-decoder baselines — first numbers, Marion County control channel
 
-Once the SAFE-T IQ corpus is captured, run the same recordings through
-SDRTrunk (nightly), OP25, and GopherTrunk and record their
-sync-loss / BER / TSBK-decode / voice-FER numbers here as the comparison
-baseline. No numbers yet — no corpus yet.
+First head-to-head, 2026-08-19. Input: the Marion County wideband capture
+(`marion.cu8`, 2.4 Msps u8, 5.83 s), control channel at +550 kHz — NAC 0x261,
+CQPSK/LSM simulcast (WACN BEE00, SYS 262, RFSS 1, Site 10, per GopherTrunk's
+own site decode). Every decoder saw the same signal; where a decoder needed a
+single channel, all got the *identical* file: the channel mixed to DC and
+decimated to 48 ksps (windowed-sinc FIR, then fine-centered by a 4th-power
+carrier estimate to −198 Hz residual). The metric is **CRC-passed TSBKs**,
+the one number all three report with the same semantics (OP25 dumps TSBKs
+only after `crc16` passes; HoosierSDR counts blocks after trellis+CRC;
+GopherTrunk reports `tsbk decoded` net of `crc_failed`).
+
+| Decoder | Input | Frame syncs | TSBKs (CRC-passed) | Voice grants |
+|---|---|:--:|:--:|:--:|
+| **SDRTrunk 0.6.1** (P25P1 CQPSK/LSM, recording-tuner playback) | 2.4M s16 wav | n/r | **~205** | n/r |
+| **HoosierSDR** (native front end, wideband) | 2.4M cu8 | 69 | **192** | 27 |
+| **HoosierSDR** | 48k channelized | 69 | 191 | 25 |
+| OP25 boatbod `28f2c40` (2026-08-13), `-D cqpsk` | 48k channelized | n/r | 21 | 1 |
+| GopherTrunk `09b0014` (2026-08-18), `-demod cqpsk` | 48k channelized | 8 | 17 | 7 |
+| GopherTrunk, same, wideband `-auto-tune` | 2.4M cu8 | 4 | 12 | — |
+
+**SDRTrunk set the bar, and chasing it fixed two real defects.** Its
+playback looped the file (~2.4 passes, 484 TSBKs over 13.5 s, steady
+35–36/s); per 5.83 s pass that is ~205, verified to be the recording and
+not a live dongle (the same grants repeat with the file's 5.8 s period, and
+sync losses cluster at the loop seams). The channel carries 69 TSDU frames
+× 3 blocks ≈ 207 TSBKs — SDRTrunk decodes essentially every block, and
+HoosierSDR's first run managed only **152** despite syncing on **all 69
+frames**: the deficit was entirely TSBK blocks dying in trellis/CRC after a
+good sync, at a uniform ~13% per block position. Instrumenting on this
+capture found two fixes:
+
+1. **A failed block no longer aborts the TSDU.** The framer treated an
+   undecodable block as end-of-frame and silently discarded the intact
+   blocks behind it — 28 blocks on this capture. 152 → 173.
+2. **CRC-guided list Viterbi.** When the maximum-likelihood trellis path
+   fails the CRC, a K-best list tries the next candidates and the CRC
+   arbitrates; cost bounds keep the search among genuine near-misses so a
+   noise block cannot fish a lucky CRC out of 64 tries. 173 → **192**, and
+   grants 21 → 27. Syncs unchanged throughout — nothing was traded away.
+
+The same fixes took the `live261.cu8` control capture from 190 → 203 TSBKs
+and 10 → 14 grants. A residual note: pre-fix, `--no-equalizer` beat the
+equalizer 160 to 152 on this strong channel; post-fix the order rights
+itself (192 vs 190). And this channel's distortion is mild (mean sync bit
+errors 0.42/48), so the equalizer-attribution test still needs the degraded
+capture described above.
+
+Against the detect-first CLI decoders the picture inverts: OP25 was given a
+parameter sweep (`-C`, `-G`, `-b`, `-X` around defaults; defaults won, and
+`-D fsk4` decoded nothing) and still managed 21; GopherTrunk's best was 17
+on the pre-centered single channel (its `-auto-tune` found the carrier
+within 150 Hz of our estimate but decoded fewer frames). HoosierSDR decodes
+~9–11× either of them on the same bits.
+
+The Phase 1 gate ("measurably lower BER and sync-loss than SDRTrunk
+nightly") is **not yet met on this recording**: sync is at parity and block
+recovery is now 94% of SDRTrunk's (192 vs ~205). The remaining ~13 blocks
+per pass are the next unit of work — rerun this table as it closes.
+
+Reproduce: `docker build` boatbod op25 (gr3.10, Ubuntu 22.04), then
+`rx.py -F <48k.cf32> -S 48000 -D cqpsk -T trunk.tsv -v 10` and count
+`TSBK: op=` lines; `gophertrunk replay -in marion.cu8 -format u8
+-sample-rate 2400000 -protocol p25p1 -demod cqpsk -tune-hz 550000`;
+`hoosier-sdr --rate 2400000 --offset 550k --cqpsk marion.cu8` ("TSBKs
+decoded" line in the summary); SDRTrunk 0.6.1 → Add Recording Tuner on a
+16-bit stereo IQ wav of the capture (center 851.000 MHz), a P25P1 channel
+at 851.550 MHz with modulation CQPSK, preferred tuner = the recording
+tuner (else a live dongle covering the frequency is silently chosen), and
+count `TSBK` lines in the decoded-messages event log, normalized per
+5.83 s file pass (playback loops).
+
+### The remaining gap, characterized — burst phase hits
+
+What the last ~13 blocks per pass actually are, established by ground-truth
+matching: control channels repeat their broadcasts, so a failed block's true
+transmit pattern can be recovered by re-encoding every cleanly-decoded TSBK
+(111 unique on this capture) and taking the nearest in dibit Hamming
+distance. Four failed blocks matched within distance 19; their error maps
+share one signature:
+
+- **Errors arrive in bursts of 5–11 consecutive on-air symbols** (~1–2 ms),
+  several bursts per block, 17–19 dibit errors total — far beyond what the
+  rate-1/2 trellis or a 64-deep list can absorb.
+- **The demodulator is confidently wrong through the bursts**: per-dibit
+  confidence at the error positions runs 300–510 of 510. The soft
+  information *lies*, which is exactly why list-Viterbi recovery stops at
+  192 — the CRC-guided search is steered away from the real damage.
+- **The corruption is not a constant phase slip**: the truth→received dibit
+  mapping scatters within a burst, so no rotation hypothesis repairs it.
+
+That signature — short events where the differential phase is dragged
+around per-symbol while amplitude (and therefore confidence) stays healthy —
+is a **simulcast differential-phase hit**: the relative phase of two towers
+sweeping through a bad alignment. It is the thesis regime showing up in
+miniature on a strong channel. The stationary CMA equalizer doesn't help
+(equalizer on/off moves the count by 2), because the event is faster than
+its adaptation. Closing these blocks is demodulator work — a
+decision-feedback or fast-adapting equalizer through the burst (the
+roadmap's DFE/MLSE experiment), not framing or FEC work, and the
+degraded-location capture will amplify exactly these events.
+
+Reproduce: `HS_TSDU_DEBUG=1 hoosier-sdr … 2>` a log dumps every TSBK
+block's received dibits, confidences, ML cost and decode; the matching
+analysis is a ~60-line script over that dump.
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
-| _pending_ | | | | | |
+| _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |

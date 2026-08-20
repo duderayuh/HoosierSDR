@@ -193,11 +193,26 @@ fn load_iq(path: &str) -> Vec<f32> {
     f.read_to_end(&mut bytes).expect("read IQ");
     // `.cu8` is the RTL-SDR's native format: interleaved unsigned 8-bit, DC at
     // 127.5. Load it directly so a raw `rtl_sdr` capture can be decoded without
-    // a conversion step. Everything else is interleaved little-endian f32
-    // (`.cf32`), the project's working format.
+    // a conversion step.
     if path.ends_with(".cu8") || path.ends_with(".u8") {
         return bytes.iter().map(|&b| (b as f32 - 127.5) / 127.5).collect();
     }
+    // `.cs16` is `airspy_rx -t 2` (INT16_IQ): interleaved signed 16-bit
+    // little-endian, centred at 0. This is the Airspy R2's reliable output
+    // format — its old firmware hangs when asked for float32 — and it is
+    // native 12-bit data promoted to 16-bit, so it loses nothing to f32 at
+    // half the file size.
+    if path.ends_with(".cs16") || path.ends_with(".s16") {
+        let n = bytes.len() / 2;
+        return (0..n)
+            .map(|i| {
+                let s = i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+                s as f32 / 32768.0
+            })
+            .collect();
+    }
+    // Everything else is interleaved little-endian f32 (`.cf32`), the
+    // project's working format.
     let n = bytes.len() / 4;
     (0..n)
         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
@@ -274,6 +289,7 @@ fn report(out: &DecodeOutput, dec: &ChannelDecoder, cat: Option<&hs_core::catalo
     println!("modulation:       {:?}", dec.modulation());
     println!("vocoder:          {}", dec.vocoder_name());
     println!("frame syncs:      {}", out.syncs);
+    println!("TSBKs decoded:    {}", dec.diagnostics().tsbks);
     println!("voice grants:     {}", out.grants.len());
     for g in &out.grants {
         println!(
@@ -482,7 +498,7 @@ fn warn_low_rate(rate: f64) {
 }
 
 fn main() {
-    let args = parse_args();
+    let mut args = parse_args();
     warn_low_rate(args.rate);
 
     if let Some(sys_id) = args.rr_system {
@@ -504,12 +520,29 @@ fn main() {
         std::process::exit(2);
     }
 
-    let iq = if args.demo {
+    let mut iq = if args.demo {
         println!("Decoding a synthesized P25 transmission (demo mode)…\n");
         demo_iq(args.rate, args.cqpsk)
     } else {
         load_iq(args.input.as_ref().unwrap())
     };
+
+    // Normalize a hardware rate that isn't a multiple of the symbol rate (an
+    // Airspy R2's 10 or 2.5 MSPS) to the nearest clean rate, once, before any
+    // channel processing. Everything downstream then treats it like a native
+    // capture — scan, offset tuning and the channelizer all assume rate % 4800.
+    if !args.demo {
+        if let Some((up, down, out_rate)) = hs_dsp::resample::normalize_ratio(args.rate) {
+            println!(
+                "normalizing {:.3} MSPS → {:.3} MSPS (×{up}/{down}) so the decoder's \
+                 front end can lock…\n",
+                args.rate / 1e6,
+                out_rate / 1e6
+            );
+            iq = hs_dsp::resample::resample_iq(&iq, up, down, args.rate);
+            args.rate = out_rate;
+        }
+    }
 
     if args.scan {
         run_scan(&iq, &args);
