@@ -485,7 +485,10 @@ and that route never opens; `low_level_input_does_not_feed_the_degenerate_minimu
 pins it (pre-fix the feedback norm reaches 0.49 on a clean channel). After
 the fix the DFE beats the linear CMA on the Airspy control channel (209 →
 **216**) and on its voice channel (84 → 127 syncs), and the RTL-SDR results are
-unchanged within noise (203 → 202, 207 → 207).
+unchanged within noise (203 → 202, 207 → 207). Confirmed on a fresh live
+Airspy R2 capture the same day (NAC 0x260 control channel, 10 s at
+2.5 MSPS): pre-fix `--dfe` decoded 66 TSBKs / 23 syncs; post-fix, bare, CMA
+and DFE all decode 393 TSBKs / 132 syncs — the channel's full rate.
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
