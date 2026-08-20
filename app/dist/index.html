@@ -4,87 +4,180 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>HoosierSDR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="masthead">
-    <div class="brand">Hoosier<b>SDR</b></div>
-    <div class="statuspill" id="statuspill">idle</div>
-    <div class="tagline">P25 Phase I receiver · never decrypts</div>
+    <div class="inner">
+      <div class="brand">Hoosier<b>SDR</b><span class="dot">.</span></div>
+      <div class="tuned">
+        <div>
+          <span class="hz" id="tunedHz">857.6625</span><span class="unit"> MHz</span>
+          <div class="sub" id="tunedSub">NAC 0x261 · SITE 010 · CQPSK</div>
+        </div>
+      </div>
+      <span class="spacer"></span>
+      <div class="pill" id="pill"><span class="led"></span><span id="pillText">standby</span></div>
+      <button class="themebtn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
   </header>
 
-  <main>
-    <section class="panel controls">
-      <header><h2>Tuning</h2></header>
-      <div class="body grid2">
-        <label>Frequency
-          <input id="freq" type="text" value="851.0125M" />
-        </label>
-        <label>Sample rate
-          <select id="rate">
-            <option value="48000">48 kHz (file)</option>
-            <option value="2400000" selected>2.4 MHz (RTL-SDR)</option>
-            <option value="10000000">10 MHz (Airspy)</option>
-          </select>
-        </label>
-        <label>Gain (dB)
-          <input id="gain" type="text" placeholder="AGC" />
-        </label>
-        <label>Modulation
-          <select id="mod">
-            <option value="c4fm" selected>C4FM</option>
-            <option value="cqpsk">CQPSK / LSM (simulcast)</option>
-          </select>
-        </label>
-        <label class="wide">Talkgroup catalog (RadioReference CSV path)
-          <span class="row">
-            <input id="catalog" type="text" placeholder="/path/to/talkgroups.csv" />
-            <button id="loadcat" class="ghost">Load</button>
-          </span>
-        </label>
-        <label>Record IQ to
-          <input id="reciq" type="text" placeholder="run.cf32 (share with support)" />
-        </label>
-        <label>Record log to
-          <input id="reclog" type="text" placeholder="run.json" />
-        </label>
+  <div class="wrap">
+    <section class="console">
+      <!-- LEFT: scopes + readouts -->
+      <div class="scopes">
+        <div class="screen">
+          <span class="tag">Spectrum · Waterfall</span>
+          <span class="axis" id="wfAxis">857.20 MHz ± 1.2 MHz</span>
+          <canvas id="waterfall" width="1024" height="244"></canvas>
+        </div>
+
+        <div class="two">
+          <div class="screen">
+            <span class="tag">Constellation · π/4-DQPSK</span>
+            <canvas id="scope" width="380" height="210"></canvas>
+          </div>
+          <div class="readouts">
+            <div class="readout">
+              <span class="k">Lock</span>
+              <span class="v sig" id="r-lock">—</span>
+              <div class="bar"><i id="r-lockbar" style="width:0%"></i></div>
+            </div>
+            <div class="readout">
+              <span class="k">Sync&nbsp;err</span>
+              <span class="v" id="r-syncerr">—</span>
+            </div>
+            <div class="readout">
+              <span class="k">Equalizer</span>
+              <span class="v" id="r-eq" style="font-size:15px">CMA</span>
+            </div>
+            <div class="readout">
+              <span class="k">Frame&nbsp;syncs</span>
+              <span class="v" id="r-syncs">0</span>
+            </div>
+            <div class="readout">
+              <span class="k">Grants</span>
+              <span class="v sig" id="r-grants">0</span>
+            </div>
+            <div class="readout">
+              <span class="k">Voice</span>
+              <span class="v" id="r-voice">0.0<small>s</small></span>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="body actions">
-        <button id="start" class="primary">Start capture</button>
-        <button id="stop" class="danger" disabled>Stop</button>
-        <span class="sep"></span>
-        <input id="decfile" type="text" placeholder="decode a .cf32 file instead" />
-        <button id="decode" class="ghost">Decode file</button>
+
+      <!-- RIGHT: receiver front panel -->
+      <div class="panel">
+        <div class="head">
+          <span class="eyebrow">Receiver</span>
+          <span class="meta" id="rateMeta">2.4 MSPS</span>
+        </div>
+        <div class="body">
+          <label class="field freq-field">
+            <span class="lab">Frequency <span class="mono" style="color:var(--ink-faint)">control ch</span></span>
+            <input id="freq" type="text" value="857.6625M" spellcheck="false" />
+          </label>
+
+          <div class="row2">
+            <label class="field">
+              <span class="lab">Sample rate</span>
+              <select id="rate">
+                <option value="48000">48 kHz · file</option>
+                <option value="2400000" selected>2.4 MHz · RTL-SDR</option>
+                <option value="2500000">2.5 MHz · Airspy R2</option>
+                <option value="10000000">10 MHz · Airspy R2</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="lab">Gain</span>
+              <input id="gain" type="text" placeholder="AGC" />
+            </label>
+          </div>
+
+          <div class="field">
+            <span class="lab">Modulation</span>
+            <div class="seg" id="modSeg" role="group" aria-label="Modulation">
+              <button data-v="c4fm" aria-pressed="false">C4FM</button>
+              <button data-v="cqpsk" aria-pressed="true">CQPSK<span class="hint">simulcast / LSM</span></button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="lab">Equalizer <span class="mono" style="color:var(--ink-faint)">pre-detection</span></span>
+            <div class="seg warn" id="eqSeg" role="group" aria-label="Equalizer">
+              <button data-v="bypass" aria-pressed="false">Bare</button>
+              <button data-v="cma" aria-pressed="true">CMA<span class="hint">default</span></button>
+              <button data-v="dfe" aria-pressed="false">DFE<span class="hint">deep null</span></button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="start">Start</button>
+            <button class="btn danger" id="stop" disabled>Stop</button>
+          </div>
+
+          <div class="divider"></div>
+          <div class="subhead"><span class="eyebrow">Catalog &amp; capture</span><span class="line"></span></div>
+
+          <label class="field">
+            <span class="lab">Talkgroup catalog · RadioReference CSV</span>
+            <span class="inline">
+              <input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" />
+              <button class="btn ghost" id="loadcat">Load</button>
+            </span>
+          </label>
+          <div class="row2">
+            <label class="field">
+              <span class="lab">Record IQ</span>
+              <input id="reciq" type="text" placeholder="run.cf32" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">Record log</span>
+              <input id="reclog" type="text" placeholder="run.json" spellcheck="false" />
+            </label>
+          </div>
+          <label class="field">
+            <span class="lab">Decode a recording instead</span>
+            <span class="inline">
+              <input id="decfile" type="text" placeholder="capture.cf32 / .cu8 / .cs16" spellcheck="false" />
+              <button class="btn ghost" id="decode">Decode</button>
+            </span>
+          </label>
+        </div>
       </div>
     </section>
 
-    <section class="panel">
-      <header><h2>Spectrum</h2><span class="meta" id="specmeta"></span></header>
-      <canvas id="waterfall" width="1024" height="200"></canvas>
-    </section>
-
-    <div class="tiles">
-      <div class="tile"><span class="k">Frame syncs</span><span class="v" id="t-syncs">0</span></div>
-      <div class="tile"><span class="k">Grants</span><span class="v" id="t-grants">0</span></div>
-      <div class="tile"><span class="k">Voice</span><span class="v" id="t-voice">0.0<small>s</small></span></div>
-      <div class="tile"><span class="k">Blocks</span><span class="v" id="t-blocks">0</span></div>
-      <div class="tile"><span class="k">Modulation</span><span class="v small" id="t-mod">—</span></div>
-    </div>
-
-    <section class="panel">
-      <header><h2>Calls</h2><button id="clear" class="ghost small">clear</button></header>
+    <!-- CALLS -->
+    <section class="panel calls">
+      <div class="head">
+        <span class="eyebrow">Decoded dispatch</span>
+        <button class="btn ghost" id="clear" style="font-size:12px;padding:6px 11px">Clear</button>
+      </div>
       <div class="body">
-        <table id="calls">
-          <thead><tr><th>Time</th><th>Talkgroup</th><th>Source</th><th>Downlink</th><th>Status</th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <div id="callsEmpty" class="empty">No calls yet. Start a capture or decode a file.</div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr>
+              <th>Time</th><th>Talkgroup</th><th>Source unit</th><th>Downlink</th><th>Channel</th>
+            </tr></thead>
+            <tbody id="callBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="empty">
+          <span class="big">No traffic yet</span>
+          Press Start to follow the control channel, or decode a recording.
+        </div>
       </div>
     </section>
 
-    <p class="legal">Decodes unencrypted P25 only — encrypted talkgroups are detected and skipped by design.
-      Indiana: use at your dwelling or place of business only (IC 35-44.1-2-7).</p>
-  </main>
+    <p class="legal">
+      <span class="mark">◆</span>
+      <span><b>Decodes unencrypted P25 only.</b> Encrypted talkgroups are detected by their ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC&nbsp;35-44.1-2-7). HoosierSDR equalizes the channel <b>before</b> differential detection — the front end no other open-source P25 decoder uses.</span>
+    </p>
+  </div>
 
   <script src="app.js"></script>
 </body>

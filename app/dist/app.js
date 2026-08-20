@@ -25,6 +25,7 @@ function opts() {
     rate: parseFloat($("rate").value),
     gain: $("gain").value.trim() === "" ? null : parseFloat($("gain").value),
     cqpsk: $("mod").value === "cqpsk",
+    eq: $("eq").value,
   };
 }
 
@@ -82,6 +83,10 @@ listen("status", (e) => {
   $("t-voice").innerHTML = s.voice_secs.toFixed(1) + "<small>s</small>";
   $("t-blocks").textContent = s.blocks;
   $("t-mod").textContent = s.modulation;
+  $("t-syncerr").textContent = s.syncs ? s.sync_err.toFixed(2) : "—";
+  const m = $("m-lock");
+  if (s.lock < 0) { $("t-lock").textContent = "n/a"; m.style.display = "none"; }
+  else { $("t-lock").textContent = Math.round(s.lock * 100) + "%"; m.style.display = ""; m.value = s.lock; }
 });
 listen("spectrum", (e) => pushSpectrum(e.payload.bins_db));
 listen("stopped", () => { setLive(false); });
@@ -109,7 +114,7 @@ $("decode").onclick = async () => {
   const path = $("decfile").value.trim();
   if (!path) return;
   const o = opts();
-  try { await invoke("decode_file", { path, rate: o.rate, cqpsk: o.cqpsk }); }
+  try { await invoke("decode_file", { path, rate: o.rate, cqpsk: o.cqpsk, eq: o.eq }); }
   catch (err) { alert(err); }
 };
 $("clear").onclick = () => { tbody.innerHTML = ""; $("callsEmpty").style.display = ""; };

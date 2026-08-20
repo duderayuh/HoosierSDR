@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use hs_catalog::CsvCatalog;
-use hs_core::decoder::{ChannelDecoder, EqMode};
+use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 #[derive(Default)]
 struct AppState {
@@ -36,6 +36,10 @@ struct StatusMsg {
     voice_secs: f64,
     blocks: u64,
     modulation: String,
+    /// CQPSK carrier-lock quality 0..1, or -1 on the C4FM path (no metric).
+    lock: f32,
+    /// Mean frame-sync bit errors (of 48) — the receiver's own decode quality.
+    sync_err: f64,
 }
 
 #[derive(Serialize, Clone)]
@@ -71,6 +75,7 @@ fn start_capture(
     rate: f64,
     gain: Option<f64>,
     cqpsk: bool,
+    eq: String,
     record_iq: Option<String>,
     record_log: Option<String>,
 ) -> Result<(), String> {
@@ -81,7 +86,7 @@ fn start_capture(
     let catalog = state.catalog.clone();
     std::thread::spawn(move || {
         let res = capture_loop(
-            &app, &running, &catalog, freq, rate, gain, cqpsk, record_iq, record_log,
+            &app, &running, &catalog, freq, rate, gain, cqpsk, &eq, record_iq, record_log,
         );
         if let Err(e) = res {
             let _ = app.emit("error", e);
@@ -101,6 +106,7 @@ fn capture_loop(
     rate: f64,
     gain: Option<f64>,
     cqpsk: bool,
+    eq: &str,
     record_iq: Option<String>,
     record_log: Option<String>,
 ) -> Result<(), String> {
@@ -109,7 +115,7 @@ fn capture_loop(
 
     let mut src = RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
         .map_err(|e| format!("open RTL-SDR: {e:?}"))?;
-    let mut dec = new_decoder(rate, cqpsk);
+    let mut dec = new_decoder(rate, cqpsk, eq);
     let mut iq_file = match record_iq {
         Some(p) => Some(std::fs::File::create(&p).map_err(|e| format!("record IQ: {e}"))?),
         None => None,
@@ -178,6 +184,8 @@ fn capture_loop(
                 voice_secs: total_pcm as f64 / 8000.0,
                 blocks,
                 modulation: format!("{:?}", dec.modulation()),
+                lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                sync_err: dec.diagnostics().mean_sync_errors(),
             },
         );
     }
@@ -196,13 +204,14 @@ fn decode_file(
     path: String,
     rate: f64,
     cqpsk: bool,
+    eq: String,
 ) -> Result<(), String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
     let iq: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    let mut dec = new_decoder(rate, cqpsk);
+    let mut dec = new_decoder(rate, cqpsk, &eq);
     let out = dec.process(&iq);
     let cat = state.catalog.lock().unwrap();
     for g in &out.grants {
@@ -229,14 +238,27 @@ fn decode_file(
             voice_secs: out.pcm.len() as f64 / 8000.0,
             blocks: 1,
             modulation: format!("{:?}", dec.modulation()),
+            lock: dec.cqpsk_lock().unwrap_or(-1.0),
+            sync_err: dec.diagnostics().mean_sync_errors(),
         },
     );
     Ok(())
 }
 
-fn new_decoder(rate: f64, cqpsk: bool) -> ChannelDecoder {
+/// Map the UI's equalizer selector to an `EqMode`. `cma` is the shipping
+/// CQPSK default (the thesis); `dfe` adds decision feedback for the deep-null
+/// simulcast burst; `bypass` is the conventional detect-first receiver.
+fn eq_mode(eq: &str) -> EqMode {
+    match eq {
+        "dfe" => EqMode::Dfe,
+        "bypass" => EqMode::Bypass,
+        _ => EqMode::Enabled,
+    }
+}
+
+fn new_decoder(rate: f64, cqpsk: bool, eq: &str) -> ChannelDecoder {
     if cqpsk {
-        ChannelDecoder::new_cqpsk(rate)
+        ChannelDecoder::with_offset(rate, Modulation::Cqpsk, eq_mode(eq), 0.0)
     } else {
         ChannelDecoder::new(rate, EqMode::Bypass)
     }
