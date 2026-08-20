@@ -193,11 +193,26 @@ fn load_iq(path: &str) -> Vec<f32> {
     f.read_to_end(&mut bytes).expect("read IQ");
     // `.cu8` is the RTL-SDR's native format: interleaved unsigned 8-bit, DC at
     // 127.5. Load it directly so a raw `rtl_sdr` capture can be decoded without
-    // a conversion step. Everything else is interleaved little-endian f32
-    // (`.cf32`), the project's working format.
+    // a conversion step.
     if path.ends_with(".cu8") || path.ends_with(".u8") {
         return bytes.iter().map(|&b| (b as f32 - 127.5) / 127.5).collect();
     }
+    // `.cs16` is `airspy_rx -t 2` (INT16_IQ): interleaved signed 16-bit
+    // little-endian, centred at 0. This is the Airspy R2's reliable output
+    // format — its old firmware hangs when asked for float32 — and it is
+    // native 12-bit data promoted to 16-bit, so it loses nothing to f32 at
+    // half the file size.
+    if path.ends_with(".cs16") || path.ends_with(".s16") {
+        let n = bytes.len() / 2;
+        return (0..n)
+            .map(|i| {
+                let s = i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+                s as f32 / 32768.0
+            })
+            .collect();
+    }
+    // Everything else is interleaved little-endian f32 (`.cf32`), the
+    // project's working format.
     let n = bytes.len() / 4;
     (0..n)
         .map(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
