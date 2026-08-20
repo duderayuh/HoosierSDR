@@ -59,6 +59,19 @@ pub struct CmaDfe {
     /// EWMA of the CMA error magnitude — a convergence/health signal, matching
     /// [`CmaEqualizer::error_var`](super::cma::CmaEqualizer).
     pub error_var: f32,
+    /// EWMA of input symbol power, used to hold the equalizer's input at unit
+    /// power. The receiver's AGC normalizes *sample*-rate power ahead of the
+    /// matched filter, so after the filter strips out-of-channel energy the
+    /// symbols can land well below the constant-modulus radius (measured:
+    /// ~0.25 RMS on an Airspy capture vs ~1.0 on RTL-SDR captures). A DFE
+    /// started with a persistent modulus error of that size has a cheaper
+    /// route to unit modulus than the slow feedforward gain: let the feedback
+    /// taps synthesize it from past decisions — the degenerate CM-DFE minimum
+    /// that decouples the output from the input entirely. Normalizing here
+    /// makes the centre-spike init a genuine unit-modulus passthrough so that
+    /// route never opens.
+    in_pwr: f32,
+    seen: u32,
 }
 
 impl CmaDfe {
@@ -87,6 +100,8 @@ impl CmaDfe {
             mu_fb,
             r2: 1.0,
             error_var: 0.0,
+            in_pwr: 1.0,
+            seen: 0,
         }
     }
 
@@ -98,6 +113,8 @@ impl CmaDfe {
         self.xin.iter_mut().for_each(|d| *d = C32::ZERO);
         self.dec.iter_mut().for_each(|d| *d = C32::ZERO);
         self.error_var = 0.0;
+        self.in_pwr = 1.0;
+        self.seen = 0;
     }
 
     /// Feedforward part: Σ ff[k]* · x[n−k].
@@ -128,6 +145,13 @@ impl CmaDfe {
     /// `adapt` gates tap updates so the caller can freeze the equalizer until
     /// the timing loop has settled (as the linear CMA path does).
     pub fn push(&mut self, x: C32, adapt: bool) -> C32 {
+        // Symbol-rate power normalization (see `in_pwr`). Growing-window mean
+        // during warm-up, then a ~100-symbol EWMA — slow next to the symbol
+        // rate but fast next to the tap adaptation it protects.
+        self.seen = self.seen.saturating_add(1);
+        let a = (1.0 / self.seen as f32).max(0.01);
+        self.in_pwr += a * (x.norm_sq() - self.in_pwr);
+        let x = x.scale(1.0 / self.in_pwr.max(1e-12).sqrt());
         self.xpos = (self.xpos + 1) % self.xin.len();
         self.xin[self.xpos] = x;
 
@@ -227,6 +251,37 @@ mod tests {
         assert!(
             late < early * 0.3,
             "CMA-DFE did not open the deep-null eye: early {early:.1} late {late:.1}"
+        );
+    }
+
+    /// A clean channel arriving well below the constant-modulus radius (as the
+    /// sample-rate AGC delivers on an Airspy capture, ~0.25 RMS) must not be
+    /// "fixed" by the feedback section. Without input normalization the slow
+    /// production step sizes let the feedback taps grow to synthesize unit
+    /// modulus from past decisions — the degenerate CM-DFE minimum, which
+    /// off-air collapsed a 209-TSBK control channel to 46 — while the CM error
+    /// fell, so nothing downstream noticed. Pin both symptoms.
+    #[test]
+    fn low_level_input_does_not_feed_the_degenerate_minimum() {
+        let dibits: Vec<u8> = (0..40_000).map(|i| ((i * 7 + i / 3) % 4) as u8).collect();
+        let syms = modulate_symbols(&dibits);
+        // Production step sizes (see `CqpskReceiver::new_dfe`).
+        let mut eq = CmaDfe::new(9, 6, 0.001, 0.0005);
+        let mut late = 0.0f32;
+        for (i, &s) in syms.iter().enumerate() {
+            let y = eq.push(s.scale(0.25), true);
+            if i >= syms.len() - 800 {
+                late += (y.norm_sq() - 1.0).abs();
+            }
+        }
+        let fb_norm = eq.fb.iter().map(|c| c.norm_sq()).sum::<f32>().sqrt();
+        assert!(
+            fb_norm < 0.05,
+            "feedback taps grew to {fb_norm:.3} on a clean low-level channel"
+        );
+        assert!(
+            late < 1.0,
+            "DFE did not pass a low-level clean channel: {late:.3}"
         );
     }
 
