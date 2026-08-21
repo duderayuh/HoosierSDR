@@ -110,7 +110,17 @@
           <div class="screen">
             <span class="tag">Spectrum · waterfall</span>
             <span class="axis" id="wfAxis">—</span>
-            <canvas id="waterfall" width="1400" height="230"></canvas>
+            <div class="wfctl">
+              <select id="wfFft" title="FFT size"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option></select>
+              <select id="wfAvg" title="Averaging"><option value="1">avg 1</option><option value="2">avg 2</option><option value="4" selected>avg 4</option><option value="8">avg 8</option></select>
+              <select id="wfMap" title="Colour map"><option value="phosphor">phosphor</option><option value="inferno">inferno</option><option value="viridis">viridis</option><option value="turbo">turbo</option><option value="grey">grey</option></select>
+              <label title="Floor dB">min <input id="wfMin" type="range" min="-120" max="-40" value="-95" /></label>
+              <label title="Ceiling dB">max <input id="wfMax" type="range" min="-60" max="20" value="-20" /></label>
+              <label class="chk"><input id="wfLine" type="checkbox" checked /> spectrum</label>
+              <label class="chk"><input id="wfPeak" type="checkbox" /> peak hold</label>
+            </div>
+            <canvas id="spectrum" width="1400" height="90"></canvas>
+            <canvas id="waterfall" width="1400" height="200"></canvas>
           </div>
 
           <div class="panel grow calls">
@@ -301,8 +311,17 @@
             </div>
           </div>
           <div class="panel">
-            <div class="head"><span class="eyebrow">Audio &amp; recording</span></div>
+            <div class="head"><span class="eyebrow">Audio &amp; recording</span><span class="meta" id="fmtMeta"></span></div>
             <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Stored format</span>
+                  <select id="fmtCodec"><option value="wav">WAV (lossless)</option><option value="mp3">MP3</option><option value="m4a">M4A (AAC)</option><option value="opus">Opus</option></select></label>
+                <label class="field"><span class="lab">Quality (kbit/s)</span>
+                  <select id="fmtKbps"><option>16</option><option>24</option><option selected>32</option><option>48</option><option>64</option><option>96</option><option>128</option></select></label>
+                <label class="field"><span class="lab">Rate</span>
+                  <select id="fmtMode"><option value="vbr">Variable (VBR)</option><option value="cbr">Constant (CBR)</option></select></label>
+              </div>
+              <p class="help" id="fmtHelp">WAV is always captured first; other formats are made by ffmpeg and replace it. Speech at 8 kHz sounds fine at 24–32 kbit/s.</p>
               <div id="followOpts">
                 <label class="check"><input id="play" type="checkbox" checked /> Play calls through the default output as they complete</label>
                 <input id="callsdir" type="hidden" value="" />

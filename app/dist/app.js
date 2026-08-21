@@ -275,27 +275,65 @@ function toggleLock(tg) {
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
 renderLockout();
 
-/* ---------- waterfall ---------- */
+/* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
 const wf = $("waterfall"), wctx = wf.getContext("2d");
+const sp = $("spectrum"), spctx = sp.getContext("2d");
 wctx.fillStyle = "#05090a"; wctx.fillRect(0, 0, wf.width, wf.height);
-function phosphor(t) {
-  const stops = [[6,14,16],[14,58,74],[26,140,150],[74,214,180],[150,240,120],[245,200,90],[255,246,225]];
+const MAPS = {
+  phosphor: [[6,14,16],[14,58,74],[26,140,150],[74,214,180],[150,240,120],[245,200,90],[255,246,225]],
+  inferno:  [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,255,164]],
+  viridis:  [[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]],
+  turbo:    [[48,18,59],[70,107,227],[40,187,213],[87,238,133],[189,247,57],[251,184,39],[240,97,16],[175,29,4]],
+  grey:     [[0,0,0],[255,255,255]],
+};
+const wfCfg = store("hs.wf", { fft: 1024, avg: 4, map: "phosphor", min: -95, max: -20, line: true, peak: false });
+let peakHold = null;
+function colour(t) {
+  const stops = MAPS[wfCfg.map] || MAPS.phosphor;
   t = Math.max(0, Math.min(1, t));
   const p = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(p)), f = p - i;
   const a = stops[i], b = stops[i + 1];
   return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
 }
 function pushSpectrum(db) {
-  const w = wf.width, h = wf.height;
+  const w = wf.width, h = wf.height, n = db.length, lo = wfCfg.min, hi = wfCfg.max;
   wctx.drawImage(wf, 0, 0, w, h - 1, 0, 1, w, h - 1);
-  const n = db.length, row = wctx.createImageData(w, 1);
+  const row = wctx.createImageData(w, 1);
   for (let x = 0; x < w; x++) {
     const v = db[Math.floor((x / w) * n)];
-    const [r, g, b] = phosphor((v + 92) / 74);
+    const [r, g, b] = colour((v - lo) / (hi - lo));
     const i = x * 4; row.data[i] = r; row.data[i+1] = g; row.data[i+2] = b; row.data[i+3] = 255;
   }
   wctx.putImageData(row, 0, 0);
+  // spectrum line
+  sp.style.display = wfCfg.line ? "" : "none";
+  if (!wfCfg.line) return;
+  const sw = sp.width, sh = sp.height;
+  spctx.fillStyle = "#05090a"; spctx.fillRect(0, 0, sw, sh);
+  spctx.strokeStyle = "rgba(46,120,112,.25)"; spctx.lineWidth = 1;
+  for (let k = 1; k < 4; k++) { const y = (sh * k) / 4; spctx.beginPath(); spctx.moveTo(0, y); spctx.lineTo(sw, y); spctx.stroke(); }
+  if (wfCfg.peak) { if (!peakHold || peakHold.length !== n) peakHold = db.slice(); else for (let i = 0; i < n; i++) peakHold[i] = Math.max(peakHold[i] - 0.05, db[i]); } else peakHold = null;
+  const yOf = (v) => sh - ((v - lo) / (hi - lo)) * sh;
+  if (peakHold) { spctx.strokeStyle = "rgba(245,181,68,.8)"; spctx.beginPath(); for (let x = 0; x < sw; x++) { const v = peakHold[Math.floor((x / sw) * n)]; x ? spctx.lineTo(x, yOf(v)) : spctx.moveTo(x, yOf(v)); } spctx.stroke(); }
+  spctx.strokeStyle = "rgba(52,224,207,.95)"; spctx.lineWidth = 1.2; spctx.beginPath();
+  for (let x = 0; x < sw; x++) { const v = db[Math.floor((x / sw) * n)]; x ? spctx.lineTo(x, yOf(v)) : spctx.moveTo(x, yOf(v)); }
+  spctx.stroke();
+  spctx.lineTo(sw, sh); spctx.lineTo(0, sh); spctx.closePath(); spctx.fillStyle = "rgba(52,224,207,.12)"; spctx.fill();
 }
+function wfApply() {
+  $("wfFft").value = wfCfg.fft; $("wfAvg").value = wfCfg.avg; $("wfMap").value = wfCfg.map; $("wfMin").value = wfCfg.min; $("wfMax").value = wfCfg.max; $("wfLine").checked = wfCfg.line; $("wfPeak").checked = wfCfg.peak;
+  sp.style.display = wfCfg.line ? "" : "none";
+  save("hs.wf", wfCfg);
+  if (TAURI) invoke("spectrum_set", { fft: +wfCfg.fft, average: +wfCfg.avg }).catch(() => {});
+}
+$("wfFft").onchange = () => { wfCfg.fft = +$("wfFft").value; wfApply(); };
+$("wfAvg").onchange = () => { wfCfg.avg = +$("wfAvg").value; wfApply(); };
+$("wfMap").onchange = () => { wfCfg.map = $("wfMap").value; wfApply(); };
+$("wfMin").oninput = () => { wfCfg.min = Math.min(+$("wfMin").value, wfCfg.max - 10); wfApply(); };
+$("wfMax").oninput = () => { wfCfg.max = Math.max(+$("wfMax").value, wfCfg.min + 10); wfApply(); };
+$("wfLine").onchange = () => { wfCfg.line = $("wfLine").checked; wfApply(); };
+$("wfPeak").onchange = () => { wfCfg.peak = $("wfPeak").checked; wfApply(); };
+wfApply();
 
 /* ---------- readouts shared by both modes ---------- */
 let followVoice = 0;
@@ -593,6 +631,22 @@ if (TAURI) {
     try { const n = await invoke("library_prune", { days: d }); alert(`${n} calls deleted`); libStatsRefresh(); } catch (e) { alert(e); }
   };
   trRefresh(); libStatsRefresh();
+
+  /* ---------- stored audio format ---------- */
+  async function fmtRefresh() {
+    try {
+      const f = await invoke("format_get");
+      $("fmtCodec").value = f.format.codec; $("fmtKbps").value = String(f.format.bitrate_kbps); $("fmtMode").value = f.format.mode;
+      $("fmtMeta").textContent = f.ffmpeg ? f.ffmpeg.replace(/ Copyright.*/, "") : "ffmpeg not found — WAV only";
+      [...$("fmtCodec").options].forEach((o) => { if (o.value !== "wav") o.disabled = !f.ffmpeg; });
+    } catch (e) { log(`format_get: ${e}`); }
+  }
+  const fmtSave = async () => {
+    try { await invoke("format_set", { format: { codec: $("fmtCodec").value, bitrate_kbps: +$("fmtKbps").value, mode: $("fmtMode").value } }); $("fmtMeta").textContent = "saved"; setTimeout(fmtRefresh, 700); }
+    catch (e) { alert(e); fmtRefresh(); }
+  };
+  $("fmtCodec").onchange = $("fmtKbps").onchange = $("fmtMode").onchange = fmtSave;
+  fmtRefresh();
 
   /* ---------- RadioReference account ---------- */
   async function rrRefresh() {

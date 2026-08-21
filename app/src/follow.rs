@@ -25,6 +25,9 @@ pub struct FollowParams {
     pub hang_secs: Option<(f64, f64)>,
     /// Label written into sidecars (the playlist's system name, if any).
     pub system_name: String,
+    /// Stored audio format; WAV is written first and replaced when another
+    /// codec is chosen (ffmpeg).
+    pub format: crate::encode::Format,
 }
 
 /// Everything the loop reads live from the UI, shared by reference.
@@ -37,6 +40,8 @@ pub struct Live<'a> {
     pub units: &'a std::sync::Mutex<std::collections::HashMap<u32, String>>,
     /// The call library; `None` runs without persistence (tests).
     pub db: Option<&'a std::sync::Mutex<rusqlite::Connection>>,
+    /// Waterfall (fft size, averaging); `None` = 256 × 1.
+    pub spectrum: Option<&'a std::sync::Mutex<(usize, usize)>>,
 }
 
 /// Everything the loop tells the front end. Serialized as `{kind: ...}`.
@@ -177,6 +182,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         db: live.db,
         calls_dir: p.calls_dir.as_deref(),
         system_name: p.system_name.clone(),
+        format: p.format.clone(),
         syncs: 0,
         calls: 0,
         oob: 0,
@@ -250,8 +256,12 @@ pub fn run<S: SdrSource + Send + 'static>(
             }
         }
         if blocks.is_multiple_of(4) {
+            let (n, avg) = live
+                .spectrum
+                .map(|m| *m.lock().unwrap())
+                .unwrap_or((256, 1));
             emit(FollowEvent::Spectrum {
-                bins_db: super::power_spectrum(chunk, 256),
+                bins_db: super::power_spectrum_avg(chunk, n, avg),
             });
         }
         if last_status.elapsed().as_secs_f64() >= 1.0 {
@@ -311,6 +321,7 @@ struct Reporter<'a> {
     db: Option<&'a std::sync::Mutex<rusqlite::Connection>>,
     calls_dir: Option<&'a std::path::Path>,
     system_name: String,
+    format: crate::encode::Format,
     syncs: u32,
     calls: usize,
     oob: u32,
@@ -463,7 +474,19 @@ impl Reporter<'_> {
                             "srcList": [{"src": c.source_unit, "time": start, "pos": 0.0, "emergency": u8::from(c.emergency), "tag": unit_name.clone().unwrap_or_default()}],
                         });
                         let _ = std::fs::write(dir.join(format!("{stem}.json")), side.to_string());
-                        Some(path.to_string_lossy().into_owned())
+                        // Derived format, if asked for; the WAV goes once it exists.
+                        let stored = match crate::encode::transcode(&path, &self.format) {
+                            Ok(p) if p != path => {
+                                let _ = std::fs::remove_file(&path);
+                                p
+                            }
+                            Ok(p) => p,
+                            Err(e) => {
+                                emit(FollowEvent::Notice { text: format!("kept WAV: {e}") });
+                                path.clone()
+                            }
+                        };
+                        Some(stored.to_string_lossy().into_owned())
                     }
                     Err(e) => {
                         emit(FollowEvent::Notice {
@@ -596,6 +619,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            format: Default::default(),
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
@@ -607,6 +631,7 @@ mod tests {
             priorities: &pri,
             units: &units,
             db: None,
+            spectrum: None,
         };
         run(src, &p, None, &live, &running, &mut |e| events.push(e)).expect("follow");
         let measured = events
@@ -673,6 +698,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            format: Default::default(),
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
@@ -685,6 +711,7 @@ mod tests {
             priorities: &pri,
             units: &units,
             db: None,
+            spectrum: None,
         };
         run(src, &p, None, &live, &running, &mut |e| events.push(e)).expect("follow");
         let starts = events
@@ -717,6 +744,7 @@ mod tests {
                 calls_dir: None,
                 hang_secs: None,
                 system_name: String::new(),
+                format: Default::default(),
             };
             let running = AtomicBool::new(true);
             let mut n = 0;
@@ -729,6 +757,7 @@ mod tests {
                 priorities: &pri,
                 units: &units,
                 db: None,
+                spectrum: None,
             };
             run(src, &p, None, &live, &running, &mut |e| {
                 if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
@@ -762,6 +791,7 @@ mod tests {
                 calls_dir: None,
                 hang_secs: None,
                 system_name: String::new(),
+                format: Default::default(),
             };
             let running = AtomicBool::new(true);
             let (lockout, allow, _, pri, units) = live_defaults();
@@ -773,6 +803,7 @@ mod tests {
                 priorities: &pri,
                 units: &units,
                 db: None,
+                spectrum: None,
             };
             let mut n = 0;
             run(src, &p, None, &live, &running, &mut |e| {
@@ -809,6 +840,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            format: Default::default(),
         };
         let running = std::sync::Arc::new(AtomicBool::new(true));
         let r = std::sync::Arc::clone(&running);
@@ -830,6 +862,7 @@ mod tests {
             priorities: &pri,
             units: &units,
             db: None,
+            spectrum: None,
         };
         run(src, &p, None, &live, &running, &mut |e| match e {
             FollowEvent::Measured {
