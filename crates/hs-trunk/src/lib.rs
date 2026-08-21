@@ -83,6 +83,13 @@ impl SiteModel {
     /// The site's announced alternate control channels, resolved to downlink
     /// frequencies. A channel whose IDEN plan has not been heard yet is
     /// omitted — there is nothing to tune until the plan arrives.
+    /// The channel plans announced so far, by identifier.
+    pub fn idens(&self) -> impl Iterator<Item = (u8, &IdenPlan)> {
+        let mut v: Vec<(u8, &IdenPlan)> = self.idens.iter().map(|(k, p)| (*k, p)).collect();
+        v.sort_by_key(|(k, _)| *k);
+        v.into_iter()
+    }
+
     pub fn secondary_cc_freqs(&self) -> Vec<u64> {
         self.secondary_ccs
             .iter()
