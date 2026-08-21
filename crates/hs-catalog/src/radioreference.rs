@@ -509,12 +509,22 @@ impl<T: SoapTransport> RrClient<T> {
         let cats = self.talkgroup_categories(sys_id)?;
         let mut all: Vec<Talkgroup> = Vec::new();
         let mut last_err: Option<RrError> = whole.err();
-        for (cid, _) in &cats {
+        for (cid, cat_name) in &cats {
             match self.call_args(
                 "getTrsTalkgroups",
                 &[("sid", &sid), ("tgCid", &cid.to_string())],
             ) {
-                Ok(root) => all.extend(parse_talkgroups(&root)),
+                Ok(root) => {
+                    let mut tgs = parse_talkgroups(&root);
+                    // The per-category reply doesn't repeat the category;
+                    // we asked for it, so we know it.
+                    for t in tgs.iter_mut() {
+                        if t.category.is_none() && !cat_name.is_empty() {
+                            t.category = Some(cat_name.clone());
+                        }
+                    }
+                    all.extend(tgs);
+                }
                 Err(e) => last_err = Some(e),
             }
         }
@@ -1074,6 +1084,8 @@ mod tests {
         let c = RrClient::with_transport(Credentials::new("k", "u", "p"), t);
         let tgs = c.talkgroups(5737).unwrap();
         assert_eq!(tgs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![101, 201]);
+        assert_eq!(tgs[0].category.as_deref(), Some("Law"));
+        assert_eq!(tgs[1].category.as_deref(), Some("Fire"));
         let seen = c.transport.seen.borrow();
         assert!(
             seen[0].contains("<tgCid>0</tgCid>"),
