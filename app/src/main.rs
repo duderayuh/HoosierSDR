@@ -9,15 +9,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
+mod encode;
 mod follow;
+mod library;
 mod player;
 mod playlists;
 mod rr;
+mod stream;
+mod transcribe;
 mod units;
 
 #[derive(Default)]
@@ -36,6 +40,19 @@ struct AppState {
     units: units::Units,
     /// The audio thread, started on first use. `Some(None)` = no device.
     audio: Mutex<Option<Option<player::Audio>>>,
+    /// The call library (opened at startup).
+    db: Arc<Mutex<Option<Mutex<rusqlite::Connection>>>>,
+    /// Where call audio lives.
+    library_dir: Mutex<Option<std::path::PathBuf>>,
+    /// Archive playback in progress: live calls are stored but not spoken.
+    archive_mode: Arc<AtomicBool>,
+    transcriber: transcribe::Shared,
+    /// Stored audio format for new calls.
+    format: Mutex<encode::Format>,
+    /// Spectrum settings: (fft size, averaging blocks).
+    spectrum: Arc<Mutex<(usize, usize)>>,
+    /// Live Icecast/Broadcastify feed, when enabled.
+    streamer: stream::Shared,
 }
 
 impl AppState {
@@ -101,10 +118,146 @@ fn set_allowlist(tgs: Option<Vec<u16>>, state: State<AppState>) {
     *state.allowlist.lock().unwrap() = tgs.map(|t| t.into_iter().collect());
 }
 
+// ---------------- audio format + spectrum ----------------
+
+#[derive(Serialize)]
+struct FormatInfo {
+    format: encode::Format,
+    ffmpeg: Option<String>,
+}
+
+#[tauri::command]
+fn format_get(state: State<AppState>) -> FormatInfo {
+    FormatInfo {
+        format: state.format.lock().unwrap().clone(),
+        ffmpeg: encode::ffmpeg_available(),
+    }
+}
+
+#[tauri::command]
+fn format_set(
+    app: AppHandle,
+    state: State<AppState>,
+    format: encode::Format,
+) -> Result<(), String> {
+    if format.codec != "wav" && encode::ffmpeg_available().is_none() {
+        return Err("ffmpeg is not installed (brew install ffmpeg); WAV only until it is".into());
+    }
+    *state.format.lock().unwrap() = format.clone();
+    if let Ok(d) = app.path().app_config_dir() {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(
+            d.join("format.json"),
+            serde_json::to_string_pretty(&format).unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+/// Waterfall FFT size (256–4096) and number of blocks averaged (1–16).
+#[tauri::command]
+fn spectrum_set(state: State<AppState>, fft: usize, average: usize) {
+    let fft = fft.clamp(256, 4096).next_power_of_two();
+    *state.spectrum.lock().unwrap() = (fft, average.clamp(1, 16));
+}
+
+// ---------------- library ----------------
+
+fn with_db<T>(
+    state: &State<AppState>,
+    f: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let guard = state.db.lock().unwrap();
+    let db = guard.as_ref().ok_or("library not open")?;
+    let c = db.lock().unwrap();
+    f(&c)
+}
+
+#[tauri::command]
+fn library_search(
+    state: State<AppState>,
+    query: library::Query,
+) -> Result<Vec<library::CallRow>, String> {
+    with_db(&state, |c| library::search(c, &query))
+}
+
+#[tauri::command]
+fn library_get(state: State<AppState>, id: i64) -> Result<Option<library::CallRow>, String> {
+    with_db(&state, |c| library::get(c, id))
+}
+
+#[tauri::command]
+fn library_star(state: State<AppState>, id: i64, on: bool) -> Result<(), String> {
+    with_db(&state, |c| library::set_starred(c, id, on))
+}
+
+/// A human correction; empty text clears it. The machine transcript stays.
+#[tauri::command]
+fn library_set_edited(state: State<AppState>, id: i64, text: String) -> Result<(), String> {
+    let t = text.trim();
+    with_db(&state, |c| {
+        library::set_edited(c, id, (!t.is_empty()).then_some(t))
+    })
+}
+
+#[tauri::command]
+fn library_stats(state: State<AppState>) -> Result<(i64, f64, i64, String), String> {
+    let dir = state
+        .library_dir
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    with_db(&state, library::stats).map(|(n, secs, tr)| (n, secs, tr, dir))
+}
+
+#[tauri::command]
+fn library_prune(state: State<AppState>, days: u32) -> Result<usize, String> {
+    with_db(&state, |c| library::prune(c, days))
+}
+
+/// Export a cart to a folder with a chain-of-custody manifest; returns the
+/// manifest path.
+#[tauri::command]
+fn library_export(
+    app: AppHandle,
+    state: State<AppState>,
+    ids: Vec<i64>,
+    dest: String,
+) -> Result<String, String> {
+    let dest = std::path::PathBuf::from(shellexpand_home(&dest));
+    let ver = format!("HoosierSDR {}", app.package_info().version);
+    with_db(&state, |c| library::export(c, &ids, &dest, &ver))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Play a library call through the speaker, ahead of anything queued.
+#[tauri::command]
+fn library_play(state: State<AppState>, id: i64) -> Result<(), String> {
+    let path = with_db(&state, |c| library::get(c, id))?
+        .and_then(|r| r.audio)
+        .ok_or("no audio for that call")?;
+    let pcm = encode::decode_to_pcm(std::path::Path::new(&path))?;
+    state.audio().ok_or("no audio output device")?.play(pcm, 0);
+    Ok(())
+}
+
+/// While archive playback is on, live calls are stored but not spoken.
+#[tauri::command]
+fn set_archive_mode(state: State<AppState>, on: bool) {
+    state.archive_mode.store(on, Ordering::SeqCst);
+    if on {
+        if let Some(a) = state.audio() {
+            a.skip();
+        }
+    }
+}
+
 /// Replay a saved call through the default audio device.
 #[tauri::command]
 fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
-    let pcm = player::read_wav(&shellexpand_home(&path))?;
+    let pcm = encode::decode_to_pcm(std::path::Path::new(&shellexpand_home(&path)))?;
     state.audio().ok_or("no audio output device")?.play(pcm, 0);
     Ok(())
 }
@@ -176,9 +329,21 @@ fn start_capture(
     }
     let running = state.running.clone();
     let catalog = state.catalog.clone();
+    let spectrum_cfg = state.spectrum.clone();
     std::thread::spawn(move || {
         let res = capture_loop(
-            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq, record_log,
+            &app,
+            &running,
+            &catalog,
+            &source,
+            freq,
+            rate,
+            gain,
+            cqpsk,
+            &eq,
+            record_iq,
+            record_log,
+            spectrum_cfg,
         );
         if let Err(e) = res {
             let _ = app.emit("error", e);
@@ -241,6 +406,12 @@ fn start_follow(
     let hold = state.hold.clone();
     let priorities = state.priorities.clone();
     let units = state.units.clone();
+    let db = state.db.clone();
+    let library_dir = state.library_dir.lock().unwrap().clone();
+    let archive_mode = state.archive_mode.clone();
+    let format = state.format.lock().unwrap().clone();
+    let spectrum = state.spectrum.clone();
+    let streamer = state.streamer.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -254,22 +425,19 @@ fn start_follow(
                 }
                 None => None,
             };
-            // Blocks are 65536 complex samples at the normalized rate
-            // (2.4 or 9.6 MSPS): 27 ms or 6.8 ms each.
-            let hang_blocks = hang_ms.map(|ms| {
-                let norm = hs_dsp::resample::normalize_ratio(rate)
-                    .map(|(_, _, r)| r)
-                    .unwrap_or(rate);
-                let block_ms = 65536.0 / norm * 1000.0;
-                let hang = (ms as f64 / block_ms).ceil() as u32;
-                (hang.max(1), (hang * 7).max(20))
+            // Hang after a terminator; the lost-terminator timeout scales with
+            // it but never drops below the engine's 2 s.
+            let hang_secs = hang_ms.map(|ms| {
+                let h = ms as f64 / 1000.0;
+                (h, (h * 4.0).max(2.0))
             });
             let params = follow::FollowParams {
                 center_hz: freq,
                 control_hz: control,
-                calls_dir,
-                hang_blocks,
+                calls_dir: library_dir.or(calls_dir),
+                hang_secs,
                 system_name: system_name.unwrap_or_default(),
+                format,
             };
             let player = if play { audio } else { None };
             if play && player.is_none() {
@@ -281,19 +449,27 @@ fn start_follow(
                 );
             }
             let cat = catalog.lock().unwrap().clone();
+            let db_guard = db.lock().unwrap();
             let live = follow::Live {
                 lockout: &lockout,
                 allowlist: &allowlist,
                 hold: &hold,
                 priorities: &priorities,
                 units: &units,
+                db: db_guard.as_ref(),
+                spectrum: Some(&spectrum),
             };
             follow::run(src, &params, cat.as_ref(), &live, &running, &mut |ev| {
-                if let (Some(pl), follow::FollowEvent::Call { pcm, priority, .. }) =
-                    (player.as_ref(), &ev)
-                {
+                if let follow::FollowEvent::Call { pcm, priority, .. } = &ev {
                     if !pcm.is_empty() {
-                        pl.play(pcm.clone(), *priority);
+                        if let Some(st) = streamer.lock().unwrap().as_ref() {
+                            st.feed(pcm);
+                        }
+                        if let Some(pl) = player.as_ref() {
+                            if !archive_mode.load(Ordering::SeqCst) {
+                                pl.play(pcm.clone(), *priority);
+                            }
+                        }
                     }
                 }
                 let _ = app.emit("follow", ev);
@@ -329,6 +505,7 @@ fn capture_loop(
     eq: &str,
     record_iq: Option<String>,
     record_log: Option<String>,
+    spectrum_cfg: Arc<Mutex<(usize, usize)>>,
 ) -> Result<(), String> {
     use hs_core::stream::{Buffered, Normalized};
     use hs_source::SdrSource;
@@ -396,7 +573,10 @@ fn capture_loop(
             let _ = app.emit(
                 "spectrum",
                 SpectrumMsg {
-                    bins_db: power_spectrum(block, 256),
+                    bins_db: {
+                        let (n, avg) = *spectrum_cfg.lock().unwrap();
+                        power_spectrum_avg(block, n, avg)
+                    },
                 },
             );
         }
@@ -492,33 +672,77 @@ fn new_decoder(rate: f64, cqpsk: bool, eq: &str) -> ChannelDecoder {
 
 /// Power spectrum (dB, DC-centered) of the first `n` complex samples of an
 /// interleaved-IQ block, via a small direct DFT — enough for a waterfall.
-fn power_spectrum(block: &[f32], n: usize) -> Vec<f32> {
-    let pairs = (block.len() / 2).min(n);
-    if pairs == 0 {
-        return vec![-120.0; n];
+/// `n`-bin power spectrum (dB) of an interleaved-IQ block: radix-2 FFT over
+/// a Hann window, averaged over up to `avg` consecutive frames, DC in the
+/// middle. Sized for a waterfall row, not for measurement.
+fn power_spectrum_avg(block: &[f32], n: usize, avg: usize) -> Vec<f32> {
+    let n = n.clamp(256, 4096).next_power_of_two();
+    let pairs = block.len() / 2;
+    let frames = (pairs / n).clamp(1, avg.max(1));
+    if pairs < n {
+        return vec![-100.0; n];
     }
-    let re: Vec<f32> = (0..pairs).map(|i| block[2 * i]).collect();
-    let im: Vec<f32> = (0..pairs).map(|i| block[2 * i + 1]).collect();
-    let mut out = vec![0f32; pairs];
-    let two_pi = std::f32::consts::TAU;
-    for (k, o) in out.iter_mut().enumerate() {
-        let mut sr = 0.0f32;
-        let mut si = 0.0f32;
-        for t in 0..pairs {
-            let ang = -two_pi * (k as f32) * (t as f32) / pairs as f32;
-            let (s, c) = ang.sin_cos();
-            sr += re[t] * c - im[t] * s;
-            si += re[t] * s + im[t] * c;
+    let win: Vec<f32> = (0..n)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / n as f32).cos())
+        .collect();
+    let mut acc = vec![0.0f32; n];
+    for f in 0..frames {
+        let base = f * n * 2;
+        let mut re: Vec<f32> = (0..n).map(|i| block[base + 2 * i] * win[i]).collect();
+        let mut im: Vec<f32> = (0..n).map(|i| block[base + 2 * i + 1] * win[i]).collect();
+        fft_in_place(&mut re, &mut im);
+        for i in 0..n {
+            acc[i] += re[i] * re[i] + im[i] * im[i];
         }
-        let power = (sr * sr + si * si) / (pairs * pairs) as f32;
-        *o = 10.0 * (power + 1e-12).log10();
     }
-    // fftshift so DC is centered.
-    let half = pairs / 2;
-    let mut shifted = vec![0f32; pairs];
-    shifted[..half].copy_from_slice(&out[pairs - half..]);
-    shifted[half..].copy_from_slice(&out[..pairs - half]);
-    shifted
+    let scale = 1.0 / (frames as f32 * (n as f32 * 0.5).powi(2));
+    let mut out: Vec<f32> = acc
+        .iter()
+        .map(|p| 10.0 * (p * scale + 1e-12).log10())
+        .collect();
+    out.rotate_left(n / 2);
+    out
+}
+
+/// Iterative radix-2 Cooley–Tukey, in place. `re.len()` must be a power of 2.
+fn fft_in_place(re: &mut [f32], im: &mut [f32]) {
+    let n = re.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = -2.0 * std::f32::consts::PI / len as f32;
+        let (wr, wi) = (ang.cos(), ang.sin());
+        let mut i = 0;
+        while i < n {
+            let (mut cr, mut ci) = (1.0f32, 0.0f32);
+            for k in 0..len / 2 {
+                let (ur, ui) = (re[i + k], im[i + k]);
+                let (xr, xi) = (re[i + k + len / 2], im[i + k + len / 2]);
+                let (vr, vi) = (xr * cr - xi * ci, xr * ci + xi * cr);
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
 }
 
 fn main() {
@@ -526,12 +750,34 @@ fn main() {
         .manage(AppState::default())
         .setup(|app| {
             // A talkgroup catalog downloaded earlier is loaded on start.
-            use tauri::Manager;
             let state = app.state::<AppState>();
             if let Some(cat) = rr::saved_catalog(app.handle()) {
                 *state.catalog.lock().unwrap() = Some(cat);
             }
             *state.units.lock().unwrap() = units::load(app.handle());
+            // The call library lives in the app's data directory.
+            if let Ok(base) = app.path().app_data_dir() {
+                let lib = base.join("library");
+                match library::open(&lib) {
+                    Ok(c) => {
+                        *state.db.lock().unwrap() = Some(Mutex::new(c));
+                        *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
+                    }
+                    Err(e) => eprintln!("library: {e}"),
+                }
+            }
+            state.transcriber.lock().unwrap().settings = transcribe::load_settings(app.handle());
+            if let Some(f) = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .and_then(|d| std::fs::read_to_string(d.join("format.json")).ok())
+                .and_then(|t| serde_json::from_str(&t).ok())
+            {
+                *state.format.lock().unwrap() = f;
+            }
+            transcribe::spawn_pump(app.handle().clone());
+            stream::autostart(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -550,6 +796,23 @@ fn main() {
             units::units_list,
             units::unit_set,
             units::units_import,
+            library_search,
+            library_get,
+            library_star,
+            library_set_edited,
+            library_stats,
+            library_prune,
+            library_export,
+            library_play,
+            set_archive_mode,
+            format_get,
+            format_set,
+            stream::stream_get,
+            stream::stream_configure,
+            spectrum_set,
+            transcribe::transcribe_probe,
+            transcribe::transcribe_configure,
+            transcribe::transcribe_call,
             play_wav,
             ui_log,
             rr::rr_settings,

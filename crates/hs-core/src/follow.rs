@@ -89,13 +89,13 @@ struct ActiveCall {
     pcm_cqpsk: Vec<i16>,
     syncs_c4fm: u32,
     syncs_cqpsk: u32,
-    /// Blocks seen with no frame sync, used to retire a finished call.
-    quiet: u32,
+    /// Seconds of IQ seen with no frame sync, used to retire a finished call.
+    quiet: f64,
     /// Nonzero once a terminator (TDU) has been seen: the channel said the
     /// transmission is over, and this counts the hang blocks since. New voice
     /// clears it — the conversation continued — and the decoders stay alive
     /// through the hang, so a continuation costs no re-acquisition.
-    ending: u32,
+    ending: Option<f64>,
 }
 
 /// A call the follower has finished with.
@@ -175,13 +175,17 @@ pub struct TrunkFollower {
     center_hz: f64,
     /// Added to every nominal frequency to find where it really is.
     correction_hz: f64,
-    /// Blocks without a sync before a call is considered over (~1 s). The
-    /// fallback for when the terminator is lost to noise.
-    quiet_limit: u32,
-    /// Blocks a call lingers after its terminator before it is retired. Long
+    /// Seconds without a sync before a call is considered over. The fallback
+    /// for when the terminator is lost to noise. Measured in seconds of IQ,
+    /// not blocks: callers feed blocks of wildly different lengths (the CLI
+    /// 100 ms, the app 6.8 ms at 9.6 MSPS), and a block count that was ~2 s
+    /// for one was 136 ms for the other — shorter than CQPSK acquisition, so
+    /// every call was retired before it produced a sample of audio.
+    quiet_secs: f64,
+    /// Seconds a call lingers after its terminator before it is retired. Long
     /// enough to bridge the gap to a continuation transmission of the same
     /// conversation; short enough that the call reports promptly.
-    hang_limit: u32,
+    hang_secs: f64,
     /// Most calls the channelizer will follow at once.
     max_calls: usize,
     /// The control channel's modulation, which is also what a replacement
@@ -192,12 +196,11 @@ pub struct TrunkFollower {
     /// Nominal frequency the follower was started on — kept in the hunt
     /// rotation so a fade on the primary eventually retries it.
     primary_hz: u64,
-    /// Consecutive blocks in which the control channel produced no frame
-    /// sync. A control channel transmits continuously, so silence here means
-    /// it is gone, not idle.
-    control_quiet: u32,
-    /// Quiet blocks before the control channel is declared lost (~2 s).
-    control_loss_limit: u32,
+    /// Seconds in which the control channel produced no frame sync. A control
+    /// channel transmits continuously, so silence here means it is gone.
+    control_quiet: f64,
+    /// Quiet seconds before the control channel is declared lost.
+    control_loss_secs: f64,
     /// Rotation position over the known control channels, so repeated losses
     /// hunt through all of them rather than retrying one forever.
     hunt_next: usize,
@@ -256,14 +259,14 @@ impl TrunkFollower {
             active: Vec::new(),
             center_hz,
             correction_hz,
-            quiet_limit: 20,
-            hang_limit: 3,
+            quiet_secs: 2.0,
+            hang_secs: 0.3,
             max_calls: 6,
             modulation,
             control_nominal_hz: control_nominal_hz as u64,
             primary_hz: control_nominal_hz as u64,
-            control_quiet: 0,
-            control_loss_limit: 20,
+            control_quiet: 0.0,
+            control_loss_secs: 2.0,
             hunt_next: 0,
             lost_reported: false,
             lockout: std::collections::HashSet::new(),
@@ -286,17 +289,16 @@ impl TrunkFollower {
         self.priority.get(&tg).copied().unwrap_or(50)
     }
 
-    /// How long a call lingers: `hang_blocks` after its terminator, and
-    /// `quiet_blocks` with no frame sync before it is considered over (the
-    /// fallback when the terminator is lost). Blocks are whatever the caller
-    /// feeds `process` — ~27 ms at 2.4 MSPS with 65536-sample blocks.
-    pub fn set_hang(&mut self, hang_blocks: u32, quiet_blocks: u32) {
-        self.hang_limit = hang_blocks.max(1);
-        self.quiet_limit = quiet_blocks.max(1);
+    /// How long a call lingers, in seconds: `hang` after its terminator, and
+    /// `quiet` with no frame sync before it is considered over (the fallback
+    /// when the terminator is lost). Independent of block size.
+    pub fn set_hang(&mut self, hang: f64, quiet: f64) {
+        self.hang_secs = hang.max(0.05);
+        self.quiet_secs = quiet.max(0.5);
     }
 
-    pub fn hang(&self) -> (u32, u32) {
-        (self.hang_limit, self.quiet_limit)
+    pub fn hang(&self) -> (f64, f64) {
+        (self.hang_secs, self.quiet_secs)
     }
 
     /// Most decoder slots used at once.
@@ -471,6 +473,8 @@ impl TrunkFollower {
     pub fn process(&mut self, iq: &[f32]) -> FollowOutput {
         let mut out = FollowOutput::default();
 
+        let secs = (iq.len() / 2) as f64 / self.sample_rate;
+
         // The control channel decimates itself out of the wideband stream.
         let control_out = self.control.process(iq);
         out.control_syncs = control_out.syncs;
@@ -480,13 +484,13 @@ impl TrunkFollower {
         // alternates it has been announcing (SCCB), or the signal faded. Hunt
         // the known control channels rather than sitting deaf forever.
         if control_out.syncs == 0 {
-            self.control_quiet += 1;
-            if self.control_quiet >= self.control_loss_limit {
-                self.control_quiet = 0;
+            self.control_quiet += secs;
+            if self.control_quiet >= self.control_loss_secs {
+                self.control_quiet = 0.0;
                 self.hunt(&mut out);
             }
         } else {
-            self.control_quiet = 0;
+            self.control_quiet = 0.0;
             self.lost_reported = false;
         }
 
@@ -526,9 +530,9 @@ impl TrunkFollower {
             call.pcm_c4fm.extend_from_slice(&a.pcm);
             call.pcm_cqpsk.extend_from_slice(&b.pcm);
             if a.syncs.max(b.syncs) == 0 {
-                call.quiet += 1;
+                call.quiet += secs;
             } else {
-                call.quiet = 0;
+                call.quiet = 0.0;
             }
             // A terminator ends the transmission explicitly; hold the call
             // open for a short hang in case the conversation continues, then
@@ -536,23 +540,25 @@ impl TrunkFollower {
             // from either is the channel's own word. New voice during the
             // hang means the call carried on.
             if a.terminators + b.terminators > 0 {
-                call.ending = call.ending.max(1);
-            } else if call.ending > 0 {
+                call.ending.get_or_insert(0.0);
+            } else if let Some(h) = call.ending.as_mut() {
                 if a.pcm.is_empty() && b.pcm.is_empty() {
-                    call.ending += 1;
+                    *h += secs;
                 } else {
-                    call.ending = 0;
+                    call.ending = None;
                 }
             }
         }
 
         // Retire finished calls: terminated and past the hang, or — when the
         // terminator was lost — quiet past the timeout.
-        let (quiet_limit, hang_limit) = (self.quiet_limit, self.hang_limit);
+        let (quiet_secs, hang_secs) = (self.quiet_secs, self.hang_secs);
         let mut finished = Vec::new();
         let mut i = 0;
         while i < self.active.len() {
-            if self.active[i].quiet >= quiet_limit || self.active[i].ending > hang_limit {
+            if self.active[i].quiet >= quiet_secs
+                || self.active[i].ending.is_some_and(|h| h > hang_secs)
+            {
                 finished.push(self.active.remove(i));
             } else {
                 i += 1;
@@ -632,8 +638,8 @@ impl TrunkFollower {
                 pcm_cqpsk: Vec::new(),
                 syncs_c4fm: 0,
                 syncs_cqpsk: 0,
-                quiet: 0,
-                ending: 0,
+                quiet: 0.0,
+                ending: None,
             });
             out.started.push((g.talkgroup, g.freq_hz));
         }
@@ -925,8 +931,8 @@ impl TrunkFollower {
             pcm_cqpsk: Vec::new(),
             syncs_c4fm: 0,
             syncs_cqpsk: 0,
-            quiet: 0,
-            ending: 0,
+            quiet: 0.0,
+            ending: None,
         });
     }
 }
@@ -972,8 +978,35 @@ mod priority_tests {
         assert_eq!(f.priority_of(7), 1);
         assert_eq!(f.priority_of(8), 99);
         assert_eq!(f.priority_of(9), 50);
-        f.set_hang(0, 0);
-        assert_eq!(f.hang(), (1, 1));
+        f.set_hang(0.0, 0.0);
+        assert_eq!(f.hang(), (0.05, 0.5));
+    }
+
+    /// A call with no sync is retired after the quiet time in *seconds*,
+    /// whether the IQ arrives in 100 ms blocks or 6.8 ms blocks.
+    #[test]
+    fn quiet_timeout_is_measured_in_seconds_not_blocks() {
+        for block_secs in [0.1, 0.0068] {
+            let mut f = follower();
+            f.set_hang(0.3, 1.0);
+            f.push_fake_call(100, 851_100_000);
+            let block = vec![0.0f32; (2_400_000.0 * block_secs) as usize * 2];
+            let mut fed = 0.0;
+            let mut completed = 0;
+            while fed < 0.9 {
+                completed += f.process(&block).completed.len();
+                fed += block_secs;
+            }
+            assert_eq!(completed, 0, "retired early at {block_secs}s blocks");
+            while fed < 1.3 {
+                completed += f.process(&block).completed.len();
+                fed += block_secs;
+            }
+            assert_eq!(
+                completed, 1,
+                "not retired after 1 s at {block_secs}s blocks"
+            );
+        }
     }
 
     #[test]
