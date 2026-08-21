@@ -12,6 +12,7 @@ pub mod lc;
 pub mod lrrp;
 pub mod moto;
 pub mod nid;
+pub mod p25p2;
 pub mod pdu;
 pub mod soft;
 pub mod synth;
