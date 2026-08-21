@@ -22,7 +22,8 @@ pub struct DeviceSettings {
     pub nickname: String,
     /// Oscillator error, ppm (positive = runs high).
     pub ppm: f64,
-    /// RTL-SDR tuner gain in dB; `None` = AGC.
+    /// RTL-SDR tuner gain in dB; `None` = a fixed 40 dB default (the tuner's
+    /// hardware AGC proved unreliable and garbled voice).
     pub gain: Option<f64>,
     /// Preferred sample rate, Hz (0 = the radio's default for the mode).
     pub rate: f64,
@@ -72,8 +73,8 @@ impl DeviceSettings {
             });
         }
         Some(match self.gain {
-            Some(db) => G::Manual(db),
-            None => G::Agc,
+            Some(db) => G::Manual(hs_source::clamp_rtl_gain(db)),
+            None => G::Manual(hs_source::RTL_DEFAULT_GAIN_DB),
         })
     }
 }

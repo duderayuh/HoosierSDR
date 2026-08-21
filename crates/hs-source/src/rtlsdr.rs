@@ -56,9 +56,11 @@ impl RtlSdrSource {
         rx0.frequency().set(center_freq).map_err(map)?;
         match gain {
             Some(g) => {
-                // Best-effort disable AGC, then set manual gain.
+                // Best-effort disable AGC, then set manual gain (clamped into
+                // the tuner's valid step list — out-of-range values would
+                // otherwise pick a garbage floor).
                 let _ = rx0.agc().disable();
-                rx0.gain().set(g).map_err(map)?;
+                rx0.gain().set(crate::clamp_rtl_gain(g)).map_err(map)?;
             }
             None => {
                 let _ = rx0.agc().enable();
@@ -102,7 +104,7 @@ impl RtlSdrSource {
             }
             GainSetting::Manual(db) => {
                 let _ = rx0.agc().disable();
-                rx0.gain().set(*db)?;
+                rx0.gain().set(crate::clamp_rtl_gain(*db))?;
             }
             _ => {} // Airspy-only settings mean nothing to an RTL-SDR.
         }

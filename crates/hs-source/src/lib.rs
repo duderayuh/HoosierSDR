@@ -68,6 +68,27 @@ pub const RTL_TUNER_GAINS_DB: &[f64] = &[
     32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6,
 ];
 
+/// Sensible default tuner gain for an RTL-SDR: 40 dB, the same value the
+/// known-good field capture was made at (`rtl_sdr -g 40`). The R820T's
+/// hardware AGC is unreliable and produced garbled voice at low/floor gain,
+/// so a fresh device defaults to a fixed manual gain rather than AGC.
+pub const RTL_DEFAULT_GAIN_DB: f64 = 40.0;
+
+/// Clamp an RTL-SDR gain into the tuner's valid step list. Out-of-range values
+/// (e.g. a stale negative reading) are snapped to the nearest real step rather
+/// than passed to the driver, which would either reject them or pick a garbage
+/// floor — the failure mode behind "-24 dB" garbage voice.
+pub fn clamp_rtl_gain(db: f64) -> f64 {
+    let min = RTL_TUNER_GAINS_DB[0];
+    let max = RTL_TUNER_GAINS_DB[RTL_TUNER_GAINS_DB.len() - 1];
+    let clamped = db.clamp(min, max);
+    RTL_TUNER_GAINS_DB
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - clamped).abs().total_cmp(&(b - clamped).abs()))
+        .unwrap_or(clamped)
+}
+
 /// A stream of complex baseband samples at a known rate and center frequency.
 pub trait SdrSource {
     fn sample_rate(&self) -> f64;
