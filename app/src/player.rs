@@ -241,7 +241,10 @@ mod tests {
         // Queued behind it, in arrival order: 1 then 2. A later high-priority
         // push goes ahead of them but never displaces the playing clip.
         q.push(vec![4; 4], 10);
-        assert_eq!(q.clips.iter().map(|c| c.pcm[0]).collect::<Vec<_>>(), vec![4, 1, 2]);
+        assert_eq!(
+            q.clips.iter().map(|c| c.pcm[0]).collect::<Vec<_>>(),
+            vec![4, 1, 2]
+        );
         q.skip();
         assert_eq!(q.next_sample(), 4.0 / 32768.0);
         q.skip();
@@ -253,6 +256,6 @@ mod tests {
         q.replay_last();
         assert_eq!(q.next_sample(), 2.0 / 32768.0);
         assert_eq!(q.history.len(), 5); // 3, 4, 1, 2, 2(replayed)
- // 1, 3, 2, 2(replayed)
+                                        // 1, 3, 2, 2(replayed)
     }
 }

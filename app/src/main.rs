@@ -15,9 +15,11 @@ use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod follow;
+mod library;
 mod player;
 mod playlists;
 mod rr;
+mod transcribe;
 mod units;
 
 #[derive(Default)]
@@ -36,6 +38,13 @@ struct AppState {
     units: units::Units,
     /// The audio thread, started on first use. `Some(None)` = no device.
     audio: Mutex<Option<Option<player::Audio>>>,
+    /// The call library (opened at startup).
+    db: Arc<Mutex<Option<Mutex<rusqlite::Connection>>>>,
+    /// Where call audio lives.
+    library_dir: Mutex<Option<std::path::PathBuf>>,
+    /// Archive playback in progress: live calls are stored but not spoken.
+    archive_mode: Arc<AtomicBool>,
+    transcriber: transcribe::Shared,
 }
 
 impl AppState {
@@ -99,6 +108,99 @@ fn set_lockout(tgs: Vec<u16>, state: State<AppState>) {
 #[tauri::command]
 fn set_allowlist(tgs: Option<Vec<u16>>, state: State<AppState>) {
     *state.allowlist.lock().unwrap() = tgs.map(|t| t.into_iter().collect());
+}
+
+// ---------------- library ----------------
+
+fn with_db<T>(
+    state: &State<AppState>,
+    f: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let guard = state.db.lock().unwrap();
+    let db = guard.as_ref().ok_or("library not open")?;
+    let c = db.lock().unwrap();
+    f(&c)
+}
+
+#[tauri::command]
+fn library_search(
+    state: State<AppState>,
+    query: library::Query,
+) -> Result<Vec<library::CallRow>, String> {
+    with_db(&state, |c| library::search(c, &query))
+}
+
+#[tauri::command]
+fn library_get(state: State<AppState>, id: i64) -> Result<Option<library::CallRow>, String> {
+    with_db(&state, |c| library::get(c, id))
+}
+
+#[tauri::command]
+fn library_star(state: State<AppState>, id: i64, on: bool) -> Result<(), String> {
+    with_db(&state, |c| library::set_starred(c, id, on))
+}
+
+/// A human correction; empty text clears it. The machine transcript stays.
+#[tauri::command]
+fn library_set_edited(state: State<AppState>, id: i64, text: String) -> Result<(), String> {
+    let t = text.trim();
+    with_db(&state, |c| {
+        library::set_edited(c, id, (!t.is_empty()).then_some(t))
+    })
+}
+
+#[tauri::command]
+fn library_stats(state: State<AppState>) -> Result<(i64, f64, i64, String), String> {
+    let dir = state
+        .library_dir
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    with_db(&state, library::stats).map(|(n, secs, tr)| (n, secs, tr, dir))
+}
+
+#[tauri::command]
+fn library_prune(state: State<AppState>, days: u32) -> Result<usize, String> {
+    with_db(&state, |c| library::prune(c, days))
+}
+
+/// Export a cart to a folder with a chain-of-custody manifest; returns the
+/// manifest path.
+#[tauri::command]
+fn library_export(
+    app: AppHandle,
+    state: State<AppState>,
+    ids: Vec<i64>,
+    dest: String,
+) -> Result<String, String> {
+    let dest = std::path::PathBuf::from(shellexpand_home(&dest));
+    let ver = format!("HoosierSDR {}", app.package_info().version);
+    with_db(&state, |c| library::export(c, &ids, &dest, &ver))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Play a library call through the speaker, ahead of anything queued.
+#[tauri::command]
+fn library_play(state: State<AppState>, id: i64) -> Result<(), String> {
+    let path = with_db(&state, |c| library::get(c, id))?
+        .and_then(|r| r.audio)
+        .ok_or("no audio for that call")?;
+    let pcm = player::read_wav(&path)?;
+    state.audio().ok_or("no audio output device")?.play(pcm, 0);
+    Ok(())
+}
+
+/// While archive playback is on, live calls are stored but not spoken.
+#[tauri::command]
+fn set_archive_mode(state: State<AppState>, on: bool) {
+    state.archive_mode.store(on, Ordering::SeqCst);
+    if on {
+        if let Some(a) = state.audio() {
+            a.skip();
+        }
+    }
 }
 
 /// Replay a saved call through the default audio device.
@@ -241,6 +343,9 @@ fn start_follow(
     let hold = state.hold.clone();
     let priorities = state.priorities.clone();
     let units = state.units.clone();
+    let db = state.db.clone();
+    let library_dir = state.library_dir.lock().unwrap().clone();
+    let archive_mode = state.archive_mode.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -263,7 +368,7 @@ fn start_follow(
             let params = follow::FollowParams {
                 center_hz: freq,
                 control_hz: control,
-                calls_dir,
+                calls_dir: library_dir.or(calls_dir),
                 hang_secs,
                 system_name: system_name.unwrap_or_default(),
             };
@@ -277,18 +382,20 @@ fn start_follow(
                 );
             }
             let cat = catalog.lock().unwrap().clone();
+            let db_guard = db.lock().unwrap();
             let live = follow::Live {
                 lockout: &lockout,
                 allowlist: &allowlist,
                 hold: &hold,
                 priorities: &priorities,
                 units: &units,
+                db: db_guard.as_ref(),
             };
             follow::run(src, &params, cat.as_ref(), &live, &running, &mut |ev| {
                 if let (Some(pl), follow::FollowEvent::Call { pcm, priority, .. }) =
                     (player.as_ref(), &ev)
                 {
-                    if !pcm.is_empty() {
+                    if !pcm.is_empty() && !archive_mode.load(Ordering::SeqCst) {
                         pl.play(pcm.clone(), *priority);
                     }
                 }
@@ -528,6 +635,19 @@ fn main() {
                 *state.catalog.lock().unwrap() = Some(cat);
             }
             *state.units.lock().unwrap() = units::load(app.handle());
+            // The call library lives in the app's data directory.
+            if let Ok(base) = app.path().app_data_dir() {
+                let lib = base.join("library");
+                match library::open(&lib) {
+                    Ok(c) => {
+                        *state.db.lock().unwrap() = Some(Mutex::new(c));
+                        *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
+                    }
+                    Err(e) => eprintln!("library: {e}"),
+                }
+            }
+            state.transcriber.lock().unwrap().settings = transcribe::load_settings(app.handle());
+            transcribe::spawn_pump(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -546,6 +666,18 @@ fn main() {
             units::units_list,
             units::unit_set,
             units::units_import,
+            library_search,
+            library_get,
+            library_star,
+            library_set_edited,
+            library_stats,
+            library_prune,
+            library_export,
+            library_play,
+            set_archive_mode,
+            transcribe::transcribe_probe,
+            transcribe::transcribe_configure,
+            transcribe::transcribe_call,
             play_wav,
             ui_log,
             rr::rr_settings,

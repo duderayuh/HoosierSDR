@@ -17,8 +17,8 @@ pub struct FollowParams {
     pub center_hz: f64,
     /// Nominal control-channel frequency, Hz.
     pub control_hz: f64,
-    /// Directory to write one WAV (+ JSON sidecar, + calls.csv line) per
-    /// completed call into, if any.
+    /// Library folder: one WAV + JSON sidecar per completed call goes under
+    /// `<calls_dir>/YYYY/MM/DD/`, and a row into the library database.
     pub calls_dir: Option<std::path::PathBuf>,
     /// Hang time after a terminator and quiet timeout, in seconds; `None`
     /// keeps the engine defaults.
@@ -35,6 +35,8 @@ pub struct Live<'a> {
     pub hold: &'a std::sync::Mutex<Option<u16>>,
     pub priorities: &'a std::sync::Mutex<std::collections::HashMap<u16, u8>>,
     pub units: &'a std::sync::Mutex<std::collections::HashMap<u32, String>>,
+    /// The call library; `None` runs without persistence (tests).
+    pub db: Option<&'a std::sync::Mutex<rusqlite::Connection>>,
 }
 
 /// Everything the loop tells the front end. Serialized as `{kind: ...}`.
@@ -67,6 +69,8 @@ pub enum FollowEvent {
         patched_with: Vec<u16>,
         priority: u8,
         wav: Option<String>,
+        /// Library row id, once stored.
+        id: Option<i64>,
         #[serde(skip)]
         pcm: Vec<i16>,
     },
@@ -170,6 +174,7 @@ pub fn run<S: SdrSource + Send + 'static>(
     let mut rep = Reporter {
         catalog,
         units: live.units,
+        db: live.db,
         calls_dir: p.calls_dir.as_deref(),
         system_name: p.system_name.clone(),
         syncs: 0,
@@ -303,6 +308,7 @@ fn epoch_secs() -> u64 {
 struct Reporter<'a> {
     catalog: Option<&'a CsvCatalog>,
     units: &'a std::sync::Mutex<std::collections::HashMap<u32, String>>,
+    db: Option<&'a std::sync::Mutex<rusqlite::Connection>>,
     calls_dir: Option<&'a std::path::Path>,
     system_name: String,
     syncs: u32,
@@ -430,8 +436,11 @@ impl Reporter<'_> {
             let name = self.name_of(c.talkgroup);
             let unit_name = self.unit_name(c.source_unit);
             // A keyup with no voice leaves nothing worth a file.
-            let wav = self.calls_dir.filter(|_| !c.pcm.is_empty()).and_then(|dir| {
-                let stem = format!("{}_tg{}_{}", chrono_stamp(), c.talkgroup, (c.freq_hz as f64 / 1e6 * 10_000.0).round() as u64);
+            let wav = self.calls_dir.filter(|_| !c.pcm.is_empty()).and_then(|root| {
+                let stamp = chrono_stamp();
+                let dir = root.join(&stamp[0..4]).join(&stamp[4..6]).join(&stamp[6..8]);
+                std::fs::create_dir_all(&dir).ok()?;
+                let stem = format!("{stamp}_tg{}_{}", c.talkgroup, (c.freq_hz as f64 / 1e6 * 10_000.0).round() as u64);
                 let path = dir.join(format!("{stem}.wav"));
                 match hs_core::wav::write_wav(path.to_str()?, 8000, &c.pcm) {
                     Ok(()) => {
@@ -464,37 +473,34 @@ impl Reporter<'_> {
                     }
                 }
             });
-            if let Some(dir) = self.calls_dir {
-                use std::io::Write;
-                let csv = dir.join("calls.csv");
-                let new = !csv.exists();
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&csv)
-                {
-                    if new {
-                        let _ = writeln!(f, "start_epoch,talkgroup,name,unit,unit_name,freq_hz,seconds,modulation,emergency,patched_with,wav");
+            let id = self.db.and_then(|db| {
+                let row = crate::library::CallRow {
+                    id: 0,
+                    start: start as i64,
+                    secs,
+                    tg: c.talkgroup,
+                    tg_name: name.clone(),
+                    unit: c.source_unit,
+                    unit_name: unit_name.clone(),
+                    freq_hz: c.freq_hz,
+                    modulation: mod_name(c.modulation),
+                    emergency: c.emergency,
+                    patched_with: c.patched_with.clone(),
+                    system: self.system_name.clone(),
+                    site: String::new(),
+                    audio: wav.clone(),
+                    ..Default::default()
+                };
+                match crate::library::insert(&*db.lock().ok()?, &row) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        emit(FollowEvent::Notice {
+                            text: format!("library: {e}"),
+                        });
+                        None
                     }
-                    let _ = writeln!(
-                        f,
-                        "{start},{},{:?},{},{:?},{},{secs:.1},{},{},{:?},{:?}",
-                        c.talkgroup,
-                        name,
-                        c.source_unit,
-                        unit_name.clone().unwrap_or_default(),
-                        c.freq_hz,
-                        mod_name(c.modulation),
-                        u8::from(c.emergency),
-                        c.patched_with
-                            .iter()
-                            .map(|t| t.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                        wav.clone().unwrap_or_default()
-                    );
                 }
-            }
+            });
             emit(FollowEvent::Call {
                 tg: c.talkgroup,
                 name,
@@ -507,6 +513,7 @@ impl Reporter<'_> {
                 patched_with: c.patched_with.clone(),
                 priority: self.priority_of(c.talkgroup),
                 wav,
+                id,
                 pcm: c.pcm,
             });
         }
@@ -599,6 +606,7 @@ mod tests {
             hold: &hold,
             priorities: &pri,
             units: &units,
+            db: None,
         };
         run(src, &p, None, &live, &running, &mut |e| events.push(e)).expect("follow");
         let measured = events
@@ -676,6 +684,7 @@ mod tests {
             hold: &hold,
             priorities: &pri,
             units: &units,
+            db: None,
         };
         run(src, &p, None, &live, &running, &mut |e| events.push(e)).expect("follow");
         let starts = events
@@ -719,6 +728,7 @@ mod tests {
                 hold: &hold,
                 priorities: &pri,
                 units: &units,
+                db: None,
             };
             run(src, &p, None, &live, &running, &mut |e| {
                 if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
@@ -762,6 +772,7 @@ mod tests {
                 hold: &hold,
                 priorities: &pri,
                 units: &units,
+                db: None,
             };
             let mut n = 0;
             run(src, &p, None, &live, &running, &mut |e| {
@@ -801,7 +812,10 @@ mod tests {
         };
         let running = std::sync::Arc::new(AtomicBool::new(true));
         let r = std::sync::Arc::clone(&running);
-        let secs: u64 = std::env::var("HS_LIVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(25);
+        let secs: u64 = std::env::var("HS_LIVE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(25);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(secs));
             r.store(false, Ordering::SeqCst);
@@ -815,6 +829,7 @@ mod tests {
             hold: &hold,
             priorities: &pri,
             units: &units,
+            db: None,
         };
         run(src, &p, None, &live, &running, &mut |e| match e {
             FollowEvent::Measured {
