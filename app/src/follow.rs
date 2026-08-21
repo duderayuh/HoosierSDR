@@ -173,9 +173,13 @@ pub fn run<S: SdrSource + Send + 'static>(
         text: "measuring the control channel (frequency and modulation)…".into(),
     });
     let cancel = || !running.load(Ordering::SeqCst);
-    let Some((measured_hz, modulation)) =
-        hs_core::follow::measure_carrier_cancellable(&prime, rate, p.center_hz, p.control_hz, &cancel)
-    else {
+    let Some((measured_hz, modulation)) = hs_core::follow::measure_carrier_cancellable(
+        &prime,
+        rate,
+        p.center_hz,
+        p.control_hz,
+        &cancel,
+    ) else {
         if cancel() {
             return Ok(());
         }
@@ -403,7 +407,12 @@ impl Reporter<'_> {
         }
     }
 
-    fn report(&mut self, out: hs_core::follow::FollowOutput, secs: f64, emit: &mut dyn FnMut(FollowEvent)) {
+    fn report(
+        &mut self,
+        out: hs_core::follow::FollowOutput,
+        secs: f64,
+        emit: &mut dyn FnMut(FollowEvent),
+    ) {
         self.syncs += out.control_syncs;
         self.gate.tick(secs);
         if let Some((old, new)) = out.control_moved {

@@ -378,22 +378,25 @@ fn start_capture(
     let catalog = state.catalog.clone();
     let spectrum_cfg = state.spectrum.clone();
     let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let prev = take_previous(&state);
     let handle = std::thread::spawn(move || {
-        join_previous(&app);
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capture_loop(
-            &app,
-            &running,
-            &catalog,
-            &source,
-            freq,
-            rate,
-            gain,
-            cqpsk,
-            &eq,
-            record_iq,
-            record_log,
-            spectrum_cfg,
-        )))
+        join_previous(prev);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_loop(
+                &app,
+                &running,
+                &catalog,
+                &source,
+                freq,
+                rate,
+                gain,
+                cqpsk,
+                &eq,
+                record_iq,
+                record_log,
+                spectrum_cfg,
+            )
+        }))
         .unwrap_or_else(|p| Err(format!("capture crashed: {}", panic_text(&p))));
         finish_run(&app, my_gen, res);
     });
@@ -462,8 +465,9 @@ fn start_follow(
     let uploader = state.uploader.clone();
     let audio = if play { state.audio() } else { None };
     let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let prev = take_previous(&state);
     let handle = std::thread::spawn(move || {
-        join_previous(&app);
+        join_previous(prev);
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
             // A radio that cannot span the requested band centre and the
             // control channel (an RTL-SDR at 2.4 MSPS covers ±1.2 MHz) is
@@ -611,10 +615,15 @@ fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
     }
 }
 
-/// Wait for the previous run's thread so its radio is closed before a new
-/// one is opened (an Airspy refuses a second open).
-fn join_previous(app: &AppHandle) {
-    let prev = app.state::<AppState>().run_thread.lock().unwrap().take();
+/// Take the previous run's thread handle (on the caller's thread, before the
+/// new one is spawned) so the new thread can wait for the old radio to close
+/// — an Airspy refuses a second open. Joining inside the new thread after
+/// the handle store would race into joining itself.
+fn take_previous(state: &AppState) -> Option<std::thread::JoinHandle<()>> {
+    state.run_thread.lock().unwrap().take()
+}
+
+fn join_previous(prev: Option<std::thread::JoinHandle<()>>) {
     if let Some(h) = prev {
         let _ = h.join();
     }
