@@ -16,6 +16,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod follow;
 mod player;
+mod playlists;
 mod rr;
 
 #[derive(Default)]
@@ -24,6 +25,8 @@ struct AppState {
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
     /// Talkgroups the listener has locked out; read by the follower live.
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
+    /// The active playlist's talkgroups (`None` = follow everything).
+    allowlist: Arc<Mutex<Option<std::collections::HashSet<u16>>>>,
     /// The audio thread, started on first use. `Some(None)` = no device.
     audio: Mutex<Option<Option<std::sync::mpsc::Sender<Vec<i16>>>>>,
 }
@@ -50,6 +53,12 @@ fn ui_log(msg: String) {
 #[tauri::command]
 fn set_lockout(tgs: Vec<u16>, state: State<AppState>) {
     *state.lockout.lock().unwrap() = tgs.into_iter().collect();
+}
+
+/// Restrict the follower to a playlist's talkgroups (`None` clears it).
+#[tauri::command]
+fn set_allowlist(tgs: Option<Vec<u16>>, state: State<AppState>) {
+    *state.allowlist.lock().unwrap() = tgs.map(|t| t.into_iter().collect());
 }
 
 /// Replay a saved call through the default audio device.
@@ -186,6 +195,7 @@ fn start_follow(
     let running = state.running.clone();
     let catalog = state.catalog.clone();
     let lockout = state.lockout.clone();
+    let allowlist = state.allowlist.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -214,7 +224,7 @@ fn start_follow(
                 );
             }
             let cat = catalog.lock().unwrap().clone();
-            follow::run(src, &params, cat.as_ref(), &lockout, &running, &mut |ev| {
+            follow::run(src, &params, cat.as_ref(), &lockout, &allowlist, &running, &mut |ev| {
                 if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_ref(), &ev) {
                     if !pcm.is_empty() {
                         let _ = pl.send(pcm.clone());
@@ -464,11 +474,20 @@ fn main() {
             decode_file,
             start_follow,
             set_lockout,
+            set_allowlist,
             play_wav,
             ui_log,
             rr::rr_settings,
             rr::rr_save,
-            rr::rr_download
+            rr::rr_download,
+            rr::rr_states,
+            rr::rr_state,
+            rr::rr_county,
+            rr::rr_zip,
+            playlists::playlists_list,
+            playlists::playlist_save,
+            playlists::playlist_delete,
+            playlists::playlist_activate
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");
