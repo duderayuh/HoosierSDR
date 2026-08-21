@@ -254,21 +254,17 @@ fn start_follow(
                 }
                 None => None,
             };
-            // Blocks are 65536 complex samples at the normalized rate
-            // (2.4 or 9.6 MSPS): 27 ms or 6.8 ms each.
-            let hang_blocks = hang_ms.map(|ms| {
-                let norm = hs_dsp::resample::normalize_ratio(rate)
-                    .map(|(_, _, r)| r)
-                    .unwrap_or(rate);
-                let block_ms = 65536.0 / norm * 1000.0;
-                let hang = (ms as f64 / block_ms).ceil() as u32;
-                (hang.max(1), (hang * 7).max(20))
+            // Hang after a terminator; the lost-terminator timeout scales with
+            // it but never drops below the engine's 2 s.
+            let hang_secs = hang_ms.map(|ms| {
+                let h = ms as f64 / 1000.0;
+                (h, (h * 4.0).max(2.0))
             });
             let params = follow::FollowParams {
                 center_hz: freq,
                 control_hz: control,
                 calls_dir,
-                hang_blocks,
+                hang_secs,
                 system_name: system_name.unwrap_or_default(),
             };
             let player = if play { audio } else { None };

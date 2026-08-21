@@ -20,9 +20,9 @@ pub struct FollowParams {
     /// Directory to write one WAV (+ JSON sidecar, + calls.csv line) per
     /// completed call into, if any.
     pub calls_dir: Option<std::path::PathBuf>,
-    /// Hang time after a terminator and quiet timeout, in blocks; `None`
+    /// Hang time after a terminator and quiet timeout, in seconds; `None`
     /// keeps the engine defaults.
-    pub hang_blocks: Option<(u32, u32)>,
+    pub hang_secs: Option<(f64, f64)>,
     /// Label written into sidecars (the playlist's system name, if any).
     pub system_name: String,
 }
@@ -163,7 +163,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         rate,
     });
 
-    if let Some((h, q)) = p.hang_blocks {
+    if let Some((h, q)) = p.hang_secs {
         f.set_hang(h, q);
     }
     let mut last_site = f.site_info();
@@ -587,7 +587,7 @@ mod tests {
             center_hz: 851e6,
             control_hz: 851_537_500.0,
             calls_dir: None,
-            hang_blocks: None,
+            hang_secs: None,
             system_name: String::new(),
         };
         let running = AtomicBool::new(true);
@@ -663,7 +663,7 @@ mod tests {
             center_hz: 851e6,
             control_hz: 851_537_500.0,
             calls_dir: None,
-            hang_blocks: None,
+            hang_secs: None,
             system_name: String::new(),
         };
         let running = AtomicBool::new(true);
@@ -706,7 +706,7 @@ mod tests {
                 center_hz: 851e6,
                 control_hz: 851_537_500.0,
                 calls_dir: None,
-                hang_blocks: None,
+                hang_secs: None,
                 system_name: String::new(),
             };
             let running = AtomicBool::new(true);
@@ -750,7 +750,7 @@ mod tests {
                 center_hz: 851e6,
                 control_hz: 851_537_500.0,
                 calls_dir: None,
-                hang_blocks: None,
+                hang_secs: None,
                 system_name: String::new(),
             };
             let running = AtomicBool::new(true);
@@ -796,13 +796,14 @@ mod tests {
             center_hz: 855e6,
             control_hz: 851_537_500.0,
             calls_dir: None,
-            hang_blocks: None,
+            hang_secs: None,
             system_name: String::new(),
         };
         let running = std::sync::Arc::new(AtomicBool::new(true));
         let r = std::sync::Arc::clone(&running);
+        let secs: u64 = std::env::var("HS_LIVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(25);
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(25));
+            std::thread::sleep(std::time::Duration::from_secs(secs));
             r.store(false, Ordering::SeqCst);
         });
         let player = crate::player::spawn();
