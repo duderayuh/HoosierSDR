@@ -22,10 +22,66 @@ pub struct DeviceSettings {
     pub nickname: String,
     /// Oscillator error, ppm (positive = runs high).
     pub ppm: f64,
-    /// RTL-SDR gain in dB; `None` = AGC. Ignored by the Airspy R2.
+    /// RTL-SDR tuner gain in dB; `None` = AGC.
     pub gain: Option<f64>,
     /// Preferred sample rate, Hz (0 = the radio's default for the mode).
     pub rate: f64,
+    /// Airspy: touch the gain at all. Off by default — the R2 firmware this
+    /// project was developed on wedged USB streaming on any gain call.
+    #[serde(default)]
+    pub airspy_gain: bool,
+    /// Airspy mode: "agc" (front-end AGCs on), "linearity", "sensitivity",
+    /// "manual".
+    #[serde(default)]
+    pub airspy_mode: String,
+    /// Preset 0–21 for linearity / sensitivity.
+    #[serde(default)]
+    pub airspy_preset: u8,
+    #[serde(default)]
+    pub airspy_lna: u8,
+    #[serde(default)]
+    pub airspy_mixer: u8,
+    #[serde(default)]
+    pub airspy_vga: u8,
+    #[serde(default)]
+    pub airspy_lna_agc: bool,
+    #[serde(default)]
+    pub airspy_mixer_agc: bool,
+}
+
+impl DeviceSettings {
+    /// The gain to apply for a radio of `kind`, or `None` to leave the
+    /// radio at its default (Airspy with gain control opted out).
+    pub fn gain_setting(&self, kind: &str) -> Option<hs_source::GainSetting> {
+        use hs_source::GainSetting as G;
+        if kind == "airspy" {
+            if !self.airspy_gain {
+                return None;
+            }
+            return Some(match self.airspy_mode.as_str() {
+                "linearity" => G::AirspyLinearity(self.airspy_preset.min(21)),
+                "sensitivity" => G::AirspySensitivity(self.airspy_preset.min(21)),
+                "manual" => G::AirspyManual {
+                    lna: self.airspy_lna.min(14),
+                    mixer: self.airspy_mixer.min(15),
+                    vga: self.airspy_vga.min(15),
+                    lna_agc: self.airspy_lna_agc,
+                    mixer_agc: self.airspy_mixer_agc,
+                },
+                _ => G::Agc,
+            });
+        }
+        Some(match self.gain {
+            Some(db) => G::Manual(db),
+            None => G::Agc,
+        })
+    }
+}
+
+/// Settings for one radio by its picker key ("kind|id"), or the defaults.
+pub fn settings_for(app: &AppHandle, kind: &str, id: Option<&str>) -> DeviceSettings {
+    let all = load(app);
+    id.and_then(|i| all.get(&format!("{kind}|{i}")).cloned()).unwrap_or_default()
 }
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -73,6 +129,8 @@ pub fn detect() -> Vec<Device> {
 pub struct View {
     pub devices: Vec<Device>,
     pub settings: HashMap<String, DeviceSettings>,
+    /// The RTL-SDR tuner's gain steps, for the picker.
+    pub rtl_gains_db: Vec<f64>,
 }
 
 /// Detect radios (runs the USB probe off the UI thread).
@@ -84,7 +142,28 @@ pub async fn devices_list(app: AppHandle) -> View {
     View {
         devices,
         settings: load(&app),
+        rtl_gains_db: hs_source::RTL_TUNER_GAINS_DB.to_vec(),
     }
+}
+
+/// Change a streaming radio's gain now. `key` is the picker key of the
+/// radio ("kind|id") — it must be one of the radios the current run opened.
+#[tauri::command]
+pub fn gain_live(app: AppHandle, state: tauri::State<crate::AppState>, key: String, settings: DeviceSettings) -> Result<String, String> {
+    let kind = key.split('|').next().unwrap_or("").to_string();
+    let g = settings
+        .gain_setting(&kind)
+        .ok_or("gain control is opted out for this Airspy (tick “apply gain” first)")?;
+    let handles = state.gain_handles.lock().unwrap();
+    let h = handles.get(&key).ok_or("that radio is not part of the current run — Start first")?;
+    h.request(g.clone());
+    // Remember it for the next start too.
+    let mut all = load(&app);
+    all.insert(key.clone(), settings);
+    if let Ok(p) = path(&app) {
+        let _ = std::fs::write(&p, serde_json::to_string_pretty(&all).unwrap_or_default());
+    }
+    Ok(format!("applied {g:?}"))
 }
 
 #[tauri::command]

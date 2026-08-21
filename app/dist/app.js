@@ -812,11 +812,48 @@ if (TAURI) {
     if ($("source").value !== cur) { const a = srcKind() === "airspy"; if ($("pillText").textContent === "standby") { $("rate").value = a ? (modeSel === "follow" ? "10000000" : "2500000") : "2400000"; syncRate(); } }
     devLoadSelected();
   }
+  /* ---------- gain controls, SDRTrunk-style ---------- */
+  const RTL_GAINS = () => (devView.rtl_gains_db && devView.rtl_gains_db.length ? devView.rtl_gains_db : [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6]);
+  function gainUi() {
+    const airspy = srcKind() === "airspy";
+    $("gnRtl").style.display = airspy ? "none" : ""; $("gnAirspy").style.display = airspy ? "" : "none";
+    const g = RTL_GAINS(); $("gnRtlGain").max = g.length - 1; $("gnRtlGainVal").textContent = (g[+$("gnRtlGain").value] ?? 0).toFixed(1) + " dB";
+    $("gnRtlGain").disabled = $("gnRtlAgc").checked;
+    const mode = $("gnAsMode").value, on = $("gnAsEnabled").checked;
+    $("gnAsPresetField").style.display = mode === "linearity" || mode === "sensitivity" ? "" : "none"; $("gnAsManual").style.display = mode === "manual" ? "" : "none";
+    ["gnAsMode", "gnAsPreset", "gnAsLna", "gnAsMixer", "gnAsVga", "gnAsLnaAgc", "gnAsMixerAgc"].forEach((id) => $(id).disabled = !on);
+    $("gnAsPresetVal").textContent = $("gnAsPreset").value; $("gnAsLnaVal").textContent = $("gnAsLna").value; $("gnAsMixerVal").textContent = $("gnAsMixer").value; $("gnAsVgaVal").textContent = $("gnAsVga").value;
+    $("gnAsLna").disabled = !on || $("gnAsLnaAgc").checked; $("gnAsMixer").disabled = !on || $("gnAsMixerAgc").checked;
+    // Mirror the RTL gain into the legacy field the start command still reads.
+    $("gain").value = !airspy && !$("gnRtlAgc").checked ? String(g[+$("gnRtlGain").value] ?? "") : "";
+  }
+  ["gnRtlAgc", "gnRtlGain", "gnAsEnabled", "gnAsMode", "gnAsPreset", "gnAsLna", "gnAsMixer", "gnAsVga", "gnAsLnaAgc", "gnAsMixerAgc"].forEach((id) => { $(id).oninput = gainUi; $(id).onchange = gainUi; });
+  function gainFromUi(s) {
+    const g = RTL_GAINS();
+    s.gain = $("gnRtlAgc").checked ? null : (g[+$("gnRtlGain").value] ?? null);
+    s.airspy_gain = $("gnAsEnabled").checked; s.airspy_mode = $("gnAsMode").value; s.airspy_preset = +$("gnAsPreset").value;
+    s.airspy_lna = +$("gnAsLna").value; s.airspy_mixer = +$("gnAsMixer").value; s.airspy_vga = +$("gnAsVga").value; s.airspy_lna_agc = $("gnAsLnaAgc").checked; s.airspy_mixer_agc = $("gnAsMixerAgc").checked;
+    return s;
+  }
+  function gainToUi(s) {
+    const g = RTL_GAINS();
+    $("gnRtlAgc").checked = s.gain == null;
+    if (s.gain != null) { let best = 0; g.forEach((v, i) => { if (Math.abs(v - s.gain) < Math.abs(g[best] - s.gain)) best = i; }); $("gnRtlGain").value = best; } else $("gnRtlGain").value = g.length - 1;
+    $("gnAsEnabled").checked = !!s.airspy_gain; $("gnAsMode").value = s.airspy_mode || "agc"; $("gnAsPreset").value = s.airspy_preset ?? 12;
+    $("gnAsLna").value = s.airspy_lna ?? 8; $("gnAsMixer").value = s.airspy_mixer ?? 8; $("gnAsVga").value = s.airspy_vga ?? 8; $("gnAsLnaAgc").checked = !!s.airspy_lna_agc; $("gnAsMixerAgc").checked = !!s.airspy_mixer_agc;
+    gainUi();
+  }
+  $("gnApply").onclick = async () => {
+    if ($("pillText").textContent === "standby") { uiToast("Start first — live gain changes apply to the running radio.", "err"); return; }
+    const s = gainFromUi({ ...(devView.settings[devKey()] || {}), nickname: $("dvNick").value.trim(), ppm: parseFloat($("ppm").value) || 0, rate: parseFloat($("dvRate").value) || 0 });
+    try { $("gnMeta").textContent = await invoke("gain_live", { key: devKey(), settings: s }); devView.settings[devKey()] = s; devRenderList(); } catch (e) { uiToast(`${e}`, "err"); $("gnMeta").textContent = ""; }
+  };
+
   window.devLoadSelected = function devLoadSelected() {
     const d = devView.devices.find((x) => `${x.kind}|${x.id}` === $("source").value);
     const s = devView.settings[devKey()] || {};
     $("dvSelMeta").textContent = d ? d.label : ($("source").value.includes("|") ? "not attached right now" : "no radio detected");
-    $("dvNick").value = s.nickname || ""; $("ppm").value = s.ppm != null && s.ppm !== 0 ? String(s.ppm) : ""; $("gain").value = s.gain != null ? String(s.gain) : "";
+    $("dvNick").value = s.nickname || ""; $("ppm").value = s.ppm != null && s.ppm !== 0 ? String(s.ppm) : ""; gainToUi(s);
     const rates = d ? d.rates : (srcKind() === "airspy" ? [10000000, 2500000] : [2400000]);
     $("dvRate").innerHTML = `<option value="0">default for the mode</option>` + rates.map((r) => `<option value="${r}">${r >= 1e6 ? (r / 1e6).toFixed(1) + " M" : (r / 1e3) + " k"}</option>`).join("");
     $("dvRate").value = String(s.rate || 0);
@@ -824,14 +861,14 @@ if (TAURI) {
   };
   async function devSave() {
     const id = devKey();
-    const settings = { nickname: $("dvNick").value.trim(), ppm: parseFloat($("ppm").value) || 0, gain: $("gain").value.trim() === "" ? null : parseFloat($("gain").value), rate: parseFloat($("dvRate").value) || 0 };
+    const settings = gainFromUi({ ...(devView.settings[id] || {}), nickname: $("dvNick").value.trim(), ppm: parseFloat($("ppm").value) || 0, rate: parseFloat($("dvRate").value) || 0 });
     try { await invoke("devices_set", { id, settings }); devView.settings[id] = settings; devRenderList(); devRenderSource(); uiToast("Radio settings saved"); } catch (e) { uiToast(`${e}`, "err"); }
   }
   $("dvSave").onclick = devSave;
   function devRenderList() {
     $("dvEmpty").style.display = devView.devices.length ? "none" : "";
     $("dvMeta").textContent = devView.devices.length ? `${devView.devices.length} attached` : "";
-    $("dvList").innerHTML = devView.devices.map((d) => { const k = `${d.kind}|${d.id}`, s = devView.settings[k] || {}; return `<div class="row ${$("source").value === k ? "on" : ""}" data-dev="${esc(k)}"><span class="grow"><b>${esc(s.nickname || d.label)}</b> <small>${d.kind === "airspy" ? "Airspy" : "RTL-SDR"} · ${esc(d.kind === "airspy" ? d.id.replace(/^0+/, "") : d.id)}</small><br><small>${s.ppm ? `${s.ppm} ppm` : "0 ppm"} · ${s.gain != null ? s.gain + " dB" : "AGC"} · ${s.rate ? (s.rate / 1e6).toFixed(1) + " M" : "default rate"}</small></span><button class="btn ghost sm" data-devuse="${esc(k)}">Use</button></div>`; }).join("");
+    $("dvList").innerHTML = devView.devices.map((d) => { const k = `${d.kind}|${d.id}`, s = devView.settings[k] || {}; return `<div class="row ${$("source").value === k ? "on" : ""}" data-dev="${esc(k)}"><span class="grow"><b>${esc(s.nickname || d.label)}</b> <small>${d.kind === "airspy" ? "Airspy" : "RTL-SDR"} · ${esc(d.kind === "airspy" ? d.id.replace(/^0+/, "") : d.id)}</small><br><small>${s.ppm ? `${s.ppm} ppm` : "0 ppm"} · ${d.kind === "airspy" ? (s.airspy_gain ? `gain: ${s.airspy_mode || "agc"}${/linearity|sensitivity/.test(s.airspy_mode || "") ? " " + s.airspy_preset : ""}` : "gain: firmware default") : (s.gain != null ? s.gain + " dB" : "AGC")} · ${s.rate ? (s.rate / 1e6).toFixed(1) + " M" : "default rate"}</small></span><button class="btn ghost sm" data-devuse="${esc(k)}">Use</button></div>`; }).join("");
     $("dvList").querySelectorAll("[data-devuse]").forEach((b) => b.onclick = () => { $("source").value = b.dataset.devuse; $("source").onchange(); devRenderList(); showView("monitor"); });
   }
   async function devRefresh() {

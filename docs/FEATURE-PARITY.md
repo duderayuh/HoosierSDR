@@ -95,9 +95,9 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | RTL-SDR, Airspy R2/Mini | ✅ | ✅ | ✅ R2 / RTL (Mini: untested) |
 | HackRF, SDRplay, BladeRF | ✅ | HackRF | ➖ |
 | Multiple tuners pooled | ✅ | ✅ | ✅ one radio on control, the others parked over the rest of the span (auto plan in Devices) |
-| Gain / PPM controls | ✅ | ✅ | ✅ gain (RTL), PPM (both; "use measured" from the control channel) |
+| Gain / PPM controls | ✅ | ✅ | ✅ per radio: RTL tuner AGC or the R820T's real gain steps, changeable live; Airspy front-end AGC / linearity / sensitivity / manual LNA-mixer-VGA (opt-in per radio — the 2016 R2 firmware hangs on gain calls); PPM with "use measured" |
 | Auto-PPM from decoder | ✅ | — | ✅ (per run) |
-| Airspy gain control | ✅ | ✅ | ❌ R2 firmware hangs (documented) |
+| Airspy gain control | ✅ | ✅ | ✅ opt-in per radio (R2 rc10 firmware hangs on it — documented; newer firmware takes it) |
 
 ## 7. Protocols & location
 
@@ -149,3 +149,7 @@ Traffic channels are now sliced out of one FFT of the band per block (`hs_dsp::c
 ## Audio quality (2026-08-21)
 
 The speaker path upsampled 8 kHz audio to the device rate by **linear interpolation with no anti-imaging filter**: a 3 kHz formant's image sat at 5 kHz only 6.6 dB down, a 1 kHz tone's at 7 kHz 17 dB down — the thin, metallic sound listeners reported. `player::SincInterp` (32-tap Blackman-windowed sinc, 128 phases) replaces it; `sinc_interpolation_suppresses_images` measures the 7 and 9 kHz images of a 1 kHz tone at −88 / −91 dB. The stored calls themselves have a normal speech spectrum (no clipping; energy 300–3000 Hz), so the decode was not the main culprit. Vocoder: mbelib renders unvoiced bands from `uvquality` sine components (its default 3); now a Settings control (default 16) since smoother unvoiced synthesis is the other half of "metallic". Channel extraction remains switchable (channelizer / classic) for an on-air A/B.
+
+## Gain controls (2026-08-21)
+
+`hs_source::GainSetting` (AGC / manual dB / Airspy linearity, sensitivity, manual stages with per-stage AGC) and `GainHandle`: a request queued from the UI thread and applied inside the radio's own `read`, so the device is only ever touched by the thread that owns it. Devices tab: RTL-SDR tuner AGC or a slider over the R820T's 29 real steps; Airspy mode/preset/stage controls behind a per-radio opt-in (the R2 firmware this was developed on wedges USB streaming on any gain call — newer firmware does not). "Apply to the running radio" changes gain live; Save keeps it for the next start. Settings are applied when each radio (primary or coverage) is opened.

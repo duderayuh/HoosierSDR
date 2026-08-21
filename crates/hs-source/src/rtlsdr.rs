@@ -5,7 +5,7 @@
 //! source converts them to the interleaved-f32 blocks the decode chain
 //! consumes. Tune, sample rate, and gain are set at construction.
 
-use crate::{SdrSource, SourceError};
+use crate::{GainHandle, GainSetting, SdrSource, SourceError};
 use num_complex::Complex32;
 use seify::{DynDevice, DynRxStreamer, RxStreamer};
 
@@ -16,6 +16,7 @@ pub struct RtlSdrSource {
     sample_rate: f64,
     center_freq: f64,
     scratch: Vec<Complex32>,
+    gain: GainHandle,
 }
 
 impl RtlSdrSource {
@@ -71,7 +72,41 @@ impl RtlSdrSource {
             sample_rate,
             center_freq,
             scratch: Vec::new(),
+            gain: GainHandle::default(),
         })
+    }
+
+    /// A handle that changes this radio's gain while it streams (applied on
+    /// the next `read`, on the reader's own thread).
+    pub fn gain_handle(&self) -> GainHandle {
+        self.gain.clone()
+    }
+
+    /// The overall gain range Seify reports for this radio, (min, max, step)
+    /// in dB, if it exposes one.
+    pub fn gain_range(&self) -> Option<(f64, f64, f64)> {
+        let rx0 = self._dev.rx(0).ok()?;
+        let r = rx0.gain().range().ok()?;
+        match r.items.first()? {
+            seify::RangeItem::Interval(a, b) => Some((*a, *b, 0.0)),
+            seify::RangeItem::Step(a, b, st) => Some((*a, *b, *st)),
+            _ => None,
+        }
+    }
+
+    fn apply_gain(&mut self, g: &GainSetting) -> Result<(), seify::Error> {
+        let rx0 = self._dev.rx(0)?;
+        match g {
+            GainSetting::Agc => {
+                rx0.agc().enable()?;
+            }
+            GainSetting::Manual(db) => {
+                let _ = rx0.agc().disable();
+                rx0.gain().set(*db)?;
+            }
+            _ => {} // Airspy-only settings mean nothing to an RTL-SDR.
+        }
+        Ok(())
     }
 }
 
@@ -85,6 +120,11 @@ impl SdrSource for RtlSdrSource {
     }
 
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        if let Some(g) = self.gain.take() {
+            if let Err(e) = self.apply_gain(&g) {
+                eprintln!("rtl-sdr gain {g:?}: {e:?}");
+            }
+        }
         let pairs = buf.len() / 2;
         if self.scratch.len() < pairs {
             self.scratch.resize(pairs, Complex32::new(0.0, 0.0));

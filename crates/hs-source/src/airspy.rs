@@ -31,7 +31,7 @@
 //! policy as the trunk follower's reader thread). Device-side drops the
 //! firmware reports are counted separately.
 
-use crate::{SdrSource, SourceError};
+use crate::{GainHandle, GainSetting, SdrSource, SourceError};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
@@ -69,6 +69,51 @@ extern "C" {
     fn airspy_set_freq(device: *mut AirspyDevice, freq_hz: u32) -> i32;
     fn airspy_start_rx(device: *mut AirspyDevice, cb: SampleBlockCb, ctx: *mut c_void) -> i32;
     fn airspy_stop_rx(device: *mut AirspyDevice) -> i32;
+    fn airspy_set_lna_gain(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_mixer_gain(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_vga_gain(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_lna_agc(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_mixer_agc(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_linearity_gain(device: *mut AirspyDevice, value: u8) -> i32;
+    fn airspy_set_sensitivity_gain(device: *mut AirspyDevice, value: u8) -> i32;
+}
+
+/// Apply one gain setting to an open device. **Opt-in only**: on the R2
+/// firmware this project was developed against (NOS rc10, 2016) any gain
+/// call wedged USB streaming until the board was replugged, so the app
+/// asks before using these. Newer firmware takes them normally (this is
+/// what SDRTrunk's Airspy linearity/sensitivity controls do).
+///
+/// # Safety
+/// `dev` must be an open device.
+unsafe fn apply_airspy_gain(dev: *mut AirspyDevice, g: &GainSetting) -> Result<(), SourceError> {
+    let check = |what: &str, r: i32| {
+        if r == AIRSPY_SUCCESS {
+            Ok(())
+        } else {
+            Err(SourceError::Unsupported(format!("airspy {what} failed ({r})")))
+        }
+    };
+    match g {
+        GainSetting::AirspyLinearity(v) => check("linearity gain", airspy_set_linearity_gain(dev, (*v).min(21))),
+        GainSetting::AirspySensitivity(v) => check("sensitivity gain", airspy_set_sensitivity_gain(dev, (*v).min(21))),
+        GainSetting::AirspyManual { lna, mixer, vga, lna_agc, mixer_agc } => {
+            check("lna agc", airspy_set_lna_agc(dev, u8::from(*lna_agc)))?;
+            check("mixer agc", airspy_set_mixer_agc(dev, u8::from(*mixer_agc)))?;
+            if !lna_agc {
+                check("lna gain", airspy_set_lna_gain(dev, (*lna).min(14)))?;
+            }
+            if !mixer_agc {
+                check("mixer gain", airspy_set_mixer_gain(dev, (*mixer).min(15)))?;
+            }
+            check("vga gain", airspy_set_vga_gain(dev, (*vga).min(15)))
+        }
+        GainSetting::Agc => {
+            check("lna agc", airspy_set_lna_agc(dev, 1))?;
+            check("mixer agc", airspy_set_mixer_agc(dev, 1))
+        }
+        GainSetting::Manual(_) => Ok(()),
+    }
 }
 
 /// Shared between the USB callback and the reader.
@@ -121,6 +166,7 @@ pub struct AirspySource {
     pending: Vec<f32>,
     pending_pos: usize,
     gain_ignored: Option<f64>,
+    gain: GainHandle,
 }
 
 // SAFETY: the device pointer is only used from the owning thread for
@@ -231,6 +277,7 @@ impl AirspySource {
                 pending: Vec::new(),
                 pending_pos: 0,
                 gain_ignored: gain,
+                gain: GainHandle::default(),
             })
         }
     }
@@ -238,6 +285,19 @@ impl AirspySource {
     /// The gain the caller asked for, which this firmware cannot be given.
     pub fn gain_ignored(&self) -> Option<f64> {
         self.gain_ignored
+    }
+
+    /// Apply a gain setting now (the radio may be streaming). Opt-in: see
+    /// the module notes on firmware that hangs.
+    pub fn set_gain(&mut self, g: &GainSetting) -> Result<(), SourceError> {
+        // SAFETY: `dev` is open for the life of `self`.
+        unsafe { apply_airspy_gain(self.dev, g) }
+    }
+
+    /// A handle that changes this radio's gain from another thread; the
+    /// request is applied on the next `read`.
+    pub fn gain_handle(&self) -> GainHandle {
+        self.gain.clone()
     }
 
     /// Blocks dropped here because the consumer fell behind.
@@ -265,6 +325,11 @@ impl SdrSource for AirspySource {
     }
 
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        if let Some(g) = self.gain.take() {
+            if let Err(e) = self.set_gain(&g) {
+                eprintln!("airspy gain {g:?}: {e:?}");
+            }
+        }
         if self.pending_pos >= self.pending.len() {
             self.pending = match self.rx.recv() {
                 Ok(b) => b,
