@@ -262,8 +262,14 @@ pub fn catalog_user_set(
                 .filter_map(|l| {
                     let f: Vec<&str> = l.split(',').collect();
                     let id = f.first()?.trim().parse().ok()?;
-                    let alias = f.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
-                    let cat = f.get(6).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+                    let alias = f
+                        .get(2)
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default();
+                    let cat = f
+                        .get(6)
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default();
                     Some((id, alias, cat))
                 })
                 .collect()
@@ -451,7 +457,10 @@ fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> 
     };
     let sys = client.system_with_progress(sid, &mut report).map_err(|e| {
         eprintln!("[rr] download {sid} failed: {e}");
-        let _ = app.emit("rr_progress", serde_json::json!({ "sid": sid, "step": "failed", "done": 0, "total": 0 }));
+        let _ = app.emit(
+            "rr_progress",
+            serde_json::json!({ "sid": sid, "step": "failed", "done": 0, "total": 0 }),
+        );
         e.to_string()
     })?;
     report("saving", 3, 3);

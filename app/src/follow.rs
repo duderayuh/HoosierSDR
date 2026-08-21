@@ -305,7 +305,11 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     for (center, label, r, _) in &extra {
         f.add_band(*center, *r);
         emit(FollowEvent::Notice {
-            text: format!("{label} covers {:.4}–{:.4} MHz", (center - r * 0.5 + 12_500.0) / 1e6, (center + r * 0.5 - 12_500.0) / 1e6),
+            text: format!(
+                "{label} covers {:.4}–{:.4} MHz",
+                (center - r * 0.5 + 12_500.0) / 1e6,
+                (center + r * 0.5 - 12_500.0) / 1e6
+            ),
         });
     }
     emit(FollowEvent::Measured {
@@ -333,7 +337,12 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         _ => None,
     });
     if !matches!(p.modulation.to_ascii_lowercase().as_str(), "" | "auto") {
-        emit(FollowEvent::Notice { text: format!("traffic modulation forced to {}", p.modulation.to_uppercase()) });
+        emit(FollowEvent::Notice {
+            text: format!(
+                "traffic modulation forced to {}",
+                p.modulation.to_uppercase()
+            ),
+        });
     }
     let mut last_site = f.site_info();
     let mut rep = Reporter {
@@ -438,7 +447,9 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                     }
                     Err(SourceError::Eof) => break,
                     Err(err) => {
-                        emit(FollowEvent::Notice { text: format!("{label}: capture error: {err:?}") });
+                        emit(FollowEvent::Notice {
+                            text: format!("{label}: capture error: {err:?}"),
+                        });
                         break;
                     }
                 }
@@ -636,10 +647,16 @@ impl Reporter<'_> {
                     unit,
                     group,
                     accepted,
-                } => (if accepted { "affiliated" } else { "refused" }, unit, Some(group)),
-                MobilityEvent::Registered { unit, status } => {
-                    (if status == 0 { "registered" } else { "refused" }, unit, None)
-                }
+                } => (
+                    if accepted { "affiliated" } else { "refused" },
+                    unit,
+                    Some(group),
+                ),
+                MobilityEvent::Registered { unit, status } => (
+                    if status == 0 { "registered" } else { "refused" },
+                    unit,
+                    None,
+                ),
                 MobilityEvent::Located { unit, group } => ("located", unit, Some(group)),
                 MobilityEvent::Deregistered { unit } => ("deregistered", unit, None),
             };
@@ -913,7 +930,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     static NO_LOCKOUT_RANGES: std::sync::Mutex<Vec<(u16, u16)>> = std::sync::Mutex::new(Vec::new());
-    static NO_PRIORITY_RANGES: std::sync::Mutex<Vec<(u16, u16, u8)>> = std::sync::Mutex::new(Vec::new());
+    static NO_PRIORITY_RANGES: std::sync::Mutex<Vec<(u16, u16, u8)>> =
+        std::sync::Mutex::new(Vec::new());
     static NO_RULES: std::sync::Mutex<Vec<crate::units::Rule>> = std::sync::Mutex::new(Vec::new());
     static NO_RECORD: std::sync::Mutex<crate::Policy> = std::sync::Mutex::new(None);
 

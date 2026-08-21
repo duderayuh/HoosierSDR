@@ -51,7 +51,14 @@ impl Queue {
             .iter()
             .position(|c| c.priority > priority)
             .unwrap_or(self.clips.len());
-        self.clips.insert(at, Clip { pcm, priority, queued_at: std::time::Instant::now() });
+        self.clips.insert(
+            at,
+            Clip {
+                pcm,
+                priority,
+                queued_at: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Drop clips that have waited past the limit. Called before a clip is
@@ -167,7 +174,12 @@ impl Audio {
     pub fn backlog(&self) -> (f32, u64) {
         self.queue
             .lock()
-            .map(|q| (q.clips.iter().map(|c| c.pcm.len()).sum::<usize>() as f32 / 8000.0, q.dropped))
+            .map(|q| {
+                (
+                    q.clips.iter().map(|c| c.pcm.len()).sum::<usize>() as f32 / 8000.0,
+                    q.dropped,
+                )
+            })
             .unwrap_or((0.0, 0))
     }
     /// Drop queued clips older than `secs` when their turn comes (0 = never).
@@ -249,10 +261,15 @@ impl SincInterp {
             for (i, t) in taps.iter_mut().enumerate() {
                 // Distance from the output instant to input sample i.
                 let x = i as f64 - (half - 1.0) - frac;
-                let sinc = if x.abs() < 1e-9 { 2.0 * cutoff } else { (2.0 * std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x) };
+                let sinc = if x.abs() < 1e-9 {
+                    2.0 * cutoff
+                } else {
+                    (2.0 * std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x)
+                };
                 let w = {
                     let n = (x + half) / (2.0 * half);
-                    0.42 - 0.5 * (2.0 * std::f64::consts::PI * n).cos() + 0.08 * (4.0 * std::f64::consts::PI * n).cos()
+                    0.42 - 0.5 * (2.0 * std::f64::consts::PI * n).cos()
+                        + 0.08 * (4.0 * std::f64::consts::PI * n).cos()
                 };
                 *t = (sinc * w) as f32;
                 sum += *t as f64;
@@ -361,9 +378,12 @@ mod tests {
     #[test]
     fn sinc_interpolation_suppresses_images() {
         let (fin, fout) = (8000.0, 48000.0);
-        let mut src = (0..).map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / fin as f32).sin());
+        let mut src =
+            (0..).map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / fin as f32).sin());
         let mut it = SincInterp::new(fin, fout);
-        let out: Vec<f32> = (0..48000).map(|_| it.next(|| src.next().unwrap())).collect();
+        let out: Vec<f32> = (0..48000)
+            .map(|_| it.next(|| src.next().unwrap()))
+            .collect();
         let tail = &out[8000..]; // past the filter's warm-up
         let power_at = |hz: f32| {
             let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -378,10 +398,22 @@ mod tests {
         let image = power_at(7000.0);
         let image2 = power_at(9000.0);
         let db = |p: f64| 10.0 * (p / tone).log10();
-        eprintln!("image 7 kHz {:.1} dB, 9 kHz {:.1} dB", db(image), db(image2));
+        eprintln!(
+            "image 7 kHz {:.1} dB, 9 kHz {:.1} dB",
+            db(image),
+            db(image2)
+        );
         assert!(tone > 0.2, "tone lost: {tone}");
-        assert!(db(image) < -60.0, "7 kHz image only {:.1} dB down", db(image));
-        assert!(db(image2) < -60.0, "9 kHz image only {:.1} dB down", db(image2));
+        assert!(
+            db(image) < -60.0,
+            "7 kHz image only {:.1} dB down",
+            db(image)
+        );
+        assert!(
+            db(image2) < -60.0,
+            "9 kHz image only {:.1} dB down",
+            db(image2)
+        );
     }
 
     #[test]

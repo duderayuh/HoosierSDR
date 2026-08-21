@@ -422,7 +422,9 @@ impl ChannelDecoder {
                     self.active_tg = Some(tg);
                 } else if !lcw.is_standard() {
                     if let Some(alias) = self.talker.observe(&lcw) {
-                        self.diag.talker_aliases.push((self.active_tg.unwrap_or(0), alias.clone()));
+                        self.diag
+                            .talker_aliases
+                            .push((self.active_tg.unwrap_or(0), alias.clone()));
                         out.talker_alias = Some(alias);
                     }
                     let key = (lcw.mfid, lcw.lco);
@@ -477,6 +479,14 @@ impl ChannelDecoder {
                     let pcm = self.vocoder.decode(frame);
                     self.diag.voice_frames += 1;
                     self.diag.pcm_samples += pcm.len() as u64;
+                    let errs = self.vocoder.last_errs.max(0) as u32;
+                    self.diag.voice_frame_errors += errs as u64;
+                    if errs > 5 {
+                        self.diag.voice_frames_holding += 1;
+                    }
+                    if errs > self.diag.voice_error_max {
+                        self.diag.voice_error_max = errs;
+                    }
                     out.pcm.extend_from_slice(&pcm);
                 }
             }
@@ -642,8 +652,10 @@ impl ChannelDecoder {
                 ..
             } => {
                 if status == 0 {
-                    out.mobility
-                        .push(MobilityEvent::Located { unit: target, group });
+                    out.mobility.push(MobilityEvent::Located {
+                        unit: target,
+                        group,
+                    });
                 }
             }
             Tsbk::DeregistrationAck { source_id, .. } => {

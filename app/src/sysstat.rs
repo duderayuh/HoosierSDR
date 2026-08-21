@@ -31,11 +31,18 @@ static STARTED: OnceLock<std::time::Instant> = OnceLock::new();
 #[tauri::command]
 pub fn sys_status(state: State<AppState>) -> SysStatus {
     let started = STARTED.get_or_init(std::time::Instant::now);
-    let mut sys = SYS.get_or_init(|| Mutex::new(System::new())).lock().unwrap();
+    let mut sys = SYS
+        .get_or_init(|| Mutex::new(System::new()))
+        .lock()
+        .unwrap();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
     let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_cpu().with_memory());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
+    );
     let (cpu_app, mem_app) = sys
         .process(pid)
         .map(|p| (p.cpu_usage(), p.memory() as f64 / 1e6))
@@ -53,13 +60,20 @@ pub fn sys_status(state: State<AppState>) -> SysStatus {
                 .max_by_key(|d| d.mount_point().as_os_str().len())
                 .map(|d| (d.available_space(), d.total_space()))
         })
-        .or_else(|| disks.list().first().map(|d| (d.available_space(), d.total_space())))
+        .or_else(|| {
+            disks
+                .list()
+                .first()
+                .map(|d| (d.available_space(), d.total_space()))
+        })
         .unwrap_or((0, 0));
     let (calls, minutes) = {
         let db = state.db.lock().unwrap().clone();
         db.and_then(|db| {
             let c = db.lock().unwrap();
-            crate::library::stats(&c).ok().map(|(n, secs, _)| (n, secs / 60.0))
+            crate::library::stats(&c)
+                .ok()
+                .map(|(n, secs, _)| (n, secs / 60.0))
         })
         .unwrap_or((0, 0.0))
     };

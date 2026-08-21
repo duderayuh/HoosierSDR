@@ -15,10 +15,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
-mod encode;
 mod alerts;
 mod conversations;
 mod devices;
+mod encode;
 mod follow;
 mod hook;
 mod library;
@@ -441,7 +441,9 @@ fn library_export(
 fn tg_latest_call(state: State<AppState>, tg: u16) -> Result<Option<library::CallRow>, String> {
     with_db(&state, |c| {
         let mut st = c
-            .prepare("SELECT id FROM calls WHERE tg = ?1 AND audio IS NOT NULL ORDER BY id DESC LIMIT 1")
+            .prepare(
+                "SELECT id FROM calls WHERE tg = ?1 AND audio IS NOT NULL ORDER BY id DESC LIMIT 1",
+            )
             .map_err(|e| e.to_string())?;
         let id: Option<i64> = st
             .query_row([tg], |r| r.get(0))
@@ -678,7 +680,10 @@ fn open_device_with_gain(
                 .and_then(|d| u64::from_str_radix(d.trim_start_matches("0x"), 16).ok());
             let mut src = AirspySource::open(serial, freq, rate, None)
                 .map_err(|e| format!("open Airspy: {e:?}"))?;
-            if let Some(g) = setting.as_ref().filter(|g| !matches!(g, GainSetting::Manual(_))) {
+            if let Some(g) = setting
+                .as_ref()
+                .filter(|g| !matches!(g, GainSetting::Manual(_)))
+            {
                 src.set_gain(g).map_err(|e| format!("Airspy gain: {e:?}"))?;
             }
             let h = src.gain_handle();

@@ -372,8 +372,13 @@ mod tests {
         );
         // GAV = 2 (denied) sets bits 62..61.
         assert!(matches!(
-            parse(&build(true, 0x28, 0, args | (2u64 << 61))).unwrap().tsbk,
-            Tsbk::GroupAffiliationResponse { accepted: false, .. }
+            parse(&build(true, 0x28, 0, args | (2u64 << 61)))
+                .unwrap()
+                .tsbk,
+            Tsbk::GroupAffiliationResponse {
+                accepted: false,
+                ..
+            }
         ));
         // Unit Registration Response: RV 0, system 0x6BD, source id and
         // address both 0xBEEF1.

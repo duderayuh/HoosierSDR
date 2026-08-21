@@ -359,7 +359,11 @@ mod patch_tests {
 pub enum MobilityEvent {
     /// A radio affiliated to a talkgroup (or was refused when `accepted` is
     /// false).
-    Affiliated { unit: u32, group: u16, accepted: bool },
+    Affiliated {
+        unit: u32,
+        group: u16,
+        accepted: bool,
+    },
     /// A radio registered on the system (`status` 0 = accepted).
     Registered { unit: u32, status: u8 },
     /// A radio registered its location for a talkgroup.
@@ -511,10 +515,7 @@ mod affiliation_tests {
     fn the_table_is_bounded_and_forgets_the_quietest() {
         let mut t = AffiliationTable::new();
         for u in 0..(AFFILIATION_CAP as u32 + 10) {
-            t.observe(
-                MobilityEvent::Registered { unit: u, status: 0 },
-                u as f64,
-            );
+            t.observe(MobilityEvent::Registered { unit: u, status: 0 }, u as f64);
         }
         assert_eq!(t.len(), AFFILIATION_CAP);
         assert!(t.members(0).is_empty());

@@ -770,7 +770,11 @@ impl TrunkFollower {
         // agreement with the control channel's modulation counts toward
         // dropping the second decoder; disagreement resets it.
         if c.dual && n_c4 + n_cq > 0 {
-            let winner = if pick_c4fm { Modulation::C4fm } else { Modulation::Cqpsk };
+            let winner = if pick_c4fm {
+                Modulation::C4fm
+            } else {
+                Modulation::Cqpsk
+            };
             if winner == self.modulation {
                 self.mod_confirmed += 1;
             } else {
@@ -836,12 +840,8 @@ impl TrunkFollower {
             self.affiliations.observe(*ev, self.elapsed_secs);
         }
         out.mobility = control_out.mobility.clone();
-        out.locations.extend(
-            control_out
-                .locations
-                .iter()
-                .map(|l| (l.llid, l.lat, l.lon)),
-        );
+        out.locations
+            .extend(control_out.locations.iter().map(|l| (l.llid, l.lat, l.lon)));
 
         // A control channel transmits continuously, so a stretch with no
         // frame sync means it is gone — the site rotated it onto one of the
@@ -937,13 +937,21 @@ impl TrunkFollower {
                 // The channelizer delivers the channel at baseband, 48 kHz;
                 // a classic call decimates it out of the wideband stream.
                 c4fm: ChannelDecoder::with_offset(
-                    if self.use_channelizer { CHANNEL_RATE } else { band_rate },
+                    if self.use_channelizer {
+                        CHANNEL_RATE
+                    } else {
+                        band_rate
+                    },
                     Modulation::C4fm,
                     EqMode::Bypass,
                     if self.use_channelizer { 0.0 } else { offset },
                 ),
                 cqpsk: ChannelDecoder::with_offset(
-                    if self.use_channelizer { CHANNEL_RATE } else { band_rate },
+                    if self.use_channelizer {
+                        CHANNEL_RATE
+                    } else {
+                        band_rate
+                    },
                     Modulation::Cqpsk,
                     EqMode::Enabled,
                     if self.use_channelizer { 0.0 } else { offset },
@@ -971,7 +979,6 @@ impl TrunkFollower {
         out
     }
 
-
     /// One block of one band: drop locked-out calls, slice the channelizer,
     /// run each call's decoders, retire what finished.
     fn decode_band(&mut self, which: Option<usize>, iq: &[f32], secs: f64, out: &mut FollowOutput) {
@@ -979,7 +986,8 @@ impl TrunkFollower {
         // A talkgroup locked out mid-call: stop following it now, silently —
         // the listener asked not to hear it, so it gets no audio and no row.
         if !self.lockout.is_empty() || self.allowlist.is_some() {
-            let keep: Vec<bool> = band.active
+            let keep: Vec<bool> = band
+                .active
                 .iter()
                 .map(|c| self.wanted(c.talkgroup))
                 .collect();
@@ -1001,7 +1009,8 @@ impl TrunkFollower {
             Vec::new()
         } else {
             let offsets: Vec<f64> = band.active.iter().map(|c| c.offset_hz).collect();
-            let ch = band.chan
+            let ch = band
+                .chan
                 .get_or_insert_with(|| Channelizer::new(band.sample_rate, &offsets));
             if offsets != band.chan_offsets {
                 ch.set_channels(&offsets);
@@ -1010,10 +1019,17 @@ impl TrunkFollower {
             ch.process(iq)
         };
         let empty: Vec<f32> = Vec::new();
-        let per_call: Vec<&[f32]> = band.active
+        let per_call: Vec<&[f32]> = band
+            .active
             .iter()
             .enumerate()
-            .map(|(i, c)| if c.wideband { iq } else { channels.get(i).map(|v| v.as_slice()).unwrap_or(&empty) })
+            .map(|(i, c)| {
+                if c.wideband {
+                    iq
+                } else {
+                    channels.get(i).map(|v| v.as_slice()).unwrap_or(&empty)
+                }
+            })
             .collect();
         // Each call's decoders run on their own thread for this block: the
         // channelizer has already done the shared work, so the per-call part
@@ -1022,7 +1038,8 @@ impl TrunkFollower {
         let site = self.forced.unwrap_or(self.modulation);
         let results: Vec<(crate::decoder::DecodeOutput, crate::decoder::DecodeOutput)> =
             std::thread::scope(|sc| {
-                let handles: Vec<_> = band.active
+                let handles: Vec<_> = band
+                    .active
                     .iter_mut()
                     .zip(per_call.iter())
                     .map(|(call, samples)| {
@@ -1035,7 +1052,9 @@ impl TrunkFollower {
                             if !call.wideband {
                                 filtered.reserve(samples.len());
                                 for pair in samples.chunks_exact(2) {
-                                    if let Some(y) = call.filter.push(hs_dsp::C32::new(pair[0], pair[1])) {
+                                    if let Some(y) =
+                                        call.filter.push(hs_dsp::C32::new(pair[0], pair[1]))
+                                    {
                                         filtered.push(y.re);
                                         filtered.push(y.im);
                                     }
@@ -1068,7 +1087,10 @@ impl TrunkFollower {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("call decoder")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("call decoder"))
+                    .collect()
             });
         for (call, (a, b)) in band.active.iter_mut().zip(results) {
             call.syncs_c4fm += a.syncs;
@@ -1078,7 +1100,11 @@ impl TrunkFollower {
             // all after a second gets the other decoder too. The site rule
             // is strong but not a guarantee, and the channelizer makes the
             // second decoder cheap — far cheaper than a silent call.
-            if !call.dual && call.age > 1.0 && call.syncs_c4fm + call.syncs_cqpsk == 0 && self.forced.is_none() {
+            if !call.dual
+                && call.age > 1.0
+                && call.syncs_c4fm + call.syncs_cqpsk == 0
+                && self.forced.is_none()
+            {
                 call.dual = true;
             }
             call.pcm_c4fm.extend_from_slice(&a.pcm);
@@ -1150,7 +1176,11 @@ impl TrunkFollower {
         let in_band: Vec<u64> = candidates
             .iter()
             .copied()
-            .filter(|&hz| self.band.offset_of(hz as f64 + self.correction_hz).is_some())
+            .filter(|&hz| {
+                self.band
+                    .offset_of(hz as f64 + self.correction_hz)
+                    .is_some()
+            })
             .collect();
 
         let Some(&next_hz) = in_band.get(self.hunt_next % in_band.len().max(1)) else {
@@ -1177,7 +1207,6 @@ impl TrunkFollower {
         out.control_moved = Some((self.control_nominal_hz, next_hz));
         self.control_nominal_hz = next_hz;
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,7 +1441,12 @@ impl TrunkFollower {
             source_unit: 0,
             offset_hz: offset,
             c4fm: ChannelDecoder::with_offset(CHANNEL_RATE, Modulation::C4fm, EqMode::Bypass, 0.0),
-            cqpsk: ChannelDecoder::with_offset(CHANNEL_RATE, Modulation::Cqpsk, EqMode::Enabled, 0.0),
+            cqpsk: ChannelDecoder::with_offset(
+                CHANNEL_RATE,
+                Modulation::Cqpsk,
+                EqMode::Enabled,
+                0.0,
+            ),
             dual: true,
             age: 0.0,
             filter: channel_filter(),
@@ -1577,11 +1611,17 @@ mod capture_tests {
             "neighbours name another system: {:?}",
             s.neighbours
         );
-        assert!(s.rfss.is_some() && s.site.is_some(), "RFSS/site from RfssStatus");
+        assert!(
+            s.rfss.is_some() && s.site.is_some(),
+            "RFSS/site from RfssStatus"
+        );
         for (sys, r, st, hz) in &s.neighbours {
             eprintln!("neighbour sys {sys:#x} rfss {r} site {st} {hz:?}");
             if let Some(hz) = hz {
-                assert!((851_000_000..=869_000_000).contains(hz), "neighbour {hz} out of band");
+                assert!(
+                    (851_000_000..=869_000_000).contains(hz),
+                    "neighbour {hz} out of band"
+                );
             }
         }
     }
@@ -1597,7 +1637,8 @@ mod load_tests {
     #[ignore]
     fn twelve_calls_at_once_realtime_factor() {
         let rate = 9_600_000.0;
-        let mut f = TrunkFollower::new(rate, 855e6, 851_537_500.0, 851_537_500.0, Modulation::Cqpsk);
+        let mut f =
+            TrunkFollower::new(rate, 855e6, 851_537_500.0, 851_537_500.0, Modulation::Cqpsk);
         f.set_max_calls(12);
         for k in 0..12u64 {
             f.push_fake_call(100 + k as u16, 852_000_000 + k * 250_000);
@@ -1619,6 +1660,9 @@ mod load_tests {
             fed += 0.1;
         }
         let el = start.elapsed().as_secs_f64();
-        eprintln!("12 calls: {secs} s of IQ in {el:.2} s → {:.2}x real time", secs / el);
+        eprintln!(
+            "12 calls: {secs} s of IQ in {el:.2} s → {:.2}x real time",
+            secs / el
+        );
     }
 }

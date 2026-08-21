@@ -382,7 +382,13 @@ fn traffic_audio_decodes_through_the_channelizer() {
     let mut band = Vec::new();
     add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
     add_to_band(&mut band, &traffic_dibits_n(6), TRAFFIC + TUNER_ERROR);
-    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
     let block = (RATE as usize / 10) * 2;
     let mut completed = Vec::new();
     let mut started = 0;
@@ -404,7 +410,10 @@ fn traffic_audio_decodes_through_the_channelizer() {
         call.syncs_cqpsk,
         call.modulation
     );
-    assert!(call.syncs_cqpsk > 0, "no CQPSK frame sync on the traffic channel");
+    assert!(
+        call.syncs_cqpsk > 0,
+        "no CQPSK frame sync on the traffic channel"
+    );
     assert!(!call.pcm.is_empty(), "call completed with no audio");
     assert_eq!(call.modulation, Some(Modulation::Cqpsk));
 }
@@ -418,11 +427,21 @@ fn neighbour_call(classic: bool) -> hs_core::follow::Call {
     add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
     add_to_band(&mut band, &traffic_dibits_n(6), TRAFFIC + TUNER_ERROR);
     let mut neighbour = Vec::new();
-    add_to_band(&mut neighbour, &traffic_dibits_n(6), TRAFFIC + 12_500.0 + TUNER_ERROR);
+    add_to_band(
+        &mut neighbour,
+        &traffic_dibits_n(6),
+        TRAFFIC + 12_500.0 + TUNER_ERROR,
+    );
     for (b, n) in band.iter_mut().zip(neighbour.iter()) {
         *b += 3.0 * n;
     }
-    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
     f.set_channelizer(!classic);
     let block = (RATE as usize / 10) * 2;
     let mut completed = Vec::new();
@@ -448,7 +467,10 @@ fn neighbour_call(classic: bool) -> hs_core::follow::Call {
 #[test]
 fn a_loud_adjacent_channel_does_not_garble_the_call() {
     let call = neighbour_call(false);
-    assert!(call.syncs_cqpsk > 0, "traffic channel lost to its neighbour");
+    assert!(
+        call.syncs_cqpsk > 0,
+        "traffic channel lost to its neighbour"
+    );
     assert!(!call.pcm.is_empty(), "no audio with a loud neighbour");
     assert_eq!(call.modulation, Some(Modulation::Cqpsk));
 }
@@ -456,7 +478,10 @@ fn a_loud_adjacent_channel_does_not_garble_the_call() {
 #[test]
 fn a_loud_adjacent_channel_does_not_garble_the_call_classically() {
     let call = neighbour_call(true);
-    assert!(call.syncs_cqpsk > 0, "traffic channel lost to its neighbour");
+    assert!(
+        call.syncs_cqpsk > 0,
+        "traffic channel lost to its neighbour"
+    );
     assert!(!call.pcm.is_empty(), "no audio with a loud neighbour");
 }
 
@@ -494,7 +519,13 @@ fn a_grant_outside_the_primary_band_decodes_on_an_extra_radio() {
             band2[n * 2 + 1] += s.re * sin + s.im * cos;
         }
     }
-    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
     let extra = f.add_band(center2, RATE);
     assert_eq!(f.bands().len(), 2);
     let block = (RATE as usize / 10) * 2;
@@ -519,12 +550,25 @@ fn a_grant_outside_the_primary_band_decodes_on_an_extra_radio() {
     }
     completed.extend(f.finish());
     assert!(
-        started.iter().any(|(tg, hz)| *tg == TG2 && *hz == traffic2 as u64),
+        started
+            .iter()
+            .any(|(tg, hz)| *tg == TG2 && *hz == traffic2 as u64),
         "grant on the extra band not followed: started {started:?}, out of band {oob}"
     );
-    assert!(started.iter().any(|(tg, _)| *tg == TALKGROUP), "primary band's call not followed");
-    let c2 = completed.iter().find(|c| c.talkgroup == TG2).expect("extra-band call reported");
-    eprintln!("extra band: {} samples, syncs c4fm {} cqpsk {}", c2.pcm.len(), c2.syncs_c4fm, c2.syncs_cqpsk);
+    assert!(
+        started.iter().any(|(tg, _)| *tg == TALKGROUP),
+        "primary band's call not followed"
+    );
+    let c2 = completed
+        .iter()
+        .find(|c| c.talkgroup == TG2)
+        .expect("extra-band call reported");
+    eprintln!(
+        "extra band: {} samples, syncs c4fm {} cqpsk {}",
+        c2.pcm.len(),
+        c2.syncs_c4fm,
+        c2.syncs_cqpsk
+    );
     assert!(c2.syncs_cqpsk > 0, "no sync on the extra band's call");
     assert!(!c2.pcm.is_empty(), "extra band's call produced no audio");
 }

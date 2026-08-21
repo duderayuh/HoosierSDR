@@ -266,13 +266,17 @@ pub fn previous_on_talkgroup(
     window_secs: i64,
 ) -> Result<Vec<String>, String> {
     let start: i64 = c
-        .query_row("SELECT start FROM calls WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row("SELECT start FROM calls WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
         .map_err(|e| format!("previous: {e}"))?;
     let mut st = c
         .prepare("SELECT audio FROM calls WHERE tg = ?1 AND id < ?2 AND start >= ?3 AND audio IS NOT NULL ORDER BY id DESC LIMIT ?4")
         .map_err(|e| e.to_string())?;
     let rows = st
-        .query_map(params![tg, id, start - window_secs, n as i64], |r| r.get::<_, String>(0))
+        .query_map(params![tg, id, start - window_secs, n as i64], |r| {
+            r.get::<_, String>(0)
+        })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
 }
@@ -281,11 +285,19 @@ pub fn previous_on_talkgroup(
 pub fn latest_call(c: &Connection, tgs: &[u16]) -> Result<Option<CallRow>, String> {
     if tgs.is_empty() {
         return c
-            .query_row(&format!("SELECT {COLS} FROM calls ORDER BY id DESC LIMIT 1"), [], row)
+            .query_row(
+                &format!("SELECT {COLS} FROM calls ORDER BY id DESC LIMIT 1"),
+                [],
+                row,
+            )
             .optional()
             .map_err(|e| format!("latest: {e}"));
     }
-    let list = tgs.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+    let list = tgs
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     c.query_row(
         &format!("SELECT {COLS} FROM calls WHERE tg IN ({list}) ORDER BY id DESC LIMIT 1"),
         [],

@@ -152,6 +152,16 @@ pub struct Diagnostics {
     pub encrypted_skips: Vec<u16>,
     pub voice_frames: u64,
     pub pcm_samples: u64,
+    /// Cumulative per-frame IMBE FEC error count (mbelib's `errs2`): how many
+    /// bit errors the Golay/Hamming decoders had to correct across all voice
+    /// frames. A frame near 0 is clean; the decoder mutes/holds-and-repeats a
+    /// frame once this passes 5, which is what garbled audio sounds like.
+    pub voice_frame_errors: u64,
+    /// Voice frames whose `errs2` exceeded 5 — the ones mbelib rejected as too
+    /// corrupt and concealed by holding the previous frame.
+    pub voice_frames_holding: u64,
+    /// Worst single-frame error count seen.
+    pub voice_error_max: u32,
     pub health: SymbolHealth,
 }
 
@@ -207,6 +217,18 @@ impl Diagnostics {
         ));
         s.push_str(&format!("  \"voice_frames\": {},\n", self.voice_frames));
         s.push_str(&format!("  \"pcm_samples\": {},\n", self.pcm_samples));
+        s.push_str(&format!(
+            "  \"voice_frame_errors\": {},\n",
+            self.voice_frame_errors
+        ));
+        s.push_str(&format!(
+            "  \"voice_frames_holding\": {},\n",
+            self.voice_frames_holding
+        ));
+        s.push_str(&format!(
+            "  \"voice_error_max\": {},\n",
+            self.voice_error_max
+        ));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
         s.push_str(&format!("  \"tsbks\": {},\n", self.tsbks));
         s.push_str(&format!(
