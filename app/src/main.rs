@@ -23,6 +23,7 @@ mod rr;
 mod stream;
 mod transcribe;
 mod units;
+mod upload;
 
 #[derive(Default)]
 struct AppState {
@@ -53,6 +54,8 @@ struct AppState {
     spectrum: Arc<Mutex<(usize, usize)>>,
     /// Live Icecast/Broadcastify feed, when enabled.
     streamer: stream::Shared,
+    /// Per-call uploads (rdio-scanner / OpenMHz / Broadcastify Calls).
+    uploader: upload::Shared,
 }
 
 impl AppState {
@@ -427,6 +430,7 @@ fn start_follow(
     let format = state.format.lock().unwrap().clone();
     let spectrum = state.spectrum.clone();
     let streamer = state.streamer.clone();
+    let uploader = state.uploader.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -474,6 +478,37 @@ fn start_follow(
                 spectrum: Some(&spectrum),
             };
             follow::run(src, &params, &catalog, &live, &running, &mut |ev| {
+                if let follow::FollowEvent::Call {
+                    id: Some(id),
+                    wav: Some(wav),
+                    tg,
+                    name,
+                    source,
+                    unit_name,
+                    freq_mhz,
+                    secs,
+                    emergency,
+                    patched_with,
+                    ..
+                } = &ev
+                {
+                    if let Some(u) = uploader.lock().unwrap().as_ref() {
+                        u.submit(upload::Job {
+                            id: *id,
+                            audio: wav.clone(),
+                            start: library::now(),
+                            secs: *secs,
+                            tg: *tg,
+                            tg_name: name.clone(),
+                            unit: *source,
+                            unit_name: unit_name.clone(),
+                            freq_hz: (*freq_mhz * 1e6).round() as u64,
+                            emergency: *emergency,
+                            patched_with: patched_with.clone(),
+                            system: params.system_name.clone(),
+                        });
+                    }
+                }
                 if let follow::FollowEvent::Call { pcm, priority, .. } = &ev {
                     if !pcm.is_empty() {
                         if let Some(st) = streamer.lock().unwrap().as_ref() {
@@ -774,6 +809,7 @@ fn main() {
                 let lib = base.join("library");
                 match library::open(&lib) {
                     Ok(c) => {
+                        upload::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Mutex::new(c));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -792,6 +828,10 @@ fn main() {
             }
             transcribe::spawn_pump(app.handle().clone());
             stream::autostart(app.handle());
+            let up = upload::load_settings(app.handle());
+            if up.rdio.enabled || up.openmhz.enabled || up.broadcastify.enabled {
+                *state.uploader.lock().unwrap() = Some(upload::start(app.handle().clone(), up));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -823,6 +863,10 @@ fn main() {
             format_set,
             stream::stream_get,
             stream::stream_configure,
+            upload::uploads_get,
+            upload::uploads_configure,
+            upload::uploads_test,
+            upload::upload_call,
             spectrum_set,
             transcribe::transcribe_probe,
             transcribe::transcribe_configure,
