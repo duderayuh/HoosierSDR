@@ -111,8 +111,28 @@ pub struct Call {
     pub syncs_cqpsk: u32,
     /// Talkgroups patched to this one; audio may be shared with them.
     pub patched_with: Vec<u16>,
+    /// A radio signalled emergency during the call (link-control service
+    /// option bit).
+    pub emergency: bool,
     /// 8 kHz mono audio.
     pub pcm: Vec<i16>,
+}
+
+/// What the control channel has said about its site so far.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SiteInfo {
+    /// Most-seen NAC among BCH-clean NIDs.
+    pub nac: Option<u16>,
+    pub wacn: Option<u32>,
+    pub sys_id: Option<u16>,
+    /// Control channel currently followed (nominal Hz).
+    pub control_hz: u64,
+    /// Alternate control channels the site announced (Hz).
+    pub alternates_hz: Vec<u64>,
+    /// Channel plans: (iden, base Hz, spacing Hz).
+    pub idens: Vec<(u8, u64, u64)>,
+    /// Active patches: (supergroup, members).
+    pub patches: Vec<(u16, Vec<u16>)>,
 }
 
 /// What one processed block produced.
@@ -133,6 +153,9 @@ pub struct FollowOutput {
     pub grants_encrypted: Vec<(u16, u64)>,
     /// Grants skipped because the listener locked the talkgroup out.
     pub grants_locked: Vec<(u16, u64)>,
+    /// Grants not followed because every decoder slot was busy with a call
+    /// of equal or higher priority.
+    pub grants_busy: Vec<(u16, u64)>,
     /// The control channel went quiet and the follower retuned to an
     /// alternate: (old nominal Hz, new nominal Hz).
     pub control_moved: Option<(u64, u64)>,
@@ -188,6 +211,9 @@ pub struct TrunkFollower {
     /// When set, the only talkgroups followed — a playlist. Grants outside it
     /// count as locked. The lockout still applies within it.
     allowlist: Option<std::collections::HashSet<u16>>,
+    /// Talkgroup priorities, 1 (highest) … 99; unlisted = 50. Decides which
+    /// call gives way when every decoder slot is busy.
+    priority: std::collections::HashMap<u16, u8>,
 }
 
 impl TrunkFollower {
@@ -242,6 +268,74 @@ impl TrunkFollower {
             lost_reported: false,
             lockout: std::collections::HashSet::new(),
             allowlist: None,
+            priority: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Talkgroup priorities (1 = highest, 99 = lowest; unlisted = 50). When
+    /// the decoder slots are full, a grant for a higher-priority talkgroup
+    /// retires the lowest-priority call in progress; equal priority waits.
+    pub fn set_priorities(&mut self, p: impl IntoIterator<Item = (u16, u8)>) {
+        self.priority = p
+            .into_iter()
+            .map(|(tg, pr)| (tg, pr.clamp(1, 99)))
+            .collect();
+    }
+
+    pub fn priority_of(&self, tg: u16) -> u8 {
+        self.priority.get(&tg).copied().unwrap_or(50)
+    }
+
+    /// How long a call lingers: `hang_blocks` after its terminator, and
+    /// `quiet_blocks` with no frame sync before it is considered over (the
+    /// fallback when the terminator is lost). Blocks are whatever the caller
+    /// feeds `process` — ~27 ms at 2.4 MSPS with 65536-sample blocks.
+    pub fn set_hang(&mut self, hang_blocks: u32, quiet_blocks: u32) {
+        self.hang_limit = hang_blocks.max(1);
+        self.quiet_limit = quiet_blocks.max(1);
+    }
+
+    pub fn hang(&self) -> (u32, u32) {
+        (self.hang_limit, self.quiet_limit)
+    }
+
+    /// Most decoder slots used at once.
+    pub fn set_max_calls(&mut self, n: usize) {
+        self.max_calls = n.max(1);
+    }
+
+    /// Which active call should give way to a grant of priority `pri`, if any:
+    /// the worst-priority call, and only if it is strictly worse than `pri`.
+    fn contention_victim(&self, pri: u8) -> Option<usize> {
+        let (i, worst) = self
+            .active
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, self.priority_of(c.talkgroup)))
+            .max_by_key(|(_, p)| *p)?;
+        (worst > pri).then_some(i)
+    }
+
+    /// What the control channel has announced about this site.
+    pub fn site_info(&self) -> SiteInfo {
+        let d = self.control.diagnostics();
+        let mut counts: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        for n in d.nids.iter().filter(|n| n.bch_errors == 0) {
+            *counts.entry(n.nac).or_default() += 1;
+        }
+        let nac = counts.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n);
+        let site = self.control.site();
+        SiteInfo {
+            nac,
+            wacn: site.system.map(|s| s.wacn),
+            sys_id: site.system.map(|s| s.sys_id),
+            control_hz: self.control_nominal_hz,
+            alternates_hz: site.secondary_cc_freqs(),
+            idens: site
+                .idens()
+                .map(|(id, p)| (id, p.base_freq_hz, p.spacing_hz))
+                .collect(),
+            patches: self.control.patches().patches().to_vec(),
         }
     }
 
@@ -325,6 +419,13 @@ impl TrunkFollower {
             d.nids.iter().filter(|n| n.bch_errors == 0).count()
         };
         let (n_c4, n_cq) = (clean(c.c4fm.diagnostics()), clean(c.cqpsk.diagnostics()));
+        let emergency = c
+            .c4fm
+            .diagnostics()
+            .link_control
+            .iter()
+            .chain(c.cqpsk.diagnostics().link_control.iter())
+            .any(|l| l.emergency);
         let pick_c4fm = match n_c4.cmp(&n_cq) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
@@ -361,6 +462,7 @@ impl TrunkFollower {
             freq_hz: c.freq_hz,
             modulation,
             patched_with: self.control.patches().siblings(c.talkgroup),
+            emergency,
             pcm,
         }
     }
@@ -490,7 +592,17 @@ impl TrunkFollower {
                 out.completed.push(done);
             }
             if self.active.len() >= self.max_calls {
-                continue;
+                match self.contention_victim(self.priority_of(g.talkgroup)) {
+                    Some(i) => {
+                        let old = self.active.remove(i);
+                        let done = self.retire(old);
+                        out.completed.push(done);
+                    }
+                    None => {
+                        out.grants_busy.push((g.talkgroup, g.freq_hz));
+                        continue;
+                    }
+                }
             }
             // Only follow a channel that is actually inside this capture. A
             // trunked system grants across its whole band, most of which a
@@ -786,4 +898,89 @@ pub fn in_band(sample_rate: f64, center_hz: f64, control_hz: f64) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+impl TrunkFollower {
+    /// A placeholder active call for contention tests (decoders idle).
+    fn push_fake_call(&mut self, talkgroup: u16, freq_hz: u64) {
+        let offset = freq_hz as f64 - self.center_hz;
+        self.active.push(ActiveCall {
+            freq_hz,
+            talkgroup,
+            source_unit: 0,
+            c4fm: ChannelDecoder::with_offset(
+                self.sample_rate,
+                Modulation::C4fm,
+                EqMode::Bypass,
+                offset,
+            ),
+            cqpsk: ChannelDecoder::with_offset(
+                self.sample_rate,
+                Modulation::Cqpsk,
+                EqMode::Enabled,
+                offset,
+            ),
+            pcm_c4fm: Vec::new(),
+            pcm_cqpsk: Vec::new(),
+            syncs_c4fm: 0,
+            syncs_cqpsk: 0,
+            quiet: 0,
+            ending: 0,
+        });
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    fn follower() -> TrunkFollower {
+        TrunkFollower::new(
+            2_400_000.0,
+            851e6,
+            851_012_500.0,
+            851_012_500.0,
+            Modulation::Cqpsk,
+        )
+    }
+
+    /// With every slot busy, a higher-priority grant evicts the lowest-priority
+    /// call; an equal- or lower-priority grant waits.
+    #[test]
+    fn higher_priority_grant_evicts_the_lowest_priority_call() {
+        let mut f = follower();
+        f.set_max_calls(2);
+        f.set_priorities([(100, 10), (200, 60)]);
+        f.push_fake_call(100, 851_100_000);
+        f.push_fake_call(200, 851_200_000);
+        // Priority 50 (unlisted) beats 60 → the TG 200 call (index 1) gives way.
+        assert_eq!(f.contention_victim(50), Some(1));
+        // Priority 60 ties the worst call → nobody gives way.
+        assert_eq!(f.contention_victim(60), None);
+        // Nothing beats priority 1's claim, but 1 itself beats everyone.
+        assert_eq!(f.contention_victim(1), Some(1));
+        f.set_priorities([(100, 1), (200, 1)]);
+        assert_eq!(f.contention_victim(1), None);
+        assert_eq!(f.contention_victim(99), None);
+    }
+
+    #[test]
+    fn priorities_clamp_and_default() {
+        let mut f = follower();
+        f.set_priorities([(7, 0), (8, 200)]);
+        assert_eq!(f.priority_of(7), 1);
+        assert_eq!(f.priority_of(8), 99);
+        assert_eq!(f.priority_of(9), 50);
+        f.set_hang(0, 0);
+        assert_eq!(f.hang(), (1, 1));
+    }
+
+    #[test]
+    fn site_info_starts_empty_and_names_the_control() {
+        let f = follower();
+        let s = f.site_info();
+        assert_eq!(s.control_hz, 851_012_500);
+        assert!(s.nac.is_none() && s.idens.is_empty() && s.patches.is_empty());
+    }
 }

@@ -42,7 +42,8 @@ fn app_key() -> Option<String> {
 
 fn client(app: &AppHandle) -> Result<RrClient, String> {
     let p = load_prefs(app);
-    let key = app_key().ok_or("no RadioReference app key: this build has none embedded, so enter one in Config")?;
+    let key = app_key()
+        .ok_or("no RadioReference app key: this build has none embedded, so enter one in Config")?;
     if p.username.is_empty() {
         return Err("save your RadioReference username and password first".into());
     }
@@ -114,8 +115,11 @@ fn load_prefs(app: &AppHandle) -> Prefs {
 
 fn save_prefs(app: &AppHandle, p: &Prefs) -> Result<(), String> {
     let path = prefs_path(app)?;
-    std::fs::write(&path, serde_json::to_string_pretty(p).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(p).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn secret(user: &str) -> Result<keyring::Entry, String> {
@@ -158,7 +162,12 @@ pub fn rr_settings(app: AppHandle, state: State<AppState>) -> RrSettings {
         username: p.username,
         sid: p.sid,
         system_name: p.system_name,
-        catalog_len: state.catalog.lock().unwrap().as_ref().map_or(0, |c| c.len()),
+        catalog_len: state
+            .catalog
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |c| c.len()),
     }
 }
 
@@ -257,7 +266,11 @@ pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<R
                     .unwrap_or_else(|| format!("site {}", s.site_id)),
                 nac: s.nac,
                 tdma_control: s.tdma_control,
-                control_mhz: s.control_channels_hz.iter().map(|h| *h as f64 / 1e6).collect(),
+                control_mhz: s
+                    .control_channels_hz
+                    .iter()
+                    .map(|h| *h as f64 / 1e6)
+                    .collect(),
                 span_mhz: lo.zip(hi).map(|(a, b)| (a as f64 / 1e6, b as f64 / 1e6)),
             }
         })
@@ -349,29 +362,43 @@ pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>,
 
 #[tauri::command]
 pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<StateView, String> {
-    cached(&app, &format!("state_{stid}"), refresh.unwrap_or(false), || {
-        let c = client(&app)?;
-        let info = c.state_info(stid).map_err(|e| e.to_string())?;
-        Ok(StateView {
-            counties: info
-                .counties
-                .into_iter()
-                .map(|c| CountyRow {
-                    ctid: c.ctid,
-                    name: c.name,
-                })
-                .collect(),
-            systems: sys_rows(info.systems),
-        })
-    })
+    cached(
+        &app,
+        &format!("state_{stid}"),
+        refresh.unwrap_or(false),
+        || {
+            let c = client(&app)?;
+            let info = c.state_info(stid).map_err(|e| e.to_string())?;
+            Ok(StateView {
+                counties: info
+                    .counties
+                    .into_iter()
+                    .map(|c| CountyRow {
+                        ctid: c.ctid,
+                        name: c.name,
+                    })
+                    .collect(),
+                systems: sys_rows(info.systems),
+            })
+        },
+    )
 }
 
 #[tauri::command]
-pub fn rr_county(app: AppHandle, ctid: u32, refresh: Option<bool>) -> Result<Vec<SystemRow>, String> {
-    cached(&app, &format!("county_{ctid}"), refresh.unwrap_or(false), || {
-        let c = client(&app)?;
-        Ok(sys_rows(c.county_systems(ctid).map_err(|e| e.to_string())?))
-    })
+pub fn rr_county(
+    app: AppHandle,
+    ctid: u32,
+    refresh: Option<bool>,
+) -> Result<Vec<SystemRow>, String> {
+    cached(
+        &app,
+        &format!("county_{ctid}"),
+        refresh.unwrap_or(false),
+        || {
+            let c = client(&app)?;
+            Ok(sys_rows(c.county_systems(ctid).map_err(|e| e.to_string())?))
+        },
+    )
 }
 
 #[tauri::command]
@@ -393,8 +420,8 @@ mod tests {
     /// prints, the key.
     #[test]
     fn this_build_embeds_a_key_when_configured() {
-        let configured = std::env::var("HS_RR_APP_KEY").is_ok()
-            || std::path::Path::new(".rr_app_key").exists();
+        let configured =
+            std::env::var("HS_RR_APP_KEY").is_ok() || std::path::Path::new(".rr_app_key").exists();
         if configured {
             assert!(super::embedded_key().is_some_and(|k| k.len() >= 8));
         }

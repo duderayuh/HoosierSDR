@@ -65,16 +65,21 @@
             <div class="body tight">
               <div class="kv">
                 <div><span class="k">Frequency</span><span class="v mono" id="tunedHz">—</span></div>
+                <div><span class="k">NAC · System</span><span class="v mono" id="r-site">—</span></div>
                 <div><span class="k">Syncs</span><span class="v mono" id="r-syncs">0</span></div>
                 <div><span class="k">Calls</span><span class="v mono sig" id="r-grants">0</span></div>
                 <div><span class="k">Voice</span><span class="v mono" id="r-voice">0.0<small>s</small></span></div>
-                <div><span class="k">Stream</span><span class="v mono" id="r-stream">—</span></div>
-                <div><span class="k">Dropped</span><span class="v mono" id="r-syncerr">—</span></div>
+                <div><span class="k">Stream · drops</span><span class="v mono" id="r-stream">—</span></div>
               </div>
               <div class="kv" id="chanReadouts" style="display:none">
                 <div><span class="k">Lock</span><span class="v mono sig" id="r-lock">—</span><div class="bar"><i id="r-lockbar" style="width:0%"></i></div></div>
                 <div><span class="k">Equalizer</span><span class="v mono" id="r-eq">CMA</span></div>
+                <div><span class="k">Dropped</span><span class="v mono" id="r-syncerr">—</span></div>
               </div>
+              <details class="site" id="siteDetails">
+                <summary class="lab">Site details <span class="mono faint" id="siteSummary"></span></summary>
+                <div class="mono small" id="siteBody">—</div>
+              </details>
               <div class="notice mono" id="followMeta"></div>
             </div>
           </div>
@@ -82,9 +87,20 @@
           <div class="panel grow">
             <div class="head"><span class="eyebrow">Now playing</span><span class="meta" id="activeMeta">idle</span></div>
             <div class="body tight">
+              <div class="xport">
+                <button class="btn sm" id="holdBtn" title="Follow only the talkgroup on the air / last heard">Hold</button>
+                <button class="btn sm" id="skipBtn" title="Stop the call being played, go to the next">Skip</button>
+                <button class="btn sm" id="replayBtn" title="Play the last call again">Replay</button>
+                <span class="meta" id="queueMeta"></span>
+              </div>
               <div id="active" class="active"></div>
               <div class="empty small" id="activeEmpty">No call on the air.</div>
             </div>
+          </div>
+
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Events</span><span class="meta"></span><button class="btn ghost sm" id="evClear">Clear</button></div>
+            <div class="body tight"><div id="events" class="events mono"></div></div>
           </div>
         </aside>
 
@@ -106,7 +122,7 @@
             <div class="lockbar" id="lockbar" style="display:none"><span class="eyebrow">Locked out</span><span id="lockchips"></span></div>
             <div class="tablewrap">
               <table>
-                <thead><tr><th>Time</th><th>Talkgroup</th><th>Unit</th><th>Frequency</th><th>Length</th><th>Mod</th><th></th></tr></thead>
+                <thead><tr><th>Time</th><th>Talkgroup</th><th>Unit</th><th>Frequency</th><th>Length</th><th>Mod</th><th class="actions-h">Actions</th></tr></thead>
                 <tbody id="callBody"></tbody>
               </table>
               <div class="empty" id="empty"><span class="big">No traffic yet</span><span id="emptyHint">Pick a playlist or set a control channel, then press Start.</span></div>
@@ -183,6 +199,18 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Scanning</span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Hang time (ms) <span class="mono faint">after a call ends</span></span><input id="hangMs" type="text" inputmode="numeric" placeholder="engine default" /></label>
+                <label class="field"><span class="lab">Temporary avoid (minutes)</span>
+                  <select id="avoidMin"><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option></select></label>
+              </div>
+              <label class="check"><input id="autostart" type="checkbox" /> Start the last-used playlist when the app opens</label>
+              <label class="check"><input id="tones" type="checkbox" checked /> Alert tones (emergency, and talkgroups marked 🔔)</label>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Audio &amp; recording</span></div>
             <div class="body">
               <div id="followOpts">
@@ -210,6 +238,19 @@
               </div>
               <label class="field" id="rrKeyField"><span class="lab">App key <span class="mono faint">this build has none embedded</span></span><input id="rrKey" type="password" spellcheck="false" /></label>
               <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Secrets are kept in the Keychain on this Mac.</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="unitSave" style="width:100%">Save</button></label>
+              </div>
+              <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
+                <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
+              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
             </div>
           </div>
           <div class="panel">

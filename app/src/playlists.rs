@@ -43,8 +43,11 @@ fn load(app: &AppHandle) -> Vec<Playlist> {
 
 fn store(app: &AppHandle, v: &[Playlist]) -> Result<(), String> {
     let p = path(app)?;
-    std::fs::write(&p, serde_json::to_string_pretty(v).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("{}: {e}", p.display()))
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(v).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 #[tauri::command]

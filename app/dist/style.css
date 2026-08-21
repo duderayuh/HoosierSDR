@@ -195,3 +195,22 @@ td.act button.on { color: var(--enc); border-color: var(--enc); }
 .tablewrap.tgs tr.enc td { opacity: .5; }
 .legal { font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) { .pill.live .led { animation: none; } tbody tr.new td { animation: none; } }
+
+/* transport + events + site + emergency */
+.xport { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.xport .btn.on { background: var(--amber); border-color: var(--amber); color: #17100a; }
+.events { display: flex; flex-direction: column; gap: 2px; max-height: 150px; overflow: auto; font-size: 11px; color: var(--ink-dim); }
+.events .ev { display: grid; grid-template-columns: 58px 1fr; gap: 8px; }
+.events .ev .t { color: var(--ink-faint); }
+.events .ev.warn { color: var(--amber); }
+.events .ev.alarm { color: var(--enc); font-weight: 600; }
+details.site summary { cursor: pointer; list-style: none; margin: 4px 0; }
+details.site summary::-webkit-details-marker { display: none; }
+.mono.small { font-size: 11px; line-height: 1.5; color: var(--ink-dim); white-space: pre-wrap; }
+.active .call.emg { border-color: var(--enc); border-left-color: var(--enc); background: color-mix(in srgb, var(--enc) 10%, var(--panel-2)); }
+.active .call.emg .t { color: var(--enc); }
+tbody tr.emg td { background: color-mix(in srgb, var(--enc) 9%, transparent); }
+.badge.emg { color: var(--enc); background: color-mix(in srgb, var(--enc) 18%, transparent); font-weight: 700; }
+td.act button.pri-h { color: var(--amber); border-color: var(--amber); }
+td.act button.pri-l { opacity: .55; }
+td.act button.bell { color: var(--signal); border-color: var(--signal); }
