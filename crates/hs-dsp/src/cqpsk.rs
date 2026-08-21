@@ -285,7 +285,7 @@ impl CqpskReceiver {
         // recursive feedback loop rings and injects noise at an aggressive
         // step, and a jointly slow convergence settles into a better minimum
         // than a fast feedforward reaches. Swept on the Marion County and
-        // live261 control channels; this lifts 192 → 203 and 203 → 207 TSBKs.
+        // live261 control channels; this lifts 192 → 202 and 203 → 207 TSBKs.
         Self::build(sps, beta, FrontEq::Dfe(CmaDfe::new(9, 6, 0.001, 0.0005)))
     }
 

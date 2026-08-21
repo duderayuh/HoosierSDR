@@ -178,6 +178,22 @@ impl ChannelDecoder {
         self.modulation
     }
 
+    /// CQPSK carrier-lock quality in 0..1 (1 = solidly locked), once the
+    /// blind acquisition has completed; 0 before it acquires. `None` on the
+    /// C4FM path, which has no equivalent decision-directed lock metric.
+    /// Surfaced so a live UI can show a lock meter.
+    pub fn cqpsk_lock(&self) -> Option<f32> {
+        self.cqpsk.as_ref().map(|r| {
+            if !r.acquired() {
+                0.0
+            } else {
+                // lock_error is bounded by ~0.39 on noise; map that to 0 and a
+                // solid lock (error → 0) to 1.
+                (1.0 - r.lock_error() / 0.39).clamp(0.0, 1.0)
+            }
+        })
+    }
+
     /// How the capture rate is reduced before demodulation.
     pub fn decimation(&self) -> DecimationPlan {
         self.plan

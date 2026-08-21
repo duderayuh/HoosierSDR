@@ -448,10 +448,11 @@ the CMA, selected with `--dfe`.
 
 | Control channel | bare | CMA (default) | **DFE (`--dfe`)** | SDRTrunk |
 |---|:--:|:--:|:--:|:--:|
-| Marion County (`marion.cu8`, +550 kHz) | 190 | 192 | **203** | ~205 |
+| Marion County (`marion.cu8`, +550 kHz) | 190 | 192 | **202** | ~205 |
 | `live261.cu8` (+537.5 kHz) | 210 | 203 | **207** | — |
+| Marion County, Airspy R2 (`airspy_marion.cs16`, 2.5 MSPS, +462.5 kHz, 6 s) | — | 209 | **216** | — |
 
-TSBKs per pass. On Marion County the DFE lifts 192 → **203 — matching
+TSBKs per pass. On Marion County the DFE lifts 192 → **202 — matching
 SDRTrunk's ~205** and closing essentially the whole remaining gap on this
 recording; grants rise 27 → 28. It never regresses below the linear CMA on
 the near-clean `live261` either. Tuning that mattered: the feedback loop is
@@ -462,6 +463,32 @@ minimum than a fast feedforward reaches. This is still measured on **strong**
 channels where the burst events are rare; the degraded-location capture is
 where the DFE is expected to pull decisively ahead of the linear path, and
 `--dfe` vs default is the A/B to run on it.
+
+**Airspy R2 (2026-08-20) — the degenerate minimum, and its fix.** The first
+DFE run on an Airspy capture *collapsed*: 209 → 46 TSBKs, syncing at full
+rate for ~1.5 s and then never again, at the same elapsed time from any start
+point in the file (so adaptation dynamics, not a capture event; the file has
+no dropped samples). Tracing the taps showed why: the equalizer's input was
+arriving at ~0.25 RMS instead of ~1.0. The receiver's AGC normalizes
+*sample-rate* power ahead of the matched filter, and on the Airspy — wider
+dynamic range, more out-of-channel energy in the decimated band — the filter
+then strips most of that power, leaving the symbols far inside the
+constant-modulus radius. The RTL-SDR captures happen to land near 1.0, which
+is why the sweep never saw this. With a persistent modulus error that large
+and a deliberately slow feedforward step, the cheapest route to unit modulus
+is the feedback section: its taps grew 0 → 0.39 synthesizing the modulus from
+past decisions while the CM error *fell* (0.8 → 0.1) — the textbook
+degenerate CM-DFE solution, output decoupled from input, self-consistent and
+finite, so nothing reset it. The fix is a symbol-rate power normalizer on the
+DFE's input so the centre-spike init is a genuine unit-modulus passthrough
+and that route never opens; `low_level_input_does_not_feed_the_degenerate_minimum`
+pins it (pre-fix the feedback norm reaches 0.49 on a clean channel). After
+the fix the DFE beats the linear CMA on the Airspy control channel (209 →
+**216**) and on its voice channel (84 → 127 syncs), and the RTL-SDR results are
+unchanged within noise (203 → 202, 207 → 207). Confirmed on a fresh live
+Airspy R2 capture the same day (NAC 0x260 control channel, 10 s at
+2.5 MSPS): pre-fix `--dfe` decoded 66 TSBKs / 23 syncs; post-fix, bare, CMA
+and DFE all decode 393 TSBKs / 132 syncs — the channel's full rate.
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|

@@ -446,7 +446,7 @@ fn run_scan(iq: &[f32], args: &Args) {
     } else {
         println!(
             "\nNo control channel in this capture — these are traffic channels \n\
-             (voice only, no grants). The control channel is elsewhere in the band."
+             (voice only, no trunking signalling). The control channel is elsewhere in the band."
         );
     }
 }
