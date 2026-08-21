@@ -274,6 +274,7 @@
               </div>
               <label class="field"><span class="lab">System ID <span class="mono faint">or paste radioreference.com/db/sid/…</span></span>
                 <span class="inline"><input id="rrSid" type="text" inputmode="numeric" placeholder="11" spellcheck="false" /><button class="btn ghost" id="rrDownload">Load</button></span></label>
+              <div class="progress" id="rrProg" style="display:none"><div class="bar"><i id="rrProgBar"></i></div><span class="mono small" id="rrProgText"></span></div>
               <div id="sysList" class="list"></div>
             </div>
           </div>
@@ -466,6 +467,17 @@
       </section>
     </div>
   </main>
+  <footer class="statusbar" id="statusbar">
+    <span id="sb-state" class="mono">standby</span>
+    <span class="sep"></span>
+    <span title="This app, percent of one core · whole machine"><b>CPU</b> <span id="sb-cpu" class="mono">—</span></span>
+    <span title="This app · machine used / total"><b>MEM</b> <span id="sb-mem" class="mono">—</span></span>
+    <span title="Free space on the library's volume"><b>DISK</b> <span id="sb-disk" class="mono">—</span></span>
+    <span title="Calls in the library"><b>LIBRARY</b> <span id="sb-lib" class="mono">—</span></span>
+    <span title="Samples per second reaching the decoder vs. the radio's rate, and dropped blocks"><b>STREAM</b> <span id="sb-stream" class="mono">—</span></span>
+    <span class="spacer"></span>
+    <span title="Time since the app started"><b>UP</b> <span id="sb-up" class="mono">—</span></span>
+  </footer>
   <script src="app.js"></script>
 </body>
 </html>

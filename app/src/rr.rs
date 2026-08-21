@@ -377,10 +377,19 @@ fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> 
     let state = app.state::<AppState>();
     let mut p = load_prefs(&app);
     let client = client(&app)?;
-    let sys = client.system(sid).map_err(|e| {
+    use tauri::Emitter;
+    let mut report = |step: &str, done: usize, total: usize| {
+        let _ = app.emit(
+            "rr_progress",
+            serde_json::json!({ "sid": sid, "step": step, "done": done, "total": total }),
+        );
+    };
+    let sys = client.system_with_progress(sid, &mut report).map_err(|e| {
         eprintln!("[rr] download {sid} failed: {e}");
+        let _ = app.emit("rr_progress", serde_json::json!({ "sid": sid, "step": "failed", "done": 0, "total": 0 }));
         e.to_string()
     })?;
+    report("saving", 3, 3);
 
     let csv = sys.talkgroup_csv();
     let n = CsvCatalog::parse(&csv).len();
@@ -389,6 +398,7 @@ fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> 
         let _ = std::fs::write(d.join(format!("rr_{sid}.csv")), &csv);
     }
     *state.catalog.lock().unwrap() = merged_catalog(&app);
+    report("done", 3, 3);
 
     p.sid = Some(sid);
     p.system_name = sys.name.clone();
