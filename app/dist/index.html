@@ -15,6 +15,7 @@
     <div class="brand">Hoosier<b>SDR</b></div>
     <div class="seg nav" id="navSeg" role="tablist">
       <button data-v="monitor" aria-pressed="true">Monitor</button>
+      <button data-v="library" aria-pressed="false">Library</button>
       <button data-v="playlists" aria-pressed="false">Playlists</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
@@ -132,6 +133,67 @@
       </section>
     </div>
 
+    <!-- ===================== LIBRARY ===================== -->
+    <div class="view" id="view-library" style="display:none">
+      <section class="library">
+        <div class="panel">
+          <div class="head">
+            <span class="eyebrow">Search calls</span>
+            <input id="qText" type="text" placeholder="words in transcripts, talkgroup or unit names…" spellcheck="false" />
+            <button class="btn primary sm" id="qGo">Search</button>
+            <span class="meta" id="libMeta"></span>
+          </div>
+          <div class="body tight">
+            <div class="qrow">
+              <label class="field"><span class="lab">From</span><input id="qFrom" type="datetime-local" /></label>
+              <label class="field"><span class="lab">To</span><input id="qTo" type="datetime-local" /></label>
+              <label class="field"><span class="lab">Talkgroup</span><input id="qTg" type="text" inputmode="numeric" placeholder="any" /></label>
+              <label class="field"><span class="lab">Unit</span><input id="qUnit" type="text" inputmode="numeric" placeholder="any" /></label>
+              <label class="field"><span class="lab">&nbsp;</span><span class="inline">
+                <label class="check" style="margin:0"><input id="qStar" type="checkbox" /> ★</label>
+                <label class="check" style="margin:0"><input id="qEmg" type="checkbox" /> emergency</label>
+                <label class="check" style="margin:0"><input id="qAudio" type="checkbox" checked /> with audio</label></span></label>
+            </div>
+            <div class="xport">
+              <button class="btn sm" id="listenBtn" title="Play the results in order, oldest first">▶ Listen to results</button>
+              <button class="btn sm" id="listenStop" disabled>■</button>
+              <label class="check" style="margin:0 0 0 8px"><input id="qLive" type="checkbox" checked /> keep adding new calls</label>
+              <span class="meta" id="listenMeta"></span>
+              <span class="spacer"></span>
+              <button class="btn ghost sm" id="qAllCart">Add all to cart</button>
+              <button class="btn ghost sm" id="qMore">Older…</button>
+            </div>
+            <div class="tablewrap lib">
+              <table>
+                <thead><tr><th></th><th>Time</th><th>Talkgroup</th><th>Unit</th><th>Len</th><th>Transcript</th><th class="actions-h">Actions</th></tr></thead>
+                <tbody id="libBody"></tbody>
+              </table>
+              <div class="empty" id="libEmpty"><span class="big">No calls yet</span>Calls you follow are saved here automatically, hashed at capture, and transcribed if enabled.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Cart</span><span class="meta" id="cartMeta">empty</span><button class="btn ghost sm" id="cartClear">Clear</button></div>
+            <div class="body tight">
+              <div id="cartList" class="list" style="max-height:40vh"></div>
+              <label class="field" style="margin-top:10px"><span class="lab">Export to folder <span class="mono faint">audio + transcripts + manifest</span></span>
+                <span class="inline"><input id="exportDir" type="text" placeholder="~/Desktop/case-2026-08-20" spellcheck="false" /><button class="btn primary" id="exportBtn">Export</button></span></label>
+              <p class="help">The manifest records each file's SHA-256 at capture and at export, the machine transcript and model, any human edit, the exporter and host, and is itself hashed (manifest.sha256).</p>
+              <div class="mono small" id="exportResult"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Call</span><span class="meta" id="detMeta"></span></div>
+            <div class="body tight" id="detBody">
+              <div class="empty small">Select a call to see and edit its transcript.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <!-- ===================== PLAYLISTS ===================== -->
     <div class="view" id="view-playlists" style="display:none">
       <section class="two-col">
@@ -211,11 +273,39 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Transcription</span><span class="meta" id="trMeta"></span></div>
+            <div class="body">
+              <label class="check"><input id="trEnabled" type="checkbox" /> Transcribe calls automatically as they complete</label>
+              <div class="row3">
+                <label class="field"><span class="lab">Engine</span><select id="trEngine"><option value="faster-whisper">faster-whisper</option><option value="openai-whisper">openai-whisper</option></select></label>
+                <label class="field"><span class="lab">Model</span><select id="trModel">
+                  <option value="tiny">tiny</option><option value="base" selected>base</option><option value="small">small</option><option value="medium">medium</option>
+                  <option value="large-v3">large-v3</option><option value="distil-large-v3">distil-large-v3</option><option value="turbo">turbo</option></select></label>
+                <label class="field"><span class="lab">Device</span><select id="trDevice"><option value="auto">auto</option><option value="cpu">cpu</option><option value="cuda">cuda</option></select></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Language</span><input id="trLang" type="text" value="en" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="trSave" style="width:100%">Save</button></label>
+              </div>
+              <p class="help" id="trHelp">Runs locally with Python: <code>pip install faster-whisper</code> (fast, CPU-friendly) or <code>openai-whisper</code>. Models download on first use.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Library</span><span class="meta" id="libStats"></span></div>
+            <div class="body">
+              <div class="mono small" id="libDir">—</div>
+              <div class="row2" style="margin-top:8px">
+                <label class="field"><span class="lab">Delete calls older than (days) <span class="mono faint">starred calls are kept</span></span><input id="pruneDays" type="text" inputmode="numeric" placeholder="never" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="pruneNow" style="width:100%">Prune now</button></label>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Audio &amp; recording</span></div>
             <div class="body">
               <div id="followOpts">
                 <label class="check"><input id="play" type="checkbox" checked /> Play calls through the default output as they complete</label>
-                <label class="field"><span class="lab">Save each call as a WAV in</span><input id="callsdir" type="text" placeholder="~/hoosier-calls (blank: don't save)" spellcheck="false" /></label>
+                <input id="callsdir" type="hidden" value="" />
               </div>
               <div id="channelOpts">
                 <div class="row2">

@@ -40,11 +40,12 @@ function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttri
 
 /* ---------- views ---------- */
 function showView(v) {
-  ["monitor", "playlists", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  ["monitor", "library", "playlists", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  if (v === "library" && typeof libOnShow === "function") libOnShow();
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
-if (["#playlists", "#settings"].includes(location.hash)) showView(location.hash.slice(1));
+if (["#playlists", "#settings", "#library"].includes(location.hash)) showView(location.hash.slice(1));
 
 /* ---------- tuning state ---------- */
 let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
@@ -165,6 +166,7 @@ function addCall(g) {
     `<td>${g.encrypted ? '<span class="badge enc">Encrypted</span>' : g.emergency ? '<span class="badge emg">EMERGENCY</span>' : `<span class="badge clear">${g.modulation || "clear"}</span>`}${g.patched_with && g.patched_with.length ? ` <span class="badge clear" title="patched with">⛓ ${g.patched_with.length}</span>` : ""}</td>` +
     `<td class="act">` +
       (g.wav ? `<button title="Replay" data-wav="${g.wav}">▶</button>` : "") +
+      (g.id != null ? `<button title="Add to cart" data-cart="${g.id}" class="${cart.has(g.id) ? "on" : ""}">🛒</button>` : "") +
       `<button data-pri="${g.tg}">☆</button>` +
       `<button title="Alert tone for TG ${g.tg}" data-bell="${g.tg}">🔔</button>` +
       `<button title="Avoid TG ${g.tg} for a while" data-avoid="${g.tg}">⏱</button>` +
@@ -176,6 +178,7 @@ function addCall(g) {
   tr.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => avoidFor(+b.dataset.avoid));
   tr.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => cyclePriority(+b.dataset.pri));
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
+  tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
   const text = `${g.name} ${g.tg} ${g.source || ""} ${g.freq_mhz.toFixed(4)}`.toLowerCase();
   history.unshift({ el: tr, text });
   tbody.prepend(tr);
@@ -204,6 +207,20 @@ function cyclePriority(tg) {
   save("hs.prio", Object.fromEntries(prio)); pushPriorities(); refreshRowButtons();
 }
 function toggleBell(tg) { bells.has(tg) ? bells.delete(tg) : bells.add(tg); save("hs.bells", [...bells]); refreshRowButtons(); }
+
+/* ---------- cart ---------- */
+const cart = new Map(Object.entries(store("hs.cart", {})).map(([k, v]) => [+k, v]));  // id → label
+function cartSave() { save("hs.cart", Object.fromEntries(cart)); renderCart(); }
+function cartAdd(id, label) { if (id == null) return; cart.set(id, label); cartSave(); }
+function cartToggle(id, label) { if (cart.has(id)) cart.delete(id); else cart.set(id, label); cartSave(); }
+function renderCart() {
+  $("cartMeta").textContent = cart.size ? `${cart.size} call${cart.size === 1 ? "" : "s"}` : "empty";
+  $("cartList").innerHTML = [...cart].map(([id, label]) => `<div class="row"><span class="grow">${label}</span><button class="btn ghost" data-uncart="${id}">✕</button></div>`).join("");
+  $("cartList").querySelectorAll("[data-uncart]").forEach((b) => b.onclick = () => { cart.delete(+b.dataset.uncart); cartSave(); });
+  document.querySelectorAll("button[data-cart]").forEach((b) => b.classList.toggle("on", cart.has(+b.dataset.cart)));
+}
+$("cartClear").onclick = () => { cart.clear(); cartSave(); };
+renderCart();
 
 /* ---------- tones (WebAudio, no assets) ---------- */
 let actx = null;
@@ -319,7 +336,8 @@ function handleFollow(ev) {
       followVoice += ev.secs;
       if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
       addCall({ tg: ev.tg, name: ev.name, source: ev.source, unit_name: ev.unit_name, freq_mhz: ev.freq_mhz, encrypted: false,
-                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with });
+                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id });
+      if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);
       $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
       break;
     case "site": {
@@ -430,6 +448,151 @@ if (TAURI) {
     try { const n = await invoke("units_import", { path }); $("unitsMeta").textContent = `${n} named`; renderUnits(); } catch (e) { alert(e); }
   };
   renderUnits();
+
+  /* ---------- library: search, listen, detail, export ---------- */
+  let libRows = [], libSel = null, listening = false, listenQueue = [], listenIdx = 0, listenTimer = null;
+  const fmtT = (epoch) => new Date(epoch * 1000).toLocaleString("en-US", { hour12: false, month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const localToEpoch = (v) => v ? Math.floor(new Date(v).getTime() / 1000) : null;
+  function libQuery(extra) {
+    return { text: $("qText").value.trim() || null, from: localToEpoch($("qFrom").value), to: localToEpoch($("qTo").value),
+      tg: parseInt($("qTg").value, 10) || null, unit: parseInt($("qUnit").value, 10) || null,
+      starred: $("qStar").checked || null, emergency: $("qEmg").checked || null, with_audio: $("qAudio").checked || null, limit: 200, ...extra };
+  }
+  function libRender(rows, append) {
+    if (!append) { libRows = []; $("libBody").innerHTML = ""; }
+    libRows = append ? libRows.concat(rows) : rows;
+    const html = rows.map(libRowHtml).join("");
+    if (append) $("libBody").insertAdjacentHTML("beforeend", html); else $("libBody").innerHTML = html;
+    $("libEmpty").style.display = libRows.length ? "none" : "";
+    $("libMeta").textContent = libRows.length ? `${libRows.length} calls` : "";
+    wireLibRows();
+  }
+  function libRowHtml(r) {
+    const t = r.transcript_edited || r.transcript || "";
+    return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
+      `<td class="time">${fmtT(r.start)}</td><td class="tg">${r.tg_name}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span></td>` +
+      `<td class="src">${r.unit_name || r.unit || "—"}</td><td class="len">${r.secs.toFixed(1)}s</td>` +
+      `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${t.replace(/"/g, "&quot;")}">${t || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
+      `<td class="act">${r.audio ? `<button title="Play" data-lplay="${r.id}">▶</button>` : ""}<button title="Star" data-lstar="${r.id}" class="${r.starred ? "pri-h" : ""}">★</button>` +
+      `<button title="Transcribe now" data-ltr="${r.id}">T</button></td></tr>`;
+  }
+  function libPrependHtml(r) { $("libBody").insertAdjacentHTML("afterbegin", libRowHtml(r)); libRows.unshift(r); $("libEmpty").style.display = "none"; wireLibRows(); }
+  function wireLibRows() {
+    $("libBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = (e) => { if (e.target.closest("button,input")) return; libSelect(+tr.dataset.id); });
+    $("libBody").querySelectorAll("input[data-sel]").forEach((c) => c.onchange = () => { const r = libRows.find((x) => x.id === +c.dataset.sel); cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); });
+    $("libBody").querySelectorAll("button[data-lplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.lplay }).catch((e) => alert(e)));
+    $("libBody").querySelectorAll("button[data-lstar]").forEach((b) => b.onclick = async () => { const r = libRows.find((x) => x.id === +b.dataset.lstar); r.starred = !r.starred; await invoke("library_star", { id: r.id, on: r.starred }); b.classList.toggle("pri-h", r.starred); });
+    $("libBody").querySelectorAll("button[data-ltr]").forEach((b) => b.onclick = () => { b.textContent = "…"; invoke("transcribe_call", { id: +b.dataset.ltr }).catch((e) => { b.textContent = "T"; alert(e); }); });
+  }
+  async function libSearch(append) {
+    try {
+      const q = libQuery(append && libRows.length ? { before_id: libRows[libRows.length - 1].id } : {});
+      const rows = await invoke("library_search", { query: q });
+      libRender(rows, append);
+    } catch (e) { alert(e); }
+  }
+  $("qGo").onclick = () => libSearch(false);
+  $("qText").onkeydown = (e) => { if (e.key === "Enter") libSearch(false); };
+  ["qFrom", "qTo", "qTg", "qUnit", "qStar", "qEmg", "qAudio"].forEach((id) => $(id).onchange = () => libSearch(false));
+  $("qMore").onclick = () => libSearch(true);
+  $("qAllCart").onclick = () => { libRows.forEach((r) => cart.set(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`)); cartSave(); $("libBody").querySelectorAll("input[data-sel]").forEach((c) => c.checked = true); };
+  let libShown = false;
+  window.libOnShow = () => { if (!libShown) { libShown = true; libSearch(false); } };
+  // New live calls appear at the top when no filter narrows them out.
+  window.libLiveAdd = async (id) => {
+    if (!libShown) return;
+    try { const r = await invoke("library_get", { id }); if (r) { libPrependHtml(r); if (listening && $("qLive").checked) listenQueue.push(r.id); } } catch (_) {}
+  };
+  listen("transcript", (e) => {
+    const { id, text } = e.payload;
+    const r = libRows.find((x) => x.id === id); if (r) r.transcript = text;
+    const tr = $("libBody").querySelector(`tr[data-id="${id}"]`);
+    if (tr) { const td = tr.querySelector("td.tr"); if (td && !(r && r.transcript_edited)) { td.textContent = text; td.title = text; } const b = tr.querySelector("button[data-ltr]"); if (b) b.textContent = "T"; }
+    if (libSel === id) libSelect(id);
+  });
+  listen("transcribe_error", (e) => logEvent(`transcription: ${e.payload}`, "warn"));
+  listen("transcribe_ready", (e) => logEvent(`transcriber ready: ${e.payload}`));
+
+  async function libSelect(id) {
+    libSel = id;
+    $("libBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.id === id));
+    try {
+      const r = await invoke("library_get", { id }); if (!r) return;
+      $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}`;
+      $("detBody").innerHTML = `<div class="det">
+        <div><b>${r.tg_name}</b> <span class="faint">TG ${r.tg}</span> · unit ${r.unit_name ? r.unit_name + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
+        <div class="faint">${fmtT(r.start)} · ${r.system || ""} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button></div>
+        <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
+        <div class="machine">${r.transcript || "—"}</div>
+        <div class="k">Edited transcript (kept separately; the machine text above is never changed)</div>
+        <textarea id="detEdit" placeholder="Type a corrected transcript…">${r.transcript_edited || ""}</textarea>
+        <div class="xport" style="margin-top:6px"><button class="btn primary sm" id="detSave">Save edit</button><button class="btn ghost sm" id="detClearEdit">Clear edit</button><span class="meta" id="detSaved">${r.edited_at ? "edited " + fmtT(r.edited_at) : ""}</span></div>
+      </div>`;
+      const play = $("detPlay"); if (play) play.onclick = () => invoke("library_play", { id }).catch((e) => alert(e));
+      $("detCart").onclick = () => { cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); libSelect(id); };
+      $("detTr").onclick = () => invoke("transcribe_call", { id }).then(() => $("detSaved").textContent = "transcribing…").catch((e) => alert(e));
+      $("detSave").onclick = async () => { await invoke("library_set_edited", { id, text: $("detEdit").value }); $("detSaved").textContent = "saved"; libSearchRefreshRow(id); };
+      $("detClearEdit").onclick = async () => { $("detEdit").value = ""; await invoke("library_set_edited", { id, text: "" }); $("detSaved").textContent = "edit cleared"; libSearchRefreshRow(id); };
+    } catch (e) { alert(e); }
+  }
+  async function libSearchRefreshRow(id) {
+    const r = await invoke("library_get", { id }); const i = libRows.findIndex((x) => x.id === id);
+    if (r && i >= 0) { libRows[i] = r; const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.outerHTML = libRowHtml(r); wireLibRows(); } }
+  }
+
+  /* listen mode: play results oldest → newest through the speaker, live calls muted meanwhile */
+  $("listenBtn").onclick = async () => {
+    if (!libRows.length) { alert("Search first, then listen."); return; }
+    listening = true; listenQueue = libRows.map((r) => r.id).filter((id) => libRows.find((r) => r.id === id).audio).reverse(); listenIdx = 0;
+    $("listenBtn").disabled = true; $("listenStop").disabled = false;
+    await invoke("set_archive_mode", { on: true });
+    listenNext();
+  };
+  $("listenStop").onclick = async () => { listening = false; clearTimeout(listenTimer); $("listenBtn").disabled = false; $("listenStop").disabled = true; $("listenMeta").textContent = ""; $("libBody").querySelectorAll("tr.playing").forEach((t) => t.classList.remove("playing")); await invoke("set_archive_mode", { on: false }); await invoke("skip_call"); };
+  async function listenNext() {
+    if (!listening) return;
+    if (listenIdx >= listenQueue.length) { $("listenMeta").textContent = $("qLive").checked ? "waiting for new calls…" : "done"; listenTimer = setTimeout(listenNext, 1500); return; }
+    const id = listenQueue[listenIdx++]; const r = libRows.find((x) => x.id === id);
+    $("libBody").querySelectorAll("tr.playing").forEach((t) => t.classList.remove("playing"));
+    const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.classList.add("playing"); tr.scrollIntoView({ block: "nearest" }); }
+    $("listenMeta").textContent = `${listenIdx}/${listenQueue.length} · ${r ? r.tg_name : ""}`;
+    try { await invoke("library_play", { id }); } catch (_) {}
+    listenTimer = setTimeout(listenNext, ((r ? r.secs : 3) + 0.4) * 1000);
+  }
+
+  /* export */
+  $("exportBtn").onclick = async () => {
+    const dest = $("exportDir").value.trim(); if (!dest) { alert("Choose a destination folder."); return; }
+    if (!cart.size) { alert("The cart is empty."); return; }
+    try { const m = await invoke("library_export", { ids: [...cart.keys()], dest }); $("exportResult").textContent = `exported ${cart.size} calls → ${m}`; }
+    catch (e) { alert(e); }
+  };
+
+  /* settings: transcription + library */
+  async function trRefresh() {
+    try {
+      const p = await invoke("transcribe_probe");
+      $("trEnabled").checked = p.settings.enabled; $("trEngine").value = p.settings.engine; $("trModel").value = p.settings.model; $("trLang").value = p.settings.language; $("trDevice").value = p.settings.device;
+      [...$("trEngine").options].forEach((o) => { o.disabled = !p.engines.includes(o.value); o.textContent = o.value + (p.engines.includes(o.value) ? "" : " (not installed)"); });
+      $("trMeta").textContent = p.engines.length ? (p.running_model ? `running ${p.running_model}` : `available: ${p.engines.join(", ")}`) : "no whisper found — see below";
+      if (p.last_error) $("trMeta").textContent = `error: ${p.last_error}`;
+    } catch (e) { log(`transcribe_probe: ${e}`); }
+  }
+  $("trSave").onclick = async () => {
+    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); }
+    catch (e) { alert(e); }
+  };
+  $("trEnabled").onchange = $("trSave").onclick;
+  async function libStatsRefresh() {
+    try { const [n, secs, tr, dir] = await invoke("library_stats"); $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
+  }
+  $("pruneNow").onclick = async () => {
+    const d = parseInt($("pruneDays").value, 10); if (!Number.isFinite(d)) { alert("Enter a number of days."); return; }
+    if (!confirm(`Delete unstarred calls older than ${d} days?`)) return;
+    try { const n = await invoke("library_prune", { days: d }); alert(`${n} calls deleted`); libStatsRefresh(); } catch (e) { alert(e); }
+  };
+  trRefresh(); libStatsRefresh();
 
   /* ---------- RadioReference account ---------- */
   async function rrRefresh() {
