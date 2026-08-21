@@ -18,6 +18,7 @@ mod follow;
 mod player;
 mod playlists;
 mod rr;
+mod units;
 
 #[derive(Default)]
 struct AppState {
@@ -27,18 +28,57 @@ struct AppState {
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
     /// The active playlist's talkgroups (`None` = follow everything).
     allowlist: Arc<Mutex<Option<std::collections::HashSet<u16>>>>,
+    /// Hold: follow only this talkgroup until released.
+    hold: Arc<Mutex<Option<u16>>>,
+    /// Talkgroup priorities (1 high … 99 low; unlisted 50).
+    priorities: Arc<Mutex<std::collections::HashMap<u16, u8>>>,
+    /// Radio-ID aliases.
+    units: units::Units,
     /// The audio thread, started on first use. `Some(None)` = no device.
-    audio: Mutex<Option<Option<std::sync::mpsc::Sender<Vec<i16>>>>>,
+    audio: Mutex<Option<Option<player::Audio>>>,
 }
 
 impl AppState {
-    fn audio(&self) -> Option<std::sync::mpsc::Sender<Vec<i16>>> {
+    fn audio(&self) -> Option<player::Audio> {
         self.audio
             .lock()
             .unwrap()
             .get_or_insert_with(player::spawn)
             .clone()
     }
+}
+
+/// Hold on one talkgroup (`None` releases). Overrides the playlist while set.
+#[tauri::command]
+fn set_hold(tg: Option<u16>, state: State<AppState>) {
+    *state.hold.lock().unwrap() = tg;
+}
+
+/// Replace the talkgroup priority table.
+#[tauri::command]
+fn set_priorities(entries: Vec<(u16, u8)>, state: State<AppState>) {
+    *state.priorities.lock().unwrap() = entries.into_iter().collect();
+}
+
+/// Stop the call being played and move to the next queued one.
+#[tauri::command]
+fn skip_call(state: State<AppState>) {
+    if let Some(a) = state.audio() {
+        a.skip();
+    }
+}
+
+/// Calls waiting in the speaker queue (including the one playing).
+#[tauri::command]
+fn audio_queued(state: State<AppState>) -> usize {
+    state.audio().map(|a| a.queued()).unwrap_or(0)
+}
+
+/// Play the last completed call again.
+#[tauri::command]
+fn replay_last(state: State<AppState>) -> Result<(), String> {
+    state.audio().ok_or("no audio output device")?.replay_last();
+    Ok(())
 }
 
 /// Front-end diagnostics land in the terminal that launched the app, so a
@@ -65,8 +105,8 @@ fn set_allowlist(tgs: Option<Vec<u16>>, state: State<AppState>) {
 #[tauri::command]
 fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
     let pcm = player::read_wav(&shellexpand_home(&path))?;
-    let tx = state.audio().ok_or("no audio output device")?;
-    tx.send(pcm).map_err(|_| "audio thread stopped".to_string())
+    state.audio().ok_or("no audio output device")?.play(pcm, 0);
+    Ok(())
 }
 
 #[derive(Serialize, Clone)]
@@ -188,6 +228,8 @@ fn start_follow(
     control: f64,
     calls_dir: Option<String>,
     play: bool,
+    hang_ms: Option<u32>,
+    system_name: Option<String>,
 ) -> Result<(), String> {
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already running".into());
@@ -196,6 +238,9 @@ fn start_follow(
     let catalog = state.catalog.clone();
     let lockout = state.lockout.clone();
     let allowlist = state.allowlist.clone();
+    let hold = state.hold.clone();
+    let priorities = state.priorities.clone();
+    let units = state.units.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -209,10 +254,22 @@ fn start_follow(
                 }
                 None => None,
             };
+            // Blocks are 65536 complex samples at the normalized rate
+            // (2.4 or 9.6 MSPS): 27 ms or 6.8 ms each.
+            let hang_blocks = hang_ms.map(|ms| {
+                let norm = hs_dsp::resample::normalize_ratio(rate)
+                    .map(|(_, _, r)| r)
+                    .unwrap_or(rate);
+                let block_ms = 65536.0 / norm * 1000.0;
+                let hang = (ms as f64 / block_ms).ceil() as u32;
+                (hang.max(1), (hang * 7).max(20))
+            });
             let params = follow::FollowParams {
                 center_hz: freq,
                 control_hz: control,
                 calls_dir,
+                hang_blocks,
+                system_name: system_name.unwrap_or_default(),
             };
             let player = if play { audio } else { None };
             if play && player.is_none() {
@@ -224,10 +281,19 @@ fn start_follow(
                 );
             }
             let cat = catalog.lock().unwrap().clone();
-            follow::run(src, &params, cat.as_ref(), &lockout, &allowlist, &running, &mut |ev| {
-                if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_ref(), &ev) {
+            let live = follow::Live {
+                lockout: &lockout,
+                allowlist: &allowlist,
+                hold: &hold,
+                priorities: &priorities,
+                units: &units,
+            };
+            follow::run(src, &params, cat.as_ref(), &live, &running, &mut |ev| {
+                if let (Some(pl), follow::FollowEvent::Call { pcm, priority, .. }) =
+                    (player.as_ref(), &ev)
+                {
                     if !pcm.is_empty() {
-                        let _ = pl.send(pcm.clone());
+                        pl.play(pcm.clone(), *priority);
                     }
                 }
                 let _ = app.emit("follow", ev);
@@ -465,6 +531,7 @@ fn main() {
             if let Some(cat) = rr::saved_catalog(app.handle()) {
                 *state.catalog.lock().unwrap() = Some(cat);
             }
+            *state.units.lock().unwrap() = units::load(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -475,6 +542,14 @@ fn main() {
             start_follow,
             set_lockout,
             set_allowlist,
+            set_hold,
+            set_priorities,
+            skip_call,
+            replay_last,
+            audio_queued,
+            units::units_list,
+            units::unit_set,
+            units::units_import,
             play_wav,
             ui_log,
             rr::rr_settings,
