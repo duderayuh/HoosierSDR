@@ -142,6 +142,9 @@ pub struct Diagnostics {
     pub vendor_lc: Vec<(u8, u8, u32)>,
     /// Raw arguments from vendor Link Control words, for offline analysis.
     pub vendor_lc_samples: Vec<(u8, u8, [u8; 7])>,
+    /// Over-the-air talker aliases confirmed on this channel: (talkgroup,
+    /// alias text). See `hs_p25::talker_alias` for how much to trust them.
+    pub talker_aliases: Vec<(u16, String)>,
     /// Raw 240-bit Link Control slot payloads, one per LDU1, packed MSB-first.
     /// Kept so the codes protecting them can be studied against real traffic.
     pub lc_raw: Vec<[u8; 30]>,
@@ -315,6 +318,20 @@ impl Diagnostics {
             }
             let hex: String = a.iter().map(|b| format!("{b:02X}")).collect();
             s.push_str(&format!("[\"{m:02X}\",\"{o:02X}\",\"{hex}\"]"));
+        }
+        s.push_str("],\n");
+
+        s.push_str("  \"talker_aliases\": [");
+        for (i, (tg, alias)) in self.talker_aliases.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let text: String = alias
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .filter(|c| *c != '"' && *c != '\\')
+                .collect();
+            s.push_str(&format!("{{\"tg\":{tg},\"alias\":\"{text}\"}}"));
         }
         s.push_str("],\n");
 

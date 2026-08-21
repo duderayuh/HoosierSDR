@@ -373,3 +373,158 @@ fn ignores_grants_outside_the_captured_band() {
         }
     }
 }
+
+/// Strict version: the granted call must actually yield CQPSK audio through
+/// the channelizer path, draining it at end of stream rather than hoping it
+/// completed. Guards the traffic path against a channelizer regression.
+#[test]
+fn traffic_audio_decodes_through_the_channelizer() {
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic_dibits_n(6), TRAFFIC + TUNER_ERROR);
+    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let block = (RATE as usize / 10) * 2;
+    let mut completed = Vec::new();
+    let mut started = 0;
+    for chunk in band.chunks(block) {
+        let out = f.process(chunk);
+        started += out.started.len();
+        completed.extend(out.completed);
+    }
+    completed.extend(f.finish());
+    assert!(started >= 1, "grant not followed");
+    let call = completed
+        .iter()
+        .find(|c| c.talkgroup == TALKGROUP)
+        .expect("granted call reported");
+    eprintln!(
+        "call: {} samples, syncs c4fm {} cqpsk {}, mod {:?}",
+        call.pcm.len(),
+        call.syncs_c4fm,
+        call.syncs_cqpsk,
+        call.modulation
+    );
+    assert!(call.syncs_cqpsk > 0, "no CQPSK frame sync on the traffic channel");
+    assert!(!call.pcm.is_empty(), "call completed with no audio");
+    assert_eq!(call.modulation, Some(Modulation::Cqpsk));
+}
+
+/// A neighbour one channel over (12.5 kHz, three times the amplitude) must
+/// not stop the granted call decoding, with either extraction method. (Four
+/// such neighbours at once defeat the synthetic CQPSK chain classically as
+/// well, so this is a smoke test, not an adjacent-channel specification.)
+fn neighbour_call(classic: bool) -> hs_core::follow::Call {
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic_dibits_n(6), TRAFFIC + TUNER_ERROR);
+    let mut neighbour = Vec::new();
+    add_to_band(&mut neighbour, &traffic_dibits_n(6), TRAFFIC + 12_500.0 + TUNER_ERROR);
+    for (b, n) in band.iter_mut().zip(neighbour.iter()) {
+        *b += 3.0 * n;
+    }
+    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    f.set_channelizer(!classic);
+    let block = (RATE as usize / 10) * 2;
+    let mut completed = Vec::new();
+    for chunk in band.chunks(block) {
+        completed.extend(f.process(chunk).completed);
+    }
+    completed.extend(f.finish());
+    let call = completed
+        .into_iter()
+        .find(|c| c.talkgroup == TALKGROUP)
+        .expect("granted call reported");
+    eprintln!(
+        "with neighbour ({}): {} samples, syncs c4fm {} cqpsk {}, mod {:?}",
+        if classic { "classic" } else { "channelizer" },
+        call.pcm.len(),
+        call.syncs_c4fm,
+        call.syncs_cqpsk,
+        call.modulation
+    );
+    call
+}
+
+#[test]
+fn a_loud_adjacent_channel_does_not_garble_the_call() {
+    let call = neighbour_call(false);
+    assert!(call.syncs_cqpsk > 0, "traffic channel lost to its neighbour");
+    assert!(!call.pcm.is_empty(), "no audio with a loud neighbour");
+    assert_eq!(call.modulation, Some(Modulation::Cqpsk));
+}
+
+#[test]
+fn a_loud_adjacent_channel_does_not_garble_the_call_classically() {
+    let call = neighbour_call(true);
+    assert!(call.syncs_cqpsk > 0, "traffic channel lost to its neighbour");
+    assert!(!call.pcm.is_empty(), "no audio with a loud neighbour");
+}
+
+/// A second radio parked elsewhere on the site's span: a grant outside the
+/// primary band is routed to the extra band and decodes there, while the
+/// primary band's own call still decodes. This is the "use the other
+/// tuners to cover the rest of the band" behaviour.
+#[test]
+fn a_grant_outside_the_primary_band_decodes_on_an_extra_radio() {
+    const TG2: u16 = 0x2F94;
+    // Channel 40 of IDEN 1: 857.575 + 40 × 0.0125 = 858.075 MHz, +425 kHz
+    // from the primary centre — outside its ±131.5 kHz.
+    let traffic2 = (PLAN_BASE + 40 * 12_500) as f64;
+    let center2 = 858_050_000.0;
+    let grant2 = (((1u64 << 12) | 40) << 40) | ((TG2 as u64) << 24) | 0xBEEF2;
+    let control = tsdu_stream(&[
+        (0x3D, 0, iden_args(PLAN_BASE)),
+        (0x00, 0, grant_args(TALKGROUP)),
+        (0x00, 0, grant2),
+    ]);
+    let mut band1 = Vec::new();
+    add_to_band(&mut band1, &control, CONTROL + TUNER_ERROR);
+    add_to_band(&mut band1, &traffic_dibits_n(6), TRAFFIC + TUNER_ERROR);
+    // The extra radio's own IQ, relative to its own centre.
+    let mut band2 = Vec::new();
+    {
+        let sps = (RATE / 4800.0) as usize;
+        let base = modulate_iq(&traffic_dibits_n(6), sps, 0.2);
+        let offset = traffic2 + TUNER_ERROR - center2;
+        band2.resize(base.len() * 2, 0.0);
+        for (n, s) in base.iter().enumerate() {
+            let w = 2.0 * std::f64::consts::PI * offset * n as f64 / RATE;
+            let (sin, cos) = (w.sin() as f32, w.cos() as f32);
+            band2[n * 2] += s.re * cos - s.im * sin;
+            band2[n * 2 + 1] += s.re * sin + s.im * cos;
+        }
+    }
+    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let extra = f.add_band(center2, RATE);
+    assert_eq!(f.bands().len(), 2);
+    let block = (RATE as usize / 10) * 2;
+    let mut started = Vec::new();
+    let mut completed = Vec::new();
+    let mut oob = 0;
+    let n = band1.len().max(band2.len());
+    let mut i = 0;
+    while i < n {
+        let end = (i + block).min(n);
+        if i < band1.len() {
+            let out = f.process(&band1[i..end.min(band1.len())]);
+            started.extend(out.started);
+            completed.extend(out.completed);
+            oob += out.grants_out_of_band.len();
+        }
+        if i < band2.len() {
+            let out = f.process_band(extra, &band2[i..end.min(band2.len())]);
+            completed.extend(out.completed);
+        }
+        i += block;
+    }
+    completed.extend(f.finish());
+    assert!(
+        started.iter().any(|(tg, hz)| *tg == TG2 && *hz == traffic2 as u64),
+        "grant on the extra band not followed: started {started:?}, out of band {oob}"
+    );
+    assert!(started.iter().any(|(tg, _)| *tg == TALKGROUP), "primary band's call not followed");
+    let c2 = completed.iter().find(|c| c.talkgroup == TG2).expect("extra-band call reported");
+    eprintln!("extra band: {} samples, syncs c4fm {} cqpsk {}", c2.pcm.len(), c2.syncs_c4fm, c2.syncs_cqpsk);
+    assert!(c2.syncs_cqpsk > 0, "no sync on the extra band's call");
+    assert!(!c2.pcm.is_empty(), "extra band's call produced no audio");
+}

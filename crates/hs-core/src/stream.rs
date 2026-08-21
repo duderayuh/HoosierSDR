@@ -221,6 +221,26 @@ impl Buffered {
 }
 
 impl Buffered {
+    /// Read without waiting: whatever is buffered or already queued, else
+    /// `Ok(0)`. For a loop that blocks on one radio and drains the others.
+    pub fn try_read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        if self.pending_pos >= self.pending.len() {
+            self.pending = match self.rx.try_recv() {
+                Ok(r) => r?,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(0),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err(SourceError::Eof),
+            };
+            self.pending_pos = 0;
+        }
+        let avail = &self.pending[self.pending_pos..];
+        let n = avail.len().min(buf.len() & !1);
+        buf[..n].copy_from_slice(&avail[..n]);
+        self.pending_pos += n;
+        Ok(n)
+    }
+}
+
+impl Buffered {
     /// Throw away whatever is queued right now — the blocks that piled up
     /// while a live caller was busy measuring — and return how many.
     pub fn discard_queued(&mut self) -> usize {
