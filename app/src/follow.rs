@@ -6,7 +6,7 @@
 //! the button that starts it needs a human.
 
 use hs_core::catalog::CsvCatalog;
-use hs_core::follow::{in_band, measure_carrier, GrantGate, TrunkFollower};
+use hs_core::follow::{in_band, GrantGate, TrunkFollower};
 use hs_core::stream::{Buffered, Normalized};
 use hs_source::{SdrSource, SourceError};
 use serde::Serialize;
@@ -28,6 +28,10 @@ pub struct FollowParams {
     /// Stored audio format; WAV is written first and replaced when another
     /// codec is chosen (ffmpeg).
     pub format: crate::encode::Format,
+    /// Live radio: discard the IQ that queued up during the measurement so
+    /// following starts on current air. Off for recordings, where every
+    /// sample is wanted.
+    pub live: bool,
 }
 
 /// Everything the loop reads live from the UI, shared by reference.
@@ -54,6 +58,8 @@ pub enum FollowEvent {
         modulation: String,
         correction_hz: f64,
         rate: f64,
+        /// Where the radio actually is (may differ from what was typed).
+        center_mhz: f64,
     },
     CallStart {
         tg: u16,
@@ -130,15 +136,23 @@ pub fn run<S: SdrSource + Send + 'static>(
     running: &AtomicBool,
     emit: &mut dyn FnMut(FollowEvent),
 ) -> Result<(), String> {
-    let mut src = Normalized::new(src);
+    let src = Normalized::new(src);
     let rate = src.sample_rate();
     in_band(rate, p.center_hz, p.control_hz)?;
 
+    // Hand the radio to a reader thread *first*, so it keeps draining while
+    // the multi-second measurement runs — read synchronously, an RTL-SDR's
+    // buffer overflows during the sweep and the stream afterwards is holes.
+    let mut src = if p.live {
+        Buffered::new(src, 65536)
+    } else {
+        Buffered::lossless(src, 65536)
+    };
+
     // Prime on ~3 s of air and measure where the control channel really is
-    // (and which modulation it uses), reading the source directly so the
-    // measurement's several seconds don't register as queue drops.
+    // (and which modulation it uses).
     let block = (rate as usize / 10) * 2;
-    let mut buf = vec![0.0f32; block];
+    let mut buf = vec![0.0f32; 65536 * 2];
     let target = block * 30;
     let mut prime: Vec<f32> = Vec::with_capacity(target);
     while prime.len() < target {
@@ -155,8 +169,20 @@ pub fn run<S: SdrSource + Send + 'static>(
     if prime.is_empty() {
         return Err("the source delivered no samples".into());
     }
-    let Some((measured_hz, modulation)) = measure_carrier(&prime, rate, p.center_hz, p.control_hz)
-    else {
+    emit(FollowEvent::Notice {
+        text: "measuring the control channel (frequency and modulation)…".into(),
+    });
+    let cancel = || !running.load(Ordering::SeqCst);
+    let Some((measured_hz, modulation)) = hs_core::follow::measure_carrier_cancellable(
+        &prime,
+        rate,
+        p.center_hz,
+        p.control_hz,
+        &cancel,
+    ) else {
+        if cancel() {
+            return Ok(());
+        }
         return Err(format!(
             "could not find control {:.4} MHz: nothing decoded within ±12.5 kHz of it on either \
              modulation. A site lists several control-capable frequencies but only one carries \
@@ -170,6 +196,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         modulation: mod_name(Some(modulation)),
         correction_hz: f.correction_hz(),
         rate,
+        center_mhz: p.center_hz / 1e6,
     });
 
     if let Some((h, q)) = p.hang_secs {
@@ -189,7 +216,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         enc: 0,
         locked: 0,
         busy: 0,
-        gate: GrantGate::new(50),
+        gate: GrantGate::new(5.0),
         started: std::collections::HashMap::new(),
         priorities: std::collections::HashMap::new(),
         unnamed: std::collections::HashSet::new(),
@@ -219,16 +246,15 @@ pub fn run<S: SdrSource + Send + 'static>(
     // decode it too, so a call that began during startup is not lost. The
     // follower runs far faster than real time, so this catches up quickly.
     let out = f.process(&prime);
-    rep.report(out, emit);
+    rep.report(out, prime.len() as f64 / 2.0 / rate, emit);
     drop(prime);
 
-    // Now hand the radio to a reader thread and decode from its queue. Any
-    // drops the radio itself counted while we were measuring and catching up
-    // aren't live problems; report relative to here. (Read the radio's own
-    // counter before wrapping: the wrapper only learns it after its first
-    // read.)
+    // The queue filled with stale blocks while we measured; a live run starts
+    // on current air instead.
+    if p.live {
+        src.discard_queued();
+    }
     let drop_base = src.dropped();
-    let mut src = Buffered::new(src, 65536);
     let mut buf = vec![0.0f32; 65536 * 2];
     let start = std::time::Instant::now();
     let mut total_pairs = 0u64;
@@ -248,7 +274,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         // The UI may change lockout / hold / playlist / priorities any time.
         apply_live(&mut f, &mut rep);
         let out = f.process(chunk);
-        rep.report(out, emit);
+        rep.report(out, (n / 2) as f64 / rate, emit);
         if blocks.is_multiple_of(40) {
             let site = f.site_info();
             if site != last_site {
@@ -281,7 +307,7 @@ pub fn run<S: SdrSource + Send + 'static>(
         completed: f.finish(),
         ..Default::default()
     };
-    rep.report(out, emit);
+    rep.report(out, 0.0, emit);
     let secs = start.elapsed().as_secs_f64().max(1e-3);
     emit(rep.status(
         total_pairs,
@@ -381,9 +407,14 @@ impl Reporter<'_> {
         }
     }
 
-    fn report(&mut self, out: hs_core::follow::FollowOutput, emit: &mut dyn FnMut(FollowEvent)) {
+    fn report(
+        &mut self,
+        out: hs_core::follow::FollowOutput,
+        secs: f64,
+        emit: &mut dyn FnMut(FollowEvent),
+    ) {
         self.syncs += out.control_syncs;
-        self.gate.tick();
+        self.gate.tick(secs);
         if let Some((old, new)) = out.control_moved {
             emit(FollowEvent::Notice {
                 text: format!(
@@ -643,6 +674,7 @@ mod tests {
             hang_secs: None,
             system_name: String::new(),
             format: Default::default(),
+            live: false,
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
@@ -730,6 +762,7 @@ mod tests {
             hang_secs: None,
             system_name: String::new(),
             format: Default::default(),
+            live: false,
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
@@ -784,6 +817,7 @@ mod tests {
                 hang_secs: None,
                 system_name: String::new(),
                 format: Default::default(),
+                live: false,
             };
             let running = AtomicBool::new(true);
             let mut n = 0;
@@ -838,6 +872,7 @@ mod tests {
                 hang_secs: None,
                 system_name: String::new(),
                 format: Default::default(),
+                live: false,
             };
             let running = AtomicBool::new(true);
             let (lockout, allow, _, pri, units) = live_defaults();
@@ -894,6 +929,7 @@ mod tests {
             hang_secs: None,
             system_name: String::new(),
             format: Default::default(),
+            live: false,
         };
         let running = std::sync::Arc::new(AtomicBool::new(true));
         let r = std::sync::Arc::clone(&running);

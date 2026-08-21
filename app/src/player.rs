@@ -44,6 +44,12 @@ impl Queue {
         self.current = None;
     }
 
+    /// Drop everything queued and playing.
+    fn clear(&mut self) {
+        self.clips.clear();
+        self.current = None;
+    }
+
     fn replay_last(&mut self) {
         if let Some(last) = self.history.back().cloned() {
             self.clips.push_front(Clip {
@@ -97,6 +103,7 @@ enum Cmd {
     Play(Vec<i16>, u8),
     Skip,
     ReplayLast,
+    Clear,
 }
 
 /// A handle to the audio thread; cheap to clone.
@@ -118,6 +125,10 @@ impl Audio {
     /// Play the most recently played call again, now.
     pub fn replay_last(&self) {
         let _ = self.tx.send(Cmd::ReplayLast);
+    }
+    /// Silence: drop the current clip and everything queued.
+    pub fn clear(&self) {
+        let _ = self.tx.send(Cmd::Clear);
     }
     pub fn queued(&self) -> usize {
         self.queue.lock().map(|q| q.queued()).unwrap_or(0)
@@ -141,10 +152,15 @@ pub fn spawn() -> Option<Audio> {
                 Cmd::Play(pcm, pri) => q.push(pcm, pri),
                 Cmd::Skip => q.skip(),
                 Cmd::ReplayLast => q.replay_last(),
+                Cmd::Clear => q.clear(),
             }
         }
     });
-    let queue = ready_rx.recv().ok().flatten()?;
+    // A wedged CoreAudio must not hang the app: give the device 3 s.
+    let queue = ready_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .ok()
+        .flatten()?;
     Some(Audio { tx, queue })
 }
 

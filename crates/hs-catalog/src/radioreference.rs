@@ -269,8 +269,11 @@ impl Default for HttpTransport {
 
 impl SoapTransport for HttpTransport {
     fn post(&self, endpoint: &str, action: &str, body: &str) -> Result<String, RrError> {
+        // SOAP faults come back with HTTP 500 and the reason in the body;
+        // don't let the status short-circuit before the fault is read.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
             .build()
             .into();
         let mut resp = agent
@@ -365,22 +368,68 @@ impl<T: SoapTransport> RrClient<T> {
         self
     }
 
-    /// Fetch a system's identity, sites and talkgroups in one call sequence.
+    /// Fetch a system's identity, sites and talkgroups. The three calls are
+    /// independent: a system whose site list fails (or is empty) still gets
+    /// its talkgroups, and vice versa; only a system with neither is an error.
     pub fn system(&self, sys_id: u32) -> Result<RrSystem, RrError> {
-        let mut sys = self.details(sys_id)?;
-        sys.sites = self.sites(sys_id)?;
-        sys.talkgroups = self.talkgroups(sys_id)?;
+        let mut sys = self.details(sys_id).unwrap_or(RrSystem {
+            id: sys_id,
+            ..Default::default()
+        });
+        let sites = self.sites(sys_id);
+        let tgs = self.talkgroups(sys_id);
+        match (sites, tgs) {
+            (Err(e), Err(_)) => return Err(e),
+            (sites, tgs) => {
+                sys.sites = sites.unwrap_or_default();
+                sys.talkgroups = tgs.unwrap_or_default();
+            }
+        }
         Ok(sys)
     }
 
+    /// Talkgroup categories, for fetching a large system piecewise.
+    pub fn talkgroup_categories(&self, sys_id: u32) -> Result<Vec<(u32, String)>, RrError> {
+        let root = self.call("getTrsTalkgroupCats", "sid", &sys_id.to_string())?;
+        Ok(collect_records(&root, "tgCid")
+            .iter()
+            .filter_map(|n| {
+                Some((
+                    n.get_u64("tgCid")? as u32,
+                    n.get_any(&["tgCname", "tgCatName", "name"])
+                        .unwrap_or("")
+                        .to_string(),
+                ))
+            })
+            .collect())
+    }
+
     fn call(&self, method: &str, arg_name: &str, arg: &str) -> Result<Node, RrError> {
-        let body = envelope(method, arg_name, arg, &self.creds);
+        self.call_args(method, &[(arg_name, arg)])
+    }
+
+    fn call_args(&self, method: &str, args: &[(&str, &str)]) -> Result<Node, RrError> {
+        let body = envelope_args(method, args, &self.creds);
         let raw = self.transport.post(&self.endpoint, method, &body)?;
         if let Some(dir) = &self.dump_dir {
             let _ = std::fs::create_dir_all(dir);
             let _ = std::fs::write(dir.join(format!("{method}.xml")), &raw);
         }
-        let root = xml::parse(&raw).ok_or_else(|| RrError::Http("unparseable XML".into()))?;
+        let root = xml::parse(&raw).ok_or_else(|| {
+            // Not SOAP at all — usually an HTML error page. Keep enough of it
+            // to say what the server said, minus markup.
+            let text: String = raw
+                .split('<')
+                .filter_map(|s| s.split_once('>').map(|(_, t)| t))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            RrError::Http(format!(
+                "{method}: non-XML reply ({} bytes): {}",
+                raw.len(),
+                text.chars().take(240).collect::<String>()
+            ))
+        })?;
         if let Some(fault) = root.find("Fault") {
             return Err(RrError::Fault {
                 code: fault
@@ -436,13 +485,55 @@ impl<T: SoapTransport> RrClient<T> {
     }
 
     pub fn talkgroups(&self, sys_id: u32) -> Result<Vec<Talkgroup>, RrError> {
-        let root = self.call("getTrsTalkgroups", "sid", &sys_id.to_string())?;
-        let nodes = collect_records(&root, "tgDec");
-        let tgs: Vec<Talkgroup> = nodes.iter().filter_map(parse_talkgroup).collect();
-        if tgs.is_empty() {
-            return Err(RrError::Empty("talkgroups"));
+        // Whole list first. RadioReference's server has answered HTTP 500
+        // with an empty body for some large systems (MESA, sid 5737); the
+        // same data comes back fine one category at a time, so fall back to
+        // that before giving up.
+        let sid = sys_id.to_string();
+        let whole = self
+            .call_args(
+                "getTrsTalkgroups",
+                &[
+                    ("sid", &sid),
+                    ("tgCid", "0"),
+                    ("tgTag", "0"),
+                    ("tgDec", "0"),
+                ],
+            )
+            .map(|root| parse_talkgroups(&root));
+        if let Ok(tgs) = &whole {
+            if !tgs.is_empty() {
+                return Ok(tgs.clone());
+            }
         }
-        Ok(tgs)
+        let cats = self.talkgroup_categories(sys_id)?;
+        let mut all: Vec<Talkgroup> = Vec::new();
+        let mut last_err: Option<RrError> = whole.err();
+        for (cid, cat_name) in &cats {
+            match self.call_args(
+                "getTrsTalkgroups",
+                &[("sid", &sid), ("tgCid", &cid.to_string())],
+            ) {
+                Ok(root) => {
+                    let mut tgs = parse_talkgroups(&root);
+                    // The per-category reply doesn't repeat the category;
+                    // we asked for it, so we know it.
+                    for t in tgs.iter_mut() {
+                        if t.category.is_none() && !cat_name.is_empty() {
+                            t.category = Some(cat_name.clone());
+                        }
+                    }
+                    all.extend(tgs);
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if all.is_empty() {
+            return Err(last_err.unwrap_or(RrError::Empty("talkgroups")));
+        }
+        all.sort_by_key(|t| t.id);
+        all.dedup_by_key(|t| t.id);
+        Ok(all)
     }
     /// United States' states (RadioReference country id 1), for browsing.
     pub fn states(&self) -> Result<Vec<RrState>, RrError> {
@@ -519,6 +610,13 @@ fn parse_system_refs(root: &Node) -> Vec<RrSystemRef> {
                 city: n.get("sCity").map(str::to_string).filter(|c| !c.is_empty()),
             })
         })
+        .collect()
+}
+
+fn parse_talkgroups(root: &Node) -> Vec<Talkgroup> {
+    collect_records(root, "tgDec")
+        .iter()
+        .filter_map(parse_talkgroup)
         .collect()
 }
 
@@ -635,14 +733,17 @@ fn parse_radix16(s: &str) -> Option<u16> {
 
 /// Build the SOAP envelope. `authInfo` carries the app key and the end user's
 /// credentials; the service authenticates the user on every call.
-fn envelope(method: &str, arg_name: &str, arg: &str, c: &Credentials) -> String {
+fn envelope_args(method: &str, args: &[(&str, &str)], c: &Credentials) -> String {
+    let args_xml: String = args
+        .iter()
+        .map(|(k, v)| format!("   <{k}>{}</{k}>\n", esc(v)))
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
  <soap:Body>
   <{method}>
-   <{arg_name}>{arg}</{arg_name}>
-   <authInfo>
+{args_xml}   <authInfo>
     <appKey>{key}</appKey>
     <username>{user}</username>
     <password>{pass}</password>
@@ -653,13 +754,17 @@ fn envelope(method: &str, arg_name: &str, arg: &str, c: &Credentials) -> String 
  </soap:Body>
 </soap:Envelope>"#,
         method = method,
-        arg_name = arg_name,
-        arg = esc(arg),
+        args_xml = args_xml,
         key = esc(&c.app_key),
         user = esc(&c.username),
         pass = esc(&c.password),
         ver = SERVICE_VERSION,
     )
+}
+
+#[allow(dead_code)]
+fn envelope(method: &str, arg_name: &str, arg: &str, c: &Credentials) -> String {
+    envelope_args(method, &[(arg_name, arg)], c)
 }
 
 fn esc(s: &str) -> String {
@@ -941,5 +1046,73 @@ mod tests {
         c.county_systems(901).unwrap();
         let body = c.transport.seen.borrow()[0].clone();
         assert!(body.contains("getCountyInfo") && body.contains("<ctid>901</ctid>"));
+    }
+
+    /// A transport that answers each call from a queue, so a failing whole-
+    /// list request followed by per-category requests can be scripted.
+    struct Seq {
+        replies: std::cell::RefCell<std::collections::VecDeque<Result<String, RrError>>>,
+        seen: std::cell::RefCell<Vec<String>>,
+    }
+    impl SoapTransport for Seq {
+        fn post(&self, _e: &str, _a: &str, body: &str) -> Result<String, RrError> {
+            self.seen.borrow_mut().push(body.to_string());
+            self.replies
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(RrError::Empty("script")))
+        }
+    }
+
+    #[test]
+    fn talkgroups_fall_back_to_per_category_fetches() {
+        let cats = r#"<Envelope><Body><r><item><tgCid>1</tgCid><tgCname>Law</tgCname></item><item><tgCid>2</tgCid><tgCname>Fire</tgCname></item></r></Body></Envelope>"#;
+        let law = r#"<Envelope><Body><r><item><tgDec>101</tgDec><tgAlpha>PD 1</tgAlpha><tgMode>D</tgMode></item></r></Body></Envelope>"#;
+        let fire = r#"<Envelope><Body><r><item><tgDec>201</tgDec><tgAlpha>FD 1</tgAlpha><tgMode>D</tgMode></item></r></Body></Envelope>"#;
+        let t = Seq {
+            replies: std::cell::RefCell::new(
+                vec![
+                    Err(RrError::Http("http status: 500".into())),
+                    Ok(cats.into()),
+                    Ok(law.into()),
+                    Ok(fire.into()),
+                ]
+                .into(),
+            ),
+            seen: Default::default(),
+        };
+        let c = RrClient::with_transport(Credentials::new("k", "u", "p"), t);
+        let tgs = c.talkgroups(5737).unwrap();
+        assert_eq!(tgs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![101, 201]);
+        assert_eq!(tgs[0].category.as_deref(), Some("Law"));
+        assert_eq!(tgs[1].category.as_deref(), Some("Fire"));
+        let seen = c.transport.seen.borrow();
+        assert!(
+            seen[0].contains("<tgCid>0</tgCid>"),
+            "whole-list request carries the optional args"
+        );
+        assert!(seen[1].contains("getTrsTalkgroupCats"));
+        assert!(seen[2].contains("<tgCid>1</tgCid>") && seen[3].contains("<tgCid>2</tgCid>"));
+    }
+
+    #[test]
+    fn a_system_with_talkgroups_but_no_sites_still_loads() {
+        let details = r#"<Envelope><Body><return><sName>Solo</sName><sysid>0x1</sysid></return></Body></Envelope>"#;
+        let tgs = r#"<Envelope><Body><r><item><tgDec>7</tgDec><tgAlpha>X</tgAlpha><tgMode>D</tgMode></item></r></Body></Envelope>"#;
+        let t = Seq {
+            replies: std::cell::RefCell::new(
+                vec![
+                    Ok(details.into()),
+                    Err(RrError::Empty("sites")),
+                    Ok(tgs.into()),
+                ]
+                .into(),
+            ),
+            seen: Default::default(),
+        };
+        let c = RrClient::with_transport(Credentials::new("k", "u", "p"), t);
+        let sys = c.system(1).unwrap();
+        assert_eq!(sys.name.as_deref(), Some("Solo"));
+        assert!(sys.sites.is_empty() && sys.talkgroups.len() == 1);
     }
 }

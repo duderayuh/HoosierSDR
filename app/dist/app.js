@@ -30,6 +30,9 @@ function parseFreq(s) {
   return parseFloat(s);
 }
 const mhz = (hz) => (hz / 1e6).toFixed(4);
+// Everything that came from outside (RadioReference, CSVs, whisper, files) is
+// escaped before it meets innerHTML.
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const now = () => new Date().toLocaleTimeString("en-US", { hour12: false });
 function wireSeg(el, onPick) {
   el.querySelectorAll("button").forEach((b) => {
@@ -46,7 +49,7 @@ function showView(v) {
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
-if (["#playlists", "#settings", "#library", "#aliases"].includes(location.hash)) showView(location.hash.slice(1));
+setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
 
 /* ---------- tuning state ---------- */
 let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
@@ -59,7 +62,7 @@ function applyMode() {
   $("followOpts").style.display = follow ? "" : "none";
   $("channelOpts").style.display = follow ? "none" : "";
   $("freqHint").textContent = follow ? "control channel" : "channel";
-  $("emptyHint").textContent = follow ? "Pick a playlist or set a control channel, then press Start." : "Set a channel and press Start.";
+  $("emptyHint").textContent = follow ? "Pick a playlist or set a control channel, then press Start." : "Set a channel and press Start. One-channel mode decodes and counts voice but does not play it — use Follow site to listen.";
 }
 wireSeg($("modeSeg"), (v) => { modeSel = v; applyMode(); });
 wireSeg($("modSeg"), (v) => { modSel = v; });
@@ -96,7 +99,7 @@ function activeStart(ev) {
   if (activeCalls.has(key)) return;
   const el = document.createElement("div");
   el.className = "call" + (ev.priority && ev.priority < 50 ? " pri" : "");
-  el.innerHTML = `<span class="tg">${ev.name}</span><span class="t">0:00</span><span class="sub">TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)} MHz</span>`;
+  el.innerHTML = `<span class="tg">${esc(ev.name)}</span><span class="t">0:00</span><span class="sub">TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)} MHz</span>`;
   $("active").prepend(el);
   activeCalls.set(key, { el, start: Date.now() });
   activeRefresh();
@@ -116,7 +119,7 @@ const evlog = $("events");
 function logEvent(text, cls) {
   const d = document.createElement("div");
   d.className = "ev" + (cls ? " " + cls : "");
-  d.innerHTML = `<span class="t">${now()}</span><span>${text}</span>`;
+  d.innerHTML = `<span class="t">${now()}</span><span>${esc(text)}</span>`;
   evlog.prepend(d);
   while (evlog.children.length > 150) evlog.removeChild(evlog.lastChild);
 }
@@ -160,13 +163,13 @@ function addCall(g) {
   const len = g.secs != null ? `${g.secs.toFixed(1)}s` : "";
   tr.innerHTML =
     `<td class="time">${now()}</td>` +
-    `<td class="tg">${g.name}<span class="num">TG ${g.tg}</span></td>` +
-    `<td class="src">${g.unit_name ? `${g.unit_name}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">${g.source}</span>` : (g.source ? g.source : "—")}</td>` +
+    `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}</span></td>` +
+    `<td class="src">${g.unit_name ? `${esc(g.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">${g.source}</span>` : (g.source ? g.source : "—")}</td>` +
     `<td class="dl">${g.freq_mhz.toFixed(4)}</td>` +
     `<td class="len">${len}</td>` +
     `<td>${g.encrypted ? '<span class="badge enc">Encrypted</span>' : g.emergency ? '<span class="badge emg">EMERGENCY</span>' : `<span class="badge clear">${g.modulation || "clear"}</span>`}${g.patched_with && g.patched_with.length ? ` <span class="badge clear" title="patched with">⛓ ${g.patched_with.length}</span>` : ""}</td>` +
     `<td class="act">` +
-      (g.wav ? `<button title="Replay" data-wav="${g.wav}">▶</button>` : "") +
+      (g.wav ? `<button title="Replay" data-wav="${esc(g.wav)}">▶</button>` : "") +
       (g.id != null ? `<button title="Add to cart" data-cart="${g.id}" class="${cart.has(g.id) ? "on" : ""}">🛒</button>` : "") +
       `<button data-pri="${g.tg}">☆</button>` +
       `<button title="Alert tone for TG ${g.tg}" data-bell="${g.tg}">🔔</button>` +
@@ -216,7 +219,7 @@ function cartAdd(id, label) { if (id == null) return; cart.set(id, label); cartS
 function cartToggle(id, label) { if (cart.has(id)) cart.delete(id); else cart.set(id, label); cartSave(); }
 function renderCart() {
   $("cartMeta").textContent = cart.size ? `${cart.size} call${cart.size === 1 ? "" : "s"}` : "empty";
-  $("cartList").innerHTML = [...cart].map(([id, label]) => `<div class="row"><span class="grow">${label}</span><button class="btn ghost" data-uncart="${id}">✕</button></div>`).join("");
+  $("cartList").innerHTML = [...cart].map(([id, label]) => `<div class="row"><span class="grow">${esc(label)}</span><button class="btn ghost" data-uncart="${id}">✕</button></div>`).join("");
   $("cartList").querySelectorAll("[data-uncart]").forEach((b) => b.onclick = () => { cart.delete(+b.dataset.uncart); cartSave(); });
   document.querySelectorAll("button[data-cart]").forEach((b) => b.classList.toggle("on", cart.has(+b.dataset.cart)));
 }
@@ -252,7 +255,7 @@ function avoidFor(tg) {
   if (avoidUntil.has(tg)) avoidUntil.delete(tg); else avoidUntil.set(tg, Date.now() + min * 60000);
   save("hs.avoid", Object.fromEntries(avoidUntil)); renderLockout(); pushLockout();
 }
-setInterval(() => { const before = avoidUntil.size; effectiveLockout(); if (avoidUntil.size !== before) { renderLockout(); pushLockout(); } }, 15000);
+setInterval(() => { const before = avoidUntil.size; effectiveLockout(); renderLockout(); if (avoidUntil.size !== before) pushLockout(); }, 15000);
 function renderLockout() {
   const chips = [...lockout].sort((a, b) => a - b).map((tg) => `<span class="chip" data-tg="${tg}" title="Unlock">TG ${tg} ✕</span>`)
     .concat([...avoidUntil].map(([tg, until]) => `<span class="chip" data-avoid="${tg}" title="Timed avoid — click to lift">TG ${tg} ⏱ ${Math.max(1, Math.round((until - Date.now()) / 60000))}m ✕</span>`));
@@ -274,7 +277,7 @@ function toggleLock(tg) {
   renderLockout(); pushLockout();
 }
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
-renderLockout();
+effectiveLockout(); renderLockout();
 
 /* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
 const wf = $("waterfall"), wctx = wf.getContext("2d");
@@ -296,7 +299,13 @@ function colour(t) {
   const a = stops[i], b = stops[i + 1];
   return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
 }
+let pendingSpectrum = null, spectrumRaf = 0;
 function pushSpectrum(db) {
+  // Coalesce: draw at most once per animation frame, with the newest data.
+  pendingSpectrum = db;
+  if (!spectrumRaf) spectrumRaf = requestAnimationFrame(() => { spectrumRaf = 0; const d = pendingSpectrum; pendingSpectrum = null; if (d) drawSpectrum(d); });
+}
+function drawSpectrum(db) {
   const w = wf.width, h = wf.height, n = db.length, lo = wfCfg.min, hi = wfCfg.max;
   wctx.drawImage(wf, 0, 0, w, h - 1, 0, 1, w, h - 1);
   const row = wctx.createImageData(w, 1);
@@ -330,8 +339,9 @@ function wfApply() {
 $("wfFft").onchange = () => { wfCfg.fft = +$("wfFft").value; wfApply(); };
 $("wfAvg").onchange = () => { wfCfg.avg = +$("wfAvg").value; wfApply(); };
 $("wfMap").onchange = () => { wfCfg.map = $("wfMap").value; wfApply(); };
-$("wfMin").oninput = () => { wfCfg.min = Math.min(+$("wfMin").value, wfCfg.max - 10); wfApply(); };
-$("wfMax").oninput = () => { wfCfg.max = Math.max(+$("wfMax").value, wfCfg.min + 10); wfApply(); };
+$("wfMin").oninput = () => { wfCfg.min = Math.min(+$("wfMin").value, wfCfg.max - 10); };
+$("wfMax").oninput = () => { wfCfg.max = Math.max(+$("wfMax").value, wfCfg.min + 10); };
+$("wfMin").onchange = $("wfMax").onchange = wfApply;
 $("wfLine").onchange = () => { wfCfg.line = $("wfLine").checked; wfApply(); };
 $("wfPeak").onchange = () => { wfCfg.peak = $("wfPeak").checked; wfApply(); };
 wfApply();
@@ -362,7 +372,8 @@ function handleFollow(ev) {
       logEvent(`control ${ev.control_mhz.toFixed(4)} MHz ${ev.modulation}, tuner ${ev.correction_hz >= 0 ? "+" : ""}${ev.correction_hz.toFixed(0)} Hz`);
       $("tunedHz").textContent = ev.control_mhz.toFixed(4);
       $("tunedSub").textContent = `${ev.modulation} · tuner ${ev.correction_hz >= 0 ? "+" : ""}${ev.correction_hz.toFixed(0)} Hz`;
-      $("wfAxis").textContent = `${(parseFreq($("center").value) / 1e6).toFixed(2)} MHz ± ${(ev.rate / 2e6).toFixed(2)} MHz`;
+      $("wfAxis").textContent = `${(ev.center_mhz ?? parseFreq($("center").value) / 1e6).toFixed(4)} MHz ± ${(ev.rate / 2e6).toFixed(2)} MHz`;
+      if (ev.center_mhz != null) $("center").value = ev.center_mhz.toFixed(4) + "M";
       $("followMeta").textContent = "";
       activeRefresh();
       break;
@@ -427,6 +438,9 @@ if (TAURI) {
   });
   $("start").onclick = async () => {
     try {
+      if (!Number.isFinite(parseFreq($("freq").value))) { alert("Enter a frequency like 851.5375M"); return; }
+      if (modeSel === "follow" && !Number.isFinite(parseFreq($("center").value))) { alert("Enter a band centre like 855M"); return; }
+      if (+$("rate").value < 1e6) { alert("The 48 kHz rate is for decoding files; pick 2.4 M (RTL-SDR) or 2.5 / 10 M (Airspy)."); return; }
       setState(modeSel === "follow" ? "measuring" : "capturing");
       log(`start: mode=${modeSel} source=${$("source").value} rate=${$("rate").value} freq=${$("freq").value} center=${$("center").value}`);
       followVoice = 0;
@@ -446,7 +460,7 @@ if (TAURI) {
       }
     } catch (err) { setState("standby"); alert(err); }
   };
-  $("stop").onclick = () => invoke("stop_capture");
+  $("stop").onclick = () => invoke("stop_capture").catch((e) => alert(e));
   $("loadcat").onclick = async () => {
     const path = $("catalog").value.trim(); if (!path) return;
     try { const n = await invoke("load_catalog", { path }); $("loadcat").textContent = n + " TGs"; alert(`Loaded. ${n} talkgroups are now named.`); if (typeof aliasesOnShow === "function") aliasesOnShow(); } catch (err) { alert(err); }
@@ -475,7 +489,7 @@ if (TAURI) {
     try {
       const u = await invoke("units_list");
       $("unitsMeta").textContent = u.length ? `${u.length} named` : "";
-      $("unitsBody").innerHTML = u.map((r) => `<tr><td class="mono">${r.id}</td><td>${r.name}</td></tr>`).join("");
+      $("unitsBody").innerHTML = u.map((r) => `<tr><td class="mono">${r.id}</td><td>${esc(r.name)}</td></tr>`).join("");
     } catch (e) { log(`units: ${e}`); }
   }
   $("unitSave").onclick = async () => {
@@ -509,9 +523,9 @@ if (TAURI) {
   function libRowHtml(r) {
     const t = r.transcript_edited || r.transcript || "";
     return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
-      `<td class="time">${fmtT(r.start)}</td><td class="tg">${r.tg_name}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span></td>` +
-      `<td class="src">${r.unit_name || r.unit || "—"}</td><td class="len">${r.secs.toFixed(1)}s</td>` +
-      `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${t.replace(/"/g, "&quot;")}">${t || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
+      `<td class="time">${fmtT(r.start)}</td><td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span></td>` +
+      `<td class="src">${esc(r.unit_name || r.unit || "—")}</td><td class="len">${r.secs.toFixed(1)}s</td>` +
+      `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
       `<td class="act">${r.audio ? `<button title="Play" data-lplay="${r.id}">▶</button>` : ""}<button title="Star" data-lstar="${r.id}" class="${r.starred ? "pri-h" : ""}">★</button>` +
       `<button title="Transcribe now" data-ltr="${r.id}">T</button></td></tr>`;
   }
@@ -520,7 +534,7 @@ if (TAURI) {
     $("libBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = (e) => { if (e.target.closest("button,input")) return; libSelect(+tr.dataset.id); });
     $("libBody").querySelectorAll("input[data-sel]").forEach((c) => c.onchange = () => { const r = libRows.find((x) => x.id === +c.dataset.sel); cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); });
     $("libBody").querySelectorAll("button[data-lplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.lplay }).catch((e) => alert(e)));
-    $("libBody").querySelectorAll("button[data-lstar]").forEach((b) => b.onclick = async () => { const r = libRows.find((x) => x.id === +b.dataset.lstar); r.starred = !r.starred; await invoke("library_star", { id: r.id, on: r.starred }); b.classList.toggle("pri-h", r.starred); });
+    $("libBody").querySelectorAll("button[data-lstar]").forEach((b) => b.onclick = async () => { const r = libRows.find((x) => x.id === +b.dataset.lstar); r.starred = !r.starred; try { await invoke("library_star", { id: r.id, on: r.starred }); b.classList.toggle("pri-h", r.starred); } catch (e) { alert(e); } });
     $("libBody").querySelectorAll("button[data-ltr]").forEach((b) => b.onclick = () => { b.textContent = "…"; invoke("transcribe_call", { id: +b.dataset.ltr }).catch((e) => { b.textContent = "T"; alert(e); }); });
   }
   async function libSearch(append) {
@@ -540,14 +554,20 @@ if (TAURI) {
   // New live calls appear at the top when no filter narrows them out.
   window.libLiveAdd = async (id) => {
     if (!libShown) return;
-    try { const r = await invoke("library_get", { id }); if (r) { libPrependHtml(r); if (listening && $("qLive").checked) listenQueue.push(r.id); } } catch (_) {}
+    try {
+      const r = await invoke("library_get", { id }); if (!r) return;
+      const q = libQuery({});
+      const ok = (!q.tg || r.tg === q.tg) && (!q.unit || r.unit === q.unit) && (!q.starred || r.starred) && (!q.emergency || r.emergency) && (!q.with_audio || r.audio) && (!q.to || r.start <= q.to) && (!q.from || r.start >= q.from) && !q.text;
+      if (!ok) return;
+      libPrependHtml(r); if (listening && $("qLive").checked) listenQueue.push(r.id);
+    } catch (_) {}
   };
   listen("transcript", (e) => {
     const { id, text } = e.payload;
     const r = libRows.find((x) => x.id === id); if (r) r.transcript = text;
     const tr = $("libBody").querySelector(`tr[data-id="${id}"]`);
     if (tr) { const td = tr.querySelector("td.tr"); if (td && !(r && r.transcript_edited)) { td.textContent = text; td.title = text; } const b = tr.querySelector("button[data-ltr]"); if (b) b.textContent = "T"; }
-    if (libSel === id) libSelect(id);
+    if (libSel === id) { const m = document.querySelector("#detBody .machine"); if (m) m.textContent = text; }
   });
   listen("transcribe_error", (e) => logEvent(`transcription: ${e.payload}`, "warn"));
   listen("transcribe_ready", (e) => logEvent(`transcriber ready: ${e.payload}`));
@@ -559,20 +579,20 @@ if (TAURI) {
       const r = await invoke("library_get", { id }); if (!r) return;
       $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}`;
       $("detBody").innerHTML = `<div class="det">
-        <div><b>${r.tg_name}</b> <span class="faint">TG ${r.tg}</span> · unit ${r.unit_name ? r.unit_name + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
-        <div class="faint">${fmtT(r.start)} · ${r.system || ""} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span> · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
+        <div class="faint">${fmtT(r.start)} · ${esc(r.system || "")} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
-        <div class="machine">${r.transcript || "—"}</div>
+        <div class="machine">${esc(r.transcript || "—")}</div>
         <div class="k">Edited transcript (kept separately; the machine text above is never changed)</div>
-        <textarea id="detEdit" placeholder="Type a corrected transcript…">${r.transcript_edited || ""}</textarea>
+        <textarea id="detEdit" placeholder="Type a corrected transcript…">${esc(r.transcript_edited || "")}</textarea>
         <div class="xport" style="margin-top:6px"><button class="btn primary sm" id="detSave">Save edit</button><button class="btn ghost sm" id="detClearEdit">Clear edit</button><span class="meta" id="detSaved">${r.edited_at ? "edited " + fmtT(r.edited_at) : ""}</span></div>
       </div>`;
       const play = $("detPlay"); if (play) play.onclick = () => invoke("library_play", { id }).catch((e) => alert(e));
       $("detCart").onclick = () => { cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); libSelect(id); };
       $("detTr").onclick = () => invoke("transcribe_call", { id }).then(() => $("detSaved").textContent = "transcribing…").catch((e) => alert(e));
       const up = $("detUp"); if (up) up.onclick = () => invoke("upload_call", { id }).then(() => $("detSaved").textContent = "queued for upload").catch((e) => alert(e));
-      $("detSave").onclick = async () => { await invoke("library_set_edited", { id, text: $("detEdit").value }); $("detSaved").textContent = "saved"; libSearchRefreshRow(id); };
+      $("detSave").onclick = async () => { try { await invoke("library_set_edited", { id, text: $("detEdit").value }); $("detSaved").textContent = "saved"; libSearchRefreshRow(id); } catch (e) { alert(e); } };
       $("detClearEdit").onclick = async () => { $("detEdit").value = ""; await invoke("library_set_edited", { id, text: "" }); $("detSaved").textContent = "edit cleared"; libSearchRefreshRow(id); };
     } catch (e) { alert(e); }
   }
@@ -586,13 +606,16 @@ if (TAURI) {
     if (!libRows.length) { alert("Search first, then listen."); return; }
     listening = true; listenQueue = libRows.map((r) => r.id).filter((id) => libRows.find((r) => r.id === id).audio).reverse(); listenIdx = 0;
     $("listenBtn").disabled = true; $("listenStop").disabled = false;
-    await invoke("set_archive_mode", { on: true });
+    await invoke("set_archive_mode", { on: true }).catch((e) => alert(e));
     listenNext();
   };
-  $("listenStop").onclick = async () => { listening = false; clearTimeout(listenTimer); $("listenBtn").disabled = false; $("listenStop").disabled = true; $("listenMeta").textContent = ""; $("libBody").querySelectorAll("tr.playing").forEach((t) => t.classList.remove("playing")); await invoke("set_archive_mode", { on: false }); await invoke("skip_call"); };
+  $("listenStop").onclick = async () => { listening = false; clearTimeout(listenTimer); $("listenBtn").disabled = false; $("listenStop").disabled = true; $("listenMeta").textContent = ""; $("libBody").querySelectorAll("tr.playing").forEach((t) => t.classList.remove("playing")); try { await invoke("set_archive_mode", { on: false }); } catch (e) { log(`archive off: ${e}`); } };
   async function listenNext() {
     if (!listening) return;
-    if (listenIdx >= listenQueue.length) { $("listenMeta").textContent = $("qLive").checked ? "waiting for new calls…" : "done"; listenTimer = setTimeout(listenNext, 1500); return; }
+    if (listenIdx >= listenQueue.length) {
+      if (!$("qLive").checked) { $("listenStop").onclick(); $("listenMeta").textContent = "done — live audio resumed"; return; }
+      $("listenMeta").textContent = "waiting for new calls…"; listenTimer = setTimeout(listenNext, 1500); return;
+    }
     const id = listenQueue[listenIdx++]; const r = libRows.find((x) => x.id === id);
     $("libBody").querySelectorAll("tr.playing").forEach((t) => t.classList.remove("playing"));
     const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.classList.add("playing"); tr.scrollIntoView({ block: "nearest" }); }
@@ -659,7 +682,7 @@ if (TAURI) {
     try {
       const list = await invoke("catalogs_list");
       $("srcMeta").textContent = list.length ? `${list.length} source${list.length === 1 ? "" : "s"}` : "none";
-      $("srcList").innerHTML = list.length ? list.map((s) => `<div class="row"><span class="grow"><b>${s.name.replace(/^rr_/, "RadioReference sid ").replace(/^csv_/, "CSV: ")}</b><br><small>${s.talkgroups} talkgroups</small></span><button class="btn ghost" data-rmsrc="${s.name}">Remove</button></div>`).join("")
+      $("srcList").innerHTML = list.length ? list.map((s) => `<div class="row"><span class="grow"><b>${esc(s.name.replace(/^rr_/, "RadioReference sid ").replace(/^csv_/, "CSV: "))}</b><br><small>${s.talkgroups} talkgroups</small></span><button class="btn ghost" data-rmsrc="${esc(s.name)}">Remove</button></div>`).join("")
         : '<div class="row"><span class="grow" style="color:var(--ink-faint)">Nothing loaded yet.</span></div>';
       $("srcList").querySelectorAll("[data-rmsrc]").forEach((b) => b.onclick = async () => { if (!confirm(`Remove ${b.dataset.rmsrc}?`)) return; try { const n = await invoke("catalog_remove", { name: b.dataset.rmsrc }); $("loadcat").textContent = n ? n + " TGs" : "Load"; aliasesRefresh(); } catch (e) { alert(e); } });
     } catch (e) { log(`catalogs_list: ${e}`); }
@@ -725,13 +748,15 @@ if (TAURI) {
     broadcastify: { enabled: $("upBcfy").checked, api_key: $("upBcfyKey").value, system_id: parseInt($("upBcfySys").value, 10) || 0, format: $("upBcfyFmt").value },
     min_secs: parseFloat($("upMin").value) || 0,
   });
-  async function upRefresh() {
+  async function upRefresh(fields = true) {
     try {
       const v = await invoke("uploads_get"); const s = v.settings;
+      if (fields) {
       $("upRdio").checked = s.rdio.enabled; $("upRdioUrl").value = s.rdio.url; $("upRdioKey").value = s.rdio.key; $("upRdioSys").value = s.rdio.system || ""; $("upRdioLabel").value = s.rdio.system_label;
       $("upOmhz").checked = s.openmhz.enabled; $("upOmhzUrl").value = s.openmhz.url; $("upOmhzName").value = s.openmhz.short_name; $("upOmhzKey").value = s.openmhz.api_key;
       $("upBcfy").checked = s.broadcastify.enabled; $("upBcfyKey").value = s.broadcastify.api_key; $("upBcfySys").value = s.broadcastify.system_id || ""; $("upBcfyFmt").value = s.broadcastify.format || "m4a";
       $("upMin").value = s.min_secs;
+      }
       const st = v.status;
       $("upMeta").textContent = st.last_error ? `error: ${st.last_error}` : st.sent || st.queued ? `${st.sent} sent · ${st.failed} failed · ${st.queued} queued` : (!v.ffmpeg ? "ffmpeg not found — OpenMHz/Broadcastify need it" : "");
       $("upMeta").style.color = st.last_error ? "var(--enc)" : "";
@@ -741,14 +766,16 @@ if (TAURI) {
   document.querySelectorAll("[data-uptest]").forEach((b) => b.onclick = async () => {
     b.disabled = true; try { alert(await invoke("uploads_test", { service: b.dataset.uptest, settings: upSettings() })); } catch (e) { alert(`Test failed: ${e}`); } finally { b.disabled = false; }
   });
-  upRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") upRefresh(); }, 5000);
+  upRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") upRefresh(false); }, 5000);
 
   /* ---------- live feed ---------- */
-  async function stRefresh() {
+  async function stRefresh(fields = true) {
     try {
       const v = await invoke("stream_get"); const s = v.settings;
+      if (fields) {
       $("stEnabled").checked = s.enabled; $("stHost").value = s.host; $("stPort").value = s.port; $("stMount").value = s.mount; $("stUser").value = s.user;
       $("stPass").value = s.password; $("stTls").checked = s.tls; $("stCodec").value = s.codec; $("stKbps").value = String(s.bitrate_kbps); $("stName").value = s.name; $("stDesc").value = s.description;
+      }
       $("stMeta").textContent = !v.ffmpeg ? "ffmpeg not found" : v.status.last_error ? `error: ${v.status.last_error}` : v.status.running ? (v.status.connected ? `streaming · ${(v.status.bytes_sent / 1024).toFixed(0)} KB sent` : "connecting…") : "off";
       $("stMeta").style.color = v.status.last_error ? "var(--enc)" : v.status.connected ? "var(--clear)" : "";
     } catch (e) { log(`stream_get: ${e}`); }
@@ -760,7 +787,7 @@ if (TAURI) {
       setTimeout(stRefresh, 1500);
     } catch (e) { alert(e); }
   };
-  stRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") stRefresh(); }, 5000);
+  stRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") stRefresh(false); }, 5000);
 
   /* ---------- RadioReference account ---------- */
   async function rrRefresh() {
@@ -794,20 +821,20 @@ if (TAURI) {
   async function loadStates() {
     if (statesLoaded) return;
     const st = await invoke("rr_states", {});
-    $("bState").innerHTML = '<option value="">—</option>' + st.map((s) => `<option value="${s.stid}">${s.name}</option>`).join("");
+    $("bState").innerHTML = '<option value="">—</option>' + st.map((s) => `<option value="${s.stid}">${esc(s.name)}</option>`).join("");
     statesLoaded = true;
   }
   function renderSystems(list, label) {
     $("findMeta").textContent = label || "";
     $("sysList").innerHTML = list.length ? list.map((s) =>
-      `<div class="row" data-sid="${s.sid}"><span class="grow">${s.name}${s.city ? ` <small>· ${s.city}</small>` : ""}</span><span class="mono">sid ${s.sid}</span></div>`).join("")
+      `<div class="row" data-sid="${s.sid}"><span class="grow">${esc(s.name)}${s.city ? ` <small>· ${esc(s.city)}</small>` : ""}</span><span class="mono">sid ${s.sid}</span></div>`).join("")
       : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No trunked systems listed here.</span></div>';
     $("sysList").querySelectorAll(".row[data-sid]").forEach((r) => r.onclick = () => { $("rrSid").value = r.dataset.sid; loadSystem(+r.dataset.sid); });
   }
   $("bState").onchange = async () => {
     const stid = +$("bState").value; $("bCounty").innerHTML = '<option value="">— statewide —</option>'; if (!stid) return;
     try { $("findMeta").textContent = "loading…"; const v = await invoke("rr_state", { stid });
-      $("bCounty").innerHTML += v.counties.map((c) => `<option value="${c.ctid}">${c.name}</option>`).join("");
+      $("bCounty").innerHTML += v.counties.map((c) => `<option value="${c.ctid}">${esc(c.name)}</option>`).join("");
       renderSystems(v.systems, `${v.systems.length} statewide system${v.systems.length === 1 ? "" : "s"}`);
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
   };
@@ -855,7 +882,7 @@ if (TAURI) {
   function renderSites() {
     $("siteList").innerHTML = sys.sites.map((s) =>
       `<div class="row ${pickedSite && s.site_id === pickedSite.site_id ? "on" : ""}" data-site="${s.site_id}">` +
-      `<span class="grow"><b>${s.site_id}</b> ${s.name}${s.tdma_control ? ' <small style="color:var(--enc)">TDMA CC — not decodable yet</small>' : ""}</span>` +
+      `<span class="grow"><b>${s.site_id}</b> ${esc(s.name)}${s.tdma_control ? ' <small style="color:var(--enc)">TDMA CC — not decodable yet</small>' : ""}</span>` +
       (s.nac != null ? `<span class="mono">NAC 0x${s.nac.toString(16).toUpperCase().padStart(3, "0")}</span>` : "") +
       `<span class="mono">${s.control_mhz[0].toFixed(4)} MHz</span>` +
       (s.span_mhz ? `<span class="mono">${(s.span_mhz[1] - s.span_mhz[0]).toFixed(2)} MHz span</span>` : "") + `</div>`).join("");
@@ -863,7 +890,7 @@ if (TAURI) {
   }
   function renderCats() {
     const cats = [...new Set(sys.tgs.map((t) => t.category).filter(Boolean))].sort();
-    $("tgCat").innerHTML = '<option value="">all</option>' + cats.map((c) => `<option>${c}</option>`).join("");
+    $("tgCat").innerHTML = '<option value="">all</option>' + cats.map((c) => `<option>${esc(c)}</option>`).join("");
   }
   function shownTgs() {
     const q = $("tgFilter").value.trim().toLowerCase(), cat = $("tgCat").value;
@@ -872,7 +899,7 @@ if (TAURI) {
   function renderTgs() {
     $("tgBody").innerHTML = shownTgs().map((t) =>
       `<tr class="${t.encrypted ? "enc" : ""}"><td><input type="checkbox" data-tg="${t.id}" ${picked.has(t.id) ? "checked" : ""} ${t.encrypted ? "disabled" : ""}></td>` +
-      `<td class="mono">${t.id}</td><td>${t.alias}</td><td>${t.description}</td><td><small>${t.category}</small></td>` +
+      `<td class="mono">${t.id}</td><td>${esc(t.alias)}</td><td>${esc(t.description)}</td><td><small>${esc(t.category)}</small></td>` +
       `<td>${t.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}</td></tr>`).join("");
     $("tgBody").querySelectorAll("input[data-tg]").forEach((c) => c.onchange = () => { c.checked ? picked.add(+c.dataset.tg) : picked.delete(+c.dataset.tg); tgMeta(); });
     tgMeta();
@@ -898,7 +925,7 @@ if (TAURI) {
     playlists = list;
     $("plEmpty").style.display = list.length ? "none" : "";
     $("plList").innerHTML = list.map((p) =>
-      `<div class="row" data-id="${p.id}"><span class="grow"><b>${p.name}</b><br><small>${p.system_name} · site ${p.site_id} ${p.site_name} · ${p.control_mhz.toFixed(4)} MHz · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</small></span>` +
+      `<div class="row" data-id="${esc(p.id)}"><span class="grow"><b>${esc(p.name)}</b><br><small>${esc(p.system_name)} · site ${p.site_id} ${esc(p.site_name)} · ${p.control_mhz.toFixed(4)} MHz · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</small></span>` +
       `<button class="btn primary" data-act="${p.id}">Use</button><button class="btn ghost" data-del="${p.id}">Delete</button></div>`).join("");
     $("plList").querySelectorAll("[data-act]").forEach((b) => b.onclick = () => activatePlaylist(b.dataset.act));
     $("plList").querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
@@ -906,7 +933,7 @@ if (TAURI) {
       try { renderPlaylists(await invoke("playlist_delete", { id: b.dataset.del })); } catch (e) { alert(e); }
     });
     const cur = $("playlist").value;
-    $("playlist").innerHTML = '<option value="">— every talkgroup —</option>' + list.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
+    $("playlist").innerHTML = '<option value="">— every talkgroup —</option>' + list.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
     $("playlist").value = list.some((p) => p.id === cur) ? cur : "";
   }
   async function activatePlaylist(id) {
@@ -916,7 +943,12 @@ if (TAURI) {
       if (p) {
         modeSel = "follow"; setSeg($("modeSeg"), "follow"); applyMode();
         $("freq").value = p.control_mhz.toFixed(4) + "M"; $("center").value = p.center_mhz.toFixed(4) + "M";
-        $("rate").value = String(p.rate); syncRate();
+        if ($("source").value === "rtlsdr" && p.rate > 2400000) {
+          $("rate").value = "2400000"; $("center").value = p.control_mhz.toFixed(4) + "M";
+          logEvent(`RTL-SDR covers ±1.2 MHz: centred on the control channel; calls outside that span will be skipped — pick Airspy R2 for the whole site`, "warn");
+        } else { $("rate").value = String(p.rate); }
+        syncRate();
+        if ($("pillText").textContent !== "standby") logEvent("playlist changed — press Stop, then Start to retune", "warn");
         $("followMeta").textContent = `playlist: ${p.name} · ${p.tgs.length ? p.tgs.length + " talkgroups" : "all talkgroups"}`;
         showView("monitor");
       } else { $("followMeta").textContent = ""; }
@@ -937,9 +969,11 @@ if (TAURI) {
 
   // Dev hook: open with #autostart=airspy to press Start for a 10 MSPS site follow.
   if (location.hash.startsWith("#autostart")) {
-    $("source").value = location.hash.split("=")[1] || "airspy"; $("source").onchange();
+    const hp = new URLSearchParams(location.hash.slice(1));
+    $("source").value = hp.get("autostart") || "airspy"; $("source").onchange();
+    if (hp.get("rrload")) invoke("rr_download", { sid: +hp.get("rrload") }).then((d) => log(`rrload ok: ${d.name} ${d.talkgroups} tgs ${d.sites.length} sites`)).catch((e) => log(`rrload error: ${e}`));
     setTimeout(() => $("start").click(), 800);
-    setTimeout(() => $("stop").click(), 40000);
+    setTimeout(() => $("stop").click(), +(hp.get("secs") || 40) * 1000);
   }
 } else {
   /* ---------- demo driver: preview the layout without a backend ---------- */

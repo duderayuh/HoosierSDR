@@ -143,11 +143,11 @@ pub fn run_file(
         None => format!("TG {tg}"),
     };
     let mut oob = 0usize;
-    let mut gate = GrantGate::new(50);
+    let mut gate = GrantGate::new(5.0);
     for chunk in iq.chunks(block) {
         let out = f.process(chunk);
         syncs += out.control_syncs;
-        gate.tick();
+        gate.tick(0.1);
         report_control_moves(&out);
         for (tg, hz) in &out.started {
             println!("  start {} on {:.4} MHz", name_of(*tg), *hz as f64 / 1e6);
@@ -318,7 +318,7 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
     let mut blocks_since_print = 0u32;
     let mut oob = 0u32;
     let mut enc = 0u32;
-    let mut gate = GrantGate::new(50);
+    let mut gate = GrantGate::new(5.0);
     let start = std::time::Instant::now();
     let mut total_pairs: u64 = 0;
     // Drops seen at the previous heartbeat, so the warning reflects blocks lost
@@ -365,7 +365,7 @@ pub fn run_live<S: hs_source::SdrSource + Send + 'static>(
         }
         let out = f.process(&chunk);
         syncs += out.control_syncs;
-        gate.tick();
+        gate.tick(0.1);
         blocks_since_print += 1;
         let mut printed = report_control_moves(&out);
         for (tg, hz) in &out.started {

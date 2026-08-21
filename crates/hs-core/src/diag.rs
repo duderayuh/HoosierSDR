@@ -161,6 +161,22 @@ impl Diagnostics {
         }
     }
 
+    /// Keep the per-event vectors bounded for long live sessions: once a list
+    /// passes `cap`, drop its older half. Means stay meaningful; exact history
+    /// is for `--log` on recordings.
+    pub fn trim(&mut self, cap: usize) {
+        fn half<T>(v: &mut Vec<T>, cap: usize) {
+            if v.len() > cap {
+                v.drain(..v.len() / 2);
+            }
+        }
+        half(&mut self.syncs, cap);
+        half(&mut self.nids, cap);
+        half(&mut self.link_control, cap);
+        half(&mut self.grants, cap);
+        half(&mut self.locations, cap);
+    }
+
     /// Mean bit-error of all frame-sync detections (lower is better).
     pub fn mean_sync_errors(&self) -> f64 {
         if self.syncs.is_empty() {

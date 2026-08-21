@@ -115,7 +115,7 @@ impl Decimator {
             let stop = plan.working_rate / 2.0 / sample_rate;
             let transition = (stop - cutoff).max(1e-3);
             let mut n = (3.3 / transition).ceil() as usize;
-            n = n.clamp(31, 1023);
+            n = n.clamp(31, 4095);
             if n.is_multiple_of(2) {
                 n += 1;
             }
