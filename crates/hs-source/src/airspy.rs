@@ -91,13 +91,27 @@ unsafe fn apply_airspy_gain(dev: *mut AirspyDevice, g: &GainSetting) -> Result<(
         if r == AIRSPY_SUCCESS {
             Ok(())
         } else {
-            Err(SourceError::Unsupported(format!("airspy {what} failed ({r})")))
+            Err(SourceError::Unsupported(format!(
+                "airspy {what} failed ({r})"
+            )))
         }
     };
     match g {
-        GainSetting::AirspyLinearity(v) => check("linearity gain", airspy_set_linearity_gain(dev, (*v).min(21))),
-        GainSetting::AirspySensitivity(v) => check("sensitivity gain", airspy_set_sensitivity_gain(dev, (*v).min(21))),
-        GainSetting::AirspyManual { lna, mixer, vga, lna_agc, mixer_agc } => {
+        GainSetting::AirspyLinearity(v) => check(
+            "linearity gain",
+            airspy_set_linearity_gain(dev, (*v).min(21)),
+        ),
+        GainSetting::AirspySensitivity(v) => check(
+            "sensitivity gain",
+            airspy_set_sensitivity_gain(dev, (*v).min(21)),
+        ),
+        GainSetting::AirspyManual {
+            lna,
+            mixer,
+            vga,
+            lna_agc,
+            mixer_agc,
+        } => {
             check("lna agc", airspy_set_lna_agc(dev, u8::from(*lna_agc)))?;
             check("mixer agc", airspy_set_mixer_agc(dev, u8::from(*mixer_agc)))?;
             if !lna_agc {

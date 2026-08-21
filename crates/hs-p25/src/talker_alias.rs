@@ -137,8 +137,14 @@ mod tests {
     #[test]
     fn assembles_printable_text_and_confirms_on_repeat() {
         let mut a = TalkerAliasAssembler::new();
-        let header = word(LCO_MOTO_TALKER_ALIAS_HEADER, [0x01, 0x02, 0, 0, 0, b'E', b'N']);
-        let block = word(LCO_MOTO_TALKER_ALIAS_BLOCK, [b'G', b' ', b'2', b'1', 0, 0, 0]);
+        let header = word(
+            LCO_MOTO_TALKER_ALIAS_HEADER,
+            [0x01, 0x02, 0, 0, 0, b'E', b'N'],
+        );
+        let block = word(
+            LCO_MOTO_TALKER_ALIAS_BLOCK,
+            [b'G', b' ', b'2', b'1', 0, 0, 0],
+        );
         assert_eq!(a.observe(&header), None, "too short on its own");
         assert_eq!(a.observe(&block), None, "seen once");
         assert_eq!(a.observe(&header), None);
@@ -152,7 +158,10 @@ mod tests {
     #[test]
     fn binary_fields_do_not_become_aliases() {
         let mut a = TalkerAliasAssembler::new();
-        let w = word(LCO_MOTO_TALKER_ALIAS_BLOCK, [0x00, 0x41, 0x00, 0x42, 0xFF, 0x43, 0x00]);
+        let w = word(
+            LCO_MOTO_TALKER_ALIAS_BLOCK,
+            [0x00, 0x41, 0x00, 0x42, 0xFF, 0x43, 0x00],
+        );
         for _ in 0..4 {
             assert_eq!(a.observe(&w), None);
         }
@@ -171,7 +180,10 @@ mod tests {
 
     #[test]
     fn longest_run_is_chosen_and_trimmed() {
-        assert_eq!(longest_printable_run(b"\x00AB\x00 CAR 12 \x01"), Some("CAR 12".into()));
+        assert_eq!(
+            longest_printable_run(b"\x00AB\x00 CAR 12 \x01"),
+            Some("CAR 12".into())
+        );
         assert_eq!(longest_printable_run(b"\x00\x01"), None);
     }
 }

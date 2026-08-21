@@ -386,12 +386,26 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
             match ask_ollama(&ollama, &a.ai_prompt, &f) {
                 Ok((true, summary)) => ai_note = summary,
                 Ok((false, summary)) => {
-                    log_entry(&app, &a, &f, false, format!("AI gate said no: {summary}"), String::new());
+                    log_entry(
+                        &app,
+                        &a,
+                        &f,
+                        false,
+                        format!("AI gate said no: {summary}"),
+                        String::new(),
+                    );
                     return;
                 }
                 Err(e) => {
                     if !ollama.fail_open {
-                        log_entry(&app, &a, &f, false, format!("AI gate unavailable, alert held: {e}"), String::new());
+                        log_entry(
+                            &app,
+                            &a,
+                            &f,
+                            false,
+                            format!("AI gate unavailable, alert held: {e}"),
+                            String::new(),
+                        );
                         return;
                     }
                     ai_note = format!("(AI gate unavailable: {e})");
@@ -464,7 +478,9 @@ pub fn ask_ollama(o: &Ollama, prompt: &str, f: &CallFacts) -> Result<(bool, Stri
     // response — measured locally. A model that rejects the parameter is
     // retried without it.
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(o.timeout_secs.max(5) as u64)))
+        .timeout_global(Some(std::time::Duration::from_secs(
+            o.timeout_secs.max(5) as u64
+        )))
         .http_status_as_error(false)
         .build()
         .into();
@@ -490,11 +506,20 @@ pub fn ask_ollama(o: &Ollama, prompt: &str, f: &CallFacts) -> Result<(bool, Stri
         (status, text) = call(false)?;
     }
     if status != 200 {
-        return Err(format!("ollama HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "ollama HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
     let answer = v["response"].as_str().unwrap_or("");
-    parse_verdict(answer).ok_or_else(|| format!("model did not answer in JSON: {}", answer.chars().take(200).collect::<String>()))
+    parse_verdict(answer).ok_or_else(|| {
+        format!(
+            "model did not answer in JSON: {}",
+            answer.chars().take(200).collect::<String>()
+        )
+    })
 }
 
 /// `{"fire": bool, "summary": str}`, tolerating text around the JSON.
@@ -504,7 +529,9 @@ pub fn parse_verdict(answer: &str) -> Option<(bool, String)> {
     let v: serde_json::Value = serde_json::from_str(&answer[start..=end]).ok()?;
     let fire = match &v["fire"] {
         serde_json::Value::Bool(b) => *b,
-        serde_json::Value::String(s) => s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes"),
+        serde_json::Value::String(s) => {
+            s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+        }
         _ => return None,
     };
     let summary = v["summary"].as_str().unwrap_or("").to_string();
@@ -537,7 +564,11 @@ pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
         return Err("no Telegram chat id".into());
     }
     let body = serde_json::json!({ "chat_id": tg.chat_id.trim(), "text": text });
-    let (status, out) = crate::upload::post(&telegram_api("sendMessage")?, "application/json", body.to_string().into_bytes())?;
+    let (status, out) = crate::upload::post(
+        &telegram_api("sendMessage")?,
+        "application/json",
+        body.to_string().into_bytes(),
+    )?;
     check(status, &out)
 }
 
@@ -545,7 +576,11 @@ pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
 /// the same talkgroup within the window, concatenated oldest first. Encoded
 /// to MP3 when ffmpeg is present (what Telegram's `sendAudio` wants), else
 /// WAV as a document.
-fn clip_for(a: &Alert, f: &CallFacts, state: &AppState) -> Result<Option<(std::path::PathBuf, bool)>, String> {
+fn clip_for(
+    a: &Alert,
+    f: &CallFacts,
+    state: &AppState,
+) -> Result<Option<(std::path::PathBuf, bool)>, String> {
     let Some(audio) = f.audio.as_ref() else {
         return Ok(None);
     };
@@ -553,7 +588,13 @@ fn clip_for(a: &Alert, f: &CallFacts, state: &AppState) -> Result<Option<(std::p
     if a.combine_prev > 0 {
         if let (Some(db), Some(id)) = (state.db.lock().unwrap().clone(), f.id) {
             let c = db.lock().unwrap();
-            let prev = crate::library::previous_on_talkgroup(&c, id, f.tg, a.combine_prev as usize, a.combine_window_secs as i64)?;
+            let prev = crate::library::previous_on_talkgroup(
+                &c,
+                id,
+                f.tg,
+                a.combine_prev as usize,
+                a.combine_window_secs as i64,
+            )?;
             for p in prev.into_iter().rev() {
                 files.insert(0, p);
             }
@@ -570,7 +611,8 @@ fn clip_for(a: &Alert, f: &CallFacts, state: &AppState) -> Result<Option<(std::p
     let dir = std::env::temp_dir().join("hoosier-alerts");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let wav = dir.join(format!("alert_{}_{}.wav", f.tg, crate::library::now()));
-    hs_core::wav::write_wav(wav.to_str().ok_or("temp path")?, 8000, &pcm).map_err(|e| e.to_string())?;
+    hs_core::wav::write_wav(wav.to_str().ok_or("temp path")?, 8000, &pcm)
+        .map_err(|e| e.to_string())?;
     if crate::encode::ffmpeg_available().is_some() {
         let fmt: crate::encode::Format =
             serde_json::from_str(r#"{"codec":"mp3","bitrate_kbps":48,"mode":"cbr"}"#).unwrap();
@@ -585,7 +627,10 @@ fn clip_for(a: &Alert, f: &CallFacts, state: &AppState) -> Result<Option<(std::p
 /// Concatenate audio files (half a second of silence between) into one
 /// clip: MP3 via ffmpeg when available (Telegram's `sendAudio`), else WAV.
 /// Returns the path and whether it is MP3.
-pub(crate) fn combine_clips(files: &[String], stem: &str) -> Result<(std::path::PathBuf, bool), String> {
+pub(crate) fn combine_clips(
+    files: &[String],
+    stem: &str,
+) -> Result<(std::path::PathBuf, bool), String> {
     let mut pcm: Vec<i16> = Vec::new();
     for (i, p) in files.iter().enumerate() {
         let part = match read_audio(p) {
@@ -606,7 +651,8 @@ pub(crate) fn combine_clips(files: &[String], stem: &str) -> Result<(std::path::
     let dir = std::env::temp_dir().join("hoosier-alerts");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let wav = dir.join(format!("{stem}_{}.wav", crate::library::now()));
-    hs_core::wav::write_wav(wav.to_str().ok_or("temp path")?, 8000, &pcm).map_err(|e| e.to_string())?;
+    hs_core::wav::write_wav(wav.to_str().ok_or("temp path")?, 8000, &pcm)
+        .map_err(|e| e.to_string())?;
     if crate::encode::ffmpeg_available().is_some() {
         let fmt: crate::encode::Format =
             serde_json::from_str(r#"{"codec":"mp3","bitrate_kbps":48,"mode":"cbr"}"#).unwrap();
@@ -630,7 +676,11 @@ pub(crate) fn send_text_id(chat_id: &str, text: &str) -> Result<i64, String> {
         return Err("no Telegram chat id".into());
     }
     let body = serde_json::json!({ "chat_id": chat_id.trim(), "text": text });
-    let (status, out) = crate::upload::post(&telegram_api("sendMessage")?, "application/json", body.to_string().into_bytes())?;
+    let (status, out) = crate::upload::post(
+        &telegram_api("sendMessage")?,
+        "application/json",
+        body.to_string().into_bytes(),
+    )?;
     check(status, &out)?;
     message_id(&out).ok_or("Telegram reply had no message id".into())
 }
@@ -638,7 +688,14 @@ pub(crate) fn send_text_id(chat_id: &str, text: &str) -> Result<i64, String> {
 /// Send an audio file with a caption; returns the message id. Captions are
 /// capped at 1024 characters by Telegram, so a longer message is sent as
 /// text first and the audio follows with a short caption.
-pub(crate) fn send_audio_id(chat_id: &str, path: &std::path::Path, is_mp3: bool, caption: &str, title: &str, performer: &str) -> Result<Vec<i64>, String> {
+pub(crate) fn send_audio_id(
+    chat_id: &str,
+    path: &std::path::Path,
+    is_mp3: bool,
+    caption: &str,
+    title: &str,
+    performer: &str,
+) -> Result<Vec<i64>, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
@@ -646,11 +703,24 @@ pub(crate) fn send_audio_id(chat_id: &str, path: &std::path::Path, is_mp3: bool,
     let mut cap = caption.to_string();
     if caption.chars().count() > 1000 {
         ids.push(send_text_id(chat_id, caption)?);
-        cap = caption.lines().next().unwrap_or("").chars().take(200).collect();
+        cap = caption
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect();
     }
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "call.mp3".into());
-    let (method, field, mime) = if is_mp3 { ("sendAudio", "audio", "audio/mpeg") } else { ("sendDocument", "document", "audio/wav") };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "call.mp3".into());
+    let (method, field, mime) = if is_mp3 {
+        ("sendAudio", "audio", "audio/mpeg")
+    } else {
+        ("sendDocument", "document", "audio/wav")
+    };
     let mut m = crate::upload::Multipart::new()
         .text("chat_id", chat_id.trim())
         .text("caption", &cap)
@@ -668,7 +738,11 @@ pub(crate) fn send_audio_id(chat_id: &str, path: &std::path::Path, is_mp3: bool,
 /// Delete a message the bot sent (Telegram allows this for 48 hours).
 pub(crate) fn delete_message(chat_id: &str, id: i64) -> Result<(), String> {
     let body = serde_json::json!({ "chat_id": chat_id.trim(), "message_id": id });
-    let (status, out) = crate::upload::post(&telegram_api("deleteMessage")?, "application/json", body.to_string().into_bytes())?;
+    let (status, out) = crate::upload::post(
+        &telegram_api("deleteMessage")?,
+        "application/json",
+        body.to_string().into_bytes(),
+    )?;
     check(status, &out).map(|_| ())
 }
 
@@ -679,7 +753,9 @@ pub(crate) fn ollama_complete(o: &Ollama, prompt: &str) -> Result<String, String
         return Err("no Ollama model chosen".into());
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(o.timeout_secs.max(5) as u64)))
+        .timeout_global(Some(std::time::Duration::from_secs(
+            o.timeout_secs.max(5) as u64
+        )))
         .http_status_as_error(false)
         .build()
         .into();
@@ -702,9 +778,13 @@ pub(crate) fn ollama_complete(o: &Ollama, prompt: &str) -> Result<String, String
         (status, text) = call(false)?;
     }
     if status != 200 {
-        return Err(format!("ollama HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "ollama HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
     let out = v["response"].as_str().unwrap_or("").trim().to_string();
     if out.is_empty() {
         return Err("model returned an empty summary".into());
@@ -720,8 +800,18 @@ fn read_audio(path: &str) -> Result<Vec<i16>, String> {
     }
 }
 
-fn send_telegram(tg: &Telegram, a: &Alert, f: &CallFacts, message: &str, state: &AppState) -> Result<String, String> {
-    let clip = if a.attach_audio { clip_for(a, f, state)? } else { None };
+fn send_telegram(
+    tg: &Telegram,
+    a: &Alert,
+    f: &CallFacts,
+    message: &str,
+    state: &AppState,
+) -> Result<String, String> {
+    let clip = if a.attach_audio {
+        clip_for(a, f, state)?
+    } else {
+        None
+    };
     match clip {
         None => send_message(tg, message),
         Some((path, is_mp3)) => {
@@ -776,7 +866,11 @@ pub fn alerts_get(state: State<AppState>) -> View {
 }
 
 #[tauri::command]
-pub fn alerts_set(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
+pub fn alerts_set(
+    app: AppHandle,
+    state: State<AppState>,
+    settings: Settings,
+) -> Result<(), String> {
     let mut settings = settings;
     for (i, a) in settings.alerts.iter_mut().enumerate() {
         if a.id.trim().is_empty() {
@@ -797,7 +891,8 @@ pub fn telegram_save(token: String) -> Result<(), String> {
     if token.trim().is_empty() {
         let _ = e.delete_credential();
     } else {
-        e.set_password(token.trim()).map_err(|e| format!("keyring: {e}"))?;
+        e.set_password(token.trim())
+            .map_err(|e| format!("keyring: {e}"))?;
     }
     Ok(())
 }
@@ -840,7 +935,10 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
                 secs: r.secs,
                 emergency: r.emergency,
                 audio: r.audio,
-                transcript: r.transcript_edited.or(r.transcript).or(Some("(no transcript yet)".into())),
+                transcript: r
+                    .transcript_edited
+                    .or(r.transcript)
+                    .or(Some("(no transcript yet)".into())),
             },
             None => CallFacts {
                 id: None,
@@ -860,7 +958,12 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
             .as_deref()
             .map(|t| matched_keywords(&a.trigger.keywords, t))
             .unwrap_or_default();
-        state.alerts.lock().unwrap().last_fired.remove(&(a.id.clone(), f.tg));
+        state
+            .alerts
+            .lock()
+            .unwrap()
+            .last_fired
+            .remove(&(a.id.clone(), f.tg));
         let mut test = a.clone();
         test.enabled = true;
         fire(app.clone(), test, f.clone(), keywords);
@@ -869,7 +972,10 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
             a.name,
             f.tg_name,
             f.tg,
-            f.audio.as_ref().map(|_| " with audio").unwrap_or(" — no audio on that call")
+            f.audio
+                .as_ref()
+                .map(|_| " with audio")
+                .unwrap_or(" — no audio on that call")
         ))
     })
     .await
@@ -892,7 +998,11 @@ pub async fn ollama_models(url: String) -> Result<Vec<String>, String> {
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         Ok(v["models"]
             .as_array()
-            .map(|m| m.iter().filter_map(|x| x["name"].as_str().map(String::from)).collect())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|x| x["name"].as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default())
     })
     .await
@@ -920,7 +1030,11 @@ mod tests {
 
     #[test]
     fn keywords_match_whole_phrases_case_insensitively() {
-        let kws = vec!["Ventricular tachycardia".to_string(), "CPR".into(), "working arrest".into()];
+        let kws = vec![
+            "Ventricular tachycardia".to_string(),
+            "CPR".into(),
+            "working arrest".into(),
+        ];
         assert_eq!(
             matched_keywords(&kws, "Patient in ventricular tachycardia, starting CPR."),
             vec!["Ventricular tachycardia", "CPR"]
@@ -928,7 +1042,10 @@ mod tests {
         // "cpr" inside another word does not count; punctuation does not
         // break a phrase.
         assert!(matched_keywords(&kws, "the scprinter").is_empty());
-        assert_eq!(matched_keywords(&kws, "it's a working-arrest"), vec!["working arrest"]);
+        assert_eq!(
+            matched_keywords(&kws, "it's a working-arrest"),
+            vec!["working arrest"]
+        );
     }
 
     #[test]
@@ -939,7 +1056,10 @@ mod tests {
         };
         a.trigger.keywords = vec!["cardiac arrest".into()];
         a.trigger.tgs = vec![20308];
-        assert_eq!(matches(&a, &facts("confirmed cardiac arrest")), Some(vec!["cardiac arrest".into()]));
+        assert_eq!(
+            matches(&a, &facts("confirmed cardiac arrest")),
+            Some(vec!["cardiac arrest".into()])
+        );
         let mut other = facts("confirmed cardiac arrest");
         other.tg = 1;
         assert_eq!(matches(&a, &other), None, "other talkgroup");
@@ -965,14 +1085,31 @@ mod tests {
             name: "Arrest".into(),
             ..Default::default()
         };
-        let m = render("{alert}: {tgname}/{tg} by {unitname} — {keywords} — {transcript} {ai}", &a, &facts("starting CPR"), &["CPR".into()], "likely real");
-        assert_eq!(m, "Arrest: Medic 3/20308 by Medic 3 — CPR — starting CPR likely real");
+        let m = render(
+            "{alert}: {tgname}/{tg} by {unitname} — {keywords} — {transcript} {ai}",
+            &a,
+            &facts("starting CPR"),
+            &["CPR".into()],
+            "likely real",
+        );
+        assert_eq!(
+            m,
+            "Arrest: Medic 3/20308 by Medic 3 — CPR — starting CPR likely real"
+        );
     }
 
     #[test]
     fn verdicts_parse_with_noise_around_the_json() {
-        assert_eq!(parse_verdict("Sure. {\"fire\": true, \"summary\": \"Working arrest with CPR in progress.\"}"), Some((true, "Working arrest with CPR in progress.".into())));
-        assert_eq!(parse_verdict("{\"fire\":\"no\"}"), Some((false, String::new())));
+        assert_eq!(
+            parse_verdict(
+                "Sure. {\"fire\": true, \"summary\": \"Working arrest with CPR in progress.\"}"
+            ),
+            Some((true, "Working arrest with CPR in progress.".into()))
+        );
+        assert_eq!(
+            parse_verdict("{\"fire\":\"no\"}"),
+            Some((false, String::new()))
+        );
         assert_eq!(parse_verdict("I cannot tell."), None);
     }
 }

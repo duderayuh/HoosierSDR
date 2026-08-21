@@ -82,7 +82,8 @@ impl DeviceSettings {
 /// Settings for one radio by its picker key ("kind|id"), or the defaults.
 pub fn settings_for(app: &AppHandle, kind: &str, id: Option<&str>) -> DeviceSettings {
     let all = load(app);
-    id.and_then(|i| all.get(&format!("{kind}|{i}")).cloned()).unwrap_or_default()
+    id.and_then(|i| all.get(&format!("{kind}|{i}")).cloned())
+        .unwrap_or_default()
 }
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -150,13 +151,20 @@ pub async fn devices_list(app: AppHandle) -> View {
 /// Change a streaming radio's gain now. `key` is the picker key of the
 /// radio ("kind|id") — it must be one of the radios the current run opened.
 #[tauri::command]
-pub fn gain_live(app: AppHandle, state: tauri::State<crate::AppState>, key: String, settings: DeviceSettings) -> Result<String, String> {
+pub fn gain_live(
+    app: AppHandle,
+    state: tauri::State<crate::AppState>,
+    key: String,
+    settings: DeviceSettings,
+) -> Result<String, String> {
     let kind = key.split('|').next().unwrap_or("").to_string();
     let g = settings
         .gain_setting(&kind)
         .ok_or("gain control is opted out for this Airspy (tick “apply gain” first)")?;
     let handles = state.gain_handles.lock().unwrap();
-    let h = handles.get(&key).ok_or("that radio is not part of the current run — Start first")?;
+    let h = handles
+        .get(&key)
+        .ok_or("that radio is not part of the current run — Start first")?;
     h.request(g.clone());
     // Remember it for the next start too.
     let mut all = load(&app);

@@ -167,7 +167,10 @@ mod tests {
 
     #[test]
     fn tokens_expand_and_segments_are_sanitised() {
-        let s = render("{system}/{tgname}/{date}_{time}_{unitname}_{freq}_{mod}_{secs}s_{emg}", &ctx());
+        let s = render(
+            "{system}/{tgname}/{date}_{time}_{unitname}_{freq}_{mod}_{secs}s_{emg}",
+            &ctx(),
+        );
         assert_eq!(
             s,
             "SAFE-T/Sheriff_ Patrol_North/20260821_143012_790065_851.8125_CQPSK_5s_EMERGENCY"

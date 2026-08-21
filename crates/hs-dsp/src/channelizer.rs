@@ -331,7 +331,10 @@ mod tests {
             }
             let o = ch.process(&iq).remove(0);
             let tail = &o[o.len() / 2..];
-            tail.chunks(2).map(|c| c[0] * c[0] + c[1] * c[1]).sum::<f32>() / (tail.len() / 2) as f32
+            tail.chunks(2)
+                .map(|c| c[0] * c[0] + c[1] * c[1])
+                .sum::<f32>()
+                / (tail.len() / 2) as f32
         };
         assert!(power(4_000.0) > 0.25, "in-channel tone lost");
         assert!(power(23_000.0) < 0.01, "slice-edge tone not removed");

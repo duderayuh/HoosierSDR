@@ -69,10 +69,7 @@ pub fn apply_rules(rules: &[Rule], id: u32) -> Option<String> {
 
 /// Explicit alias first, then the rules.
 pub fn name_for(units: &HashMap<u32, String>, rules: &[Rule], id: u32) -> Option<String> {
-    units
-        .get(&id)
-        .cloned()
-        .or_else(|| apply_rules(rules, id))
+    units.get(&id).cloned().or_else(|| apply_rules(rules, id))
 }
 
 #[tauri::command]
@@ -263,7 +260,8 @@ mod tests {
 
     #[test]
     fn parses_trunk_recorder_unit_tags() {
-        let text = "Unit ID,Unit Tag\n4900165,\"Car 12\"\n^49001(\\d\\d)$,Fleet $1\n790062,Engine 3\n";
+        let text =
+            "Unit ID,Unit Tag\n4900165,\"Car 12\"\n^49001(\\d\\d)$,Fleet $1\n790062,Engine 3\n";
         assert_eq!(
             parse_csv(text),
             vec![(4900165, "Car 12".into()), (790062, "Engine 3".into())]
@@ -290,8 +288,14 @@ mod tests {
     #[test]
     fn rules_match_the_whole_id_and_first_wins() {
         let rules = vec![
-            Rule { pattern: "79.*".into(), name: "IMPD {$0}".into() },
-            Rule { pattern: "7900(\\d+)".into(), name: "Never $1".into() },
+            Rule {
+                pattern: "79.*".into(),
+                name: "IMPD {$0}".into(),
+            },
+            Rule {
+                pattern: "7900(\\d+)".into(),
+                name: "Never $1".into(),
+            },
         ];
         assert_eq!(apply_rules(&rules, 790065), Some("IMPD {790065}".into()));
         assert_eq!(apply_rules(&rules, 1790065), None, "not anchored");

@@ -166,7 +166,10 @@ pub struct ConvState {
 pub type Shared = Mutex<ConvState>;
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let d = app.path().app_config_dir().map_err(|e| format!("config dir: {e}"))?;
+    let d = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("config dir: {e}"))?;
     std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     Ok(d.join("conversations.json"))
 }
@@ -184,8 +187,11 @@ pub fn load(app: &AppHandle) -> ConvState {
 
 fn store(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let p = path(app)?;
-    std::fs::write(&p, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("{}: {e}", p.display()))
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(s).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 fn learn_key(rule: &str, tg: u16) -> String {
@@ -203,7 +209,12 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
     }
     let k = learn_key(&r.id, tg);
     let total = s.seen.get(&k).copied().unwrap_or(0);
-    let n = s.learned.get(&k).and_then(|m| m.get(&unit)).copied().unwrap_or(0);
+    let n = s
+        .learned
+        .get(&k)
+        .and_then(|m| m.get(&unit))
+        .copied()
+        .unwrap_or(0);
     n >= 3 && total > 0 && n * 10 >= total * 6
 }
 
@@ -240,12 +251,20 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
         let idx = if !fixed {
             st.open
                 .iter()
-                .position(|c| c.rule_id == r.id && c.tg == f.tg && c.mobile_unit == Some(f.unit) && now - c.last_at <= gap + late)
+                .position(|c| {
+                    c.rule_id == r.id
+                        && c.tg == f.tg
+                        && c.mobile_unit == Some(f.unit)
+                        && now - c.last_at <= gap + late
+                })
                 .or_else(|| {
                     // A hospital-initiated conversation with no mobile unit yet.
-                    st.open
-                        .iter()
-                        .position(|c| c.rule_id == r.id && c.tg == f.tg && c.mobile_unit.is_none() && now - c.last_at <= gap)
+                    st.open.iter().position(|c| {
+                        c.rule_id == r.id
+                            && c.tg == f.tg
+                            && c.mobile_unit.is_none()
+                            && now - c.last_at <= gap
+                    })
                 })
         } else {
             // The fixed party: the most recently active conversation here.
@@ -345,7 +364,10 @@ pub fn spawn_ticker(app: AppHandle) {
                 let needs_send = c.sent_at.is_none() || c.dirty;
                 if ended && needs_send {
                     // Give transcription a chance to catch up, but not forever.
-                    let missing = c.pieces.iter().any(|p| p.audio.is_some() && p.transcript.is_none());
+                    let missing = c
+                        .pieces
+                        .iter()
+                        .any(|p| p.audio.is_some() && p.transcript.is_none());
                     if transcribing && missing && quiet < gap + 90 {
                         keep.push(c);
                         continue;
@@ -381,7 +403,12 @@ fn learn(s: &mut Settings, r: &Rule, c: &Conversation) {
     let k = learn_key(&r.id, c.tg);
     *s.seen.entry(k.clone()).or_default() += 1;
     let m = s.learned.entry(k).or_default();
-    let mut units: Vec<u32> = c.pieces.iter().map(|p| p.unit).filter(|u| *u != 0).collect();
+    let mut units: Vec<u32> = c
+        .pieces
+        .iter()
+        .map(|p| p.unit)
+        .filter(|u| *u != 0)
+        .collect();
     units.sort_unstable();
     units.dedup();
     for u in units {
@@ -409,9 +436,17 @@ pub fn stitched_transcript(c: &Conversation) -> String {
         let who = if p.fixed {
             "FIXED (hospital)".to_string()
         } else {
-            format!("UNIT {}", p.unit_name.clone().unwrap_or_else(|| p.unit.to_string()))
+            format!(
+                "UNIT {}",
+                p.unit_name.clone().unwrap_or_else(|| p.unit.to_string())
+            )
         };
-        let text = p.transcript.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or("[no transcript]");
+        let text = p
+            .transcript
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("[no transcript]");
         out.push_str(&format!("{who}: {text}\n"));
     }
     out
@@ -419,7 +454,12 @@ pub fn stitched_transcript(c: &Conversation) -> String {
 
 pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
     let units: Vec<String> = {
-        let mut v: Vec<u32> = c.pieces.iter().filter(|p| !p.fixed).map(|p| p.unit).collect();
+        let mut v: Vec<u32> = c
+            .pieces
+            .iter()
+            .filter(|p| !p.fixed)
+            .map(|p| p.unit)
+            .collect();
         v.sort_unstable();
         v.dedup();
         v.iter().map(|u| u.to_string()).collect()
@@ -445,7 +485,14 @@ pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
         .replace("{duration}", &fmt_duration(c.last_at - c.first_at))
         .replace("{started}", &fmt_time(c.first_at))
         .replace("{transcript}", &stitched_transcript(c))
-        .replace("{revision}", &if c.revision > 0 { format!(" · revised ×{}", c.revision) } else { String::new() })
+        .replace(
+            "{revision}",
+            &if c.revision > 0 {
+                format!(" · revised ×{}", c.revision)
+            } else {
+                String::new()
+            },
+        )
         .trim()
         .to_string()
 }
@@ -474,7 +521,13 @@ fn log_it(app: &AppHandle, r: &Rule, c: &Conversation, ok: bool, detail: String,
         at: crate::library::now(),
         rule: r.name.clone(),
         tg_name: c.tg_name.clone(),
-        units: c.pieces.iter().filter(|p| !p.fixed).map(|p| p.unit_name.clone().unwrap_or_else(|| p.unit.to_string())).collect::<Vec<_>>().join(", "),
+        units: c
+            .pieces
+            .iter()
+            .filter(|p| !p.fixed)
+            .map(|p| p.unit_name.clone().unwrap_or_else(|| p.unit.to_string()))
+            .collect::<Vec<_>>()
+            .join(", "),
         calls: c.pieces.len(),
         revision: c.revision,
         ok,
@@ -515,8 +568,16 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let state = app.state::<AppState>();
     let n_pieces = c.pieces.len();
     let (tg, ollama) = crate::alerts::shared_settings(&state);
-    let chat = if r.chat_id.trim().is_empty() { tg.chat_id.clone() } else { r.chat_id.clone() };
-    let has_text = c.pieces.iter().any(|p| p.transcript.as_deref().is_some_and(|t| !t.trim().is_empty()));
+    let chat = if r.chat_id.trim().is_empty() {
+        tg.chat_id.clone()
+    } else {
+        r.chat_id.clone()
+    };
+    let has_text = c.pieces.iter().any(|p| {
+        p.transcript
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+    });
     if !has_text && !r.send_without_transcript {
         let why = "no transcript arrived (is transcription enabled?) — summary skipped".to_string();
         log_it(&app, &r, &c, false, why.clone(), String::new());
@@ -559,7 +620,18 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let sent = if r.attach_audio && !files.is_empty() {
         match crate::alerts::combine_clips(&files, &format!("conv_{}", c.tg)) {
             Ok((path, mp3)) => {
-                let res = crate::alerts::send_audio_id(&chat, &path, mp3, &message, &format!("{} · {}", r.name, c.tg_name), &c.pieces.iter().find(|p| !p.fixed).and_then(|p| p.unit_name.clone()).unwrap_or_else(|| c.tg_name.clone()));
+                let res = crate::alerts::send_audio_id(
+                    &chat,
+                    &path,
+                    mp3,
+                    &message,
+                    &format!("{} · {}", r.name, c.tg_name),
+                    &c.pieces
+                        .iter()
+                        .find(|p| !p.fixed)
+                        .and_then(|p| p.unit_name.clone())
+                        .unwrap_or_else(|| c.tg_name.clone()),
+                );
                 let _ = std::fs::remove_file(&path);
                 res
             }
@@ -571,12 +643,29 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     } else {
         crate::alerts::send_text_id(&chat, &message).map(|i| vec![i])
     };
-    let _ = app.emit("alert", serde_json::json!({ "name": r.name, "tg": c.tg, "message": message, "tone": false }));
+    let _ = app.emit(
+        "alert",
+        serde_json::json!({ "name": r.name, "tg": c.tg, "message": message, "tone": false }),
+    );
     match sent {
         Ok(ids) => {
             detail.push_str(&format!("sent ({} pieces)", c.pieces.len()));
-            let revision = if c.sent_at.is_some() { c.revision + 1 } else { 0 };
-            log_it(&app, &r, &Conversation { revision, ..c.clone() }, true, detail, summary.clone());
+            let revision = if c.sent_at.is_some() {
+                c.revision + 1
+            } else {
+                0
+            };
+            log_it(
+                &app,
+                &r,
+                &Conversation {
+                    revision,
+                    ..c.clone()
+                },
+                true,
+                detail,
+                summary.clone(),
+            );
             finish(&app, c.key, n_pieces, |cc| {
                 cc.sent_ids = ids;
                 cc.sent_chat = chat;
@@ -632,7 +721,14 @@ pub fn conversations_get(state: State<AppState>) -> View {
                 .settings
                 .learned
                 .get(&k)
-                .map(|m| m.keys().copied().filter(|u| is_fixed(&st.settings, r, *tg, *u) && !r.fixed_units.contains(u)).collect())
+                .map(|m| {
+                    m.keys()
+                        .copied()
+                        .filter(|u| {
+                            is_fixed(&st.settings, r, *tg, *u) && !r.fixed_units.contains(u)
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             if !units.is_empty() {
                 proposed.insert(k, units);
@@ -646,7 +742,11 @@ pub fn conversations_get(state: State<AppState>) -> View {
 }
 
 #[tauri::command]
-pub fn conversations_set(app: AppHandle, state: State<AppState>, rules: Vec<Rule>) -> Result<(), String> {
+pub fn conversations_set(
+    app: AppHandle,
+    state: State<AppState>,
+    rules: Vec<Rule>,
+) -> Result<(), String> {
     let mut rules = rules;
     for (i, r) in rules.iter_mut().enumerate() {
         if r.id.trim().is_empty() {
@@ -688,19 +788,36 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
         let state = app.state::<AppState>();
         let (rule, settings) = {
             let st = state.conversations.lock().unwrap();
-            (st.settings.rules.iter().find(|r| r.id == id).cloned().ok_or("no such rule")?, st.settings.clone())
+            (
+                st.settings
+                    .rules
+                    .iter()
+                    .find(|r| r.id == id)
+                    .cloned()
+                    .ok_or("no such rule")?,
+                st.settings.clone(),
+            )
         };
         let rows = {
             let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
             let c = db.lock().unwrap();
-            let list = rule.tgs.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+            let list = rule
+                .tgs
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             let sql = if rule.tgs.is_empty() {
                 "SELECT id FROM calls ORDER BY id DESC LIMIT 12".to_string()
             } else {
                 format!("SELECT id FROM calls WHERE tg IN ({list}) ORDER BY id DESC LIMIT 12")
             };
             let mut stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
-            let ids: Vec<i64> = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+            let ids: Vec<i64> = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .collect();
             let mut rows = Vec::new();
             for id in ids {
                 if let Some(r) = crate::library::get(&c, id)? {
@@ -732,7 +849,10 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
             });
         }
         pieces.reverse();
-        let tg = pieces.first().map(|_| rule.tgs.first().copied().unwrap_or(0)).unwrap_or(0);
+        let tg = pieces
+            .first()
+            .map(|_| rule.tgs.first().copied().unwrap_or(0))
+            .unwrap_or(0);
         let c = Conversation {
             key: 0,
             rule_id: rule.id.clone(),
@@ -759,7 +879,9 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
         test.send_without_transcript = true;
         let app2 = app.clone();
         std::thread::spawn(move || summarise_and_send_with(app2, c, test));
-        Ok(format!("summarising the last {n} transmission(s) on the rule's talkgroups — watch the log"))
+        Ok(format!(
+            "summarising the last {n} transmission(s) on the rule's talkgroups — watch the log"
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -770,7 +892,11 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
 pub fn conversation_resend(app: AppHandle, state: State<AppState>, key: u64) -> Result<(), String> {
     let c = {
         let mut st = state.conversations.lock().unwrap();
-        let c = st.open.iter_mut().find(|c| c.key == key).ok_or("that conversation is gone")?;
+        let c = st
+            .open
+            .iter_mut()
+            .find(|c| c.key == key)
+            .ok_or("that conversation is gone")?;
         if c.busy {
             return Err("already working on it".into());
         }
@@ -822,9 +948,36 @@ mod tests {
             tg_name: "Methodist ER".into(),
             mobile_unit: Some(790065),
             pieces: vec![
-                Piece { id: Some(1), unit: 790065, unit_name: Some("Medic 3".into()), fixed: false, at: 100, secs: 8.0, audio: None, transcript: Some("Medic 3 inbound, 64 year old male chest pain".into()) },
-                Piece { id: Some(2), unit: 900001, unit_name: None, fixed: true, at: 120, secs: 3.0, audio: None, transcript: Some("Copy, ETA?".into()) },
-                Piece { id: Some(3), unit: 790065, unit_name: Some("Medic 3".into()), fixed: false, at: 130, secs: 2.0, audio: None, transcript: None },
+                Piece {
+                    id: Some(1),
+                    unit: 790065,
+                    unit_name: Some("Medic 3".into()),
+                    fixed: false,
+                    at: 100,
+                    secs: 8.0,
+                    audio: None,
+                    transcript: Some("Medic 3 inbound, 64 year old male chest pain".into()),
+                },
+                Piece {
+                    id: Some(2),
+                    unit: 900001,
+                    unit_name: None,
+                    fixed: true,
+                    at: 120,
+                    secs: 3.0,
+                    audio: None,
+                    transcript: Some("Copy, ETA?".into()),
+                },
+                Piece {
+                    id: Some(3),
+                    unit: 790065,
+                    unit_name: Some("Medic 3".into()),
+                    fixed: false,
+                    at: 130,
+                    secs: 2.0,
+                    audio: None,
+                    transcript: None,
+                },
             ],
             first_at: 100,
             last_at: 130,
@@ -842,8 +995,14 @@ mod tests {
         let t = stitched_transcript(&c);
         assert_eq!(t, "UNIT Medic 3: Medic 3 inbound, 64 year old male chest pain\nFIXED (hospital): Copy, ETA?\nUNIT Medic 3: [no transcript]\n");
         let m = render(&r, &c, "Chest pain, ETA unknown.");
-        assert!(m.starts_with("🏥 Hospitals · Methodist ER\nChest pain, ETA unknown."), "{m}");
-        assert!(m.contains("Medic 3 · 3 transmissions · 30 s · 00:01 UTC · revised ×1"), "{m}");
+        assert!(
+            m.starts_with("🏥 Hospitals · Methodist ER\nChest pain, ETA unknown."),
+            "{m}"
+        );
+        assert!(
+            m.contains("Medic 3 · 3 transmissions · 30 s · 00:01 UTC · revised ×1"),
+            "{m}"
+        );
     }
 }
 
@@ -857,7 +1016,10 @@ mod payload_tests {
         let js = r#"[{"id":"c1755800000000","name":"Hospitals","enabled":true,"tgs":[10202,10244],"fixed_units":[],"learn_fixed":true,"end_gap_secs":90,"late_window_secs":180,"max_secs":900,"min_calls":1,"summary_prompt":"x","message":"y","chat_id":"","attach_audio":true,"send_without_transcript":false}]"#;
         let rules: Vec<Rule> = serde_json::from_str(js).expect("rule payload");
         assert_eq!(rules[0].tgs, vec![10202, 10244]);
-        let s = Settings { rules, ..Default::default() };
+        let s = Settings {
+            rules,
+            ..Default::default()
+        };
         let text = serde_json::to_string_pretty(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.rules.len(), 1);

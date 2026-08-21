@@ -153,14 +153,20 @@ pub fn run_once(s: &Settings, call: &CallInfo) -> Result<String, String> {
     let json = serde_json::to_string(call).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(&prog);
     cmd.args(&words[1..])
-        .env("HS_CALL_ID", call.id.map(|i| i.to_string()).unwrap_or_default())
+        .env(
+            "HS_CALL_ID",
+            call.id.map(|i| i.to_string()).unwrap_or_default(),
+        )
         .env("HS_START", call.start.to_string())
         .env("HS_SECS", format!("{:.1}", call.secs))
         .env("HS_TG", call.tg.to_string())
         .env("HS_TG_NAME", &call.tg_name)
         .env("HS_UNIT", call.unit.to_string())
         .env("HS_UNIT_NAME", call.unit_name.clone().unwrap_or_default())
-        .env("HS_TALKER_ALIAS", call.talker_alias.clone().unwrap_or_default())
+        .env(
+            "HS_TALKER_ALIAS",
+            call.talker_alias.clone().unwrap_or_default(),
+        )
         .env("HS_FREQ_HZ", call.freq_hz.to_string())
         .env("HS_MODULATION", &call.modulation)
         .env("HS_EMERGENCY", if call.emergency { "1" } else { "0" })
@@ -185,7 +191,8 @@ pub fn run_once(s: &Settings, call: &CallInfo) -> Result<String, String> {
         let _ = stdin.write_all(b"\n");
     }
     // Wait with a timeout, polling; kill on expiry.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(s.timeout_secs.max(1) as u64);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(s.timeout_secs.max(1) as u64);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -330,7 +337,13 @@ pub async fn hook_test(settings: Settings) -> Result<String, String> {
         };
         let mut s = settings;
         s.enabled = true;
-        run_once(&s, &sample).map(|o| if o.is_empty() { "ok (no output)".into() } else { o })
+        run_once(&s, &sample).map(|o| {
+            if o.is_empty() {
+                "ok (no output)".into()
+            } else {
+                o
+            }
+        })
     })
     .await
     .map_err(|e| e.to_string())?

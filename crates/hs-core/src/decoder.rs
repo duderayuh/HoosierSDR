@@ -422,7 +422,9 @@ impl ChannelDecoder {
                     self.active_tg = Some(tg);
                 } else if !lcw.is_standard() {
                     if let Some(alias) = self.talker.observe(&lcw) {
-                        self.diag.talker_aliases.push((self.active_tg.unwrap_or(0), alias.clone()));
+                        self.diag
+                            .talker_aliases
+                            .push((self.active_tg.unwrap_or(0), alias.clone()));
                         out.talker_alias = Some(alias);
                     }
                     let key = (lcw.mfid, lcw.lco);
@@ -650,8 +652,10 @@ impl ChannelDecoder {
                 ..
             } => {
                 if status == 0 {
-                    out.mobility
-                        .push(MobilityEvent::Located { unit: target, group });
+                    out.mobility.push(MobilityEvent::Located {
+                        unit: target,
+                        group,
+                    });
                 }
             }
             Tsbk::DeregistrationAck { source_id, .. } => {

@@ -34,7 +34,11 @@ impl RtlSdrSource {
                 let serial = a.get::<String>("serial").unwrap_or_default();
                 (
                     a.to_string(),
-                    if serial.is_empty() { label } else { format!("{label} · {serial}") },
+                    if serial.is_empty() {
+                        label
+                    } else {
+                        format!("{label} · {serial}")
+                    },
                 )
             })
             .collect()
