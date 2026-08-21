@@ -228,6 +228,7 @@ impl ChannelDecoder {
     /// Process a slice of interleaved-IQ f32 samples.
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
+        self.diag.trim(50_000);
         let mut derot_buf: Vec<u8> = Vec::new();
         let mut i = 0;
         while i + 1 < iq.len() {

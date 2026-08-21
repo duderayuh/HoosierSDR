@@ -367,7 +367,14 @@ pub struct RrDownload {
 /// live catalog (and are saved for next start), and its sites come back with
 /// the control channels to tune.
 #[tauri::command]
-pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<RrDownload, String> {
+pub async fn rr_download(app: AppHandle, sid: u32) -> Result<RrDownload, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_download_blocking(app, sid))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> {
+    let state = app.state::<AppState>();
     let mut p = load_prefs(&app);
     let client = client(&app)?;
     let sys = client.system(sid).map_err(|e| {
@@ -482,7 +489,13 @@ fn sys_rows(v: Vec<hs_catalog::radioreference::RrSystemRef>) -> Vec<SystemRow> {
 }
 
 #[tauri::command]
-pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
+pub async fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_states_blocking(app, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_states_blocking(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
     cached(&app, "states", refresh.unwrap_or(false), || {
         let c = client(&app)?;
         Ok(c.states()
@@ -498,7 +511,21 @@ pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>,
 }
 
 #[tauri::command]
-pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<StateView, String> {
+pub async fn rr_state(
+    app: AppHandle,
+    stid: u32,
+    refresh: Option<bool>,
+) -> Result<StateView, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_state_blocking(app, stid, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_state_blocking(
+    app: AppHandle,
+    stid: u32,
+    refresh: Option<bool>,
+) -> Result<StateView, String> {
     cached(
         &app,
         &format!("state_{stid}"),
@@ -522,7 +549,17 @@ pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<Stat
 }
 
 #[tauri::command]
-pub fn rr_county(
+pub async fn rr_county(
+    app: AppHandle,
+    ctid: u32,
+    refresh: Option<bool>,
+) -> Result<Vec<SystemRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_county_blocking(app, ctid, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_county_blocking(
     app: AppHandle,
     ctid: u32,
     refresh: Option<bool>,
@@ -539,7 +576,13 @@ pub fn rr_county(
 }
 
 #[tauri::command]
-pub fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
+pub async fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_zip_blocking(app, zip))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_zip_blocking(app: AppHandle, zip: u32) -> Result<ZipView, String> {
     let c = client(&app)?;
     let z = c.zipcode(zip).map_err(|e| e.to_string())?;
     Ok(ZipView {

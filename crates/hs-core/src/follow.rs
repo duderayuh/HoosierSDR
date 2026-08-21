@@ -768,6 +768,18 @@ pub fn measure_carrier(
     center_hz: f64,
     nominal_hz: f64,
 ) -> Option<(f64, Modulation)> {
+    measure_carrier_cancellable(iq, sample_rate, center_hz, nominal_hz, &|| false)
+}
+
+/// As [`measure_carrier`], checking `cancel()` between candidates so a live
+/// front end can abandon a long sweep (tens of seconds at 10 MSPS).
+pub fn measure_carrier_cancellable(
+    iq: &[f32],
+    sample_rate: f64,
+    center_hz: f64,
+    nominal_hz: f64,
+    cancel: &dyn Fn() -> bool,
+) -> Option<(f64, Modulation)> {
     // Half a channel either way. Sweeping that whole span at the precision the
     // demodulators want would mean a hundred trial decodes, and each one
     // channelizes the probe from scratch. Coarse-then-fine gets the same
@@ -804,6 +816,9 @@ pub fn measure_carrier(
     let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
     let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
     for k in -coarse..=coarse {
+        if cancel() {
+            return None;
+        }
         let cand = nominal_hz + k as f64 * COARSE_HZ;
         for m in mods {
             let score = try_at(cand, m);
@@ -818,6 +833,9 @@ pub fn measure_carrier(
     let (centre, m) = (best.1, best.2);
     let fine = (COARSE_HZ / FINE_HZ) as i32;
     for k in -fine..=fine {
+        if cancel() {
+            return None;
+        }
         let cand = centre + k as f64 * FINE_HZ;
         let score = try_at(cand, m);
         if score > best.0 {
@@ -831,32 +849,33 @@ pub fn measure_carrier(
 /// every cycle while its call is up, so the same out-of-band call is seen many
 /// times a second; this reports each frequency at most once per cooldown.
 pub struct GrantGate {
-    /// freq -> blocks remaining before it may be reported again.
-    seen: std::collections::HashMap<u64, u32>,
-    cooldown: u32,
+    /// freq -> seconds remaining before it may be reported again.
+    seen: std::collections::HashMap<u64, f64>,
+    cooldown_secs: f64,
 }
 
 impl GrantGate {
-    pub fn new(cooldown: u32) -> Self {
+    /// `cooldown_secs` between repeat reports of the same frequency.
+    pub fn new(cooldown_secs: f64) -> Self {
         Self {
             seen: std::collections::HashMap::new(),
-            cooldown,
+            cooldown_secs,
         }
     }
     /// True if this frequency should be reported now (and arms its cooldown).
     pub fn fresh(&mut self, freq: u64) -> bool {
         match self.seen.get_mut(&freq) {
-            Some(c) if *c > 0 => false,
+            Some(c) if *c > 0.0 => false,
             _ => {
-                self.seen.insert(freq, self.cooldown);
+                self.seen.insert(freq, self.cooldown_secs);
                 true
             }
         }
     }
-    /// Call once per processed block to age the cooldowns.
-    pub fn tick(&mut self) {
+    /// Age the cooldowns by `secs` of processed IQ.
+    pub fn tick(&mut self, secs: f64) {
         for c in self.seen.values_mut() {
-            *c = c.saturating_sub(1);
+            *c = (*c - secs).max(0.0);
         }
     }
 }

@@ -28,6 +28,11 @@ mod upload;
 #[derive(Default)]
 struct AppState {
     running: Arc<AtomicBool>,
+    /// Bumped per capture/follow start; a finishing run only reports
+    /// 'stopped' if it is still the current one.
+    run_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// The previous run's thread, joined before a new radio is opened.
+    run_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
     /// Talkgroups the listener has locked out; read by the follower live.
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
@@ -42,7 +47,7 @@ struct AppState {
     /// The audio thread, started on first use. `Some(None)` = no device.
     audio: Mutex<Option<Option<player::Audio>>>,
     /// The call library (opened at startup).
-    db: Arc<Mutex<Option<Mutex<rusqlite::Connection>>>>,
+    db: Arc<Mutex<Option<Arc<Mutex<rusqlite::Connection>>>>>,
     /// Where call audio lives.
     library_dir: Mutex<Option<std::path::PathBuf>>,
     /// Archive playback in progress: live calls are stored but not spoken.
@@ -91,7 +96,23 @@ fn skip_call(state: State<AppState>) {
 /// Calls waiting in the speaker queue (including the one playing).
 #[tauri::command]
 fn audio_queued(state: State<AppState>) -> usize {
-    state.audio().map(|a| a.queued()).unwrap_or(0)
+    state
+        .audio
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|a| a.as_ref())
+        .map(|a| a.queued())
+        .unwrap_or(0)
+}
+
+/// Drop the playing call and everything queued (used when archive playback
+/// starts or stops, so the two never interleave).
+#[tauri::command]
+fn clear_queue(state: State<AppState>) {
+    if let Some(a) = state.audio() {
+        a.clear();
+    }
 }
 
 /// Play the last completed call again.
@@ -237,32 +258,40 @@ fn library_export(
 
 /// Play a library call through the speaker, ahead of anything queued.
 #[tauri::command]
-fn library_play(state: State<AppState>, id: i64) -> Result<(), String> {
-    let path = with_db(&state, |c| library::get(c, id))?
-        .and_then(|r| r.audio)
-        .ok_or("no audio for that call")?;
-    let pcm = encode::decode_to_pcm(std::path::Path::new(&path))?;
-    state.audio().ok_or("no audio output device")?.play(pcm, 0);
-    Ok(())
+async fn library_play(app: AppHandle, id: i64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let path = with_db(&state, |c| library::get(c, id))?
+            .and_then(|r| r.audio)
+            .ok_or("no audio for that call")?;
+        let pcm = encode::decode_to_pcm(std::path::Path::new(&path))?;
+        state.audio().ok_or("no audio output device")?.play(pcm, 0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// While archive playback is on, live calls are stored but not spoken.
 #[tauri::command]
 fn set_archive_mode(state: State<AppState>, on: bool) {
     state.archive_mode.store(on, Ordering::SeqCst);
-    if on {
-        if let Some(a) = state.audio() {
-            a.skip();
-        }
+    if let Some(a) = state.audio() {
+        a.clear();
     }
 }
 
 /// Replay a saved call through the default audio device.
 #[tauri::command]
-fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
-    let pcm = encode::decode_to_pcm(std::path::Path::new(&shellexpand_home(&path)))?;
-    state.audio().ok_or("no audio output device")?.play(pcm, 0);
-    Ok(())
+async fn play_wav(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let pcm = encode::decode_to_pcm(std::path::Path::new(&shellexpand_home(&path)))?;
+        state.audio().ok_or("no audio output device")?.play(pcm, 0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Clone)]
@@ -348,8 +377,10 @@ fn start_capture(
     let running = state.running.clone();
     let catalog = state.catalog.clone();
     let spectrum_cfg = state.spectrum.clone();
-    std::thread::spawn(move || {
-        let res = capture_loop(
+    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let handle = std::thread::spawn(move || {
+        join_previous(&app);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capture_loop(
             &app,
             &running,
             &catalog,
@@ -362,13 +393,11 @@ fn start_capture(
             record_iq,
             record_log,
             spectrum_cfg,
-        );
-        if let Err(e) = res {
-            let _ = app.emit("error", e);
-        }
-        running.store(false, Ordering::SeqCst);
-        let _ = app.emit("stopped", ());
+        )))
+        .unwrap_or_else(|p| Err(format!("capture crashed: {}", panic_text(&p))));
+        finish_run(&app, my_gen, res);
     });
+    *state.run_thread.lock().unwrap() = Some(handle);
     Ok(())
 }
 
@@ -432,8 +461,32 @@ fn start_follow(
     let streamer = state.streamer.clone();
     let uploader = state.uploader.clone();
     let audio = if play { state.audio() } else { None };
-    std::thread::spawn(move || {
-        let res = (|| -> Result<(), String> {
+    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let handle = std::thread::spawn(move || {
+        join_previous(&app);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            // A radio that cannot span the requested band centre and the
+            // control channel (an RTL-SDR at 2.4 MSPS covers ±1.2 MHz) is
+            // centred on the control channel instead; calls outside that
+            // span are reported as out of band rather than failing to start.
+            let norm = hs_core::dsp::resample::normalize_ratio(rate)
+                .map(|(_, _, r)| r)
+                .unwrap_or(rate);
+            let mut freq = freq;
+            if (control - freq).abs() >= norm * 0.4 {
+                let _ = app.emit(
+                    "follow",
+                    follow::FollowEvent::Notice {
+                        text: format!(
+                            "band centre {:.4} MHz can't reach the control channel at this rate — centred on {:.4} MHz instead (±{:.2} MHz)",
+                            freq / 1e6,
+                            control / 1e6,
+                            norm * 0.4 / 1e6
+                        ),
+                    },
+                );
+                freq = control;
+            }
             let src = open_source(&source, freq, rate, gain)?;
             let calls_dir = match calls_dir.filter(|d| !d.trim().is_empty()) {
                 Some(d) => {
@@ -457,6 +510,7 @@ fn start_follow(
                 hang_secs,
                 system_name: system_name.unwrap_or_default(),
                 format,
+                live: true,
             };
             let player = if play { audio } else { None };
             if play && player.is_none() {
@@ -467,14 +521,18 @@ fn start_follow(
                     },
                 );
             }
-            let db_guard = db.lock().unwrap();
+            // Clone the connection handle and release the outer lock at once:
+            // holding it for the whole run would block every library command
+            // (search, stats, transcription, uploads) until Stop — the app
+            // looked frozen.
+            let db_conn = db.lock().unwrap().clone();
             let live = follow::Live {
                 lockout: &lockout,
                 allowlist: &allowlist,
                 hold: &hold,
                 priorities: &priorities,
                 units: &units,
-                db: db_guard.as_ref(),
+                db: db_conn.as_deref(),
                 spectrum: Some(&spectrum),
             };
             follow::run(src, &params, &catalog, &live, &running, &mut |ev| {
@@ -523,14 +581,43 @@ fn start_follow(
                 }
                 let _ = app.emit("follow", ev);
             })
-        })();
-        if let Err(e) = res {
-            let _ = app.emit("error", e);
-        }
-        running.store(false, Ordering::SeqCst);
-        let _ = app.emit("stopped", ());
+        }))
+        .unwrap_or_else(|p| Err(format!("follow crashed: {}", panic_text(&p))));
+        finish_run(&app, my_gen, res);
     });
+    *state.run_thread.lock().unwrap() = Some(handle);
     Ok(())
+}
+
+fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+/// Common epilogue for capture/follow threads: clear live state and tell the
+/// UI — but only if this run is still the current one.
+fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
+    let state = app.state::<AppState>();
+    if let Err(e) = res {
+        let _ = app.emit("error", e);
+    }
+    if state.run_gen.load(Ordering::SeqCst) == my_gen {
+        state.running.store(false, Ordering::SeqCst);
+        *state.hold.lock().unwrap() = None;
+        state.archive_mode.store(false, Ordering::SeqCst);
+        let _ = app.emit("stopped", ());
+    }
+}
+
+/// Wait for the previous run's thread so its radio is closed before a new
+/// one is opened (an Airspy refuses a second open).
+fn join_previous(app: &AppHandle) {
+    let prev = app.state::<AppState>().run_thread.lock().unwrap().take();
+    if let Some(h) = prev {
+        let _ = h.join();
+    }
 }
 
 /// `~/x` → `$HOME/x`.
@@ -574,13 +661,15 @@ fn capture_loop(
     let mut buf = vec![0f32; 65536 * 2];
     let mut blocks = 0u64;
     let mut total_pcm = 0usize;
-    let mut since_spectrum = 0u32;
 
+    let mut last_status = std::time::Instant::now();
+    let mut last_spectrum = std::time::Instant::now();
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
             Ok(0) => continue,
             Ok(n) => n,
-            Err(_) => break,
+            Err(hs_source::SourceError::Eof) => break,
+            Err(e) => return Err(format!("radio stopped: {e:?}")),
         };
         let block = &buf[..n];
 
@@ -615,10 +704,10 @@ fn capture_loop(
             );
         }
 
-        // Spectrum ~10 Hz (every few blocks), status every block.
-        since_spectrum += 1;
-        if since_spectrum >= 3 {
-            since_spectrum = 0;
+        // Wall-clock paced: ~12 waterfall rows and 4 status updates a
+        // second whatever the block size (6.8 ms at 9.6 MSPS).
+        if last_spectrum.elapsed().as_millis() >= 80 {
+            last_spectrum = std::time::Instant::now();
             let _ = app.emit(
                 "spectrum",
                 SpectrumMsg {
@@ -629,19 +718,22 @@ fn capture_loop(
                 },
             );
         }
-        let _ = app.emit(
-            "status",
-            StatusMsg {
-                syncs: dec.diagnostics().syncs.len(),
-                grants: dec.diagnostics().grants.len(),
-                voice_secs: total_pcm as f64 / 8000.0,
-                blocks,
-                modulation: format!("{:?}", dec.modulation()),
-                lock: dec.cqpsk_lock().unwrap_or(-1.0),
-                sync_err: dec.diagnostics().mean_sync_errors(),
-                dropped: src.dropped(),
-            },
-        );
+        if last_status.elapsed().as_millis() >= 250 {
+            last_status = std::time::Instant::now();
+            let _ = app.emit(
+                "status",
+                StatusMsg {
+                    syncs: dec.diagnostics().syncs.len(),
+                    grants: dec.diagnostics().grants.len(),
+                    voice_secs: total_pcm as f64 / 8000.0,
+                    blocks,
+                    modulation: format!("{:?}", dec.modulation()),
+                    lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                    sync_err: dec.diagnostics().mean_sync_errors(),
+                    dropped: src.dropped(),
+                },
+            );
+        }
     }
 
     if let Some(p) = record_log {
@@ -652,52 +744,56 @@ fn capture_loop(
 
 /// Decode an on-disk `.cf32` recording; emits grants + a final status.
 #[tauri::command]
-fn decode_file(
+async fn decode_file(
     app: AppHandle,
-    state: State<AppState>,
     path: String,
     rate: f64,
     cqpsk: bool,
     eq: String,
 ) -> Result<(), String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let iq: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    let mut dec = new_decoder(rate, cqpsk, &eq);
-    let out = dec.process(&iq);
-    let cat = state.catalog.lock().unwrap();
-    for g in &out.grants {
-        let name = cat
-            .as_ref()
-            .map(|c| c.label(g.talkgroup))
-            .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+        let iq: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut dec = new_decoder(rate, cqpsk, &eq);
+        let out = dec.process(&iq);
+        let cat = state.catalog.lock().unwrap();
+        for g in &out.grants {
+            let name = cat
+                .as_ref()
+                .map(|c| c.label(g.talkgroup))
+                .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+            let _ = app.emit(
+                "grant",
+                GrantMsg {
+                    tg: g.talkgroup,
+                    name,
+                    source: g.source_unit,
+                    freq_mhz: g.freq_hz as f64 / 1e6,
+                    encrypted: g.encrypted,
+                },
+            );
+        }
         let _ = app.emit(
-            "grant",
-            GrantMsg {
-                tg: g.talkgroup,
-                name,
-                source: g.source_unit,
-                freq_mhz: g.freq_hz as f64 / 1e6,
-                encrypted: g.encrypted,
+            "status",
+            StatusMsg {
+                syncs: dec.diagnostics().syncs.len(),
+                grants: out.grants.len(),
+                voice_secs: out.pcm.len() as f64 / 8000.0,
+                blocks: 1,
+                modulation: format!("{:?}", dec.modulation()),
+                lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                sync_err: dec.diagnostics().mean_sync_errors(),
+                dropped: 0,
             },
         );
-    }
-    let _ = app.emit(
-        "status",
-        StatusMsg {
-            syncs: dec.diagnostics().syncs.len(),
-            grants: out.grants.len(),
-            voice_secs: out.pcm.len() as f64 / 8000.0,
-            blocks: 1,
-            modulation: format!("{:?}", dec.modulation()),
-            lock: dec.cqpsk_lock().unwrap_or(-1.0),
-            sync_err: dec.diagnostics().mean_sync_errors(),
-            dropped: 0,
-        },
-    );
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Map the UI's equalizer selector to an `EqMode`. `cma` is the shipping
@@ -810,7 +906,7 @@ fn main() {
                 match library::open(&lib) {
                     Ok(c) => {
                         upload::ensure_schema(&c);
-                        *state.db.lock().unwrap() = Some(Mutex::new(c));
+                        *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
                     Err(e) => eprintln!("library: {e}"),
@@ -846,6 +942,7 @@ fn main() {
             set_priorities,
             skip_call,
             replay_last,
+            clear_queue,
             audio_queued,
             units::units_list,
             units::unit_set,

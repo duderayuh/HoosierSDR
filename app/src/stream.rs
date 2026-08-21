@@ -206,16 +206,7 @@ fn feeder(rx: Receiver<Cmd>, status: Arc<Mutex<Status>>, settings: Arc<Mutex<Set
         };
         if let Some((child, stdin)) = proc.as_mut() {
             if let Err(e) = stdin.write_all(&frame) {
-                let err = child
-                    .stderr
-                    .as_mut()
-                    .and_then(|s| {
-                        use std::io::Read;
-                        let mut b = String::new();
-                        s.read_to_string(&mut b).ok().map(|_| b)
-                    })
-                    .filter(|b| !b.trim().is_empty())
-                    .unwrap_or_else(|| e.to_string());
+                let err = format!("ffmpeg/icecast connection ended: {e}");
                 let _ = child.kill();
                 let _ = child.wait();
                 proc = None;
@@ -302,7 +293,11 @@ pub fn stream_configure(
     }
     let mut guard = state.streamer.lock().unwrap();
     match (guard.as_ref(), settings.enabled) {
-        (Some(s), true) => s.reconfigure(settings),
+        (Some(s), true) => {
+            if *s.settings.lock().unwrap() != settings {
+                s.reconfigure(settings);
+            }
+        }
         (Some(s), false) => {
             s.stop();
             *guard = None;

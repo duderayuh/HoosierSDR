@@ -60,7 +60,9 @@ impl RationalResampler {
             taps,
             // One slot of slack: an output's base sample can lag the newest
             // input by one, so `per_phase + 1` distinct samples are live.
-            hist: vec![C32::ZERO; per_phase + 2],
+            // Power-of-two length so indexing is a mask, not a division —
+            // this runs per sample at 10 MSPS.
+            hist: vec![C32::ZERO; (per_phase + 2).next_power_of_two()],
             per_phase,
             n_in: 0,
             k_out: 0,
@@ -70,8 +72,8 @@ impl RationalResampler {
     /// Push one input sample; returns a resampled output when one is due.
     /// With `down ≥ up` at most one output falls between consecutive inputs.
     pub fn push(&mut self, x: C32) -> Option<C32> {
-        let h = self.hist.len() as u64;
-        self.hist[(self.n_in % h) as usize] = x;
+        let mask = (self.hist.len() - 1) as u64;
+        self.hist[(self.n_in & mask) as usize] = x;
         self.n_in += 1;
         let newest = self.n_in - 1;
 
@@ -84,15 +86,15 @@ impl RationalResampler {
         let phase = (tick % self.up as u64) as usize;
         let base = tick / self.up as u64;
         let mut acc = C32::ZERO;
-        for i in 0..self.per_phase {
+        // Taps before the first sample read zeros; bound the loop instead of
+        // checking inside it.
+        let live = (base + 1).min(self.per_phase as u64) as usize;
+        for i in 0..live {
             let t = self.taps[phase + i * self.up];
             if t == 0.0 {
                 continue;
             }
-            let Some(idx) = base.checked_sub(i as u64) else {
-                break; // before the first sample: zeros
-            };
-            acc = acc + self.hist[(idx % h) as usize].scale(t);
+            acc = acc + self.hist[((base - i as u64) & mask) as usize].scale(t);
         }
         self.k_out += 1;
         Some(acc)
