@@ -397,6 +397,34 @@
         </div>
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Share calls · rdio-scanner / OpenMHz / Broadcastify Calls</span><span class="meta" id="upMeta"></span></div>
+            <div class="body">
+              <label class="check"><input id="upRdio" type="checkbox" /> <b>rdio-scanner</b></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Server URL</span><input id="upRdioUrl" type="text" placeholder="http://192.168.1.10:3000" spellcheck="false" /></label>
+                <label class="field"><span class="lab">API key</span><input id="upRdioKey" type="password" spellcheck="false" /></label>
+                <label class="field"><span class="lab">System ID · label</span><span class="inline"><input id="upRdioSys" type="text" inputmode="numeric" placeholder="1" /><input id="upRdioLabel" type="text" placeholder="SAFE-T" /><button class="btn ghost sm" data-uptest="rdio">Test</button></span></label>
+              </div>
+              <label class="check"><input id="upOmhz" type="checkbox" /> <b>OpenMHz</b></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Upload server</span><input id="upOmhzUrl" type="text" value="https://api.openmhz.com" spellcheck="false" /></label>
+                <label class="field"><span class="lab">System short name</span><input id="upOmhzName" type="text" placeholder="hoosiersafet" spellcheck="false" /></label>
+                <label class="field"><span class="lab">API key</span><span class="inline"><input id="upOmhzKey" type="password" spellcheck="false" /><button class="btn ghost sm" data-uptest="openmhz">Test</button></span></label>
+              </div>
+              <label class="check"><input id="upBcfy" type="checkbox" /> <b>Broadcastify Calls</b></label>
+              <div class="row3">
+                <label class="field"><span class="lab">API key</span><input id="upBcfyKey" type="password" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Calls system ID</span><input id="upBcfySys" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">Format</span><span class="inline"><select id="upBcfyFmt"><option value="m4a">M4A (AAC)</option><option value="mp3">MP3</option></select><button class="btn ghost sm" data-uptest="broadcastify">Test</button></span></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Skip calls shorter than (s)</span><input id="upMin" type="text" inputmode="decimal" value="1" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="upSave" style="width:100%">Save &amp; apply</button></label>
+              </div>
+              <p class="help">Each call is sent once per service after it completes (WAV to rdio-scanner; M4A/MP3 via ffmpeg to OpenMHz and Broadcastify). Outcomes are kept per call; re-send from a call's detail in the Library.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Live feed · Icecast / Broadcastify</span><span class="meta" id="stMeta"></span></div>
             <div class="body">
               <label class="check"><input id="stEnabled" type="checkbox" /> Stream spoken calls live (silence between calls)</label>

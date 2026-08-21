@@ -50,15 +50,15 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | Feature | SDRTrunk | DSDPlus | Trunk Recorder | ProScan | HoosierSDR |
 |---|:-:|:-:|:-:|:-:|:-:|
 | Live playback of calls | ✅ | ✅ | plugins | ✅ | ✅ (on completion) |
-| Per-call recording | MP3/WAV | WAV/MP3 | WAV/M4A | MP3/WAV | WAV |
+| Per-call recording | MP3/WAV | WAV/MP3 | WAV/M4A | MP3/WAV | WAV/MP3/M4A/Opus, quality, CBR/VBR |
 | Metadata sidecar (JSON) | ❌ | SRT | ✅ | ID3 tags | ✅ trunk-recorder shape |
 | Filename formatter | fixed | aliases | fixed | ✅ | 🟡 fixed → P2 |
-| Instant replay / replay last | ❌ | ❌ | — | grid | ✅ replay-last (90 s buffer) + per-row |
+| Instant replay / replay last | ❌ | ❌ | — | grid | ✅ replay-last + library playback, listen mode |
 | Priority preemption of audio | ✅ | ✅ | — | — | ✅ queue order (no mid-call interrupt) |
 | Mute / volume | ✅ | ✅ | — | ✅ | 🟡 play on/off → P2 volume |
 | Start/drop tones, alert tones | ✅ | ✅ | — | — | ✅ emergency + per-TG 🔔 |
 | Duplicate-call suppression (multi-site) | ✅ | — | ✅ | — | ❌ → P3 |
-| Auto-prune recordings | ❌ | — | ✅ | ✅ | ❌ → P2 |
+| Auto-prune recordings | ❌ | — | ✅ | ✅ | ✅ by age, starred kept |
 | Baseband IQ recording | ✅ | survey | debug | — | ✅ (CLI) |
 
 ## 4. Monitor / UI
@@ -68,7 +68,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | Active calls ("now playing") | ✅ | ✅ | queue | ✅ with timers |
 | Call history with filter | ✅ events | ✅ | ✅ search | ✅ |
 | Spectrum waterfall | ✅ | plots | — | ✅ |
-| Constellation / eye | ✅ | ✅ | — | ❌ → P2 (real symbols) |
+| Constellation / eye | ✅ | ✅ | — | ❌ (spectrum line + waterfall options instead) |
 | Decoder-state panel (NAC, WACN, site, neighbours, bandplan) | ✅ | ✅ | — | 🟡 NAC, alternates, band plans, patches (no WACN/neighbours yet) |
 | Event log (moves, affiliations, patches, denials) | ✅ | ✅ | — | 🟡 moves, patches, busy, out-of-band, emergency (no affiliations yet) |
 | Emergency indication + alert | ✅ | ✅ | LED | ✅ (parser-tested; not yet seen live) |
@@ -80,11 +80,11 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 
 | Feature | SDRTrunk | Trunk Recorder | OP25 | HoosierSDR |
 |---|:-:|:-:|:-:|:-:|
-| Call event CSV log | ✅ | JSON | SQL | ✅ calls.csv |
-| rdio-scanner upload | ✅ | ✅ | ❌ | ❌ → P2 |
-| OpenMHz upload | ✅ | ✅ | ❌ | ❌ → P2 |
-| Broadcastify Calls | ✅ | ✅ | ❌ | ❌ → P2 |
-| Icecast / Broadcastify feed (live) | ✅ | via liquidsoap | ✅ | ❌ → P3 (needs MP3/Opus encoder) |
+| Call event CSV log | ✅ | JSON | SQL | ✅ SQLite library + JSON sidecars (CSV export via cart) |
+| rdio-scanner upload | ✅ | ✅ | ❌ | ✅ |
+| OpenMHz upload | ✅ | ✅ | ❌ | ✅ |
+| Broadcastify Calls | ✅ | ✅ | ❌ | ✅ |
+| Icecast / Broadcastify feed (live) | ✅ | via liquidsoap | ✅ | ✅ via ffmpeg |
 | Status API / WebSocket / MQTT | ❌ | ✅ | HTTP | ❌ → P3 |
 | Script hook on call | actions | ✅ | — | ❌ → P2 |
 
@@ -107,7 +107,10 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | P25 Phase II TDMA | ✅ | ✅ | ➖ (patent window, ARCHITECTURE §5) |
 | DMR / NXDN / EDACS / LTR | ✅ / — | ✅ | ➖ |
 | LRRP / GPS map | ✅ | ✅ | 🟡 decoded, not shown → P2 map |
-| Transcription | ❌ | ❌ | 🟡 crate scaffold → Phase 4 |
+| Transcription | ❌ | ❌ | ✅ faster-whisper / openai-whisper, model picker, editable, searchable |
+
+## Beyond the matrix (2026-08-20/21)
+Call library with capture-time SHA-256, full-text search (names + transcripts), listen/archive mode, cart → export with a chain-of-custody manifest (`manifest.json` + `manifest.sha256`), transcript editing kept separate from machine text, whisper model pre-download, Aliases tab (SDRTrunk alias-list model) with "is this talkgroup loaded?".
 
 ## Priority plan
 

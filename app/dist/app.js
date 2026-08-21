@@ -561,7 +561,7 @@ if (TAURI) {
       $("detBody").innerHTML = `<div class="det">
         <div><b>${r.tg_name}</b> <span class="faint">TG ${r.tg}</span> · unit ${r.unit_name ? r.unit_name + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${r.system || ""} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
-        <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button></div>
+        <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
         <div class="machine">${r.transcript || "—"}</div>
         <div class="k">Edited transcript (kept separately; the machine text above is never changed)</div>
@@ -571,6 +571,7 @@ if (TAURI) {
       const play = $("detPlay"); if (play) play.onclick = () => invoke("library_play", { id }).catch((e) => alert(e));
       $("detCart").onclick = () => { cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); libSelect(id); };
       $("detTr").onclick = () => invoke("transcribe_call", { id }).then(() => $("detSaved").textContent = "transcribing…").catch((e) => alert(e));
+      const up = $("detUp"); if (up) up.onclick = () => invoke("upload_call", { id }).then(() => $("detSaved").textContent = "queued for upload").catch((e) => alert(e));
       $("detSave").onclick = async () => { await invoke("library_set_edited", { id, text: $("detEdit").value }); $("detSaved").textContent = "saved"; libSearchRefreshRow(id); };
       $("detClearEdit").onclick = async () => { $("detEdit").value = ""; await invoke("library_set_edited", { id, text: "" }); $("detSaved").textContent = "edit cleared"; libSearchRefreshRow(id); };
     } catch (e) { alert(e); }
@@ -716,6 +717,31 @@ if (TAURI) {
   };
   $("fmtCodec").onchange = $("fmtKbps").onchange = $("fmtMode").onchange = fmtSave;
   fmtRefresh();
+
+  /* ---------- call sharing ---------- */
+  const upSettings = () => ({
+    rdio: { enabled: $("upRdio").checked, url: $("upRdioUrl").value.trim(), key: $("upRdioKey").value, system: parseInt($("upRdioSys").value, 10) || 0, system_label: $("upRdioLabel").value.trim() },
+    openmhz: { enabled: $("upOmhz").checked, url: $("upOmhzUrl").value.trim() || "https://api.openmhz.com", short_name: $("upOmhzName").value.trim(), api_key: $("upOmhzKey").value },
+    broadcastify: { enabled: $("upBcfy").checked, api_key: $("upBcfyKey").value, system_id: parseInt($("upBcfySys").value, 10) || 0, format: $("upBcfyFmt").value },
+    min_secs: parseFloat($("upMin").value) || 0,
+  });
+  async function upRefresh() {
+    try {
+      const v = await invoke("uploads_get"); const s = v.settings;
+      $("upRdio").checked = s.rdio.enabled; $("upRdioUrl").value = s.rdio.url; $("upRdioKey").value = s.rdio.key; $("upRdioSys").value = s.rdio.system || ""; $("upRdioLabel").value = s.rdio.system_label;
+      $("upOmhz").checked = s.openmhz.enabled; $("upOmhzUrl").value = s.openmhz.url; $("upOmhzName").value = s.openmhz.short_name; $("upOmhzKey").value = s.openmhz.api_key;
+      $("upBcfy").checked = s.broadcastify.enabled; $("upBcfyKey").value = s.broadcastify.api_key; $("upBcfySys").value = s.broadcastify.system_id || ""; $("upBcfyFmt").value = s.broadcastify.format || "m4a";
+      $("upMin").value = s.min_secs;
+      const st = v.status;
+      $("upMeta").textContent = st.last_error ? `error: ${st.last_error}` : st.sent || st.queued ? `${st.sent} sent · ${st.failed} failed · ${st.queued} queued` : (!v.ffmpeg ? "ffmpeg not found — OpenMHz/Broadcastify need it" : "");
+      $("upMeta").style.color = st.last_error ? "var(--enc)" : "";
+    } catch (e) { log(`uploads_get: ${e}`); }
+  }
+  $("upSave").onclick = async () => { try { await invoke("uploads_configure", { settings: upSettings() }); $("upMeta").textContent = "saved"; setTimeout(upRefresh, 800); } catch (e) { alert(e); } };
+  document.querySelectorAll("[data-uptest]").forEach((b) => b.onclick = async () => {
+    b.disabled = true; try { alert(await invoke("uploads_test", { service: b.dataset.uptest, settings: upSettings() })); } catch (e) { alert(`Test failed: ${e}`); } finally { b.disabled = false; }
+  });
+  upRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") upRefresh(); }, 5000);
 
   /* ---------- live feed ---------- */
   async function stRefresh() {
