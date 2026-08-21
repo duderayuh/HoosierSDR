@@ -17,5 +17,5 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 hs-core = { path = "../crates/hs-core" }
-hs-source = { path = "../crates/hs-source", features = ["rtlsdr"] }
+hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy"] }
 hs-catalog = { path = "../crates/hs-catalog" }

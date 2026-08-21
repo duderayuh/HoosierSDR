@@ -490,6 +490,43 @@ Airspy R2 capture the same day (NAC 0x260 control channel, 10 s at
 2.5 MSPS): pre-fix `--dfe` decoded 66 TSBKs / 23 syncs; post-fix, bare, CMA
 and DFE all decode 393 TSBKs / 132 syncs — the channel's full rate.
 
+## Live capture (2026-08-20)
+
+First live runs through `hs-source` rather than a recording, same antenna
+and site as above (NAC 0x260, control 851.5375 MHz):
+
+| Radio | Mode | Result |
+|---|---|---|
+| Airspy R2, 2.5 MSPS → 2.4 on the fly | one channel, 15 s | 198 syncs, 46 grants, 0 dropped |
+| Airspy R2, **10 MSPS → 9.6 on the fly** | `--follow`, whole site, 60 s | control held (665 syncs), **4 calls followed to audio** across 851–858 MHz, 9.61/9.60 Msps real time, 0 dropped |
+| RTL-SDR, 2.4 MSPS | one channel, 30 s | 389 syncs, 69 grants, 0 dropped |
+
+The RTL-SDR row needed a fix on the way: read synchronously from the decode
+loop, the dongle lost samples at every block boundary (librtlsdr only buffers
+inside a read), which kept ~73% of the frame syncs and *no* grants while the
+same dongle's `rtl_sdr` recording decoded 1191 TSBKs offline. Draining the
+radio on its own thread (`stream::Buffered`, the trunk follower's policy)
+took it from 0 to 69 grants in 30 s. The Airspy path was immune — its
+callback already queues — and the 10 MSPS run is the Phase 2 path: one radio
+spanning a whole SAFE-T site, calls followed as they are granted.
+
+**Phase 2 gate — one hour unattended (2026-08-20, 17:37–18:37).** Airspy R2
+at 10 MSPS centred 855 MHz, `--follow --control 851.5375M --secs 3600`, no
+catalog, stock gain:
+
+| | |
+|---|---|
+| Control channel | held the whole hour — 47,503 frame syncs, no hunts |
+| Calls followed | **173** (0 out of band, 0 encrypted), on 851.8125 / 857.3625 / 857.3875 / 858.3375 MHz |
+| Audio | 171 WAVs, 26.1 min of voice, 24 MB; 11 near-silent (RMS < 0.003), none clipped |
+| Throughput | 9.59/9.60 Msps lifetime average (the shortfall is a cargo build that shared the CPU in minutes 5–12) |
+| Dropped samples | **0**, queue- and device-side |
+| Memory | 481 MB at 5 min → 484 MB at 60 min (flat) |
+| CPU | ~70% of one core idle, ~115% while a call decodes |
+
+Clean-audio-by-ear remains a human check; by the numbers the receiver ran a
+SAFE-T site unattended for an hour without a crash, a drop, or a leak.
+
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|
 | _voice-channel comparison pending — needs per-decoder FER instrumentation_ | | | | | |

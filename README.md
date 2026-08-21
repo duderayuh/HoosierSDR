@@ -43,13 +43,21 @@ the captured band, so one wideband recording covers a whole slice of spectrum.
 
 ## Live capture
 
-Streaming decode works end to end. `hs-core::stream::run` pulls IQ from any `SdrSource` in blocks and feeds the stateful decoder, so a frame split across block boundaries still decodes (tested). An RTL-SDR backend (Seify) lives behind the off-by-default `rtlsdr` feature, keeping the core build pure-Rust and libusb-free:
+Streaming decode works end to end. `hs-core::stream::run` pulls IQ from any `SdrSource` in blocks and feeds the stateful decoder, so a frame split across block boundaries still decodes (tested). Two radio backends live behind off-by-default features, keeping the core build pure-Rust and libusb-free:
+
+- **Airspy R2** (`airspy`, direct `libairspy`) — the device that matters: at 10 MSPS it spans a whole SAFE-T site, so `--follow` can track the control channel and every voice channel it grants from one radio. Its 10/2.5 MSPS are normalized to 9.6/2.4 MSPS on the fly. Proven live: a site followed at real time (9.61/9.60 Msps, 0 dropped) with calls decoded to audio across 851–858 MHz.
+- **RTL-SDR** (`rtlsdr`, via Seify) — 2.4 MSPS, one channel or a ±1 MHz slice.
 
 ```sh
-cargo run -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
+# whole site, live, from an Airspy R2 (centre the band on the site's span)
+cargo run --release -p hs-cli --features airspy -- --sdr --source airspy \
+    --rate 10000000 --freq 855M --follow --control 851.5375M
+
+# one channel from an RTL-SDR
+cargo run --release -p hs-cli --features rtlsdr -- --sdr --freq 851.0125M --cqpsk
 ```
 
-(That pulls Seify + libusb; on macOS `brew install libusb`. Without the feature, `--sdr` prints setup guidance.)
+`--secs N` ends a live run after N seconds with the summary printed; `--serial <hex>` picks one of several Airspys. The Airspy R2's 2016 firmware takes no gain setting (it hangs), so it runs at its defaults — which decode fine. macOS: `brew install airspy libusb`. Without the feature, `--sdr` prints setup guidance. The normalizer preserves 0.8 of the output Nyquist: ±960 kHz around the centre at 2.5 MSPS, ±3.84 MHz at 10 MSPS — centre the band so every channel you need sits inside that.
 
 ## Desktop app
 
@@ -138,7 +146,7 @@ That is the whole claim in one number — a categorical win, because differentia
 
 | Crate | Purpose |
 |---|---|
-| `hs-source` | `SdrSource` trait; RTL-SDR / Airspy (via Seify) and IQ-file backends |
+| `hs-source` | `SdrSource` trait; RTL-SDR (Seify), Airspy R2 (libairspy) and IQ-file backends |
 | `hs-dsp` | Filters, resamplers, channelizer, AGC, timing/carrier recovery, and `equalizer/` (LMS FSE, CMA, DFE, MLSE) |
 | `hs-p25` | Frame sync, NID, FEC (BCH/Golay/RS/trellis), TSBK/MBT parsing |
 | `hs-vocoder` | `Vocoder` trait; Phase I IMBE in-tree, Phase II behind a plugin boundary |

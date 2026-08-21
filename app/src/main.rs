@@ -40,6 +40,8 @@ struct StatusMsg {
     lock: f32,
     /// Mean frame-sync bit errors (of 48) — the receiver's own decode quality.
     sync_err: f64,
+    /// Samples/blocks lost between the radio and the decoder so far.
+    dropped: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -64,13 +66,14 @@ fn stop_capture(state: State<AppState>) {
     state.running.store(false, Ordering::SeqCst);
 }
 
-/// Start live capture from an RTL-SDR. Emits `grant`, `status`, and
+/// Start live capture from an RTL-SDR or Airspy (`source`). Emits `grant`, `status`, and
 /// `spectrum` events; on stop emits `stopped`, or `error` on failure.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn start_capture(
     app: AppHandle,
     state: State<AppState>,
+    source: String,
     freq: f64,
     rate: f64,
     gain: Option<f64>,
@@ -86,7 +89,8 @@ fn start_capture(
     let catalog = state.catalog.clone();
     std::thread::spawn(move || {
         let res = capture_loop(
-            &app, &running, &catalog, freq, rate, gain, cqpsk, &eq, record_iq, record_log,
+            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq,
+            record_log,
         );
         if let Err(e) = res {
             let _ = app.emit("error", e);
@@ -102,6 +106,7 @@ fn capture_loop(
     app: &AppHandle,
     running: &AtomicBool,
     catalog: &Mutex<Option<CsvCatalog>>,
+    source: &str,
     freq: f64,
     rate: f64,
     gain: Option<f64>,
@@ -110,11 +115,26 @@ fn capture_loop(
     record_iq: Option<String>,
     record_log: Option<String>,
 ) -> Result<(), String> {
+    use hs_core::stream::{Buffered, Normalized};
+    use hs_source::airspy::AirspySource;
     use hs_source::rtlsdr::RtlSdrSource;
     use hs_source::SdrSource;
 
-    let mut src = RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
-        .map_err(|e| format!("open RTL-SDR: {e:?}"))?;
+    let raw: Box<dyn SdrSource + Send> = match source {
+        "airspy" => Box::new(
+            AirspySource::open(None, freq, rate, gain)
+                .map_err(|e| format!("open Airspy: {e:?}"))?,
+        ),
+        _ => Box::new(
+            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
+                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
+        ),
+    };
+    // Normalize an Airspy's 2.5/10 MSPS to 2.4/9.6 on the fly, and drain the
+    // radio on its own thread so a busy UI frame never costs samples.
+    let mut src = Buffered::new(Normalized::new(raw), 65536);
+    // Everything downstream runs at the rate the source *delivers*.
+    let rate = src.sample_rate();
     let mut dec = new_decoder(rate, cqpsk, eq);
     let mut iq_file = match record_iq {
         Some(p) => Some(std::fs::File::create(&p).map_err(|e| format!("record IQ: {e}"))?),
@@ -186,6 +206,7 @@ fn capture_loop(
                 modulation: format!("{:?}", dec.modulation()),
                 lock: dec.cqpsk_lock().unwrap_or(-1.0),
                 sync_err: dec.diagnostics().mean_sync_errors(),
+                dropped: src.dropped(),
             },
         );
     }
@@ -240,6 +261,7 @@ fn decode_file(
             modulation: format!("{:?}", dec.modulation()),
             lock: dec.cqpsk_lock().unwrap_or(-1.0),
             sync_err: dec.diagnostics().mean_sync_errors(),
+            dropped: 0,
         },
     );
     Ok(())
