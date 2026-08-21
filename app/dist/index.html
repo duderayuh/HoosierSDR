@@ -339,6 +339,32 @@
         </div>
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Live feed · Icecast / Broadcastify</span><span class="meta" id="stMeta"></span></div>
+            <div class="body">
+              <label class="check"><input id="stEnabled" type="checkbox" /> Stream spoken calls live (silence between calls)</label>
+              <div class="row3">
+                <label class="field"><span class="lab">Host</span><input id="stHost" type="text" placeholder="audio1.broadcastify.com" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Port</span><input id="stPort" type="text" inputmode="numeric" placeholder="80" /></label>
+                <label class="field"><span class="lab">Mount</span><input id="stMount" type="text" placeholder="/abc123" spellcheck="false" /></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Source user</span><input id="stUser" type="text" value="source" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Password</span><input id="stPass" type="password" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="stTls" type="checkbox" /> TLS</label></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Codec</span><select id="stCodec"><option value="mp3">MP3</option><option value="aac">AAC</option><option value="opus">Opus (Ogg)</option></select></label>
+                <label class="field"><span class="lab">Bitrate (kbit/s)</span><select id="stKbps"><option>16</option><option>24</option><option>32</option><option>48</option><option>64</option></select></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="stSave" style="width:100%">Save &amp; apply</button></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Stream name</span><input id="stName" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Description</span><input id="stDesc" type="text" spellcheck="false" /></label>
+              </div>
+              <p class="help">Broadcastify feeds: use the host, port, mount and source password from your feed's "Feed Technical Details" page. Encoding and connection are done by ffmpeg.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
             <div class="body">
               <div class="row2">

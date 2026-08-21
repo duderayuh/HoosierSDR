@@ -20,6 +20,7 @@ mod library;
 mod player;
 mod playlists;
 mod rr;
+mod stream;
 mod transcribe;
 mod units;
 
@@ -50,6 +51,8 @@ struct AppState {
     format: Mutex<encode::Format>,
     /// Spectrum settings: (fft size, averaging blocks).
     spectrum: Arc<Mutex<(usize, usize)>>,
+    /// Live Icecast/Broadcastify feed, when enabled.
+    streamer: stream::Shared,
 }
 
 impl AppState {
@@ -408,6 +411,7 @@ fn start_follow(
     let archive_mode = state.archive_mode.clone();
     let format = state.format.lock().unwrap().clone();
     let spectrum = state.spectrum.clone();
+    let streamer = state.streamer.clone();
     let audio = if play { state.audio() } else { None };
     std::thread::spawn(move || {
         let res = (|| -> Result<(), String> {
@@ -456,11 +460,16 @@ fn start_follow(
                 spectrum: Some(&spectrum),
             };
             follow::run(src, &params, cat.as_ref(), &live, &running, &mut |ev| {
-                if let (Some(pl), follow::FollowEvent::Call { pcm, priority, .. }) =
-                    (player.as_ref(), &ev)
-                {
-                    if !pcm.is_empty() && !archive_mode.load(Ordering::SeqCst) {
-                        pl.play(pcm.clone(), *priority);
+                if let follow::FollowEvent::Call { pcm, priority, .. } = &ev {
+                    if !pcm.is_empty() {
+                        if let Some(st) = streamer.lock().unwrap().as_ref() {
+                            st.feed(pcm);
+                        }
+                        if let Some(pl) = player.as_ref() {
+                            if !archive_mode.load(Ordering::SeqCst) {
+                                pl.play(pcm.clone(), *priority);
+                            }
+                        }
                     }
                 }
                 let _ = app.emit("follow", ev);
@@ -768,6 +777,7 @@ fn main() {
                 *state.format.lock().unwrap() = f;
             }
             transcribe::spawn_pump(app.handle().clone());
+            stream::autostart(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -797,6 +807,8 @@ fn main() {
             set_archive_mode,
             format_get,
             format_set,
+            stream::stream_get,
+            stream::stream_configure,
             spectrum_set,
             transcribe::transcribe_probe,
             transcribe::transcribe_configure,

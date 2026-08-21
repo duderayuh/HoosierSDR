@@ -648,6 +648,25 @@ if (TAURI) {
   $("fmtCodec").onchange = $("fmtKbps").onchange = $("fmtMode").onchange = fmtSave;
   fmtRefresh();
 
+  /* ---------- live feed ---------- */
+  async function stRefresh() {
+    try {
+      const v = await invoke("stream_get"); const s = v.settings;
+      $("stEnabled").checked = s.enabled; $("stHost").value = s.host; $("stPort").value = s.port; $("stMount").value = s.mount; $("stUser").value = s.user;
+      $("stPass").value = s.password; $("stTls").checked = s.tls; $("stCodec").value = s.codec; $("stKbps").value = String(s.bitrate_kbps); $("stName").value = s.name; $("stDesc").value = s.description;
+      $("stMeta").textContent = !v.ffmpeg ? "ffmpeg not found" : v.status.last_error ? `error: ${v.status.last_error}` : v.status.running ? (v.status.connected ? `streaming · ${(v.status.bytes_sent / 1024).toFixed(0)} KB sent` : "connecting…") : "off";
+      $("stMeta").style.color = v.status.last_error ? "var(--enc)" : v.status.connected ? "var(--clear)" : "";
+    } catch (e) { log(`stream_get: ${e}`); }
+  }
+  $("stSave").onclick = async () => {
+    try {
+      await invoke("stream_configure", { settings: { enabled: $("stEnabled").checked, host: $("stHost").value.trim(), port: parseInt($("stPort").value, 10) || 80, mount: $("stMount").value.trim(),
+        user: $("stUser").value.trim() || "source", password: $("stPass").value, codec: $("stCodec").value, bitrate_kbps: +$("stKbps").value, name: $("stName").value, description: $("stDesc").value, tls: $("stTls").checked } });
+      setTimeout(stRefresh, 1500);
+    } catch (e) { alert(e); }
+  };
+  stRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") stRefresh(); }, 5000);
+
   /* ---------- RadioReference account ---------- */
   async function rrRefresh() {
     try {
