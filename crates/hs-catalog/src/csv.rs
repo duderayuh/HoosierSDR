@@ -52,6 +52,14 @@ impl CsvCatalog {
         Self { talkgroups }
     }
 
+    /// Add every talkgroup from `other`, replacing same-id entries — so
+    /// several systems' catalogs can be in force at once.
+    pub fn merge(&mut self, other: &CsvCatalog) {
+        for (id, tg) in &other.talkgroups {
+            self.talkgroups.insert(*id, tg.clone());
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.talkgroups.len()
     }

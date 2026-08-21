@@ -17,6 +17,7 @@
       <button data-v="monitor" aria-pressed="true">Monitor</button>
       <button data-v="library" aria-pressed="false">Library</button>
       <button data-v="playlists" aria-pressed="false">Playlists</button>
+      <button data-v="aliases" aria-pressed="false">Aliases</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
     <span class="spacer"></span>
@@ -71,6 +72,7 @@
                 <div><span class="k">Calls</span><span class="v mono sig" id="r-grants">0</span></div>
                 <div><span class="k">Voice</span><span class="v mono" id="r-voice">0.0<small>s</small></span></div>
                 <div><span class="k">Stream · drops</span><span class="v mono" id="r-stream">—</span></div>
+                <div><span class="k">Named TGs</span><span class="v mono" id="r-names">—</span></div>
               </div>
               <div class="kv" id="chanReadouts" style="display:none">
                 <div><span class="k">Lock</span><span class="v mono sig" id="r-lock">—</span><div class="bar"><i id="r-lockbar" style="width:0%"></i></div></div>
@@ -204,6 +206,59 @@
       </section>
     </div>
 
+    <!-- ===================== ALIASES ===================== -->
+    <div class="view" id="view-aliases" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroup aliases</span>
+              <input id="alFilter" type="text" placeholder="filter: name, description, category, TG, source…" spellcheck="false" />
+              <span class="meta" id="alMeta"></span></div>
+            <div class="body tight">
+              <div class="xport">
+                <label class="field" style="margin:0;flex:1"><span class="lab">Check a talkgroup</span>
+                  <span class="inline"><input id="alCheck" type="text" inputmode="numeric" placeholder="20305" spellcheck="false" /><button class="btn ghost sm" id="alCheckGo">Is it loaded?</button></span></label>
+                <span class="mono small" id="alCheckResult" style="flex:2"></span>
+              </div>
+              <div class="tablewrap tgs" style="max-height:64vh">
+                <table><thead><tr><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th>Source</th><th class="actions-h">Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
+              </div>
+              <div class="empty" id="alEmpty"><span class="big">No aliases loaded</span>Load a system from RadioReference in Playlists, or import a talkgroup CSV below.</div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Alias sources</span><span class="meta" id="srcMeta"></span></div>
+            <div class="body tight">
+              <div id="srcList" class="list"></div>
+              <p class="help">Each RadioReference system you load (Playlists → Load) and each CSV you import is kept here and merged; the newest source wins when two name the same talkgroup. Priority, alert, avoid and lock-out are your own settings and apply whichever source names the talkgroup — the same model as SDRTrunk's alias lists.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="unitSave" style="width:100%">Save</button></label>
+              </div>
+              <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
+                <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
+              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
+            <div class="body">
+              <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>
+                <span class="inline"><input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" /><button class="btn ghost" id="loadcat">Load</button></span></label>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <!-- ===================== PLAYLISTS ===================== -->
     <div class="view" id="view-playlists" style="display:none">
       <section class="two-col">
@@ -226,6 +281,7 @@
           <div class="panel" id="sysPanel" style="display:none">
             <div class="head"><span class="eyebrow" id="sysName">System</span><span class="meta" id="sysMeta"></span></div>
             <div class="body">
+              <div class="notice mono" id="sysLoaded" style="color:var(--clear);margin-bottom:8px"></div>
               <span class="lab">Site</span>
               <div id="siteList" class="list"></div>
               <div class="row3" style="margin-top:10px">
@@ -297,6 +353,8 @@
                 <label class="field"><span class="lab">Language</span><input id="trLang" type="text" value="en" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="trSave" style="width:100%">Save</button></label>
               </div>
+              <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly</span></div>
+              <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
               <p class="help" id="trHelp">Runs locally with Python: <code>pip install faster-whisper</code> (fast, CPU-friendly) or <code>openai-whisper</code>. Models download on first use.</p>
             </div>
           </div>
@@ -373,26 +431,6 @@
               </div>
               <label class="field" id="rrKeyField"><span class="lab">App key <span class="mono faint">this build has none embedded</span></span><input id="rrKey" type="password" spellcheck="false" /></label>
               <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Secrets are kept in the Keychain on this Mac.</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="unitSave" style="width:100%">Save</button></label>
-              </div>
-              <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
-                <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
-              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
-            <div class="body">
-              <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>
-                <span class="inline"><input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" /><button class="btn ghost" id="loadcat">Load</button></span></label>
             </div>
           </div>
           <p class="legal"><b>Decodes unencrypted P25 only.</b> Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC&nbsp;35-44.1-2-7).</p>

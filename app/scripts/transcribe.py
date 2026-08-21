@@ -17,6 +17,7 @@ ap.add_argument("--language", default="en")
 ap.add_argument("--device", default="auto")
 ap.add_argument("--compute", default="auto")
 ap.add_argument("--probe", action="store_true", help="report available engines and exit")
+ap.add_argument("--download", action="store_true", help="fetch/load the model once and exit")
 a = ap.parse_args()
 
 def out(obj):
@@ -48,6 +49,9 @@ try:
             return r.get("text", "").strip()
 except Exception as e:
     out({"fatal": f"{a.engine} {a.model}: {e}"}); sys.exit(2)
+
+if a.download:
+    out({"downloaded": True, "model": f"{a.engine}/{a.model}"}); sys.exit(0)
 
 out({"ready": True, "model": f"{a.engine}/{a.model}"})
 for line in sys.stdin:
