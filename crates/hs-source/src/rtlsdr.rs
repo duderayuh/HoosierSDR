@@ -19,6 +19,26 @@ pub struct RtlSdrSource {
 }
 
 impl RtlSdrSource {
+    /// The RTL-SDRs Seify can see: (args that reopen exactly this device,
+    /// human label).
+    pub fn list() -> Vec<(String, String)> {
+        seify::enumerate_with_args("driver=rtlsdr")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| {
+                let label = a
+                    .get::<String>("label")
+                    .or_else(|_| a.get::<String>("product"))
+                    .unwrap_or_else(|_| "RTL-SDR".into());
+                let serial = a.get::<String>("serial").unwrap_or_default();
+                (
+                    a.to_string(),
+                    if serial.is_empty() { label } else { format!("{label} · {serial}") },
+                )
+            })
+            .collect()
+    }
+
     /// Open the first RTL-SDR (or the device matching `args`, e.g.
     /// `"driver=rtlsdr,rtl=0"`), tune to `center_freq` Hz at `sample_rate`
     /// samples/sec, and set `gain` dB (or enable AGC when `gain` is None).
@@ -78,5 +98,14 @@ impl SdrSource for RtlSdrSource {
             buf[i * 2 + 1] = c.im;
         }
         Ok(n * 2)
+    }
+}
+
+impl Drop for RtlSdrSource {
+    /// Stop the async read before the device closes: librtlsdr closed while
+    /// a transfer is in flight is a known crash, and this is exactly the
+    /// order a radio switch (RTL-SDR → Airspy) exercises.
+    fn drop(&mut self) {
+        let _ = self.rx.deactivate();
     }
 }

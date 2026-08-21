@@ -127,10 +127,13 @@ pub struct StreamStats {
 /// sync survives a gap far more often than a full trellis-coded block does —
 /// while the same dongle's `rtl_sdr` recording decoded 1191 TSBKs offline.
 /// Draining on a dedicated thread keeps the radio's own buffer empty; if the
-/// decoder ever falls behind, the *oldest* block is dropped and counted
-/// rather than the stream silently corrupted (the trunk follower's policy).
+/// decoder ever falls behind, the *newest* block is dropped and counted
+/// (the queue already holds ~2 s of the freshest contiguous audio), rather
+/// than the stream silently corrupted. `read` waits at most 250 ms so a
+/// caller polling a stop flag is never stuck.
 pub struct Buffered {
-    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    rx: std::sync::mpsc::Receiver<Result<Vec<f32>, SourceError>>,
+    reader: Option<std::thread::JoinHandle<()>>,
     sample_rate: f64,
     center_freq: f64,
     queue_drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -140,46 +143,127 @@ pub struct Buffered {
 }
 
 impl Buffered {
-    /// Wrap `inner`, reading it in `block_pairs`-pair blocks on a new thread.
-    /// The queue holds ~96 blocks (2.6 s at 2.4 MSPS with 65536-pair blocks).
-    pub fn new<S: SdrSource + Send + 'static>(mut inner: S, block_pairs: usize) -> Self {
+    /// Wrap a live radio: blocks the consumer can't keep up with are dropped
+    /// and counted (the radio's own buffer must never overflow).
+    pub fn new<S: SdrSource + Send + 'static>(inner: S, block_pairs: usize) -> Self {
+        Self::with_policy(inner, block_pairs, false)
+    }
+
+    /// Wrap a recording (or anything that can wait): the reader blocks when
+    /// the queue is full, so every sample reaches the consumer.
+    pub fn lossless<S: SdrSource + Send + 'static>(inner: S, block_pairs: usize) -> Self {
+        Self::with_policy(inner, block_pairs, true)
+    }
+
+    fn with_policy<S: SdrSource + Send + 'static>(
+        mut inner: S,
+        block_pairs: usize,
+        lossless: bool,
+    ) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::mpsc::{sync_channel, TrySendError};
         use std::sync::Arc;
 
         let sample_rate = inner.sample_rate();
         let center_freq = inner.center_freq();
-        let (tx, rx) = sync_channel::<Vec<f32>>(96);
+        // ~2 s of queue whatever the rate.
+        let depth = ((sample_rate * 2.0) / block_pairs as f64)
+            .ceil()
+            .clamp(16.0, 1024.0) as usize;
+        let (tx, rx) = sync_channel::<Result<Vec<f32>, SourceError>>(depth);
         let queue_drops = Arc::new(AtomicU64::new(0));
         let inner_drops = Arc::new(AtomicU64::new(0));
         let (qd, id) = (Arc::clone(&queue_drops), Arc::clone(&inner_drops));
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             let mut buf = vec![0.0f32; block_pairs * 2];
             loop {
                 match inner.read(&mut buf) {
                     Ok(0) => continue,
                     Ok(n) => {
                         id.store(inner.dropped(), Ordering::Relaxed);
-                        match tx.try_send(buf[..n].to_vec()) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                qd.fetch_add(1, Ordering::Relaxed);
+                        let block = Ok(buf[..n].to_vec());
+                        if lossless {
+                            if tx.send(block).is_err() {
+                                return;
                             }
-                            Err(TrySendError::Disconnected(_)) => return,
+                        } else {
+                            match tx.try_send(block) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    qd.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Disconnected(_)) => return,
+                            }
                         }
                     }
-                    Err(_) => return,
+                    // The radio's own error is the thing the user needs to
+                    // see; pass it through (blocking send: it's the last one)
+                    // instead of turning it into a silent end-of-stream.
+                    Err(SourceError::Eof) => return,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
                 }
             }
         });
         Self {
             rx,
+            reader: Some(reader),
             sample_rate,
             center_freq,
             queue_drops,
             inner_drops,
             pending: Vec::new(),
             pending_pos: 0,
+        }
+    }
+}
+
+impl Buffered {
+    /// Read without waiting: whatever is buffered or already queued, else
+    /// `Ok(0)`. For a loop that blocks on one radio and drains the others.
+    pub fn try_read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        if self.pending_pos >= self.pending.len() {
+            self.pending = match self.rx.try_recv() {
+                Ok(r) => r?,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(0),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err(SourceError::Eof),
+            };
+            self.pending_pos = 0;
+        }
+        let avail = &self.pending[self.pending_pos..];
+        let n = avail.len().min(buf.len() & !1);
+        buf[..n].copy_from_slice(&avail[..n]);
+        self.pending_pos += n;
+        Ok(n)
+    }
+}
+
+impl Buffered {
+    /// Throw away whatever is queued right now — the blocks that piled up
+    /// while a live caller was busy measuring — and return how many.
+    pub fn discard_queued(&mut self) -> usize {
+        let mut n = 0;
+        while self.rx.try_recv().is_ok() {
+            n += 1;
+        }
+        self.pending.clear();
+        self.pending_pos = 0;
+        n
+    }
+}
+
+impl Drop for Buffered {
+    /// Close the channel, then wait for the reader so the radio is actually
+    /// closed (and free for the next open) when this goes away.
+    fn drop(&mut self) {
+        // Dropping `rx` first makes the reader's next send fail and return.
+        let (_tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<f32>, SourceError>>(1);
+        let old = std::mem::replace(&mut self.rx, rx);
+        drop(old);
+        if let Some(h) = self.reader.take() {
+            let _ = h.join();
         }
     }
 }
@@ -200,7 +284,15 @@ impl SdrSource for Buffered {
 
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
         if self.pending_pos >= self.pending.len() {
-            self.pending = self.rx.recv().map_err(|_| SourceError::Eof)?;
+            // A bounded wait so a caller polling a stop flag gets control
+            // back even when the radio has gone quiet.
+            self.pending = match self.rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(r) => r?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(0),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(SourceError::Eof)
+                }
+            };
             self.pending_pos = 0;
         }
         let avail = &self.pending[self.pending_pos..];

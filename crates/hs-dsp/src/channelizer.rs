@@ -76,6 +76,38 @@ pub struct Channelizer {
     inv: FftPlan,
     out_rate: f64,
     sample_rate: f64,
+    /// Per-bin gain across the slice: flat over the channel, raised-cosine
+    /// to zero toward the slice edges. A brick-wall slice has a sinc impulse
+    /// response far longer than the overlap-save guard, so energy near the
+    /// slice edge — the channel two over, on a busy band — wraps around and
+    /// smears across the block. The taper makes the slice a real lowpass
+    /// with a short response, which is what the guard assumes.
+    taper: Vec<f32>,
+}
+
+/// Flat passband of the slice taper, Hz each side of the channel centre.
+const TAPER_PASS_HZ: f64 = 8_000.0;
+/// Where the taper reaches zero, Hz each side (inside the ±24 kHz slice).
+const TAPER_STOP_HZ: f64 = 22_000.0;
+
+fn make_taper(out_rate: f64) -> Vec<f32> {
+    let bin_hz = out_rate / CHANNEL_BINS as f64;
+    (0..CHANNEL_BINS)
+        .map(|j| {
+            // Bin j sits at (j - W/2) × bin_hz after the rotate below puts
+            // the channel centre at index W/2 before inversion; the taper is
+            // symmetric so the indexing convention does not matter.
+            let f = ((j as f64 - CHANNEL_BINS as f64 / 2.0) * bin_hz).abs();
+            if f <= TAPER_PASS_HZ {
+                1.0
+            } else if f >= TAPER_STOP_HZ {
+                0.0
+            } else {
+                let x = (f - TAPER_PASS_HZ) / (TAPER_STOP_HZ - TAPER_PASS_HZ);
+                (0.5 * (1.0 + (core::f64::consts::PI * x).cos())) as f32
+            }
+        })
+        .collect()
 }
 
 impl Channelizer {
@@ -130,6 +162,7 @@ impl Channelizer {
             inv: FftPlan::new(CHANNEL_BINS),
             out_rate,
             sample_rate,
+            taper: make_taper(out_rate),
         }
     }
 
@@ -153,6 +186,12 @@ impl Channelizer {
             .map(|&o| (o / bin_hz).round() as isize)
             .collect();
         self.actual_hz = self.bins.iter().map(|&b| b as f64 * bin_hz).collect();
+    }
+
+    /// Forget buffered input — for a stream that paused while no channel was
+    /// wanted, so the next block is not prefixed with stale samples.
+    pub fn reset(&mut self) {
+        self.pending.clear();
     }
 
     /// Rate of every output channel.
@@ -202,7 +241,7 @@ impl Channelizer {
                 for (j, s) in slice.iter_mut().enumerate() {
                     let off = j as isize - (CHANNEL_BINS as isize) / 2;
                     let idx = (centre + off).rem_euclid(self.n as isize) as usize;
-                    *s = spectrum[idx];
+                    *s = spectrum[idx].scale(self.taper[j]);
                 }
                 slice.rotate_left(CHANNEL_BINS / 2);
                 self.inv.inverse(&mut slice);
@@ -275,6 +314,27 @@ mod tests {
             .sum::<f32>()
             / (tail.len() / 2) as f32;
         assert!(p < 0.01, "empty channel picked up {p:.4} of power");
+    }
+
+    /// A tone inside the channel passes; a tone near the slice edge — the
+    /// channel two over — is removed by the taper rather than wrapped around.
+    #[test]
+    fn taper_keeps_the_channel_and_rejects_the_slice_edge() {
+        let fs = 240_000.0;
+        let power = |hz: f64| {
+            let mut ch = Channelizer::new(fs, &[0.0]);
+            let mut iq = Vec::new();
+            for i in 0..120_000 {
+                let p = 2.0 * std::f64::consts::PI * hz * i as f64 / fs;
+                iq.push(p.cos() as f32);
+                iq.push(p.sin() as f32);
+            }
+            let o = ch.process(&iq).remove(0);
+            let tail = &o[o.len() / 2..];
+            tail.chunks(2).map(|c| c[0] * c[0] + c[1] * c[1]).sum::<f32>() / (tail.len() / 2) as f32
+        };
+        assert!(power(4_000.0) > 0.25, "in-channel tone lost");
+        assert!(power(23_000.0) < 0.01, "slice-edge tone not removed");
     }
 
     #[test]

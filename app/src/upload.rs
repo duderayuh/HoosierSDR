@@ -167,7 +167,7 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn post(url: &str, ctype: &str, body: Vec<u8>) -> Result<(u16, String), String> {
+pub fn post(url: &str, ctype: &str, body: Vec<u8>) -> Result<(u16, String), String> {
     let mut r = agent()
         .post(url)
         .header("Content-Type", ctype)
@@ -404,8 +404,8 @@ pub fn send_broadcastify(
 
 fn record(app: &AppHandle, id: i64, service: &str, ok: bool, msg: &str) {
     let state = app.state::<AppState>();
-    let guard = state.db.lock().unwrap();
-    if let Some(db) = guard.as_ref() {
+    let db = state.db.lock().unwrap().clone();
+    if let Some(db) = db {
         let c = db.lock().unwrap();
         let _ = c.execute(
             "INSERT INTO uploads (call_id, service, ok, at, msg) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -555,7 +555,13 @@ pub fn uploads_configure(
 /// Credential checks: rdio-scanner's `test=1`, OpenMHz's `/authorize`,
 /// Broadcastify's `test=1`.
 #[tauri::command]
-pub fn uploads_test(service: String, settings: Settings) -> Result<String, String> {
+pub async fn uploads_test(service: String, settings: Settings) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || uploads_test_blocking(service, settings))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn uploads_test_blocking(service: String, settings: Settings) -> Result<String, String> {
     match service.as_str() {
         "rdio" => {
             let (ctype, body) = Multipart::new()
@@ -614,8 +620,7 @@ pub fn uploads_test(service: String, settings: Settings) -> Result<String, Strin
 #[tauri::command]
 pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
     let row = {
-        let guard = state.db.lock().unwrap();
-        let db = guard.as_ref().ok_or("library not open")?;
+        let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
         let c = db.lock().unwrap();
         library::get(&c, id)?.ok_or("no such call")?
     };

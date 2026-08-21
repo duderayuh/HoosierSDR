@@ -65,6 +65,36 @@
 //! be found before anything can be followed anyway, so the correction is free.
 
 use crate::decoder::{ChannelDecoder, EqMode, Modulation};
+use hs_dsp::channelizer::Channelizer;
+
+/// Rate the channelizer delivers every traffic channel at (10 samples per
+/// symbol), and hence the rate the call decoders are built for.
+const CHANNEL_RATE: f64 = 48_000.0;
+
+/// Calls that must agree with the control channel's modulation before the
+/// second decoder is dropped (when single-modulation decoding is enabled),
+/// and how often to re-probe afterwards.
+const CONFIRM_CALLS: u32 = 2;
+const REPROBE_EVERY: u32 = 10;
+
+/// Channel filter applied to each channelizer output before its decoders:
+/// the same 8 kHz passband / 24 kHz stopband the per-channel decimator used.
+/// The channelizer's slice is a brick wall at ±24 kHz, which lets a
+/// neighbouring channel 12.5 kHz away straight into the demodulator — the
+/// first live run without this filter garbled every call on a busy site.
+const CHANNEL_PASSBAND_HZ: f64 = 8_000.0;
+
+fn channel_filter() -> hs_dsp::fir::FirC {
+    let cutoff = CHANNEL_PASSBAND_HZ / CHANNEL_RATE;
+    let stop = 0.5;
+    let transition = stop - cutoff;
+    let mut n = (3.3 / transition).ceil() as usize;
+    n = n.clamp(31, 255);
+    if n.is_multiple_of(2) {
+        n += 1;
+    }
+    hs_dsp::fir::FirC::new(hs_dsp::fir::lowpass_taps(n, cutoff + transition / 2.0), 1)
+}
 
 /// The equalizer is the point of the project on CQPSK, where a simulcast
 /// channel is what it exists to correct; on C4FM it has nothing to do.
@@ -80,9 +110,22 @@ struct ActiveCall {
     freq_hz: u64,
     talkgroup: u16,
     source_unit: u32,
-    /// Both modulations, because only the channel knows which it uses.
+    /// Offset of the channel from the capture centre (corrected), Hz — what
+    /// the channelizer is asked for.
+    offset_hz: f64,
+    /// Both modulations, because only the channel knows which it uses —
+    /// but only one of them runs once the site's modulation is confirmed
+    /// (`dual`); the other sits idle.
     c4fm: ChannelDecoder,
     cqpsk: ChannelDecoder,
+    dual: bool,
+    /// Seconds of IQ this call has been fed.
+    age: f64,
+    /// Channel filter on the channelizer's slice (see `channel_filter`).
+    filter: hs_dsp::fir::FirC,
+    /// Classic extraction: decoders built at the capture rate with their
+    /// own decimators; fed the wideband stream, not a channelizer slice.
+    wideband: bool,
     /// Audio from each modulation, kept separately so the choice between them
     /// can be made on the thing that matters rather than guessed early.
     pcm_c4fm: Vec<i16>,
@@ -114,6 +157,9 @@ pub struct Call {
     /// A radio signalled emergency during the call (link-control service
     /// option bit).
     pub emergency: bool,
+    /// The radio's over-the-air alias, when the system broadcast one (see
+    /// `hs_p25::talker_alias`).
+    pub talker_alias: Option<String>,
     /// 8 kHz mono audio.
     pub pcm: Vec<i16>,
 }
@@ -133,6 +179,12 @@ pub struct SiteInfo {
     pub idens: Vec<(u8, u64, u64)>,
     /// Active patches: (supergroup, members).
     pub patches: Vec<(u16, Vec<u16>)>,
+    /// This site's RFSS and site numbers, once broadcast.
+    pub rfss: Option<u8>,
+    pub site: Option<u8>,
+    /// Neighbouring sites: (system, RFSS, site, control channel Hz if the
+    /// plan is known).
+    pub neighbours: Vec<(u16, u8, u8, Option<u64>)>,
 }
 
 /// What one processed block produced.
@@ -164,14 +216,89 @@ pub struct FollowOutput {
     /// front end — or its operator — can retune the radio to one. Empty means
     /// the site never announced an alternate.
     pub control_lost: Option<Vec<u64>>,
+    /// Every grant the control channel issued this block, before any
+    /// filtering or de-duplication — the raw material for discovery
+    /// (which talkgroups and frequencies a site actually uses).
+    pub grants: Vec<hs_trunk::Grant>,
+    /// Affiliation / registration messages heard this block, already applied
+    /// to [`TrunkFollower::affiliations`].
+    pub mobility: Vec<hs_trunk::MobilityEvent>,
+    /// Radio position reports from packet data: (unit, lat, lon).
+    pub locations: Vec<(u32, f64, f64)>,
+    /// Over-the-air talker aliases confirmed this block: (talkgroup, alias).
+    pub talker_aliases: Vec<(u16, String)>,
+}
+
+/// One radio's worth of spectrum in which calls are decoded: the primary
+/// band (which also carries the control channel) or an extra radio parked
+/// on another part of the site's span. A call lives in the band that covers
+/// its frequency; the follower routes each grant to whichever band can.
+pub struct Band {
+    pub center_hz: f64,
+    pub sample_rate: f64,
+    chan: Option<Channelizer>,
+    chan_offsets: Vec<f64>,
+    active: Vec<ActiveCall>,
+}
+
+impl Band {
+    fn new(center_hz: f64, sample_rate: f64) -> Self {
+        Self {
+            center_hz,
+            sample_rate,
+            chan: None,
+            chan_offsets: Vec::new(),
+            active: Vec::new(),
+        }
+    }
+
+    /// Half the usable width: a channel's margin inside the band edge,
+    /// where the decimator's filter rolls off.
+    fn nyquist(&self) -> f64 {
+        self.sample_rate / 2.0 - 12_500.0
+    }
+
+    /// Offset of a (corrected) frequency from this band's centre, if inside.
+    fn offset_of(&self, hz: f64) -> Option<f64> {
+        let off = hz - self.center_hz;
+        (off.abs() < self.nyquist()).then_some(off)
+    }
 }
 
 pub struct TrunkFollower {
-    /// Capture rate. Each channel is decimated straight out of the wideband
-    /// stream at this rate — see the note on `new`.
+    /// Capture rate. The control channel is decimated straight out of the
+    /// wideband stream at this rate; traffic channels come out of the
+    /// channelizer — see the note on `new`.
     sample_rate: f64,
     control: ChannelDecoder,
-    active: Vec<ActiveCall>,
+    /// The radio the control channel is on, and the calls inside its span.
+    band: Band,
+    /// Further radios covering other parts of the site's span; each is fed
+    /// by [`process_band`](Self::process_band).
+    extra: Vec<Band>,
+    /// Calls in a row whose winning modulation matched the control
+    /// channel's; past `CONFIRM_CALLS`, new calls run one decoder.
+    mod_confirmed: u32,
+    /// Calls started, for the periodic re-probe.
+    calls_started: u32,
+    /// Decode new calls with the site's modulation alone once confirmed.
+    /// Off by default: a C4FM discriminator on a CQPSK signal still syncs
+    /// and emits audio — garbled — so a wrong site measurement would turn
+    /// every call to noise with nothing to catch it. Dual decoding with
+    /// clean-NID arbitration is the safety net, and the channelizer makes
+    /// it affordable.
+    single_modulation: bool,
+    /// Extract traffic channels with the shared channelizer (default) or,
+    /// classically, with one decimator per channel straight from the
+    /// wideband stream — kept as an on-air A/B switch.
+    use_channelizer: bool,
+    /// Decode every call with this modulation only, whatever was measured:
+    /// the listener knows the site (RadioReference says simulcast → CQPSK)
+    /// and a C4FM discriminator on a CQPSK signal still syncs and emits
+    /// garbled audio that can win the arbitration.
+    forced: Option<Modulation>,
+    /// Unvoiced-synthesis quality handed to each call's vocoder (1–64).
+    uv_quality: i32,
     center_hz: f64,
     /// Added to every nominal frequency to find where it really is.
     correction_hz: f64,
@@ -217,6 +344,14 @@ pub struct TrunkFollower {
     /// Talkgroup priorities, 1 (highest) … 99; unlisted = 50. Decides which
     /// call gives way when every decoder slot is busy.
     priority: std::collections::HashMap<u16, u8>,
+    /// Locked-out talkgroup ranges (inclusive), alongside the explicit set.
+    lockout_ranges: Vec<(u16, u16)>,
+    /// Priority ranges (inclusive); an explicit entry wins over a range.
+    priority_ranges: Vec<(u16, u16, u8)>,
+    /// Who is where, from the control channel's mobility messages.
+    affiliations: hs_trunk::AffiliationTable,
+    /// Seconds of IQ processed, the clock affiliations are stamped with.
+    elapsed_secs: f64,
 }
 
 impl TrunkFollower {
@@ -229,13 +364,16 @@ impl TrunkFollower {
     /// `modulation` is what the control channel uses, which is also what its
     /// traffic channels are decoded with — see the note on simulcast above.
     ///
-    /// Each channel is pulled out of the wideband stream by its own decimator
-    /// inside a [`ChannelDecoder`], not by a shared FFT channelizer. A
-    /// channelizer transforms the whole band every block, a cost paid whether
-    /// one channel is wanted or a hundred; it wins only past several channels.
-    /// A trunk follower watches one control channel and a handful of calls, so
-    /// direct decimation is far cheaper — measured at ~6x on one channel — and
-    /// that headroom is what lets the follower keep up with a live radio.
+    /// The control channel is pulled out of the wideband stream by its own
+    /// decimator inside a [`ChannelDecoder`]: it is always there, and direct
+    /// decimation is far cheaper for a single channel (~6x, measured). Traffic
+    /// channels go through the shared FFT [`Channelizer`] instead. Its cost
+    /// is one transform of the band per block however many calls are up,
+    /// which is what lets a busy site — ten or twenty calls at once — decode
+    /// in real time; the per-channel decimators that preceded it scaled
+    /// linearly and ran a laptop out of CPU at six, garbling every call at
+    /// once when the USB queue overflowed. (This is also how SDRTrunk's
+    /// polyphase channelizer handles the same load.)
     pub fn new(
         sample_rate: f64,
         center_hz: f64,
@@ -256,12 +394,19 @@ impl TrunkFollower {
                 eq_for(modulation),
                 control_offset,
             ),
-            active: Vec::new(),
+            band: Band::new(center_hz, sample_rate),
+            extra: Vec::new(),
+            mod_confirmed: 0,
+            calls_started: 0,
+            single_modulation: false,
+            use_channelizer: true,
+            forced: None,
+            uv_quality: hs_vocoder::imbe::DEFAULT_UV_QUALITY,
             center_hz,
             correction_hz,
             quiet_secs: 2.0,
             hang_secs: 0.3,
-            max_calls: 6,
+            max_calls: 12,
             modulation,
             control_nominal_hz: control_nominal_hz as u64,
             primary_hz: control_nominal_hz as u64,
@@ -272,7 +417,49 @@ impl TrunkFollower {
             lockout: std::collections::HashSet::new(),
             allowlist: None,
             priority: std::collections::HashMap::new(),
+            lockout_ranges: Vec::new(),
+            priority_ranges: Vec::new(),
+            affiliations: hs_trunk::AffiliationTable::new(),
+            elapsed_secs: 0.0,
         }
+    }
+
+    /// Lock out whole talkgroup ranges (inclusive) in addition to the
+    /// explicit set — the way alias lists express "everything from 10000 to
+    /// 10999". Takes effect on the next block.
+    pub fn set_lockout_ranges(&mut self, ranges: impl IntoIterator<Item = (u16, u16)>) {
+        self.lockout_ranges = ranges
+            .into_iter()
+            .map(|(a, b)| (a.min(b), a.max(b)))
+            .collect();
+    }
+
+    pub fn lockout_ranges(&self) -> &[(u16, u16)] {
+        &self.lockout_ranges
+    }
+
+    /// Priority for whole ranges (inclusive); an explicit per-talkgroup
+    /// priority still wins, and the first matching range after that.
+    pub fn set_priority_ranges(&mut self, ranges: impl IntoIterator<Item = (u16, u16, u8)>) {
+        self.priority_ranges = ranges
+            .into_iter()
+            .map(|(a, b, p)| (a.min(b), a.max(b), p.clamp(1, 99)))
+            .collect();
+    }
+
+    pub fn priority_ranges(&self) -> &[(u16, u16, u8)] {
+        &self.priority_ranges
+    }
+
+    /// The radios the control channel has placed on talkgroups.
+    pub fn affiliations(&self) -> &hs_trunk::AffiliationTable {
+        &self.affiliations
+    }
+
+    /// Recent decision-stage symbols from the control channel, oldest
+    /// first — see [`ChannelDecoder::recent_symbols`].
+    pub fn control_symbols(&self) -> Vec<(f32, f32)> {
+        self.control.recent_symbols().collect()
     }
 
     /// Talkgroup priorities (1 = highest, 99 = lowest; unlisted = 50). When
@@ -286,7 +473,13 @@ impl TrunkFollower {
     }
 
     pub fn priority_of(&self, tg: u16) -> u8 {
-        self.priority.get(&tg).copied().unwrap_or(50)
+        self.priority.get(&tg).copied().unwrap_or_else(|| {
+            self.priority_ranges
+                .iter()
+                .find(|(lo, hi, _)| (*lo..=*hi).contains(&tg))
+                .map(|(_, _, p)| *p)
+                .unwrap_or(50)
+        })
     }
 
     /// How long a call lingers, in seconds: `hang` after its terminator, and
@@ -301,6 +494,83 @@ impl TrunkFollower {
         (self.hang_secs, self.quiet_secs)
     }
 
+    /// Add a radio covering another part of the site's span (its centre
+    /// and rate). Feed it with [`process_band`](Self::process_band); grants
+    /// whose frequency falls inside it are decoded there. Returns its index.
+    pub fn add_band(&mut self, center_hz: f64, sample_rate: f64) -> usize {
+        self.extra.push(Band::new(center_hz, sample_rate));
+        self.extra.len() - 1
+    }
+
+    /// Every band: (centre Hz, sample rate), primary first.
+    pub fn bands(&self) -> Vec<(f64, f64)> {
+        std::iter::once((self.band.center_hz, self.band.sample_rate))
+            .chain(self.extra.iter().map(|b| (b.center_hz, b.sample_rate)))
+            .collect()
+    }
+
+    /// Feed a block of IQ from extra band `idx`. Only calls routed to that
+    /// band advance; the control channel is the primary band's business.
+    pub fn process_band(&mut self, idx: usize, iq: &[f32]) -> FollowOutput {
+        let mut out = FollowOutput::default();
+        if idx >= self.extra.len() {
+            return out;
+        }
+        let secs = (iq.len() / 2) as f64 / self.extra[idx].sample_rate;
+        self.decode_band(Some(idx), iq, secs, &mut out);
+        out
+    }
+
+    fn take_band(&mut self, which: Option<usize>) -> Band {
+        match which {
+            None => {
+                let (c, r) = (self.band.center_hz, self.band.sample_rate);
+                std::mem::replace(&mut self.band, Band::new(c, r))
+            }
+            Some(i) => {
+                let (c, r) = (self.extra[i].center_hz, self.extra[i].sample_rate);
+                std::mem::replace(&mut self.extra[i], Band::new(c, r))
+            }
+        }
+    }
+
+    fn put_band(&mut self, which: Option<usize>, b: Band) {
+        match which {
+            None => self.band = b,
+            Some(i) => self.extra[i] = b,
+        }
+    }
+
+    /// Calls in progress across every band.
+    fn active_count(&self) -> usize {
+        self.band.active.len() + self.extra.iter().map(|b| b.active.len()).sum::<usize>()
+    }
+
+    /// Vocoder unvoiced-synthesis quality for calls started afterwards
+    /// (see `hs_vocoder::imbe::DEFAULT_UV_QUALITY`): higher is smoother,
+    /// less granular unvoiced sound — the texture listeners call metallic.
+    pub fn set_uv_quality(&mut self, q: i32) {
+        self.uv_quality = q.clamp(1, 64);
+    }
+
+    /// Force the traffic-channel modulation (`None` = arbitrate per call).
+    pub fn set_forced_modulation(&mut self, m: Option<Modulation>) {
+        self.forced = m;
+    }
+
+    /// Channelizer (true, default) or classic per-channel decimation (false)
+    /// for traffic channels. Applies to calls started afterwards.
+    pub fn set_channelizer(&mut self, on: bool) {
+        self.use_channelizer = on;
+    }
+
+    /// Decode with the site's modulation alone once a couple of calls have
+    /// confirmed it (halves the per-call work; see the field note on the
+    /// struct for why it is off by default).
+    pub fn set_single_modulation(&mut self, on: bool) {
+        self.single_modulation = on;
+    }
+
     /// Most decoder slots used at once.
     pub fn set_max_calls(&mut self, n: usize) {
         self.max_calls = n.max(1);
@@ -308,14 +578,49 @@ impl TrunkFollower {
 
     /// Which active call should give way to a grant of priority `pri`, if any:
     /// the worst-priority call, and only if it is strictly worse than `pri`.
-    fn contention_victim(&self, pri: u8) -> Option<usize> {
-        let (i, worst) = self
-            .active
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, self.priority_of(c.talkgroup)))
-            .max_by_key(|(_, p)| *p)?;
-        (worst > pri).then_some(i)
+    fn contention_victim(&self, pri: u8) -> Option<(Option<usize>, usize)> {
+        let mut worst: Option<((Option<usize>, usize), u8)> = None;
+        let mut consider = |which: Option<usize>, active: &Vec<ActiveCall>| {
+            for (i, c) in active.iter().enumerate() {
+                let p = self.priority_of(c.talkgroup);
+                if worst.is_none_or(|(_, wp)| p > wp) {
+                    worst = Some(((which, i), p));
+                }
+            }
+        };
+        consider(None, &self.band.active);
+        for (bi, b) in self.extra.iter().enumerate() {
+            consider(Some(bi), &b.active);
+        }
+        let (loc, p) = worst?;
+        (p > pri).then_some(loc)
+    }
+
+    fn remove_call(&mut self, loc: (Option<usize>, usize)) -> ActiveCall {
+        match loc.0 {
+            None => self.band.active.remove(loc.1),
+            Some(bi) => self.extra[bi].active.remove(loc.1),
+        }
+    }
+
+    /// Where a call on this frequency is being decoded, if anywhere.
+    fn find_by_freq(&self, freq_hz: u64) -> Option<(Option<usize>, usize)> {
+        if let Some(i) = self.band.active.iter().position(|c| c.freq_hz == freq_hz) {
+            return Some((None, i));
+        }
+        for (bi, b) in self.extra.iter().enumerate() {
+            if let Some(i) = b.active.iter().position(|c| c.freq_hz == freq_hz) {
+                return Some((Some(bi), i));
+            }
+        }
+        None
+    }
+
+    fn call_talkgroup(&self, loc: (Option<usize>, usize)) -> u16 {
+        match loc.0 {
+            None => self.band.active[loc.1].talkgroup,
+            Some(bi) => self.extra[bi].active[loc.1].talkgroup,
+        }
     }
 
     /// What the control channel has announced about this site.
@@ -338,6 +643,13 @@ impl TrunkFollower {
                 .map(|(id, p)| (id, p.base_freq_hz, p.spacing_hz))
                 .collect(),
             patches: self.control.patches().patches().to_vec(),
+            rfss: site.rfss,
+            site: site.site,
+            neighbours: site
+                .neighbours()
+                .into_iter()
+                .map(|(n, hz)| (n.sys_id, n.rfss, n.site, hz))
+                .collect(),
         }
     }
 
@@ -353,7 +665,12 @@ impl TrunkFollower {
     }
 
     fn wanted(&self, tg: u16) -> bool {
-        self.allowlist.as_ref().is_none_or(|a| a.contains(&tg)) && !self.lockout.contains(&tg)
+        self.allowlist.as_ref().is_none_or(|a| a.contains(&tg))
+            && !self.lockout.contains(&tg)
+            && !self
+                .lockout_ranges
+                .iter()
+                .any(|(lo, hi)| (*lo..=*hi).contains(&tg))
     }
 
     /// Replace the set of locked-out talkgroups. Takes effect on the next
@@ -382,8 +699,10 @@ impl TrunkFollower {
 
     /// Calls currently being decoded.
     pub fn active_calls(&self) -> Vec<(u16, u64)> {
-        self.active
+        self.band
+            .active
             .iter()
+            .chain(self.extra.iter().flat_map(|b| b.active.iter()))
             .map(|c| (c.talkgroup, c.freq_hz))
             .collect()
     }
@@ -401,7 +720,10 @@ impl TrunkFollower {
     /// along with every second of audio already decoded from it. Draining here
     /// means a short capture reports what it actually heard.
     pub fn finish(&mut self) -> Vec<Call> {
-        let active = core::mem::take(&mut self.active);
+        let mut active = core::mem::take(&mut self.band.active);
+        for b in self.extra.iter_mut() {
+            active.extend(core::mem::take(&mut b.active));
+        }
         active.into_iter().map(|c| self.retire(c)).collect()
     }
 
@@ -420,7 +742,14 @@ impl TrunkFollower {
         let clean = |d: &crate::diag::Diagnostics| -> usize {
             d.nids.iter().filter(|n| n.bch_errors == 0).count()
         };
-        let (n_c4, n_cq) = (clean(c.c4fm.diagnostics()), clean(c.cqpsk.diagnostics()));
+        let (mut n_c4, mut n_cq) = (clean(c.c4fm.diagnostics()), clean(c.cqpsk.diagnostics()));
+        if !c.dual {
+            // Only one decoder ran; the other has nothing to say.
+            match self.forced.unwrap_or(self.modulation) {
+                Modulation::C4fm => n_cq = 0,
+                Modulation::Cqpsk => n_c4 = 0,
+            }
+        }
         let emergency = c
             .c4fm
             .diagnostics()
@@ -428,11 +757,33 @@ impl TrunkFollower {
             .iter()
             .chain(c.cqpsk.diagnostics().link_control.iter())
             .any(|l| l.emergency);
-        let pick_c4fm = match n_c4.cmp(&n_cq) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => c.pcm_c4fm.len() >= c.pcm_cqpsk.len(),
+        let pick_c4fm = match self.forced {
+            Some(Modulation::C4fm) => true,
+            Some(Modulation::Cqpsk) => false,
+            None => match n_c4.cmp(&n_cq) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => c.pcm_c4fm.len() >= c.pcm_cqpsk.len(),
+            },
         };
+        // A dual-decoded call with clean frames is evidence about the site:
+        // agreement with the control channel's modulation counts toward
+        // dropping the second decoder; disagreement resets it.
+        if c.dual && n_c4 + n_cq > 0 {
+            let winner = if pick_c4fm { Modulation::C4fm } else { Modulation::Cqpsk };
+            if winner == self.modulation {
+                self.mod_confirmed += 1;
+            } else {
+                self.mod_confirmed = 0;
+            }
+        }
+        // Whichever decoder was locked heard the alias words, if any.
+        let talker_alias = if pick_c4fm {
+            c.c4fm.talker_alias().or(c.cqpsk.talker_alias())
+        } else {
+            c.cqpsk.talker_alias().or(c.c4fm.talker_alias())
+        }
+        .map(str::to_string);
         let (modulation, pcm, lc) = if c.pcm_c4fm.is_empty() && c.pcm_cqpsk.is_empty() {
             (None, Vec::new(), None)
         } else if pick_c4fm {
@@ -465,6 +816,7 @@ impl TrunkFollower {
             modulation,
             patched_with: self.control.patches().siblings(c.talkgroup),
             emergency,
+            talker_alias,
             pcm,
         }
     }
@@ -474,10 +826,22 @@ impl TrunkFollower {
         let mut out = FollowOutput::default();
 
         let secs = (iq.len() / 2) as f64 / self.sample_rate;
+        self.elapsed_secs += secs;
 
         // The control channel decimates itself out of the wideband stream.
         let control_out = self.control.process(iq);
         out.control_syncs = control_out.syncs;
+        out.grants = control_out.grants.clone();
+        for ev in &control_out.mobility {
+            self.affiliations.observe(*ev, self.elapsed_secs);
+        }
+        out.mobility = control_out.mobility.clone();
+        out.locations.extend(
+            control_out
+                .locations
+                .iter()
+                .map(|l| (l.llid, l.lat, l.lon)),
+        );
 
         // A control channel transmits continuously, so a stretch with no
         // frame sync means it is gone — the site rotated it onto one of the
@@ -494,41 +858,237 @@ impl TrunkFollower {
             self.lost_reported = false;
         }
 
+        self.decode_band(None, iq, secs, &mut out);
+
+        // Start calls the control channel just granted.
+        for g in &control_out.grants {
+            if g.encrypted {
+                out.grants_encrypted.push((g.talkgroup, g.freq_hz));
+                continue;
+            }
+            if !self.wanted(g.talkgroup) {
+                out.grants_locked.push((g.talkgroup, g.freq_hz));
+                continue;
+            }
+            if let Some(loc) = self.find_by_freq(g.freq_hz) {
+                if self.call_talkgroup(loc) == g.talkgroup {
+                    // The same grant, repeated — grants are re-broadcast for
+                    // the whole life of a call.
+                    continue;
+                }
+                // The channel was reassigned to another talkgroup: whatever
+                // audio the old call still owes is over, and every frame
+                // decoded from here on belongs to the new one. Without this,
+                // back-to-back calls on one frequency merged into the first
+                // call's talkgroup. The new call starts fresh decoders — the
+                // CQPSK path re-acquires (~0.5 s) — but reusing the old ones
+                // would carry the old call's Link Control and clean-NID
+                // history into the new call's attribution, which is the very
+                // mistake this exists to fix.
+                let old = self.remove_call(loc);
+                let done = self.retire(old);
+                out.completed.push(done);
+            }
+            if self.active_count() >= self.max_calls {
+                match self.contention_victim(self.priority_of(g.talkgroup)) {
+                    Some(loc) => {
+                        let old = self.remove_call(loc);
+                        let done = self.retire(old);
+                        out.completed.push(done);
+                    }
+                    None => {
+                        out.grants_busy.push((g.talkgroup, g.freq_hz));
+                        continue;
+                    }
+                }
+            }
+            // Follow the channel in whichever band covers it: the primary
+            // radio's, or an extra radio parked elsewhere on the site's span.
+            // A trunked system grants across its whole band, most of which a
+            // single tuner cannot see — that is what the extra radios are for.
+            let corrected = g.freq_hz as f64 + self.correction_hz;
+            let (which, offset) = if let Some(off) = self.band.offset_of(corrected) {
+                (None, off)
+            } else if let Some((bi, off)) = self
+                .extra
+                .iter()
+                .enumerate()
+                .find_map(|(bi, b)| b.offset_of(corrected).map(|o| (bi, o)))
+            {
+                (Some(bi), off)
+            } else {
+                out.grants_out_of_band.push((g.talkgroup, g.freq_hz));
+                continue;
+            };
+            let band_rate = match which {
+                None => self.band.sample_rate,
+                Some(bi) => self.extra[bi].sample_rate,
+            };
+            self.calls_started += 1;
+            let dual = self.forced.is_none()
+                && (!self.single_modulation
+                    || self.mod_confirmed < CONFIRM_CALLS
+                    || self.calls_started.is_multiple_of(REPROBE_EVERY));
+            let mut call = ActiveCall {
+                freq_hz: g.freq_hz,
+                talkgroup: g.talkgroup,
+                source_unit: g.source_unit,
+                offset_hz: offset,
+                // The channelizer delivers the channel at baseband, 48 kHz;
+                // a classic call decimates it out of the wideband stream.
+                c4fm: ChannelDecoder::with_offset(
+                    if self.use_channelizer { CHANNEL_RATE } else { band_rate },
+                    Modulation::C4fm,
+                    EqMode::Bypass,
+                    if self.use_channelizer { 0.0 } else { offset },
+                ),
+                cqpsk: ChannelDecoder::with_offset(
+                    if self.use_channelizer { CHANNEL_RATE } else { band_rate },
+                    Modulation::Cqpsk,
+                    EqMode::Enabled,
+                    if self.use_channelizer { 0.0 } else { offset },
+                ),
+                dual,
+                age: 0.0,
+                filter: channel_filter(),
+                wideband: !self.use_channelizer,
+                pcm_c4fm: Vec::new(),
+                pcm_cqpsk: Vec::new(),
+                syncs_c4fm: 0,
+                syncs_cqpsk: 0,
+                quiet: 0.0,
+                ending: None,
+            };
+            call.c4fm.set_uv_quality(self.uv_quality);
+            call.cqpsk.set_uv_quality(self.uv_quality);
+            match which {
+                None => self.band.active.push(call),
+                Some(bi) => self.extra[bi].active.push(call),
+            }
+            out.started.push((g.talkgroup, g.freq_hz));
+        }
+
+        out
+    }
+
+
+    /// One block of one band: drop locked-out calls, slice the channelizer,
+    /// run each call's decoders, retire what finished.
+    fn decode_band(&mut self, which: Option<usize>, iq: &[f32], secs: f64, out: &mut FollowOutput) {
+        let mut band = self.take_band(which);
         // A talkgroup locked out mid-call: stop following it now, silently —
         // the listener asked not to hear it, so it gets no audio and no row.
         if !self.lockout.is_empty() || self.allowlist.is_some() {
-            let keep: Vec<bool> = self
-                .active
+            let keep: Vec<bool> = band.active
                 .iter()
                 .map(|c| self.wanted(c.talkgroup))
                 .collect();
             let mut i = 0;
-            self.active.retain(|_| {
+            band.active.retain(|_| {
                 i += 1;
                 keep[i - 1]
             });
         }
 
-        // Each active call does the same, at its own offset.
-        for call in self.active.iter_mut() {
-            let samples: &[f32] = iq;
-            // Both modulations run for the whole call, and `retire` picks the
-            // winner on total decoded audio at the end. Deciding early is
-            // tempting for the CPU it would save, but it cannot be done on
-            // accumulated audio: CQPSK's blind carrier acquisition takes about
-            // half a second during which it emits nothing, while the C4FM
-            // discriminator locks in one frame, so early audio always favours
-            // C4FM even on a CQPSK signal. A mis-detected control channel plus
-            // an early drop killed the correct modulation exactly this way. The
-            // per-channel decimation this follower now uses is cheap enough
-            // that running both to the end is affordable, and it is the only
-            // unbiased comparison.
-            let a = call.c4fm.process(samples);
-            let b = call.cqpsk.process(samples);
+        // Every active call is sliced out of one transform of the band
+        // (classic wideband calls get the raw stream instead).
+        let any_sliced = band.active.iter().any(|c| !c.wideband);
+        let channels: Vec<Vec<f32>> = if band.active.is_empty() || !any_sliced {
+            if let Some(ch) = band.chan.as_mut() {
+                ch.reset();
+                band.chan_offsets.clear();
+            }
+            Vec::new()
+        } else {
+            let offsets: Vec<f64> = band.active.iter().map(|c| c.offset_hz).collect();
+            let ch = band.chan
+                .get_or_insert_with(|| Channelizer::new(band.sample_rate, &offsets));
+            if offsets != band.chan_offsets {
+                ch.set_channels(&offsets);
+                band.chan_offsets = offsets;
+            }
+            ch.process(iq)
+        };
+        let empty: Vec<f32> = Vec::new();
+        let per_call: Vec<&[f32]> = band.active
+            .iter()
+            .enumerate()
+            .map(|(i, c)| if c.wideband { iq } else { channels.get(i).map(|v| v.as_slice()).unwrap_or(&empty) })
+            .collect();
+        // Each call's decoders run on their own thread for this block: the
+        // channelizer has already done the shared work, so the per-call part
+        // is independent and a busy site can use every core. Scoped threads
+        // cost tens of microseconds per block, nothing against the decode.
+        let site = self.forced.unwrap_or(self.modulation);
+        let results: Vec<(crate::decoder::DecodeOutput, crate::decoder::DecodeOutput)> =
+            std::thread::scope(|sc| {
+                let handles: Vec<_> = band.active
+                    .iter_mut()
+                    .zip(per_call.iter())
+                    .map(|(call, samples)| {
+                        let samples: &[f32] = samples;
+                        sc.spawn(move || {
+                            // Channel-filter a channelizer slice first (both
+                            // decoders share the filtered stream); a classic
+                            // wideband call filters inside its own decimator.
+                            let mut filtered: Vec<f32> = Vec::new();
+                            if !call.wideband {
+                                filtered.reserve(samples.len());
+                                for pair in samples.chunks_exact(2) {
+                                    if let Some(y) = call.filter.push(hs_dsp::C32::new(pair[0], pair[1])) {
+                                        filtered.push(y.re);
+                                        filtered.push(y.im);
+                                    }
+                                }
+                            }
+                            let samples: &[f32] = if call.wideband { samples } else { &filtered };
+                            // While the site's modulation is unconfirmed both
+                            // decoders run for the whole call, and `retire`
+                            // picks the winner at the end. Deciding early
+                            // cannot be done on accumulated audio: CQPSK's
+                            // blind carrier acquisition takes about half a
+                            // second during which it emits nothing, while the
+                            // C4FM discriminator locks in one frame, so early
+                            // audio always favours C4FM even on a CQPSK
+                            // signal. Once a couple of calls have agreed with
+                            // the control channel, new calls run the site's
+                            // decoder alone (halving the work), with a
+                            // periodic dual call to catch a mixed site.
+                            let a = if call.dual || site == Modulation::C4fm {
+                                call.c4fm.process(samples)
+                            } else {
+                                Default::default()
+                            };
+                            let b = if call.dual || site == Modulation::Cqpsk {
+                                call.cqpsk.process(samples)
+                            } else {
+                                Default::default()
+                            };
+                            (a, b)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().expect("call decoder")).collect()
+            });
+        for (call, (a, b)) in band.active.iter_mut().zip(results) {
             call.syncs_c4fm += a.syncs;
             call.syncs_cqpsk += b.syncs;
+            call.age += secs;
+            // Dual on doubt: a single-decoder call that has not synced at
+            // all after a second gets the other decoder too. The site rule
+            // is strong but not a guarantee, and the channelizer makes the
+            // second decoder cheap — far cheaper than a silent call.
+            if !call.dual && call.age > 1.0 && call.syncs_c4fm + call.syncs_cqpsk == 0 && self.forced.is_none() {
+                call.dual = true;
+            }
             call.pcm_c4fm.extend_from_slice(&a.pcm);
             call.pcm_cqpsk.extend_from_slice(&b.pcm);
+            for l in a.locations.iter().chain(b.locations.iter()) {
+                out.locations.push((l.llid, l.lat, l.lon));
+            }
+            if let Some(alias) = a.talker_alias.as_ref().or(b.talker_alias.as_ref()) {
+                out.talker_aliases.push((call.talkgroup, alias.clone()));
+            }
             if a.syncs.max(b.syncs) == 0 {
                 call.quiet += secs;
             } else {
@@ -555,11 +1115,11 @@ impl TrunkFollower {
         let (quiet_secs, hang_secs) = (self.quiet_secs, self.hang_secs);
         let mut finished = Vec::new();
         let mut i = 0;
-        while i < self.active.len() {
-            if self.active[i].quiet >= quiet_secs
-                || self.active[i].ending.is_some_and(|h| h > hang_secs)
+        while i < band.active.len() {
+            if band.active[i].quiet >= quiet_secs
+                || band.active[i].ending.is_some_and(|h| h > hang_secs)
             {
-                finished.push(self.active.remove(i));
+                finished.push(band.active.remove(i));
             } else {
                 i += 1;
             }
@@ -568,83 +1128,7 @@ impl TrunkFollower {
             out.completed.push(self.retire(c));
         }
 
-        // Start calls the control channel just granted.
-        for g in &control_out.grants {
-            if g.encrypted {
-                out.grants_encrypted.push((g.talkgroup, g.freq_hz));
-                continue;
-            }
-            if !self.wanted(g.talkgroup) {
-                out.grants_locked.push((g.talkgroup, g.freq_hz));
-                continue;
-            }
-            if let Some(pos) = self.active.iter().position(|c| c.freq_hz == g.freq_hz) {
-                if self.active[pos].talkgroup == g.talkgroup {
-                    // The same grant, repeated — grants are re-broadcast for
-                    // the whole life of a call.
-                    continue;
-                }
-                // The channel was reassigned to another talkgroup: whatever
-                // audio the old call still owes is over, and every frame
-                // decoded from here on belongs to the new one. Without this,
-                // back-to-back calls on one frequency merged into the first
-                // call's talkgroup. The new call starts fresh decoders — the
-                // CQPSK path re-acquires (~0.5 s) — but reusing the old ones
-                // would carry the old call's Link Control and clean-NID
-                // history into the new call's attribution, which is the very
-                // mistake this exists to fix.
-                let old = self.active.remove(pos);
-                let done = self.retire(old);
-                out.completed.push(done);
-            }
-            if self.active.len() >= self.max_calls {
-                match self.contention_victim(self.priority_of(g.talkgroup)) {
-                    Some(i) => {
-                        let old = self.active.remove(i);
-                        let done = self.retire(old);
-                        out.completed.push(done);
-                    }
-                    None => {
-                        out.grants_busy.push((g.talkgroup, g.freq_hz));
-                        continue;
-                    }
-                }
-            }
-            // Only follow a channel that is actually inside this capture. A
-            // trunked system grants across its whole band, most of which a
-            // single tuner cannot see.
-            let offset = g.freq_hz as f64 + self.correction_hz - self.center_hz;
-            if offset.abs() >= self.nyquist() {
-                out.grants_out_of_band.push((g.talkgroup, g.freq_hz));
-                continue;
-            }
-            self.active.push(ActiveCall {
-                freq_hz: g.freq_hz,
-                talkgroup: g.talkgroup,
-                source_unit: g.source_unit,
-                c4fm: ChannelDecoder::with_offset(
-                    self.sample_rate,
-                    Modulation::C4fm,
-                    EqMode::Bypass,
-                    offset,
-                ),
-                cqpsk: ChannelDecoder::with_offset(
-                    self.sample_rate,
-                    Modulation::Cqpsk,
-                    EqMode::Enabled,
-                    offset,
-                ),
-                pcm_c4fm: Vec::new(),
-                pcm_cqpsk: Vec::new(),
-                syncs_c4fm: 0,
-                syncs_cqpsk: 0,
-                quiet: 0.0,
-                ending: None,
-            });
-            out.started.push((g.talkgroup, g.freq_hz));
-        }
-
-        out
+        self.put_band(which, band);
     }
 
     /// The control channel has been silent past the loss limit: move to the
@@ -666,10 +1150,7 @@ impl TrunkFollower {
         let in_band: Vec<u64> = candidates
             .iter()
             .copied()
-            .filter(|&hz| {
-                let offset = hz as f64 + self.correction_hz - self.center_hz;
-                offset.abs() < self.nyquist()
-            })
+            .filter(|&hz| self.band.offset_of(hz as f64 + self.correction_hz).is_some())
             .collect();
 
         let Some(&next_hz) = in_band.get(self.hunt_next % in_band.len().max(1)) else {
@@ -697,11 +1178,6 @@ impl TrunkFollower {
         self.control_nominal_hz = next_hz;
     }
 
-    fn nyquist(&self) -> f64 {
-        // Leave a channel's width of margin from the band edge, where the
-        // decimator's filter rolls off.
-        self.sample_rate / 2.0 - 12_500.0
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +1244,18 @@ pub fn measure_carrier(
     center_hz: f64,
     nominal_hz: f64,
 ) -> Option<(f64, Modulation)> {
+    measure_carrier_cancellable(iq, sample_rate, center_hz, nominal_hz, &|| false)
+}
+
+/// As [`measure_carrier`], checking `cancel()` between candidates so a live
+/// front end can abandon a long sweep (tens of seconds at 10 MSPS).
+pub fn measure_carrier_cancellable(
+    iq: &[f32],
+    sample_rate: f64,
+    center_hz: f64,
+    nominal_hz: f64,
+    cancel: &dyn Fn() -> bool,
+) -> Option<(f64, Modulation)> {
     // Half a channel either way. Sweeping that whole span at the precision the
     // demodulators want would mean a hundred trial decodes, and each one
     // channelizes the probe from scratch. Coarse-then-fine gets the same
@@ -804,6 +1292,9 @@ pub fn measure_carrier(
     let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
     let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
     for k in -coarse..=coarse {
+        if cancel() {
+            return None;
+        }
         let cand = nominal_hz + k as f64 * COARSE_HZ;
         for m in mods {
             let score = try_at(cand, m);
@@ -818,6 +1309,9 @@ pub fn measure_carrier(
     let (centre, m) = (best.1, best.2);
     let fine = (COARSE_HZ / FINE_HZ) as i32;
     for k in -fine..=fine {
+        if cancel() {
+            return None;
+        }
         let cand = centre + k as f64 * FINE_HZ;
         let score = try_at(cand, m);
         if score > best.0 {
@@ -831,32 +1325,33 @@ pub fn measure_carrier(
 /// every cycle while its call is up, so the same out-of-band call is seen many
 /// times a second; this reports each frequency at most once per cooldown.
 pub struct GrantGate {
-    /// freq -> blocks remaining before it may be reported again.
-    seen: std::collections::HashMap<u64, u32>,
-    cooldown: u32,
+    /// freq -> seconds remaining before it may be reported again.
+    seen: std::collections::HashMap<u64, f64>,
+    cooldown_secs: f64,
 }
 
 impl GrantGate {
-    pub fn new(cooldown: u32) -> Self {
+    /// `cooldown_secs` between repeat reports of the same frequency.
+    pub fn new(cooldown_secs: f64) -> Self {
         Self {
             seen: std::collections::HashMap::new(),
-            cooldown,
+            cooldown_secs,
         }
     }
     /// True if this frequency should be reported now (and arms its cooldown).
     pub fn fresh(&mut self, freq: u64) -> bool {
         match self.seen.get_mut(&freq) {
-            Some(c) if *c > 0 => false,
+            Some(c) if *c > 0.0 => false,
             _ => {
-                self.seen.insert(freq, self.cooldown);
+                self.seen.insert(freq, self.cooldown_secs);
                 true
             }
         }
     }
-    /// Call once per processed block to age the cooldowns.
-    pub fn tick(&mut self) {
+    /// Age the cooldowns by `secs` of processed IQ.
+    pub fn tick(&mut self, secs: f64) {
         for c in self.seen.values_mut() {
-            *c = c.saturating_sub(1);
+            *c = (*c - secs).max(0.0);
         }
     }
 }
@@ -911,22 +1406,17 @@ impl TrunkFollower {
     /// A placeholder active call for contention tests (decoders idle).
     fn push_fake_call(&mut self, talkgroup: u16, freq_hz: u64) {
         let offset = freq_hz as f64 - self.center_hz;
-        self.active.push(ActiveCall {
+        self.band.active.push(ActiveCall {
             freq_hz,
             talkgroup,
             source_unit: 0,
-            c4fm: ChannelDecoder::with_offset(
-                self.sample_rate,
-                Modulation::C4fm,
-                EqMode::Bypass,
-                offset,
-            ),
-            cqpsk: ChannelDecoder::with_offset(
-                self.sample_rate,
-                Modulation::Cqpsk,
-                EqMode::Enabled,
-                offset,
-            ),
+            offset_hz: offset,
+            c4fm: ChannelDecoder::with_offset(CHANNEL_RATE, Modulation::C4fm, EqMode::Bypass, 0.0),
+            cqpsk: ChannelDecoder::with_offset(CHANNEL_RATE, Modulation::Cqpsk, EqMode::Enabled, 0.0),
+            dual: true,
+            age: 0.0,
+            filter: channel_filter(),
+            wideband: false,
             pcm_c4fm: Vec::new(),
             pcm_cqpsk: Vec::new(),
             syncs_c4fm: 0,
@@ -961,11 +1451,11 @@ mod priority_tests {
         f.push_fake_call(100, 851_100_000);
         f.push_fake_call(200, 851_200_000);
         // Priority 50 (unlisted) beats 60 → the TG 200 call (index 1) gives way.
-        assert_eq!(f.contention_victim(50), Some(1));
+        assert_eq!(f.contention_victim(50), Some((None, 1)));
         // Priority 60 ties the worst call → nobody gives way.
         assert_eq!(f.contention_victim(60), None);
         // Nothing beats priority 1's claim, but 1 itself beats everyone.
-        assert_eq!(f.contention_victim(1), Some(1));
+        assert_eq!(f.contention_victim(1), Some((None, 1)));
         f.set_priorities([(100, 1), (200, 1)]);
         assert_eq!(f.contention_victim(1), None);
         assert_eq!(f.contention_victim(99), None);
@@ -1009,11 +1499,126 @@ mod priority_tests {
         }
     }
 
+    /// Ranges lock out and prioritise whole blocks of talkgroups; an explicit
+    /// entry still wins over a range.
+    #[test]
+    fn ranges_cover_blocks_of_talkgroups() {
+        let mut f = follower();
+        f.set_lockout_ranges([(10000, 10999), (30000, 20000)]);
+        assert!(!f.wanted(10500) && !f.wanted(25000));
+        assert!(f.wanted(9999) && f.wanted(11000));
+        f.set_priority_ranges([(20000, 20999, 10)]);
+        f.set_priorities([(20308, 90)]);
+        assert_eq!(f.priority_of(20500), 10, "range priority");
+        assert_eq!(f.priority_of(20308), 90, "explicit beats range");
+        assert_eq!(f.priority_of(1), 50);
+    }
+
     #[test]
     fn site_info_starts_empty_and_names_the_control() {
         let f = follower();
         let s = f.site_info();
         assert_eq!(s.control_hz, 851_012_500);
         assert!(s.nac.is_none() && s.idens.is_empty() && s.patches.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    /// What the real NAC 0x260 control channel says about its site — the
+    /// values the decoder-state panel shows. The recording is the Marion
+    /// County (MESA) site: WACN 0xBEE00, system 0x262, whose Adjacent Status
+    /// messages name the same system id independently, so the NetworkStatus
+    /// decode is checked against ground truth, not just a round trip. This
+    /// is the test that caught the WACN/system field split being wrong.
+    #[test]
+    fn site_info_from_the_recorded_airspy_site() {
+        let path =
+            std::env::var("HOME").unwrap() + "/hoosier-field/live_airspy_851M_2500k_nac260.cs16";
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("no {path}; skipping");
+            return;
+        };
+        let mut f32s: Vec<u8> = Vec::with_capacity(bytes.len() * 2);
+        for c in bytes.chunks_exact(2) {
+            let v = i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0;
+            f32s.extend_from_slice(&v.to_le_bytes());
+        }
+        // 2.5 MSPS → the decoder's 2.4 MSPS front-end rate, as the app does.
+        use hs_source::SdrSource;
+        let mut src = crate::stream::Normalized::new(hs_source::IqFileSource::new(
+            std::io::Cursor::new(f32s),
+            2_500_000.0,
+            851e6,
+        ));
+        let rate = src.sample_rate();
+        let mut iq = Vec::new();
+        let mut buf = vec![0.0f32; 1 << 17];
+        while let Ok(n) = src.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            iq.extend_from_slice(&buf[..n]);
+        }
+        let (measured, m) = measure_carrier(&iq, rate, 851e6, 851_537_500.0).expect("control");
+        let mut f = TrunkFollower::new(rate, 851e6, 851_537_500.0, measured, m);
+        for chunk in iq.chunks(rate as usize / 5) {
+            f.process(chunk);
+        }
+        let s = f.site_info();
+        eprintln!("site: {s:?}");
+        eprintln!("affiliations: {}", f.affiliations().len());
+        assert_eq!(s.wacn, Some(0xBEE00), "WACN from NetworkStatus");
+        assert_eq!(s.sys_id, Some(0x262), "system id from NetworkStatus");
+        assert!(
+            s.neighbours.iter().all(|(sys, ..)| *sys == 0x262),
+            "neighbours name another system: {:?}",
+            s.neighbours
+        );
+        assert!(s.rfss.is_some() && s.site.is_some(), "RFSS/site from RfssStatus");
+        for (sys, r, st, hz) in &s.neighbours {
+            eprintln!("neighbour sys {sys:#x} rfss {r} site {st} {hz:?}");
+            if let Some(hz) = hz {
+                assert!((851_000_000..=869_000_000).contains(hz), "neighbour {hz} out of band");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// Throughput with a busy site: 12 calls at once over 9.6 MSPS noise.
+    /// Prints the real-time factor; run with `--release -- --ignored`.
+    #[test]
+    #[ignore]
+    fn twelve_calls_at_once_realtime_factor() {
+        let rate = 9_600_000.0;
+        let mut f = TrunkFollower::new(rate, 855e6, 851_537_500.0, 851_537_500.0, Modulation::Cqpsk);
+        f.set_max_calls(12);
+        for k in 0..12u64 {
+            f.push_fake_call(100 + k as u16, 852_000_000 + k * 250_000);
+        }
+        let secs = 2.0;
+        let mut seed = 0x9E37_79B9u32;
+        let block: Vec<f32> = (0..(rate * 0.1) as usize * 2)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed as f32 / u32::MAX as f32 - 0.5) * 0.1
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let mut fed = 0.0;
+        while fed < secs {
+            f.process(&block);
+            fed += 0.1;
+        }
+        let el = start.elapsed().as_secs_f64();
+        eprintln!("12 calls: {secs} s of IQ in {el:.2} s → {:.2}x real time", secs / el);
     }
 }

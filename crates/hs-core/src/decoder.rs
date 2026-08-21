@@ -18,7 +18,7 @@ use hs_p25::framer::{Framer, FramerEvent};
 use hs_p25::moto::MotoRegroup;
 use hs_p25::tsbk::Tsbk;
 use hs_p25::{AlgId, Duid};
-use hs_trunk::{Grant, IdenPlan, PatchTracker, SiteModel};
+use hs_trunk::{Grant, IdenPlan, MobilityEvent, Neighbour, PatchTracker, SiteModel, SystemId};
 use hs_vocoder::imbe::ImbeDecoder;
 use hs_vocoder::Vocoder;
 
@@ -51,7 +51,14 @@ pub struct DecodeOutput {
     pub terminators: u32,
     /// Radio position reports decoded from packet data this block.
     pub locations: Vec<hs_p25::lrrp::LrrpReport>,
+    /// Affiliation / registration messages heard this block.
+    pub mobility: Vec<MobilityEvent>,
+    /// An over-the-air talker alias confirmed this block (traffic channels).
+    pub talker_alias: Option<String>,
 }
+
+/// Recent decision-stage symbols kept for a constellation display.
+pub const SYMBOL_RING: usize = 512;
 
 /// Whether the equalizer sits in the symbol path.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -101,6 +108,12 @@ pub struct ChannelDecoder {
     active_enc: bool,
     /// Rolling diagnostics for real-signal export (see `diag`).
     diag: crate::diag::Diagnostics,
+    /// The last [`SYMBOL_RING`] decision-stage symbols: (I, Q) for CQPSK,
+    /// (previous level, level) for C4FM — what a constellation view draws.
+    symbols: std::collections::VecDeque<(f32, f32)>,
+    prev_level: f32,
+    /// Over-the-air alias words on a traffic channel.
+    talker: hs_p25::talker_alias::TalkerAliasAssembler,
 }
 
 impl ChannelDecoder {
@@ -171,7 +184,31 @@ impl ChannelDecoder {
             active_tg: None,
             active_enc: false,
             diag,
+            symbols: std::collections::VecDeque::with_capacity(SYMBOL_RING),
+            prev_level: 0.0,
+            talker: hs_p25::talker_alias::TalkerAliasAssembler::new(),
         }
+    }
+
+    /// Recent decision-stage symbols, oldest first. CQPSK: equalized (I, Q),
+    /// an 8-point π/4-DQPSK ring when locked. C4FM: (previous, current)
+    /// symbol level in units of the nominal ±1/±3 levels, a 16-point
+    /// transition grid when the eye is open.
+    pub fn recent_symbols(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.symbols.iter().copied()
+    }
+
+    fn push_symbol(&mut self, p: (f32, f32)) {
+        if self.symbols.len() == SYMBOL_RING {
+            self.symbols.pop_front();
+        }
+        self.symbols.push_back(p);
+    }
+
+    /// The talker alias the traffic channel broadcast for this transmission,
+    /// once confirmed.
+    pub fn talker_alias(&self) -> Option<&str> {
+        self.talker.alias()
     }
 
     pub fn modulation(&self) -> Modulation {
@@ -228,6 +265,7 @@ impl ChannelDecoder {
     /// Process a slice of interleaved-IQ f32 samples.
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
+        self.diag.trim(50_000);
         let mut derot_buf: Vec<u8> = Vec::new();
         let mut i = 0;
         while i + 1 < iq.len() {
@@ -250,6 +288,9 @@ impl ChannelDecoder {
                     // rotated by an unknown quarter turn; the derotator pins
                     // that against the Frame Sync Word before the framer.
                     if let Some((raw, dphi)) = self.cqpsk.as_mut().unwrap().push_phase(s) {
+                        if let Some(sym) = self.cqpsk.as_ref().unwrap().last_symbol() {
+                            self.push_symbol((sym.re, sym.im));
+                        }
                         derot_buf.clear();
                         self.derot.push(raw, &mut derot_buf);
                         // Confidence comes from the differential phase's
@@ -296,6 +337,8 @@ impl ChannelDecoder {
         // a marginal symbol differently from a confident one.
         let sd = hs_p25::soft::soft_slice_c4fm(eq_sym);
         debug_assert_eq!(sd.bits, slice(eq_sym));
+        self.push_symbol((self.prev_level, eq_sym));
+        self.prev_level = eq_sym;
         self.feed_dibit(sd, Some(eq_sym), out);
     }
 
@@ -378,6 +421,10 @@ impl ChannelDecoder {
                     });
                     self.active_tg = Some(tg);
                 } else if !lcw.is_standard() {
+                    if let Some(alias) = self.talker.observe(&lcw) {
+                        self.diag.talker_aliases.push((self.active_tg.unwrap_or(0), alias.clone()));
+                        out.talker_alias = Some(alias);
+                    }
                     let key = (lcw.mfid, lcw.lco);
                     match self
                         .diag
@@ -551,6 +598,57 @@ impl ChannelDecoder {
                     });
                     out.grants.push(g);
                 }
+            }
+            Tsbk::NetworkStatus { wacn, sys_id, .. } => {
+                self.site.set_system(SystemId { wacn, sys_id });
+            }
+            Tsbk::RfssStatus { rfss, site, .. } => {
+                self.site.set_rfss_site(rfss, site);
+            }
+            Tsbk::AdjacentStatus {
+                sys_id,
+                rfss,
+                site,
+                channel,
+                ..
+            } => {
+                self.site.add_neighbour(Neighbour {
+                    sys_id,
+                    rfss,
+                    site,
+                    channel,
+                });
+            }
+            Tsbk::GroupAffiliationResponse {
+                accepted,
+                group,
+                target,
+                ..
+            } => out.mobility.push(MobilityEvent::Affiliated {
+                unit: target,
+                group,
+                accepted,
+            }),
+            Tsbk::UnitRegistrationResponse {
+                status, source_id, ..
+            } => out.mobility.push(MobilityEvent::Registered {
+                unit: source_id,
+                status,
+            }),
+            Tsbk::LocationRegistrationResponse {
+                status,
+                group,
+                target,
+                ..
+            } => {
+                if status == 0 {
+                    out.mobility
+                        .push(MobilityEvent::Located { unit: target, group });
+                }
+            }
+            Tsbk::DeregistrationAck { source_id, .. } => {
+                out.mobility
+                    .push(MobilityEvent::Deregistered { unit: source_id });
             }
             Tsbk::GroupVoiceGrantUpdate {
                 channel_a, group_a, ..

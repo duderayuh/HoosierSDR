@@ -22,6 +22,10 @@ pub struct Playlist {
     pub rate: f64,
     /// Talkgroups to follow; empty means every talkgroup on the system.
     pub tgs: Vec<u16>,
+    /// The site's frequency span (MHz), so extra radios can be planned to
+    /// cover what the primary cannot.
+    #[serde(default)]
+    pub span_mhz: Option<(f64, f64)>,
 }
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {

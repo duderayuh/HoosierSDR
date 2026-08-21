@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -15,12 +16,18 @@ use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod encode;
+mod alerts;
+mod conversations;
+mod devices;
 mod follow;
+mod hook;
 mod library;
+mod names;
 mod player;
 mod playlists;
 mod rr;
 mod stream;
+mod sysstat;
 mod transcribe;
 mod units;
 mod upload;
@@ -28,6 +35,24 @@ mod upload;
 #[derive(Default)]
 struct AppState {
     running: Arc<AtomicBool>,
+    /// The current run's own stop flag. Each run gets its own, so a Stop
+    /// followed quickly by a Start on another radio cannot resurrect the
+    /// previous loop (which is what happened when `running` was shared: the
+    /// new start set it true again before the old loop had seen false, the
+    /// old loop kept the RTL-SDR, and the new one hung joining it).
+    run_flag: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// Most calls decoded at once (1–24) and how much queued audio to keep.
+    max_calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// Channelizer (true) or classic per-channel extraction. Applies on the
+    /// next start.
+    use_channelizer: Arc<AtomicBool>,
+    /// Vocoder unvoiced-synthesis quality (1–64), next start.
+    uv_quality: Arc<std::sync::atomic::AtomicI32>,
+    /// Bumped per capture/follow start; a finishing run only reports
+    /// 'stopped' if it is still the current one.
+    run_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// The previous run's thread, joined before a new radio is opened.
+    run_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
     /// Talkgroups the listener has locked out; read by the follower live.
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
@@ -37,12 +62,30 @@ struct AppState {
     hold: Arc<Mutex<Option<u16>>>,
     /// Talkgroup priorities (1 high … 99 low; unlisted 50).
     priorities: Arc<Mutex<std::collections::HashMap<u16, u8>>>,
-    /// Radio-ID aliases.
+    /// Locked-out and prioritised talkgroup ranges (inclusive).
+    lockout_ranges: Arc<Mutex<Vec<(u16, u16)>>>,
+    priority_ranges: Arc<Mutex<Vec<(u16, u16, u8)>>>,
+    /// Radio-ID aliases, and the wildcard rules behind them.
     units: units::Units,
+    unit_rules: units::Rules,
+    /// Remember over-the-air aliases into the radio-ID table.
+    learn_aliases: Arc<AtomicBool>,
+    /// Script run after each call.
+    hook: hook::Shared,
+    /// Which talkgroups are recorded / streamed / uploaded.
+    record_policy: Arc<Mutex<Policy>>,
+    stream_policy: Arc<Mutex<Policy>>,
+    upload_policy: Arc<Mutex<Policy>>,
+    /// Keyword / emergency / activity alerts (Telegram, tones).
+    alerts: alerts::Shared,
+    /// Conversation rules and the conversations in progress.
+    conversations: conversations::Shared,
+    /// Filename template for stored calls.
+    names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
     audio: Mutex<Option<Option<player::Audio>>>,
     /// The call library (opened at startup).
-    db: Arc<Mutex<Option<Mutex<rusqlite::Connection>>>>,
+    db: Arc<Mutex<Option<Arc<Mutex<rusqlite::Connection>>>>>,
     /// Where call audio lives.
     library_dir: Mutex<Option<std::path::PathBuf>>,
     /// Archive playback in progress: live calls are stored but not spoken.
@@ -68,6 +111,131 @@ impl AppState {
     }
 }
 
+/// A per-talkgroup policy: `None` = everything; `Some((all, except))` =
+/// everything or nothing by default, with `except` flipped the other way.
+pub type Policy = Option<(bool, Vec<u16>)>;
+
+pub fn policy_allows(p: &Policy, tg: u16) -> bool {
+    match p {
+        None => true,
+        Some((all, except)) => *all != except.contains(&tg),
+    }
+}
+
+/// Which talkgroups to record / stream / upload: each is `[all, [exceptions]]`.
+#[tauri::command]
+fn set_policies(state: State<AppState>, record: Policy, stream: Policy, upload: Policy) {
+    *state.record_policy.lock().unwrap() = record;
+    *state.stream_policy.lock().unwrap() = stream;
+    *state.upload_policy.lock().unwrap() = upload;
+}
+
+/// Locked-out talkgroup ranges (inclusive), alongside the explicit lockout.
+#[tauri::command]
+fn set_lockout_ranges(ranges: Vec<(u16, u16)>, state: State<AppState>) {
+    *state.lockout_ranges.lock().unwrap() = ranges;
+}
+
+/// Priority ranges (inclusive, 1 high … 99 low); explicit entries win.
+#[tauri::command]
+fn set_priority_ranges(ranges: Vec<(u16, u16, u8)>, state: State<AppState>) {
+    *state.priority_ranges.lock().unwrap() = ranges;
+}
+
+/// Speaker gain 0 (mute) … 1 (unity) … 2. Applies to live calls, replay and
+/// library playback alike.
+#[tauri::command]
+fn set_volume(gain: f32, state: State<AppState>) {
+    if let Some(a) = state.audio() {
+        a.set_volume(gain);
+    }
+}
+
+#[tauri::command]
+fn get_volume(state: State<AppState>) -> f32 {
+    state.audio().map(|a| a.volume()).unwrap_or(1.0)
+}
+
+#[derive(Serialize)]
+struct NamesView {
+    settings: names::Settings,
+    tokens: Vec<(String, String)>,
+    example: String,
+}
+
+fn names_example(template: &str) -> String {
+    names::render(
+        template,
+        &names::NameContext {
+            stamp: "20260821-143012",
+            tg: 20308,
+            tg_name: "Sheriff Patrol",
+            unit: 790065,
+            unit_name: "Car 12",
+            freq_hz: 851_812_500,
+            system: "SAFE-T",
+            site: "Marion",
+            modulation: "CQPSK",
+            secs: 4.6,
+            emergency: false,
+        },
+    )
+}
+
+#[tauri::command]
+fn names_get(state: State<AppState>) -> NamesView {
+    let s = state.names.lock().unwrap().clone();
+    NamesView {
+        example: names_example(&s.template),
+        tokens: names::TOKENS
+            .iter()
+            .map(|(t, d)| (t.to_string(), d.to_string()))
+            .collect(),
+        settings: s,
+    }
+}
+
+#[tauri::command]
+fn names_set(app: AppHandle, state: State<AppState>, template: String) -> Result<String, String> {
+    let s = names::Settings {
+        template: template.trim().to_string(),
+    };
+    let d = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("config dir: {e}"))?;
+    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    std::fs::write(
+        d.join("names.json"),
+        serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("names.json: {e}"))?;
+    let example = names_example(&s.template);
+    *state.names.lock().unwrap() = s;
+    Ok(example)
+}
+
+/// Preview a template without saving it.
+#[tauri::command]
+fn names_preview(template: String) -> String {
+    names_example(&template)
+}
+
+#[tauri::command]
+fn set_learn_aliases(on: bool, state: State<AppState>) {
+    state.learn_aliases.store(on, Ordering::SeqCst);
+}
+
+/// The radio's oscillator error in parts per million: a positive value
+/// means it runs high, so the requested frequency is lowered to land where
+/// it should. Everything downstream keeps using nominal frequencies.
+fn ppm_tune(freq: f64, ppm: Option<f64>) -> f64 {
+    match ppm {
+        Some(p) if p.is_finite() && p.abs() < 1000.0 => freq / (1.0 + p / 1e6),
+        _ => freq,
+    }
+}
+
 /// Hold on one talkgroup (`None` releases). Overrides the playlist while set.
 #[tauri::command]
 fn set_hold(tg: Option<u16>, state: State<AppState>) {
@@ -89,9 +257,39 @@ fn skip_call(state: State<AppState>) {
 }
 
 /// Calls waiting in the speaker queue (including the one playing).
+#[derive(Serialize)]
+struct QueueView {
+    clips: usize,
+    secs: f32,
+    dropped: u64,
+}
+
 #[tauri::command]
-fn audio_queued(state: State<AppState>) -> usize {
-    state.audio().map(|a| a.queued()).unwrap_or(0)
+fn audio_queued(state: State<AppState>) -> QueueView {
+    match state.audio() {
+        Some(a) => {
+            let (secs, dropped) = a.backlog();
+            QueueView {
+                clips: a.queued(),
+                secs,
+                dropped,
+            }
+        }
+        None => QueueView {
+            clips: 0,
+            secs: 0.0,
+            dropped: 0,
+        },
+    }
+}
+
+/// Drop the playing call and everything queued (used when archive playback
+/// starts or stops, so the two never interleave).
+#[tauri::command]
+fn clear_queue(state: State<AppState>) {
+    if let Some(a) = state.audio() {
+        a.clear();
+    }
 }
 
 /// Play the last completed call again.
@@ -235,34 +433,61 @@ fn library_export(
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The newest library call on a talkgroup that has audio (Discovery's
+/// "play what this talkgroup said").
+#[tauri::command]
+fn tg_latest_call(state: State<AppState>, tg: u16) -> Result<Option<library::CallRow>, String> {
+    with_db(&state, |c| {
+        let mut st = c
+            .prepare("SELECT id FROM calls WHERE tg = ?1 AND audio IS NOT NULL ORDER BY id DESC LIMIT 1")
+            .map_err(|e| e.to_string())?;
+        let id: Option<i64> = st
+            .query_row([tg], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        match id {
+            Some(id) => library::get(c, id),
+            None => Ok(None),
+        }
+    })
+}
+
 /// Play a library call through the speaker, ahead of anything queued.
 #[tauri::command]
-fn library_play(state: State<AppState>, id: i64) -> Result<(), String> {
-    let path = with_db(&state, |c| library::get(c, id))?
-        .and_then(|r| r.audio)
-        .ok_or("no audio for that call")?;
-    let pcm = encode::decode_to_pcm(std::path::Path::new(&path))?;
-    state.audio().ok_or("no audio output device")?.play(pcm, 0);
-    Ok(())
+async fn library_play(app: AppHandle, id: i64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let path = with_db(&state, |c| library::get(c, id))?
+            .and_then(|r| r.audio)
+            .ok_or("no audio for that call")?;
+        let pcm = encode::decode_to_pcm(std::path::Path::new(&path))?;
+        state.audio().ok_or("no audio output device")?.play(pcm, 0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// While archive playback is on, live calls are stored but not spoken.
 #[tauri::command]
 fn set_archive_mode(state: State<AppState>, on: bool) {
     state.archive_mode.store(on, Ordering::SeqCst);
-    if on {
-        if let Some(a) = state.audio() {
-            a.skip();
-        }
+    if let Some(a) = state.audio() {
+        a.clear();
     }
 }
 
 /// Replay a saved call through the default audio device.
 #[tauri::command]
-fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
-    let pcm = encode::decode_to_pcm(std::path::Path::new(&shellexpand_home(&path)))?;
-    state.audio().ok_or("no audio output device")?.play(pcm, 0);
-    Ok(())
+async fn play_wav(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let pcm = encode::decode_to_pcm(std::path::Path::new(&shellexpand_home(&path)))?;
+        state.audio().ok_or("no audio output device")?.play(pcm, 0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Clone)]
@@ -324,6 +549,43 @@ fn load_catalog(app: AppHandle, path: String, state: State<AppState>) -> Result<
 #[tauri::command]
 fn stop_capture(state: State<AppState>) {
     state.running.store(false, Ordering::SeqCst);
+    if let Some(f) = state.run_flag.lock().unwrap().as_ref() {
+        f.store(false, Ordering::SeqCst);
+    }
+}
+
+/// How many calls the follower decodes at once (1–24). Each costs a
+/// channel decoder (two until the site modulation is confirmed); the
+/// channelizer makes a dozen cheap. Lower it if the STREAM drop counter climbs. Applies on the
+/// next start.
+#[tauri::command]
+fn set_max_calls(n: usize, state: State<AppState>) {
+    state.max_calls.store(n.clamp(1, 24), Ordering::SeqCst);
+}
+
+/// Vocoder unvoiced-synthesis quality (1–64; mbelib's own default is 3).
+/// Higher renders unvoiced sounds (s, f, sh) from more sine components:
+/// smoother and less metallic, at a little CPU. Applies on the next start.
+#[tauri::command]
+fn set_uv_quality(q: i32, state: State<AppState>) {
+    state.uv_quality.store(q.clamp(1, 64), Ordering::SeqCst);
+}
+
+/// Traffic-channel extraction: shared channelizer (true, cheap at any call
+/// count) or the classic per-channel decimator (false, the original path).
+/// Applies on the next start — kept so the two can be compared on air.
+#[tauri::command]
+fn set_channelizer(on: bool, state: State<AppState>) {
+    state.use_channelizer.store(on, Ordering::SeqCst);
+}
+
+/// Drop queued audio older than `secs` (0 = keep everything): with many
+/// talkgroups on the air the queue otherwise falls minutes behind.
+#[tauri::command]
+fn set_queue_limit(secs: f32, state: State<AppState>) {
+    if let Some(a) = state.audio() {
+        a.set_queue_limit(secs);
+    }
 }
 
 /// Start live capture from an RTL-SDR or Airspy (`source`). Emits `grant`, `status`, and
@@ -341,41 +603,51 @@ fn start_capture(
     eq: String,
     record_iq: Option<String>,
     record_log: Option<String>,
+    ppm: Option<f64>,
+    device: Option<String>,
 ) -> Result<(), String> {
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already capturing".into());
     }
-    let running = state.running.clone();
+    let running = Arc::new(AtomicBool::new(true));
+    *state.run_flag.lock().unwrap() = Some(running.clone());
     let catalog = state.catalog.clone();
     let spectrum_cfg = state.spectrum.clone();
-    std::thread::spawn(move || {
-        let res = capture_loop(
-            &app,
-            &running,
-            &catalog,
-            &source,
-            freq,
-            rate,
-            gain,
-            cqpsk,
-            &eq,
-            record_iq,
-            record_log,
-            spectrum_cfg,
-        );
-        if let Err(e) = res {
-            let _ = app.emit("error", e);
-        }
-        running.store(false, Ordering::SeqCst);
-        let _ = app.emit("stopped", ());
+    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let prev = take_previous(&state);
+    let handle = std::thread::spawn(move || {
+        join_previous(prev);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_loop(
+                &app,
+                &running,
+                &catalog,
+                &source,
+                freq,
+                rate,
+                gain,
+                cqpsk,
+                &eq,
+                record_iq,
+                record_log,
+                spectrum_cfg,
+                ppm,
+                device.as_deref(),
+            )
+        }))
+        .unwrap_or_else(|p| Err(format!("capture crashed: {}", panic_text(&p))));
+        finish_run(&app, my_gen, res);
     });
+    *state.run_thread.lock().unwrap() = Some(handle);
     Ok(())
 }
 
-/// Open the radio the UI picked. `gain` is applied to an RTL-SDR; the Airspy
-/// R2's firmware takes none (see `hs_source::airspy`).
-fn open_source(
+/// Open a particular radio: `source` is "airspy" or "rtlsdr"; `device` is
+/// the Airspy serial (hex) or the Seify args that name one RTL-SDR — or
+/// `None` for the first of that kind found.
+fn open_device(
     source: &str,
+    device: Option<&str>,
     freq: f64,
     rate: f64,
     gain: Option<f64>,
@@ -383,15 +655,35 @@ fn open_source(
     use hs_source::airspy::AirspySource;
     use hs_source::rtlsdr::RtlSdrSource;
     Ok(match source {
-        "airspy" => Box::new(
-            AirspySource::open(None, freq, rate, gain)
-                .map_err(|e| format!("open Airspy: {e:?}"))?,
-        ),
-        _ => Box::new(
-            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
-                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
-        ),
+        "airspy" => {
+            let serial = device
+                .filter(|d| !d.is_empty())
+                .and_then(|d| u64::from_str_radix(d.trim_start_matches("0x"), 16).ok());
+            Box::new(
+                AirspySource::open(serial, freq, rate, gain)
+                    .map_err(|e| format!("open Airspy: {e:?}"))?,
+            )
+        }
+        _ => {
+            let args = device.filter(|d| !d.is_empty()).unwrap_or("driver=rtlsdr");
+            Box::new(
+                RtlSdrSource::open(args, freq, rate, gain)
+                    .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
+            )
+        }
     })
+}
+
+/// An extra radio the UI asks to park on part of the site's span.
+#[derive(serde::Deserialize, Clone, Debug)]
+struct ExtraSpec {
+    source: String,
+    device: Option<String>,
+    center: f64,
+    rate: f64,
+    gain: Option<f64>,
+    ppm: Option<f64>,
+    label: Option<String>,
 }
 
 /// Follow a trunked site live: `freq` is the band centre the radio tunes to,
@@ -413,17 +705,34 @@ fn start_follow(
     play: bool,
     hang_ms: Option<u32>,
     system_name: Option<String>,
+    site_name: Option<String>,
+    ppm: Option<f64>,
+    device: Option<String>,
+    modulation: Option<String>,
+    extra: Option<Vec<ExtraSpec>>,
 ) -> Result<(), String> {
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already running".into());
     }
-    let running = state.running.clone();
+    let running = Arc::new(AtomicBool::new(true));
+    *state.run_flag.lock().unwrap() = Some(running.clone());
+    let max_calls = state.max_calls.load(Ordering::SeqCst).clamp(1, 24);
+    let channelizer = state.use_channelizer.load(Ordering::SeqCst);
+    let uv_quality = state.uv_quality.load(Ordering::SeqCst).clamp(1, 64);
     let catalog = state.catalog.clone();
     let lockout = state.lockout.clone();
     let allowlist = state.allowlist.clone();
     let hold = state.hold.clone();
     let priorities = state.priorities.clone();
+    let lockout_ranges = state.lockout_ranges.clone();
+    let priority_ranges = state.priority_ranges.clone();
     let units = state.units.clone();
+    let unit_rules = state.unit_rules.clone();
+    let learn_aliases = state.learn_aliases.clone();
+    let record_policy = state.record_policy.clone();
+    let stream_policy = state.stream_policy.clone();
+    let upload_policy = state.upload_policy.clone();
+    let name_template = state.names.lock().unwrap().template.clone();
     let db = state.db.clone();
     let library_dir = state.library_dir.lock().unwrap().clone();
     let archive_mode = state.archive_mode.clone();
@@ -432,9 +741,45 @@ fn start_follow(
     let streamer = state.streamer.clone();
     let uploader = state.uploader.clone();
     let audio = if play { state.audio() } else { None };
-    std::thread::spawn(move || {
-        let res = (|| -> Result<(), String> {
-            let src = open_source(&source, freq, rate, gain)?;
+    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let prev = take_previous(&state);
+    let handle = std::thread::spawn(move || {
+        join_previous(prev);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            // A radio that cannot span the requested band centre and the
+            // control channel (an RTL-SDR at 2.4 MSPS covers ±1.2 MHz) is
+            // centred on the control channel instead; calls outside that
+            // span are reported as out of band rather than failing to start.
+            let norm = hs_core::dsp::resample::normalize_ratio(rate)
+                .map(|(_, _, r)| r)
+                .unwrap_or(rate);
+            let mut freq = freq;
+            if (control - freq).abs() >= norm * 0.4 {
+                let _ = app.emit(
+                    "follow",
+                    follow::FollowEvent::Notice {
+                        text: format!(
+                            "band centre {:.4} MHz can't reach the control channel at this rate — centred on {:.4} MHz instead (±{:.2} MHz)",
+                            freq / 1e6,
+                            control / 1e6,
+                            norm * 0.4 / 1e6
+                        ),
+                    },
+                );
+                freq = control;
+            }
+            let src = open_device(&source, device.as_deref(), ppm_tune(freq, ppm), rate, gain)?;
+            // Extra radios: a failure to open one is reported, not fatal.
+            let mut extras = Vec::new();
+            for (i, x) in extra.clone().unwrap_or_default().into_iter().enumerate() {
+                let label = x.label.clone().unwrap_or_else(|| format!("radio {}", i + 2));
+                match open_device(&x.source, x.device.as_deref(), ppm_tune(x.center, x.ppm), x.rate, x.gain) {
+                    Ok(src) => extras.push(follow::ExtraRadio { center_hz: x.center, label, src }),
+                    Err(e) => {
+                        let _ = app.emit("follow", follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
+                    }
+                }
+            }
             let calls_dir = match calls_dir.filter(|d| !d.trim().is_empty()) {
                 Some(d) => {
                     let d = std::path::PathBuf::from(shellexpand_home(&d));
@@ -451,12 +796,19 @@ fn start_follow(
                 (h, (h * 4.0).max(2.0))
             });
             let params = follow::FollowParams {
+                max_calls,
+                channelizer,
+                modulation: modulation.unwrap_or_default(),
+                uv_quality,
                 center_hz: freq,
                 control_hz: control,
                 calls_dir: library_dir.or(calls_dir),
                 hang_secs,
                 system_name: system_name.unwrap_or_default(),
+                site_name: site_name.unwrap_or_default(),
+                name_template,
                 format,
+                live: true,
             };
             let player = if play { audio } else { None };
             if play && player.is_none() {
@@ -467,17 +819,28 @@ fn start_follow(
                     },
                 );
             }
-            let db_guard = db.lock().unwrap();
+            // Clone the connection handle and release the outer lock at once:
+            // holding it for the whole run would block every library command
+            // (search, stats, transcription, uploads) until Stop — the app
+            // looked frozen.
+            let db_conn = db.lock().unwrap().clone();
             let live = follow::Live {
                 lockout: &lockout,
                 allowlist: &allowlist,
                 hold: &hold,
                 priorities: &priorities,
+                lockout_ranges: &lockout_ranges,
+                priority_ranges: &priority_ranges,
                 units: &units,
-                db: db_guard.as_ref(),
+                unit_rules: &unit_rules,
+                record: &record_policy,
+                db: db_conn.as_deref(),
                 spectrum: Some(&spectrum),
             };
-            follow::run(src, &params, &catalog, &live, &running, &mut |ev| {
+            let allowed = |p: &Mutex<Policy>, tg: u16| {
+                p.lock().map(|s| policy_allows(&s, tg)).unwrap_or(true)
+            };
+            follow::run_with_extras(src, extras, &params, &catalog, &live, &running, &mut |ev| {
                 if let follow::FollowEvent::Call {
                     id: Some(id),
                     wav: Some(wav),
@@ -492,7 +855,7 @@ fn start_follow(
                     ..
                 } = &ev
                 {
-                    if let Some(u) = uploader.lock().unwrap().as_ref() {
+                    if let Some(u) = uploader.lock().unwrap().as_ref().filter(|_| allowed(&upload_policy, *tg)) {
                         u.submit(upload::Job {
                             id: *id,
                             audio: wav.clone(),
@@ -509,9 +872,94 @@ fn start_follow(
                         });
                     }
                 }
-                if let follow::FollowEvent::Call { pcm, priority, .. } = &ev {
+                if let follow::FollowEvent::Call {
+                    id,
+                    secs,
+                    tg,
+                    name,
+                    source,
+                    unit_name,
+                    talker_alias,
+                    freq_mhz,
+                    modulation,
+                    emergency,
+                    patched_with,
+                    wav,
+                    ..
+                } = &ev
+                {
+                    // The system named the radio: keep that, unless the
+                    // listener already did.
+                    if learn_aliases.load(Ordering::SeqCst) {
+                        if let (Some(alias), true) = (talker_alias.as_deref(), *source != 0) {
+                            if units::learn(&app, app.state::<AppState>().inner(), *source, alias) {
+                                let _ = app.emit(
+                                    "follow",
+                                    follow::FollowEvent::Notice {
+                                        text: format!("learned alias “{alias}” for radio {source}"),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    conversations::on_call(
+                        &app,
+                        &alerts::CallFacts {
+                            id: *id,
+                            start: library::now(),
+                            tg: *tg,
+                            tg_name: name.clone(),
+                            unit: *source,
+                            unit_name: unit_name.clone(),
+                            secs: *secs,
+                            emergency: *emergency,
+                            audio: wav.clone(),
+                            transcript: None,
+                        },
+                    );
+                    alerts::on_call(
+                        &app,
+                        &alerts::CallFacts {
+                            id: *id,
+                            start: library::now(),
+                            tg: *tg,
+                            tg_name: name.clone(),
+                            unit: *source,
+                            unit_name: unit_name.clone(),
+                            secs: *secs,
+                            emergency: *emergency,
+                            audio: wav.clone(),
+                            transcript: None,
+                        },
+                    );
+                    if let Some(h) = app.state::<AppState>().hook.lock().unwrap().as_ref() {
+                        h.submit(hook::CallInfo {
+                            id: *id,
+                            start: library::now(),
+                            secs: *secs,
+                            tg: *tg,
+                            tg_name: name.clone(),
+                            unit: *source,
+                            unit_name: unit_name.clone(),
+                            talker_alias: talker_alias.clone(),
+                            freq_hz: (*freq_mhz * 1e6).round() as u64,
+                            modulation: modulation.clone(),
+                            emergency: *emergency,
+                            patched_with: patched_with.clone(),
+                            system: params.system_name.clone(),
+                            audio: wav.clone(),
+                            sidecar: wav.as_ref().map(|w| {
+                                std::path::Path::new(w)
+                                    .with_extension("json")
+                                    .to_string_lossy()
+                                    .into_owned()
+                            }),
+                        });
+                    }
+                }
+                if let follow::FollowEvent::Call { pcm, priority, tg, .. } = &ev {
                     if !pcm.is_empty() {
-                        if let Some(st) = streamer.lock().unwrap().as_ref() {
+                        if let Some(st) = streamer.lock().unwrap().as_ref().filter(|_| allowed(&stream_policy, *tg)) {
                             st.feed(pcm);
                         }
                         if let Some(pl) = player.as_ref() {
@@ -523,14 +971,48 @@ fn start_follow(
                 }
                 let _ = app.emit("follow", ev);
             })
-        })();
-        if let Err(e) = res {
-            let _ = app.emit("error", e);
-        }
-        running.store(false, Ordering::SeqCst);
-        let _ = app.emit("stopped", ());
+        }))
+        .unwrap_or_else(|p| Err(format!("follow crashed: {}", panic_text(&p))));
+        finish_run(&app, my_gen, res);
     });
+    *state.run_thread.lock().unwrap() = Some(handle);
     Ok(())
+}
+
+fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+/// Common epilogue for capture/follow threads: clear live state and tell the
+/// UI — but only if this run is still the current one.
+fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
+    let state = app.state::<AppState>();
+    if let Err(e) = res {
+        let _ = app.emit("error", e);
+    }
+    if state.run_gen.load(Ordering::SeqCst) == my_gen {
+        state.running.store(false, Ordering::SeqCst);
+        *state.hold.lock().unwrap() = None;
+        state.archive_mode.store(false, Ordering::SeqCst);
+        let _ = app.emit("stopped", ());
+    }
+}
+
+/// Take the previous run's thread handle (on the caller's thread, before the
+/// new one is spawned) so the new thread can wait for the old radio to close
+/// — an Airspy refuses a second open. Joining inside the new thread after
+/// the handle store would race into joining itself.
+fn take_previous(state: &AppState) -> Option<std::thread::JoinHandle<()>> {
+    state.run_thread.lock().unwrap().take()
+}
+
+fn join_previous(prev: Option<std::thread::JoinHandle<()>>) {
+    if let Some(h) = prev {
+        let _ = h.join();
+    }
 }
 
 /// `~/x` → `$HOME/x`.
@@ -555,11 +1037,13 @@ fn capture_loop(
     record_iq: Option<String>,
     record_log: Option<String>,
     spectrum_cfg: Arc<Mutex<(usize, usize)>>,
+    ppm: Option<f64>,
+    device: Option<&str>,
 ) -> Result<(), String> {
     use hs_core::stream::{Buffered, Normalized};
     use hs_source::SdrSource;
 
-    let raw = open_source(source, freq, rate, gain)?;
+    let raw = open_device(source, device, ppm_tune(freq, ppm), rate, gain)?;
     // Normalize an Airspy's 2.5/10 MSPS to 2.4/9.6 on the fly, and drain the
     // radio on its own thread so a busy UI frame never costs samples.
     let mut src = Buffered::new(Normalized::new(raw), 65536);
@@ -574,13 +1058,15 @@ fn capture_loop(
     let mut buf = vec![0f32; 65536 * 2];
     let mut blocks = 0u64;
     let mut total_pcm = 0usize;
-    let mut since_spectrum = 0u32;
 
+    let mut last_status = std::time::Instant::now();
+    let mut last_spectrum = std::time::Instant::now();
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
             Ok(0) => continue,
             Ok(n) => n,
-            Err(_) => break,
+            Err(hs_source::SourceError::Eof) => break,
+            Err(e) => return Err(format!("radio stopped: {e:?}")),
         };
         let block = &buf[..n];
 
@@ -615,10 +1101,10 @@ fn capture_loop(
             );
         }
 
-        // Spectrum ~10 Hz (every few blocks), status every block.
-        since_spectrum += 1;
-        if since_spectrum >= 3 {
-            since_spectrum = 0;
+        // Wall-clock paced: ~12 waterfall rows and 4 status updates a
+        // second whatever the block size (6.8 ms at 9.6 MSPS).
+        if last_spectrum.elapsed().as_millis() >= 80 {
+            last_spectrum = std::time::Instant::now();
             let _ = app.emit(
                 "spectrum",
                 SpectrumMsg {
@@ -629,19 +1115,22 @@ fn capture_loop(
                 },
             );
         }
-        let _ = app.emit(
-            "status",
-            StatusMsg {
-                syncs: dec.diagnostics().syncs.len(),
-                grants: dec.diagnostics().grants.len(),
-                voice_secs: total_pcm as f64 / 8000.0,
-                blocks,
-                modulation: format!("{:?}", dec.modulation()),
-                lock: dec.cqpsk_lock().unwrap_or(-1.0),
-                sync_err: dec.diagnostics().mean_sync_errors(),
-                dropped: src.dropped(),
-            },
-        );
+        if last_status.elapsed().as_millis() >= 250 {
+            last_status = std::time::Instant::now();
+            let _ = app.emit(
+                "status",
+                StatusMsg {
+                    syncs: dec.diagnostics().syncs.len(),
+                    grants: dec.diagnostics().grants.len(),
+                    voice_secs: total_pcm as f64 / 8000.0,
+                    blocks,
+                    modulation: format!("{:?}", dec.modulation()),
+                    lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                    sync_err: dec.diagnostics().mean_sync_errors(),
+                    dropped: src.dropped(),
+                },
+            );
+        }
     }
 
     if let Some(p) = record_log {
@@ -652,52 +1141,56 @@ fn capture_loop(
 
 /// Decode an on-disk `.cf32` recording; emits grants + a final status.
 #[tauri::command]
-fn decode_file(
+async fn decode_file(
     app: AppHandle,
-    state: State<AppState>,
     path: String,
     rate: f64,
     cqpsk: bool,
     eq: String,
 ) -> Result<(), String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let iq: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    let mut dec = new_decoder(rate, cqpsk, &eq);
-    let out = dec.process(&iq);
-    let cat = state.catalog.lock().unwrap();
-    for g in &out.grants {
-        let name = cat
-            .as_ref()
-            .map(|c| c.label(g.talkgroup))
-            .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+        let iq: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut dec = new_decoder(rate, cqpsk, &eq);
+        let out = dec.process(&iq);
+        let cat = state.catalog.lock().unwrap();
+        for g in &out.grants {
+            let name = cat
+                .as_ref()
+                .map(|c| c.label(g.talkgroup))
+                .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+            let _ = app.emit(
+                "grant",
+                GrantMsg {
+                    tg: g.talkgroup,
+                    name,
+                    source: g.source_unit,
+                    freq_mhz: g.freq_hz as f64 / 1e6,
+                    encrypted: g.encrypted,
+                },
+            );
+        }
         let _ = app.emit(
-            "grant",
-            GrantMsg {
-                tg: g.talkgroup,
-                name,
-                source: g.source_unit,
-                freq_mhz: g.freq_hz as f64 / 1e6,
-                encrypted: g.encrypted,
+            "status",
+            StatusMsg {
+                syncs: dec.diagnostics().syncs.len(),
+                grants: out.grants.len(),
+                voice_secs: out.pcm.len() as f64 / 8000.0,
+                blocks: 1,
+                modulation: format!("{:?}", dec.modulation()),
+                lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                sync_err: dec.diagnostics().mean_sync_errors(),
+                dropped: 0,
             },
         );
-    }
-    let _ = app.emit(
-        "status",
-        StatusMsg {
-            syncs: dec.diagnostics().syncs.len(),
-            grants: out.grants.len(),
-            voice_secs: out.pcm.len() as f64 / 8000.0,
-            blocks: 1,
-            modulation: format!("{:?}", dec.modulation()),
-            lock: dec.cqpsk_lock().unwrap_or(-1.0),
-            sync_err: dec.diagnostics().mean_sync_errors(),
-            dropped: 0,
-        },
-    );
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Map the UI's equalizer selector to an `EqMode`. `cma` is the shipping
@@ -804,13 +1297,33 @@ fn main() {
                 *state.catalog.lock().unwrap() = Some(cat);
             }
             *state.units.lock().unwrap() = units::load(app.handle());
+            *state.unit_rules.lock().unwrap() = units::load_rules(app.handle());
+            if let Some(n) = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .and_then(|d| std::fs::read_to_string(d.join("names.json")).ok())
+                .and_then(|t| serde_json::from_str(&t).ok())
+            {
+                *state.names.lock().unwrap() = n;
+            }
+            state.max_calls.store(12, Ordering::SeqCst);
+            state.use_channelizer.store(true, Ordering::SeqCst);
+            state.uv_quality.store(16, Ordering::SeqCst);
+            *state.alerts.lock().unwrap() = alerts::load(app.handle());
+            *state.conversations.lock().unwrap() = conversations::load(app.handle());
+            conversations::spawn_ticker(app.handle().clone());
+            let hk = hook::load_settings(app.handle());
+            if hk.enabled {
+                *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
+            }
             // The call library lives in the app's data directory.
             if let Ok(base) = app.path().app_data_dir() {
                 let lib = base.join("library");
                 match library::open(&lib) {
                     Ok(c) => {
                         upload::ensure_schema(&c);
-                        *state.db.lock().unwrap() = Some(Mutex::new(c));
+                        *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
                     Err(e) => eprintln!("library: {e}"),
@@ -844,8 +1357,45 @@ fn main() {
             set_allowlist,
             set_hold,
             set_priorities,
+            set_lockout_ranges,
+            set_priority_ranges,
+            set_volume,
+            get_volume,
+            names_get,
+            names_set,
+            names_preview,
+            set_learn_aliases,
+            set_policies,
+            set_max_calls,
+            set_queue_limit,
+            set_channelizer,
+            set_uv_quality,
+            tg_latest_call,
+            devices::devices_list,
+            devices::devices_get,
+            devices::devices_set,
+            alerts::alerts_get,
+            alerts::alerts_set,
+            alerts::alerts_test,
+            alerts::alerts_log,
+            alerts::telegram_save,
+            alerts::ollama_models,
+            conversations::conversations_get,
+            conversations::conversations_set,
+            conversations::conversations_state,
+            conversations::conversation_test,
+            conversations::conversation_resend,
+            hook::hook_get,
+            hook::hook_configure,
+            hook::hook_test,
+            units::unit_rules_list,
+            units::unit_rules_set,
+            units::unit_resolve,
+            rr::catalog_user_set,
+            rr::save_text,
             skip_call,
             replay_last,
+            clear_queue,
             audio_queued,
             units::units_list,
             units::unit_set,
@@ -863,6 +1413,7 @@ fn main() {
             format_set,
             stream::stream_get,
             stream::stream_configure,
+            sysstat::sys_status,
             upload::uploads_get,
             upload::uploads_configure,
             upload::uploads_test,

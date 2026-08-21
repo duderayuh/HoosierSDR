@@ -241,6 +241,71 @@ pub fn catalog_remove(
     Ok(n)
 }
 
+/// Name a talkgroup by hand (discovery: "I heard TG 20308, call it Sheriff
+/// Patrol"). Rows go into `csv_user.csv` in the catalogs folder — a plain
+/// RadioReference-shaped CSV the merge already reads, newest source wins —
+/// and the live catalog is reloaded. An empty alias removes the row.
+#[tauri::command]
+pub fn catalog_user_set(
+    app: AppHandle,
+    state: State<AppState>,
+    tg: u16,
+    alias: String,
+    category: Option<String>,
+) -> Result<usize, String> {
+    let p = catalogs_dir(&app)?.join("csv_user.csv");
+    let mut rows: Vec<(u16, String, String)> = std::fs::read_to_string(&p)
+        .ok()
+        .map(|t| {
+            t.lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split(',').collect();
+                    let id = f.first()?.trim().parse().ok()?;
+                    let alias = f.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+                    let cat = f.get(6).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+                    Some((id, alias, cat))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.retain(|r| r.0 != tg);
+    let alias = alias.trim().replace(['"', ','], " ");
+    if !alias.is_empty() {
+        rows.push((
+            tg,
+            alias,
+            category.unwrap_or_default().trim().replace(['"', ','], " "),
+        ));
+    }
+    rows.sort_by_key(|r| r.0);
+    let mut text = String::from("Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority\n");
+    for (id, a, c) in &rows {
+        text.push_str(&format!("{id},{id:X},\"{a}\",D,\"{a}\",,\"{c}\",\n"));
+    }
+    if rows.is_empty() {
+        let _ = std::fs::remove_file(&p);
+    } else {
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    let cat = merged_catalog(&app);
+    let n = cat.as_ref().map_or(0, |c| c.len());
+    *state.catalog.lock().unwrap() = cat;
+    Ok(n)
+}
+
+/// Write text the UI produced (a discovery CSV, a report) to a file the
+/// listener named. `~` expands; parent folders are created.
+#[tauri::command]
+pub fn save_text(path: String, text: String) -> Result<String, String> {
+    let p = std::path::PathBuf::from(crate::shellexpand_home(&path));
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
 fn load_prefs(app: &AppHandle) -> Prefs {
     prefs_path(app)
         .ok()
@@ -367,13 +432,29 @@ pub struct RrDownload {
 /// live catalog (and are saved for next start), and its sites come back with
 /// the control channels to tune.
 #[tauri::command]
-pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<RrDownload, String> {
+pub async fn rr_download(app: AppHandle, sid: u32) -> Result<RrDownload, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_download_blocking(app, sid))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> {
+    let state = app.state::<AppState>();
     let mut p = load_prefs(&app);
     let client = client(&app)?;
-    let sys = client.system(sid).map_err(|e| {
+    use tauri::Emitter;
+    let mut report = |step: &str, done: usize, total: usize| {
+        let _ = app.emit(
+            "rr_progress",
+            serde_json::json!({ "sid": sid, "step": step, "done": done, "total": total }),
+        );
+    };
+    let sys = client.system_with_progress(sid, &mut report).map_err(|e| {
         eprintln!("[rr] download {sid} failed: {e}");
+        let _ = app.emit("rr_progress", serde_json::json!({ "sid": sid, "step": "failed", "done": 0, "total": 0 }));
         e.to_string()
     })?;
+    report("saving", 3, 3);
 
     let csv = sys.talkgroup_csv();
     let n = CsvCatalog::parse(&csv).len();
@@ -382,6 +463,7 @@ pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<R
         let _ = std::fs::write(d.join(format!("rr_{sid}.csv")), &csv);
     }
     *state.catalog.lock().unwrap() = merged_catalog(&app);
+    report("done", 3, 3);
 
     p.sid = Some(sid);
     p.system_name = sys.name.clone();
@@ -482,7 +564,13 @@ fn sys_rows(v: Vec<hs_catalog::radioreference::RrSystemRef>) -> Vec<SystemRow> {
 }
 
 #[tauri::command]
-pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
+pub async fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_states_blocking(app, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_states_blocking(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>, String> {
     cached(&app, "states", refresh.unwrap_or(false), || {
         let c = client(&app)?;
         Ok(c.states()
@@ -498,7 +586,21 @@ pub fn rr_states(app: AppHandle, refresh: Option<bool>) -> Result<Vec<StateRow>,
 }
 
 #[tauri::command]
-pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<StateView, String> {
+pub async fn rr_state(
+    app: AppHandle,
+    stid: u32,
+    refresh: Option<bool>,
+) -> Result<StateView, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_state_blocking(app, stid, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_state_blocking(
+    app: AppHandle,
+    stid: u32,
+    refresh: Option<bool>,
+) -> Result<StateView, String> {
     cached(
         &app,
         &format!("state_{stid}"),
@@ -522,7 +624,17 @@ pub fn rr_state(app: AppHandle, stid: u32, refresh: Option<bool>) -> Result<Stat
 }
 
 #[tauri::command]
-pub fn rr_county(
+pub async fn rr_county(
+    app: AppHandle,
+    ctid: u32,
+    refresh: Option<bool>,
+) -> Result<Vec<SystemRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_county_blocking(app, ctid, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_county_blocking(
     app: AppHandle,
     ctid: u32,
     refresh: Option<bool>,
@@ -539,7 +651,13 @@ pub fn rr_county(
 }
 
 #[tauri::command]
-pub fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
+pub async fn rr_zip(app: AppHandle, zip: u32) -> Result<ZipView, String> {
+    tauri::async_runtime::spawn_blocking(move || rr_zip_blocking(app, zip))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rr_zip_blocking(app: AppHandle, zip: u32) -> Result<ZipView, String> {
     let c = client(&app)?;
     let z = c.zipcode(zip).map_err(|e| e.to_string())?;
     Ok(ZipView {

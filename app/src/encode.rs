@@ -28,6 +28,11 @@ impl Default for Format {
 }
 
 pub fn ffmpeg_available() -> Option<String> {
+    static PROBE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PROBE.get_or_init(ffmpeg_probe).clone()
+}
+
+fn ffmpeg_probe() -> Option<String> {
     Command::new("ffmpeg")
         .arg("-version")
         .output()

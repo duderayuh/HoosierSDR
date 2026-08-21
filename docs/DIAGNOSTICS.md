@@ -60,3 +60,12 @@ pass to `--rate` must match the capture and be a multiple of 4800.
 
 Nothing in the log contains audio content or personal data — it is decode
 telemetry only.
+
+## `talker_aliases` (added 2026-08-21)
+
+`[{"tg": 20308, "alias": "ENG 21"}]` — over-the-air aliases confirmed on this
+channel by `hs_p25::talker_alias`: the longest printable run in the Motorola
+alias Link Control words (MFID 0x90, LCO 0x15/0x17), accepted only after the
+same text repeats. The field layout of those words is deliberately *not*
+assumed; `vendor_lc_samples` keeps their raw arguments so a real capture can
+turn this into a proper parser. Empty on every capture in the corpus so far.

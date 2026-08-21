@@ -40,6 +40,10 @@ pub struct Worker {
     pub settings: Settings,
     pub busy: Arc<AtomicBool>,
     pub last_error: Option<String>,
+    /// Bumped on every start; a reader thread only tears down its own child.
+    generation: u64,
+    /// Calls asked for explicitly (Transcribe now), served before the pump's.
+    pub wanted: std::collections::VecDeque<i64>,
 }
 
 pub type Shared = Arc<Mutex<Worker>>;
@@ -81,7 +85,20 @@ pub struct Probe {
 
 /// Which engines this machine has, and the saved settings.
 #[tauri::command]
-pub fn transcribe_probe(app: AppHandle, state: State<AppState>) -> Probe {
+pub async fn transcribe_probe(app: AppHandle) -> Probe {
+    tauri::async_runtime::spawn_blocking(move || transcribe_probe_blocking(app))
+        .await
+        .unwrap_or_else(|_| Probe {
+            engines: vec![],
+            python: None,
+            settings: Settings::default(),
+            running_model: None,
+            last_error: Some("probe failed".into()),
+        })
+}
+
+fn transcribe_probe_blocking(app: AppHandle) -> Probe {
+    let state = app.state::<AppState>();
     let out = Command::new("python3")
         .arg(script_path(&app))
         .arg("--probe")
@@ -145,6 +162,7 @@ fn stop(w: &mut Worker) {
         let _ = c.kill();
         let _ = c.wait();
     }
+    w.busy.store(false, Ordering::SeqCst);
 }
 
 /// Start the worker if it isn't running; returns false (with the error kept)
@@ -183,6 +201,8 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
     w.child = Some(child);
     w.stdin = stdin;
     w.model = format!("{}/{}", s.engine, s.model);
+    w.generation += 1;
+    let my_gen = w.generation;
     drop(w);
 
     // Reader thread: results → library + event.
@@ -198,7 +218,9 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                 if let Some(f) = v.get("fatal").and_then(|f| f.as_str()) {
                     let mut w = shared2.lock().unwrap();
                     w.last_error = Some(f.to_string());
-                    stop(&mut w);
+                    if w.generation == my_gen {
+                        stop(&mut w);
+                    }
                     let _ = app2.emit("transcribe_error", f.to_string());
                     break;
                 }
@@ -223,16 +245,20 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                             "transcript",
                             serde_json::json!({ "id": id, "text": text, "model": model }),
                         );
+                        crate::alerts::on_transcript(&app2, id, text);
+                        crate::conversations::on_transcript(&app2, id, text);
                     }
                 } else if let Some(err) = v["error"].as_str() {
                     let _ = app2.emit("transcribe_error", format!("call {:?}: {err}", id));
                 }
                 shared2.lock().unwrap().busy.store(false, Ordering::SeqCst);
             }
-            // Worker ended.
+            // Worker ended — but only tear down if it is still ours; a
+            // replacement may already be running.
             let mut w = shared2.lock().unwrap();
-            stop(&mut w);
-            w.busy.store(false, Ordering::SeqCst);
+            if w.generation == my_gen {
+                stop(&mut w);
+            }
         });
     }
     true
@@ -352,16 +378,22 @@ pub fn transcribe_download(app: AppHandle, engine: String, model: String) -> Res
     Ok(())
 }
 
-/// Transcribe one call now (even if auto-transcribe is off).
+/// Transcribe one call now (even if auto-transcribe is off): queued ahead
+/// of the pump's work; never blocks the caller.
 #[tauri::command]
 pub fn transcribe_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
-    let path = {
-        let guard = state.db.lock().unwrap();
-        let db = guard.as_ref().ok_or("library not open")?;
+    {
+        let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
         let c = db.lock().unwrap();
-        let row = library::get(&c, id)?;
-        row.and_then(|r| r.audio).ok_or("no audio for that call")?
-    };
+        library::get(&c, id)?
+            .and_then(|r| r.audio)
+            .ok_or("no audio for that call")?;
+    }
+    let mut w = state.transcriber.lock().unwrap();
+    if !w.wanted.contains(&id) {
+        w.wanted.push_back(id);
+    }
+    drop(w);
     if !ensure_started(&app, &state.transcriber) {
         return Err(state
             .transcriber
@@ -371,14 +403,7 @@ pub fn transcribe_call(app: AppHandle, state: State<AppState>, id: i64) -> Resul
             .clone()
             .unwrap_or("worker did not start".into()));
     }
-    // Wait briefly for a free slot.
-    for _ in 0..100 {
-        if submit(&state.transcriber, id, &path) {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Err("transcriber busy".into())
+    Ok(())
 }
 
 /// Background pump: while enabled, feeds untranscribed calls to the worker.
@@ -398,8 +423,9 @@ pub fn spawn_pump(app: AppHandle) {
             continue;
         }
         let next = {
-            let guard = state.db.lock().unwrap();
-            let Some(db) = guard.as_ref() else { continue };
+            let Some(db) = state.db.lock().unwrap().clone() else {
+                continue;
+            };
             let c = db.lock().unwrap();
             let v = library::untranscribed(&c, 1).ok();
             v.and_then(|v| v.into_iter().next())
@@ -408,7 +434,7 @@ pub fn spawn_pump(app: AppHandle) {
         let Some(path) = row.audio else { continue };
         if !std::path::Path::new(&path).exists() {
             // Audio gone: mark so we don't loop on it.
-            if let Some(db) = state.db.lock().unwrap().as_ref() {
+            if let Some(db) = state.db.lock().unwrap().clone() {
                 let _ = library::set_transcript(&db.lock().unwrap(), row.id, "", "missing-audio");
             }
             continue;
