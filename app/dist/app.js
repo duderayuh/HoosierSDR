@@ -413,6 +413,7 @@ function handleFollow(ev) {
       $("r-grants").textContent = ev.calls;
       $("r-syncerr").textContent = ev.dropped ? `${ev.dropped}` : "0";
       $("r-stream").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)}M · ${ev.dropped || 0}`;
+      lastStream = `${ev.msps.toFixed(2)} / ${ev.want_msps.toFixed(2)} MSPS · ${ev.dropped || 0} dropped`;
       if (ev.locked) $("followMeta").textContent = `${ev.locked} locked-out call${ev.locked === 1 ? "" : "s"} skipped`;
       break;
     case "spectrum": pushSpectrum(ev.bins_db); break;
@@ -657,6 +658,34 @@ if (TAURI) {
   };
   trRefresh(); libStatsRefresh();
 
+  /* ---------- bottom status strip ---------- */
+  let lastStream = "—";
+  async function sbTick() {
+    try {
+      const s = await invoke("sys_status");
+      $("sb-cpu").textContent = `${s.cpu_app.toFixed(0)}% · ${s.cpu_total.toFixed(0)}% of ${s.cores}`;
+      $("sb-cpu").classList.toggle("hot", s.cpu_app > 90 * s.cores || s.cpu_total > 90);
+      $("sb-mem").textContent = `${(s.mem_app_mb / 1024).toFixed(2)} GB · ${(s.mem_used_mb / 1024).toFixed(1)} / ${(s.mem_total_mb / 1024).toFixed(0)} GB`;
+      $("sb-disk").textContent = `${s.disk_free_gb.toFixed(1)} GB free of ${s.disk_total_gb.toFixed(0)}`;
+      $("sb-disk").classList.toggle("hot", s.disk_free_gb < 5);
+      $("sb-lib").textContent = `${s.library_calls} calls · ${s.library_minutes.toFixed(0)} min`;
+      const up = s.uptime_secs; $("sb-up").textContent = `${Math.floor(up / 3600)}:${String(Math.floor(up / 60) % 60).padStart(2, "0")}:${String(up % 60).padStart(2, "0")}`;
+      $("sb-state").textContent = $("pillText").textContent;
+      $("sb-stream").textContent = lastStream;
+    } catch (e) { log(`sys_status: ${e}`); }
+  }
+  sbTick(); setInterval(sbTick, 2000);
+
+  /* ---------- RadioReference load progress ---------- */
+  listen("rr_progress", (e) => {
+    const p = e.payload, box = $("rrProg");
+    if (p.step === "done" || p.step === "failed") { setTimeout(() => { box.style.display = "none"; }, p.step === "done" ? 800 : 0); $("rrProgBar").style.width = p.step === "done" ? "100%" : "0%"; $("rrProgText").textContent = p.step === "done" ? "loaded" : "failed"; return; }
+    box.style.display = "";
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    $("rrProgBar").style.width = `${Math.max(3, pct)}%`;
+    $("rrProgText").textContent = `${p.step}${p.total ? ` (${p.done + 1}/${p.total})` : ""}`;
+  });
+
   /* ---------- aliases tab ---------- */
   let alRows = [];
   function alRowHtml(r) {
@@ -877,7 +906,7 @@ if (TAURI) {
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }
   }
-  $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } loadSystem(sid); };
+  $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } $("rrProg").style.display = ""; $("rrProgBar").style.width = "3%"; $("rrProgText").textContent = "connecting…"; loadSystem(sid); };
   const siteRate = (s) => ((s.span_mhz ? s.span_mhz[1] - s.span_mhz[0] : 0) <= 1.9 ? 2500000 : 10000000);
   function renderSites() {
     $("siteList").innerHTML = sys.sites.map((s) =>

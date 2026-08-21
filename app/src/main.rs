@@ -21,6 +21,7 @@ mod player;
 mod playlists;
 mod rr;
 mod stream;
+mod sysstat;
 mod transcribe;
 mod units;
 mod upload;
@@ -969,6 +970,7 @@ fn main() {
             format_set,
             stream::stream_get,
             stream::stream_configure,
+            sysstat::sys_status,
             upload::uploads_get,
             upload::uploads_configure,
             upload::uploads_test,

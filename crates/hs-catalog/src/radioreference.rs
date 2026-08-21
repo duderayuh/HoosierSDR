@@ -372,12 +372,26 @@ impl<T: SoapTransport> RrClient<T> {
     /// independent: a system whose site list fails (or is empty) still gets
     /// its talkgroups, and vice versa; only a system with neither is an error.
     pub fn system(&self, sys_id: u32) -> Result<RrSystem, RrError> {
+        self.system_with_progress(sys_id, &mut |_, _, _| {})
+    }
+
+    /// As [`system`](Self::system), reporting `(step, done, total)` as it
+    /// goes — "details", "sites", "talkgroups", and "talkgroups: <category>"
+    /// when the per-category fallback runs.
+    pub fn system_with_progress(
+        &self,
+        sys_id: u32,
+        progress: &mut dyn FnMut(&str, usize, usize),
+    ) -> Result<RrSystem, RrError> {
+        progress("details", 0, 3);
         let mut sys = self.details(sys_id).unwrap_or(RrSystem {
             id: sys_id,
             ..Default::default()
         });
+        progress("sites", 1, 3);
         let sites = self.sites(sys_id);
-        let tgs = self.talkgroups(sys_id);
+        progress("talkgroups", 2, 3);
+        let tgs = self.talkgroups_with_progress(sys_id, progress);
         match (sites, tgs) {
             (Err(e), Err(_)) => return Err(e),
             (sites, tgs) => {
@@ -485,6 +499,14 @@ impl<T: SoapTransport> RrClient<T> {
     }
 
     pub fn talkgroups(&self, sys_id: u32) -> Result<Vec<Talkgroup>, RrError> {
+        self.talkgroups_with_progress(sys_id, &mut |_, _, _| {})
+    }
+
+    fn talkgroups_with_progress(
+        &self,
+        sys_id: u32,
+        progress: &mut dyn FnMut(&str, usize, usize),
+    ) -> Result<Vec<Talkgroup>, RrError> {
         // Whole list first. RadioReference's server has answered HTTP 500
         // with an empty body for some large systems (MESA, sid 5737); the
         // same data comes back fine one category at a time, so fall back to
@@ -509,7 +531,8 @@ impl<T: SoapTransport> RrClient<T> {
         let cats = self.talkgroup_categories(sys_id)?;
         let mut all: Vec<Talkgroup> = Vec::new();
         let mut last_err: Option<RrError> = whole.err();
-        for (cid, cat_name) in &cats {
+        for (i, (cid, cat_name)) in cats.iter().enumerate() {
+            progress(&format!("talkgroups: {cat_name}"), i, cats.len());
             match self.call_args(
                 "getTrsTalkgroups",
                 &[("sid", &sid), ("tgCid", &cid.to_string())],
