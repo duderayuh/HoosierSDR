@@ -5,7 +5,13 @@
 //! stream is not `Send`). Calls are queued as clips; a clip with a better
 //! (lower) priority number is inserted ahead of worse ones but never
 //! interrupts the clip already playing. The device's own rate is used and
-//! the 8 kHz audio is linearly interpolated up to it.
+//! the 8 kHz audio is resampled up to it with a windowed-sinc interpolator.
+//!
+//! The interpolator matters more than it looks. Linear interpolation, which
+//! this used first, leaves the spectral images of speech at 8 kHz ± f only
+//! 6–17 dB down — a 3 kHz formant's image sits at 5 kHz at −6.6 dB — and the
+//! result is the thin, metallic sound listeners described. A 32-tap sinc
+//! with a Blackman window puts the images more than 60 dB down.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
@@ -18,11 +24,19 @@ const HISTORY_SAMPLES: usize = 8000 * 90;
 struct Clip {
     pcm: Vec<i16>,
     priority: u8,
+    /// When it was queued, so stale audio can be dropped.
+    queued_at: std::time::Instant,
 }
 
 #[derive(Default)]
 struct Queue {
     clips: VecDeque<Clip>,
+    /// Clips that have waited longer than this are dropped unplayed
+    /// (0 = never). With dozens of talkgroups on the air the queue would
+    /// otherwise run minutes behind the radio.
+    max_wait_secs: f32,
+    /// Clips dropped for being stale.
+    dropped: u64,
     /// The clip being played and the read position in it.
     current: Option<(Vec<i16>, usize)>,
     /// Recently played clips, newest last, bounded by `HISTORY_SAMPLES`.
@@ -37,7 +51,19 @@ impl Queue {
             .iter()
             .position(|c| c.priority > priority)
             .unwrap_or(self.clips.len());
-        self.clips.insert(at, Clip { pcm, priority });
+        self.clips.insert(at, Clip { pcm, priority, queued_at: std::time::Instant::now() });
+    }
+
+    /// Drop clips that have waited past the limit. Called before a clip is
+    /// dequeued, so audio is judged when it would play, not when it arrived.
+    fn prune_stale(&mut self) {
+        if self.max_wait_secs <= 0.0 {
+            return;
+        }
+        let limit = std::time::Duration::from_secs_f32(self.max_wait_secs);
+        let before = self.clips.len();
+        self.clips.retain(|c| c.queued_at.elapsed() <= limit);
+        self.dropped += (before - self.clips.len()) as u64;
     }
 
     fn skip(&mut self) {
@@ -55,6 +81,7 @@ impl Queue {
             self.clips.push_front(Clip {
                 pcm: last,
                 priority: 0,
+                queued_at: std::time::Instant::now(),
             });
             self.current = None;
         }
@@ -81,6 +108,7 @@ impl Queue {
                 }
                 self.current = None;
             }
+            self.prune_stale();
             match self.clips.pop_front() {
                 Some(c) => {
                     self.remember(&c.pcm);
@@ -111,6 +139,8 @@ enum Cmd {
 pub struct Audio {
     tx: Sender<Cmd>,
     queue: Arc<Mutex<Queue>>,
+    /// Output gain as f32 bits, read by the device callback. 0 = mute.
+    gain: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Audio {
@@ -133,15 +163,42 @@ impl Audio {
     pub fn queued(&self) -> usize {
         self.queue.lock().map(|q| q.queued()).unwrap_or(0)
     }
+    /// Seconds of audio waiting to play, and clips dropped as stale.
+    pub fn backlog(&self) -> (f32, u64) {
+        self.queue
+            .lock()
+            .map(|q| (q.clips.iter().map(|c| c.pcm.len()).sum::<usize>() as f32 / 8000.0, q.dropped))
+            .unwrap_or((0.0, 0))
+    }
+    /// Drop queued clips older than `secs` when their turn comes (0 = never).
+    pub fn set_queue_limit(&self, secs: f32) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.max_wait_secs = secs.max(0.0);
+        }
+    }
+    /// Set the output gain, 0.0 (mute) … 1.0 (unity); values above 1 are
+    /// allowed for quiet systems and soft-clipped in the callback. Applies to
+    /// everything the player speaks — live calls, replay and library playback.
+    pub fn set_volume(&self, gain: f32) {
+        self.gain.store(
+            gain.clamp(0.0, 2.0).to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.gain.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Start the app's audio thread. `None` if there is no output device.
 pub fn spawn() -> Option<Audio> {
     let (tx, rx) = channel::<Cmd>();
     let (ready_tx, ready_rx) = channel::<Option<Arc<Mutex<Queue>>>>();
+    let gain = Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits()));
+    let gain_cb = Arc::clone(&gain);
     std::thread::spawn(move || {
         let queue: Arc<Mutex<Queue>> = Arc::new(Mutex::new(Queue::default()));
-        let Some(_stream) = open_stream(Arc::clone(&queue)) else {
+        let Some(_stream) = open_stream(Arc::clone(&queue), gain_cb) else {
             let _ = ready_tx.send(None);
             return;
         };
@@ -161,30 +218,94 @@ pub fn spawn() -> Option<Audio> {
         .recv_timeout(std::time::Duration::from_secs(3))
         .ok()
         .flatten()?;
-    Some(Audio { tx, queue })
+    Some(Audio { tx, queue, gain })
 }
 
-fn open_stream(queue: Arc<Mutex<Queue>>) -> Option<cpal::Stream> {
+/// Windowed-sinc interpolation from 8 kHz to an arbitrary output rate.
+/// `TAPS` input samples around each output instant are weighted by a
+/// Blackman-windowed sinc with its cutoff just under the input Nyquist;
+/// `PHASES` precomputed fractional positions keep the callback cheap.
+pub struct SincInterp {
+    step: f64,
+    /// Position of the next output sample, in input samples, relative to
+    /// `hist[TAPS/2 - 1]`.
+    pos: f64,
+    hist: [f32; SincInterp::TAPS],
+    table: Vec<[f32; SincInterp::TAPS]>,
+}
+
+impl SincInterp {
+    pub const TAPS: usize = 32;
+    const PHASES: usize = 128;
+
+    pub fn new(in_rate: f64, out_rate: f64) -> Self {
+        let cutoff = 0.46; // of the input rate: IMBE audio ends near 3.7 kHz
+        let half = Self::TAPS as f64 / 2.0;
+        let mut table = Vec::with_capacity(Self::PHASES);
+        for p in 0..Self::PHASES {
+            let frac = p as f64 / Self::PHASES as f64;
+            let mut taps = [0.0f32; Self::TAPS];
+            let mut sum = 0.0f64;
+            for (i, t) in taps.iter_mut().enumerate() {
+                // Distance from the output instant to input sample i.
+                let x = i as f64 - (half - 1.0) - frac;
+                let sinc = if x.abs() < 1e-9 { 2.0 * cutoff } else { (2.0 * std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x) };
+                let w = {
+                    let n = (x + half) / (2.0 * half);
+                    0.42 - 0.5 * (2.0 * std::f64::consts::PI * n).cos() + 0.08 * (4.0 * std::f64::consts::PI * n).cos()
+                };
+                *t = (sinc * w) as f32;
+                sum += *t as f64;
+            }
+            for t in taps.iter_mut() {
+                *t /= sum as f32;
+            }
+            table.push(taps);
+        }
+        Self {
+            step: in_rate / out_rate,
+            pos: 0.0,
+            hist: [0.0; Self::TAPS],
+            table,
+        }
+    }
+
+    /// Next output sample, pulling input samples from `next_in` as needed.
+    pub fn next(&mut self, mut next_in: impl FnMut() -> f32) -> f32 {
+        while self.pos >= 1.0 {
+            self.pos -= 1.0;
+            self.hist.copy_within(1.., 0);
+            self.hist[Self::TAPS - 1] = next_in();
+        }
+        let phase = ((self.pos * Self::PHASES as f64) as usize).min(Self::PHASES - 1);
+        let taps = &self.table[phase];
+        let mut acc = 0.0f32;
+        for (h, t) in self.hist.iter().zip(taps.iter()) {
+            acc += h * t;
+        }
+        self.pos += self.step;
+        acc
+    }
+}
+
+fn open_stream(
+    queue: Arc<Mutex<Queue>>,
+    gain: Arc<std::sync::atomic::AtomicU32>,
+) -> Option<cpal::Stream> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
     let config = device.default_output_config().ok()?;
-    let out_rate = config.sample_rate().0 as f32;
+    let out_rate = config.sample_rate().0 as f64;
     let channels = config.channels() as usize;
-    let step = 8000.0 / out_rate;
-    let (mut frac, mut prev, mut next) = (0.0f32, 0.0f32, 0.0f32);
+    let mut interp = SincInterp::new(8000.0, out_rate);
     let stream = device
         .build_output_stream(
             &config.config(),
             move |data: &mut [f32], _| {
                 let mut q = queue.lock().unwrap();
+                let g = f32::from_bits(gain.load(std::sync::atomic::Ordering::Relaxed));
                 for frame in data.chunks_mut(channels) {
-                    frac += step;
-                    while frac >= 1.0 {
-                        frac -= 1.0;
-                        prev = next;
-                        next = q.next_sample();
-                    }
-                    let v = prev + (next - prev) * frac;
+                    let v = (interp.next(|| q.next_sample()) * g).clamp(-1.0, 1.0);
                     for s in frame.iter_mut() {
                         *s = v;
                     }
@@ -232,6 +353,36 @@ pub fn read_wav(path: &str) -> Result<Vec<i16>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 1 kHz tone at 8 kHz, resampled to 48 kHz: the tone must come
+    /// through at full level and its first image at 7 kHz must be gone.
+    /// Linear interpolation (the previous resampler) left that image at
+    /// roughly −17 dB, audible as a metallic edge on every voice.
+    #[test]
+    fn sinc_interpolation_suppresses_images() {
+        let (fin, fout) = (8000.0, 48000.0);
+        let mut src = (0..).map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / fin as f32).sin());
+        let mut it = SincInterp::new(fin, fout);
+        let out: Vec<f32> = (0..48000).map(|_| it.next(|| src.next().unwrap())).collect();
+        let tail = &out[8000..]; // past the filter's warm-up
+        let power_at = |hz: f32| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, v) in tail.iter().enumerate() {
+                let w = 2.0 * std::f64::consts::PI * hz as f64 * i as f64 / fout;
+                re += *v as f64 * w.cos();
+                im += *v as f64 * w.sin();
+            }
+            (re * re + im * im) / (tail.len() as f64).powi(2)
+        };
+        let tone = power_at(1000.0);
+        let image = power_at(7000.0);
+        let image2 = power_at(9000.0);
+        let db = |p: f64| 10.0 * (p / tone).log10();
+        eprintln!("image 7 kHz {:.1} dB, 9 kHz {:.1} dB", db(image), db(image2));
+        assert!(tone > 0.2, "tone lost: {tone}");
+        assert!(db(image) < -60.0, "7 kHz image only {:.1} dB down", db(image));
+        assert!(db(image2) < -60.0, "9 kHz image only {:.1} dB down", db(image2));
+    }
 
     #[test]
     fn wav_round_trips() {

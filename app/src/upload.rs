@@ -167,7 +167,7 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn post(url: &str, ctype: &str, body: Vec<u8>) -> Result<(u16, String), String> {
+pub fn post(url: &str, ctype: &str, body: Vec<u8>) -> Result<(u16, String), String> {
     let mut r = agent()
         .post(url)
         .header("Content-Type", ctype)

@@ -256,6 +256,45 @@ pub fn get(c: &Connection, id: i64) -> Result<Option<CallRow>, String> {
     .map_err(|e| format!("get: {e}"))
 }
 
+/// Audio files of up to `n` calls on `tg` that ended within `window_secs`
+/// before call `id`, newest first — the earlier traffic an alert may attach.
+pub fn previous_on_talkgroup(
+    c: &Connection,
+    id: i64,
+    tg: u16,
+    n: usize,
+    window_secs: i64,
+) -> Result<Vec<String>, String> {
+    let start: i64 = c
+        .query_row("SELECT start FROM calls WHERE id = ?1", params![id], |r| r.get(0))
+        .map_err(|e| format!("previous: {e}"))?;
+    let mut st = c
+        .prepare("SELECT audio FROM calls WHERE tg = ?1 AND id < ?2 AND start >= ?3 AND audio IS NOT NULL ORDER BY id DESC LIMIT ?4")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![tg, id, start - window_secs, n as i64], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// The newest call on any of `tgs` (or on any talkgroup when empty).
+pub fn latest_call(c: &Connection, tgs: &[u16]) -> Result<Option<CallRow>, String> {
+    if tgs.is_empty() {
+        return c
+            .query_row(&format!("SELECT {COLS} FROM calls ORDER BY id DESC LIMIT 1"), [], row)
+            .optional()
+            .map_err(|e| format!("latest: {e}"));
+    }
+    let list = tgs.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+    c.query_row(
+        &format!("SELECT {COLS} FROM calls WHERE tg IN ({list}) ORDER BY id DESC LIMIT 1"),
+        [],
+        row,
+    )
+    .optional()
+    .map_err(|e| format!("latest: {e}"))
+}
+
 pub fn set_transcript(c: &Connection, id: i64, text: &str, model: &str) -> Result<(), String> {
     c.execute(
         "UPDATE calls SET transcript = ?2, transcript_model = ?3, transcribed_at = ?4 WHERE id = ?1",

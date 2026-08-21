@@ -26,6 +26,7 @@ sha2 = "0.10"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 cpal = "0.15"
+regex = "1"
 
 # `cargo tauri dev` builds the dev profile. Unoptimized, the decode stack is
 # ~50x too slow for a 10 MSPS site follow — the UI starved and showed nothing,

@@ -241,6 +241,71 @@ pub fn catalog_remove(
     Ok(n)
 }
 
+/// Name a talkgroup by hand (discovery: "I heard TG 20308, call it Sheriff
+/// Patrol"). Rows go into `csv_user.csv` in the catalogs folder — a plain
+/// RadioReference-shaped CSV the merge already reads, newest source wins —
+/// and the live catalog is reloaded. An empty alias removes the row.
+#[tauri::command]
+pub fn catalog_user_set(
+    app: AppHandle,
+    state: State<AppState>,
+    tg: u16,
+    alias: String,
+    category: Option<String>,
+) -> Result<usize, String> {
+    let p = catalogs_dir(&app)?.join("csv_user.csv");
+    let mut rows: Vec<(u16, String, String)> = std::fs::read_to_string(&p)
+        .ok()
+        .map(|t| {
+            t.lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split(',').collect();
+                    let id = f.first()?.trim().parse().ok()?;
+                    let alias = f.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+                    let cat = f.get(6).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+                    Some((id, alias, cat))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.retain(|r| r.0 != tg);
+    let alias = alias.trim().replace(['"', ','], " ");
+    if !alias.is_empty() {
+        rows.push((
+            tg,
+            alias,
+            category.unwrap_or_default().trim().replace(['"', ','], " "),
+        ));
+    }
+    rows.sort_by_key(|r| r.0);
+    let mut text = String::from("Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority\n");
+    for (id, a, c) in &rows {
+        text.push_str(&format!("{id},{id:X},\"{a}\",D,\"{a}\",,\"{c}\",\n"));
+    }
+    if rows.is_empty() {
+        let _ = std::fs::remove_file(&p);
+    } else {
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    let cat = merged_catalog(&app);
+    let n = cat.as_ref().map_or(0, |c| c.len());
+    *state.catalog.lock().unwrap() = cat;
+    Ok(n)
+}
+
+/// Write text the UI produced (a discovery CSV, a report) to a file the
+/// listener named. `~` expands; parent folders are created.
+#[tauri::command]
+pub fn save_text(path: String, text: String) -> Result<String, String> {
+    let p = std::path::PathBuf::from(crate::shellexpand_home(&path));
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
 fn load_prefs(app: &AppHandle) -> Prefs {
     prefs_path(app)
         .ok()
