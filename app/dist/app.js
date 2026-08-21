@@ -40,12 +40,13 @@ function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttri
 
 /* ---------- views ---------- */
 function showView(v) {
-  ["monitor", "library", "playlists", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  ["monitor", "library", "playlists", "aliases", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "library" && typeof libOnShow === "function") libOnShow();
+  if (v === "aliases" && typeof aliasesOnShow === "function") aliasesOnShow();
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
-if (["#playlists", "#settings", "#library"].includes(location.hash)) showView(location.hash.slice(1));
+if (["#playlists", "#settings", "#library", "#aliases"].includes(location.hash)) showView(location.hash.slice(1));
 
 /* ---------- tuning state ---------- */
 let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
@@ -448,7 +449,7 @@ if (TAURI) {
   $("stop").onclick = () => invoke("stop_capture");
   $("loadcat").onclick = async () => {
     const path = $("catalog").value.trim(); if (!path) return;
-    try { const n = await invoke("load_catalog", { path }); $("loadcat").textContent = n + " TGs"; } catch (err) { alert(err); }
+    try { const n = await invoke("load_catalog", { path }); $("loadcat").textContent = n + " TGs"; alert(`Loaded. ${n} talkgroups are now named.`); if (typeof aliasesOnShow === "function") aliasesOnShow(); } catch (err) { alert(err); }
   };
   $("decode").onclick = async () => {
     const path = $("decfile").value.trim(); if (!path) return;
@@ -632,6 +633,74 @@ if (TAURI) {
   };
   trRefresh(); libStatsRefresh();
 
+  /* ---------- aliases tab ---------- */
+  let alRows = [];
+  function alRowHtml(r) {
+    const p = prio.get(r.id) || 50;
+    return `<tr class="${r.encrypted ? "enc" : ""}"><td class="mono">${r.id}</td><td>${r.alias}</td><td>${r.description}</td><td><small>${r.category}</small></td><td><small class="mono">${r.source}</small></td>` +
+      `<td class="act"><button data-pri="${r.id}" class="${p === 10 ? "pri-h" : p === 90 ? "pri-l" : ""}">${p === 10 ? "★" : p === 90 ? "▽" : "☆"}</button>` +
+      `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" class="${avoidUntil.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" class="${lockout.has(r.id) ? "on" : ""}">⊘</button></td></tr>`;
+  }
+  function alRender() {
+    const q = $("alFilter").value.trim().toLowerCase();
+    const shown = q ? alRows.filter((r) => `${r.id} ${r.alias} ${r.description} ${r.category} ${r.source}`.toLowerCase().includes(q)) : alRows;
+    $("alBody").innerHTML = shown.slice(0, 2000).map(alRowHtml).join("");
+    $("alEmpty").style.display = alRows.length ? "none" : "";
+    $("alMeta").textContent = alRows.length ? (q ? `${shown.length} of ${alRows.length}` : `${alRows.length} talkgroups`) : "";
+    const tb = $("alBody");
+    tb.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => { cyclePriority(+b.dataset.pri); alRender(); });
+    tb.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => { toggleBell(+b.dataset.bell); alRender(); });
+    tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid); alRender(); });
+    tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); alRender(); });
+  }
+  $("alFilter").oninput = alRender;
+  async function srcRender() {
+    try {
+      const list = await invoke("catalogs_list");
+      $("srcMeta").textContent = list.length ? `${list.length} source${list.length === 1 ? "" : "s"}` : "none";
+      $("srcList").innerHTML = list.length ? list.map((s) => `<div class="row"><span class="grow"><b>${s.name.replace(/^rr_/, "RadioReference sid ").replace(/^csv_/, "CSV: ")}</b><br><small>${s.talkgroups} talkgroups</small></span><button class="btn ghost" data-rmsrc="${s.name}">Remove</button></div>`).join("")
+        : '<div class="row"><span class="grow" style="color:var(--ink-faint)">Nothing loaded yet.</span></div>';
+      $("srcList").querySelectorAll("[data-rmsrc]").forEach((b) => b.onclick = async () => { if (!confirm(`Remove ${b.dataset.rmsrc}?`)) return; try { const n = await invoke("catalog_remove", { name: b.dataset.rmsrc }); $("loadcat").textContent = n ? n + " TGs" : "Load"; aliasesRefresh(); } catch (e) { alert(e); } });
+    } catch (e) { log(`catalogs_list: ${e}`); }
+  }
+  async function aliasesRefresh() {
+    try { alRows = await invoke("catalog_rows"); alRender(); srcRender(); $("r-names").textContent = new Set(alRows.map((r) => r.id)).size || "—"; } catch (e) { log(`catalog_rows: ${e}`); }
+  }
+  window.aliasesOnShow = aliasesRefresh;
+  $("alCheckGo").onclick = async () => {
+    const tg = parseInt($("alCheck").value, 10); if (!Number.isFinite(tg)) return;
+    try {
+      const hits = await invoke("catalog_lookup", { tg });
+      $("alCheckResult").textContent = hits.length ? `✔ TG ${tg} = “${hits[hits.length - 1].alias}” (${hits[hits.length - 1].description || hits[hits.length - 1].category}) — from ${hits.map((h) => h.source).join(", ")}` : `✘ TG ${tg} is not in any loaded catalog`;
+      $("alCheckResult").style.color = hits.length ? "var(--clear)" : "var(--enc)";
+    } catch (e) { alert(e); }
+  };
+  $("alCheck").onkeydown = (e) => { if (e.key === "Enter") $("alCheckGo").onclick(); };
+  aliasesRefresh();
+
+  /* ---------- whisper models: what's downloaded, download ahead of time ---------- */
+  const MODEL_SIZES = { tiny: "75 MB", base: "145 MB", small: "480 MB", medium: "1.5 GB", "large-v3": "3 GB", "distil-large-v3": "1.5 GB", turbo: "1.6 GB" };
+  const downloading = new Set();
+  async function trModelsRender() {
+    try {
+      const rows = await invoke("transcribe_models"); const names = [...new Set(rows.map((r) => r.model))];
+      $("trModels").innerHTML = names.map((m) => {
+        const cell = (eng) => { const r = rows.find((x) => x.model === m && x.engine === eng); const key = `${eng}/${m}`;
+          return r && r.downloaded ? `<span class="badge clear">✔ downloaded</span>` : downloading.has(key) ? `<span class="meta">downloading…</span>` : `<button class="btn ghost sm" data-dl="${key}">Download</button>`; };
+        return `<tr><td class="mono">${m} <small class="faint">${MODEL_SIZES[m] || ""}</small></td><td>${cell("faster-whisper")}</td><td>${cell("openai-whisper")}</td></tr>`;
+      }).join("");
+      $("trModels").querySelectorAll("[data-dl]").forEach((b) => b.onclick = () => { const [engine, model] = b.dataset.dl.split("/"); downloading.add(b.dataset.dl); trModelsRender(); invoke("transcribe_download", { engine, model }).catch((e) => { downloading.delete(b.dataset.dl); alert(e); trModelsRender(); }); });
+    } catch (e) { log(`transcribe_models: ${e}`); }
+  }
+  listen("transcribe_download", (e) => {
+    const { engine, model, state, detail } = e.payload; const key = `${engine}/${model}`;
+    if (state !== "started") downloading.delete(key);
+    if (state === "error") alert(`Model download failed (${key}): ${detail}`);
+    if (state === "done") logEvent(`model ready: ${key}`);
+    trModelsRender();
+  });
+  trModelsRender();
+
   /* ---------- stored audio format ---------- */
   async function fmtRefresh() {
     try {
@@ -748,7 +817,9 @@ if (TAURI) {
       pickedSite = sys.sites[0] || null; picked = new Set();
       renderSites(); renderCats(); renderTgs();
       $("plName").value = sys.name;
-      rrRefresh();
+      $("sysLoaded").textContent = `✔ Loaded ${sys.talkgroups} talkgroups from ${sys.name} — they now name calls; see the Aliases tab to check any talkgroup.`;
+      logEvent(`loaded ${sys.talkgroups} talkgroups from ${sys.name}`);
+      rrRefresh(); aliasesRefresh();
       $("sysPanel").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }

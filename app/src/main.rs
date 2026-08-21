@@ -299,7 +299,9 @@ fn load_catalog(app: AppHandle, path: String, state: State<AppState>) -> Result<
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
     let n = CsvCatalog::parse(&text).len();
     if n == 0 {
-        return Err("no talkgroups found in that CSV (expected RadioReference export columns)".into());
+        return Err(
+            "no talkgroups found in that CSV (expected RadioReference export columns)".into(),
+        );
     }
     // Keep a copy so it is merged in on every start.
     if let Ok(d) = rr::catalogs_dir(&app) {
@@ -825,6 +827,8 @@ fn main() {
             transcribe::transcribe_probe,
             transcribe::transcribe_configure,
             transcribe::transcribe_call,
+            transcribe::transcribe_models,
+            transcribe::transcribe_download,
             play_wav,
             ui_log,
             rr::rr_settings,
@@ -832,6 +836,8 @@ fn main() {
             rr::rr_download,
             rr::catalogs_list,
             rr::catalog_remove,
+            rr::catalog_rows,
+            rr::catalog_lookup,
             rr::rr_states,
             rr::rr_state,
             rr::rr_county,

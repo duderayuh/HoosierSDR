@@ -339,7 +339,12 @@ struct Reporter<'a> {
 
 impl Reporter<'_> {
     fn name_of(&self, tg: u16) -> String {
-        match self.catalog.lock().ok().and_then(|c| c.as_ref().map(|k| k.label(tg))) {
+        match self
+            .catalog
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().map(|k| k.label(tg)))
+        {
             Some(l) => l,
             None => format!("TG {tg}"),
         }
@@ -651,7 +656,15 @@ mod tests {
             db: None,
             spectrum: None,
         };
-        run(src, &p, &std::sync::Mutex::new(None), &live, &running, &mut |e| events.push(e)).expect("follow");
+        run(
+            src,
+            &p,
+            &std::sync::Mutex::new(None),
+            &live,
+            &running,
+            &mut |e| events.push(e),
+        )
+        .expect("follow");
         let measured = events
             .iter()
             .find_map(|e| match e {
@@ -731,7 +744,15 @@ mod tests {
             db: None,
             spectrum: None,
         };
-        run(src, &p, &std::sync::Mutex::new(None), &live, &running, &mut |e| events.push(e)).expect("follow");
+        run(
+            src,
+            &p,
+            &std::sync::Mutex::new(None),
+            &live,
+            &running,
+            &mut |e| events.push(e),
+        )
+        .expect("follow");
         let starts = events
             .iter()
             .filter(|e| matches!(e, FollowEvent::CallStart { tg, .. } if *tg == 20308))
@@ -777,11 +798,18 @@ mod tests {
                 db: None,
                 spectrum: None,
             };
-            run(src, &p, &std::sync::Mutex::new(None), &live, &running, &mut |e| {
-                if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
-                    n += 1;
-                }
-            })
+            run(
+                src,
+                &p,
+                &std::sync::Mutex::new(None),
+                &live,
+                &running,
+                &mut |e| {
+                    if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
+                        n += 1;
+                    }
+                },
+            )
             .expect("follow");
             Some(n)
         };
@@ -824,11 +852,18 @@ mod tests {
                 spectrum: None,
             };
             let mut n = 0;
-            run(src, &p, &std::sync::Mutex::new(None), &live, &running, &mut |e| {
-                if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
-                    n += 1;
-                }
-            })
+            run(
+                src,
+                &p,
+                &std::sync::Mutex::new(None),
+                &live,
+                &running,
+                &mut |e| {
+                    if matches!(e, FollowEvent::CallStart { tg, .. } if tg == 20308) {
+                        n += 1;
+                    }
+                },
+            )
             .expect("follow");
             Some(n)
         };
@@ -882,36 +917,43 @@ mod tests {
             db: None,
             spectrum: None,
         };
-        run(src, &p, &std::sync::Mutex::new(None), &live, &running, &mut |e| match e {
-            FollowEvent::Measured {
-                control_mhz,
-                modulation,
-                ..
-            } => {
-                eprintln!("measured {control_mhz} {modulation}")
-            }
-            FollowEvent::CallStart { name, freq_mhz, .. } => {
-                starts += 1;
-                eprintln!("start {name} {freq_mhz}")
-            }
-            FollowEvent::Call {
-                name, secs, pcm, ..
-            } => {
-                calls += 1;
-                eprintln!("call {name} {secs:.1}s");
-                if let Some(pl) = player.as_ref() {
-                    pl.play(pcm, 50);
+        run(
+            src,
+            &p,
+            &std::sync::Mutex::new(None),
+            &live,
+            &running,
+            &mut |e| match e {
+                FollowEvent::Measured {
+                    control_mhz,
+                    modulation,
+                    ..
+                } => {
+                    eprintln!("measured {control_mhz} {modulation}")
                 }
-            }
-            FollowEvent::Status {
-                control_syncs,
-                msps,
-                want_msps,
-                dropped,
-                ..
-            } => last = Some((control_syncs, msps, want_msps, dropped)),
-            _ => {}
-        })
+                FollowEvent::CallStart { name, freq_mhz, .. } => {
+                    starts += 1;
+                    eprintln!("start {name} {freq_mhz}")
+                }
+                FollowEvent::Call {
+                    name, secs, pcm, ..
+                } => {
+                    calls += 1;
+                    eprintln!("call {name} {secs:.1}s");
+                    if let Some(pl) = player.as_ref() {
+                        pl.play(pcm, 50);
+                    }
+                }
+                FollowEvent::Status {
+                    control_syncs,
+                    msps,
+                    want_msps,
+                    dropped,
+                    ..
+                } => last = Some((control_syncs, msps, want_msps, dropped)),
+                _ => {}
+            },
+        )
         .expect("follow");
         eprintln!("{starts} starts, {calls} calls, status {last:?}");
         let (syncs, _, _, dropped) = last.expect("status");

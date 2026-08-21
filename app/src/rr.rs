@@ -143,7 +143,9 @@ pub struct CatalogFile {
 
 #[tauri::command]
 pub fn catalogs_list(app: AppHandle) -> Vec<CatalogFile> {
-    let Ok(d) = catalogs_dir(&app) else { return vec![] };
+    let Ok(d) = catalogs_dir(&app) else {
+        return vec![];
+    };
     let mut v: Vec<CatalogFile> = std::fs::read_dir(d)
         .into_iter()
         .flatten()
@@ -152,7 +154,11 @@ pub fn catalogs_list(app: AppHandle) -> Vec<CatalogFile> {
         .filter_map(|e| {
             let t = std::fs::read_to_string(e.path()).ok()?;
             Some(CatalogFile {
-                name: e.file_name().to_string_lossy().trim_end_matches(".csv").to_string(),
+                name: e
+                    .file_name()
+                    .to_string_lossy()
+                    .trim_end_matches(".csv")
+                    .to_string(),
                 talkgroups: CsvCatalog::parse(&t).len(),
             })
         })
@@ -161,8 +167,72 @@ pub fn catalogs_list(app: AppHandle) -> Vec<CatalogFile> {
     v
 }
 
+#[derive(Serialize)]
+pub struct AliasRow {
+    pub id: u16,
+    pub alias: String,
+    pub description: String,
+    pub category: String,
+    pub encrypted: bool,
+    pub source: String,
+}
+
+/// Every named talkgroup across all saved catalogs, with its source.
 #[tauri::command]
-pub fn catalog_remove(app: AppHandle, state: State<AppState>, name: String) -> Result<usize, String> {
+pub fn catalog_rows(app: AppHandle) -> Vec<AliasRow> {
+    let Ok(d) = catalogs_dir(&app) else {
+        return vec![];
+    };
+    let mut rows: Vec<AliasRow> = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(d)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "csv"))
+        .collect();
+    files.sort();
+    for f in files {
+        let source = f
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Ok(t) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let cat = CsvCatalog::parse(&t);
+        if let Ok(tgs) = hs_catalog::Catalog::talkgroups(&cat, 0) {
+            for tg in tgs {
+                rows.push(AliasRow {
+                    id: tg.id,
+                    alias: tg.alias.unwrap_or_default(),
+                    description: tg.description.unwrap_or_default(),
+                    category: tg.category.unwrap_or_default(),
+                    encrypted: tg.encrypted,
+                    source: source.clone(),
+                });
+            }
+        }
+    }
+    rows.sort_by_key(|r| (r.id, r.source.clone()));
+    rows
+}
+
+/// Is this talkgroup named? Which source names it?
+#[tauri::command]
+pub fn catalog_lookup(app: AppHandle, tg: u16) -> Vec<AliasRow> {
+    catalog_rows(app)
+        .into_iter()
+        .filter(|r| r.id == tg)
+        .collect()
+}
+
+#[tauri::command]
+pub fn catalog_remove(
+    app: AppHandle,
+    state: State<AppState>,
+    name: String,
+) -> Result<usize, String> {
     let p = catalogs_dir(&app)?.join(format!("{}.csv", name.replace(['/', '\\'], "_")));
     std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     let cat = merged_catalog(&app);

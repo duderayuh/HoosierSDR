@@ -255,6 +255,103 @@ fn submit(shared: &Shared, id: i64, path: &str) -> bool {
     true
 }
 
+#[derive(Serialize)]
+pub struct ModelInfo {
+    pub engine: String,
+    pub model: String,
+    pub downloaded: bool,
+    pub path: Option<String>,
+}
+
+/// Which model files are already on this machine, per engine.
+#[tauri::command]
+pub fn transcribe_models() -> Vec<ModelInfo> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut out = Vec::new();
+    for m in [
+        "tiny",
+        "base",
+        "small",
+        "medium",
+        "large-v3",
+        "distil-large-v3",
+        "turbo",
+    ] {
+        // faster-whisper: Hugging Face hub cache, Systran/faster-whisper-<m>
+        // (distil models live under Systran/faster-distil-whisper-*).
+        let repo = if let Some(rest) = m.strip_prefix("distil-") {
+            format!("models--Systran--faster-distil-whisper-{rest}")
+        } else if m == "turbo" {
+            "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo".to_string()
+        } else {
+            format!("models--Systran--faster-whisper-{m}")
+        };
+        let p = std::path::Path::new(&home)
+            .join(".cache/huggingface/hub")
+            .join(&repo);
+        let done = p.join("snapshots").exists();
+        out.push(ModelInfo {
+            engine: "faster-whisper".into(),
+            model: m.into(),
+            downloaded: done,
+            path: done.then(|| p.to_string_lossy().into_owned()),
+        });
+        // openai-whisper: ~/.cache/whisper/<m>.pt
+        let p = std::path::Path::new(&home)
+            .join(".cache/whisper")
+            .join(format!("{m}.pt"));
+        let done = p.exists();
+        out.push(ModelInfo {
+            engine: "openai-whisper".into(),
+            model: m.into(),
+            downloaded: done,
+            path: done.then(|| p.to_string_lossy().into_owned()),
+        });
+    }
+    out
+}
+
+/// Download (and load once) a model in the background so the first real
+/// transcription doesn't stall. Emits `transcribe_download` events:
+/// {engine, model, state: "started"|"done"|"error", detail}.
+#[tauri::command]
+pub fn transcribe_download(app: AppHandle, engine: String, model: String) -> Result<(), String> {
+    let script = script_path(&app);
+    std::thread::spawn(move || {
+        let _ = app.emit(
+            "transcribe_download",
+            serde_json::json!({"engine": engine, "model": model, "state": "started"}),
+        );
+        let out = Command::new("python3")
+            .arg(&script)
+            .args(["--engine", &engine, "--model", &model, "--download"])
+            .output();
+        let (state, detail) = match out {
+            Ok(o) if o.status.success() => (
+                "done",
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            ),
+            Ok(o) => (
+                "error",
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout).trim(),
+                    String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                ),
+            ),
+            Err(e) => ("error", format!("python3: {e}")),
+        };
+        let _ = app.emit(
+            "transcribe_download",
+            serde_json::json!({"engine": engine, "model": model, "state": state, "detail": detail}),
+        );
+    });
+    Ok(())
+}
+
 /// Transcribe one call now (even if auto-transcribe is off).
 #[tauri::command]
 pub fn transcribe_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
