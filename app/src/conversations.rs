@@ -846,3 +846,20 @@ mod tests {
         assert!(m.contains("Medic 3 · 3 transmissions · 30 s · 00:01 UTC · revised ×1"), "{m}");
     }
 }
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    /// Exactly what the page sends on Save must deserialize.
+    #[test]
+    fn the_pages_rule_payload_deserializes() {
+        let js = r#"[{"id":"c1755800000000","name":"Hospitals","enabled":true,"tgs":[10202,10244],"fixed_units":[],"learn_fixed":true,"end_gap_secs":90,"late_window_secs":180,"max_secs":900,"min_calls":1,"summary_prompt":"x","message":"y","chat_id":"","attach_audio":true,"send_without_transcript":false}]"#;
+        let rules: Vec<Rule> = serde_json::from_str(js).expect("rule payload");
+        assert_eq!(rules[0].tgs, vec![10202, 10244]);
+        let s = Settings { rules, ..Default::default() };
+        let text = serde_json::to_string_pretty(&s).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.rules.len(), 1);
+    }
+}

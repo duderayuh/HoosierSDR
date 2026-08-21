@@ -920,7 +920,7 @@ if (TAURI) {
   async function akPersist() {
     akSettings.telegram.chat_id = $("tgChat").value.trim();
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
-    try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { uiToast(`Could not save alerts: ${e}`, "err"); return false; }
+    try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
   }
   $("akNew").onclick = () => {
     const id = `a${Date.now()}`;
@@ -991,7 +991,13 @@ if (TAURI) {
     r.chat_id = $("cvChat").value.trim(); r.min_calls = parseInt($("cvMin").value, 10) || 1; r.attach_audio = $("cvAudio").checked; r.send_without_transcript = $("cvNoTr").checked;
     return r;
   }
-  async function cvPersist() { try { await invoke("conversations_set", { rules: cvView.settings.rules }); cvView = await invoke("conversations_get"); cvRenderList(); return true; } catch (e) { uiToast(`Could not save: ${e}`, "err"); return false; } }
+  async function cvPersist() {
+    if (!cvView) { uiToast("Conversation rules did not load — reopen the Alerts tab", "err"); return false; }
+    try { await invoke("conversations_set", { rules: cvView.settings.rules }); }
+    catch (e) { log(`conversations_set failed: ${e} · payload ${JSON.stringify(cvView.settings.rules).slice(0, 300)}`); uiToast(`Could not save the conversation rule: ${e}`, "err"); return false; }
+    try { cvView = await invoke("conversations_get"); } catch (e) { log(`conversations_get failed: ${e}`); }
+    cvRenderList(); return true;
+  }
   async function cvRefresh() { try { cvView = await invoke("conversations_get"); cvRenderList(); } catch (e) { log(`conversations_get: ${e}`); } }
   async function cvStateRefresh() {
     try {
