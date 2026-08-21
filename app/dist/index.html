@@ -533,11 +533,34 @@
                 <label class="field"><span class="lab">Nickname</span><input id="dvNick" type="text" placeholder="Airspy on the roof antenna" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Preferred rate</span><select id="dvRate"></select></label>
               </div>
-              <div class="row2">
-                <label class="field"><span class="lab">Gain (dB) <span class="mono faint">RTL-SDR only · blank = AGC</span></span><input id="gain" type="text" placeholder="AGC" /></label>
-                <label class="field"><span class="lab">Frequency correction (ppm)</span>
-                  <span class="inline"><input id="ppm" type="text" inputmode="decimal" placeholder="0" /><button class="btn ghost sm" id="ppmUse" title="Use the value measured from the control channel" disabled>use measured</button></span></label>
+              <label class="field"><span class="lab">Frequency correction (ppm)</span>
+                <span class="inline"><input id="ppm" type="text" inputmode="decimal" placeholder="0" /><button class="btn ghost sm" id="ppmUse" title="Use the value measured from the control channel" disabled>use measured</button></span></label>
+              <input id="gain" type="hidden" />
+              <div id="gnRtl">
+                <div class="lab">Gain · RTL-SDR</div>
+                <div class="row2">
+                  <label class="check" style="margin:0"><input id="gnRtlAgc" type="checkbox" checked /> tuner AGC</label>
+                  <label class="field" style="margin:0"><span class="lab">Tuner gain (dB) <span class="mono faint">the R820T's real steps</span></span>
+                    <span class="inline"><input id="gnRtlGain" type="range" min="0" max="28" value="28" /><span class="mono small" id="gnRtlGainVal" style="min-width:52px">49.6</span></span></label>
+                </div>
               </div>
+              <div id="gnAirspy">
+                <div class="lab">Gain · Airspy</div>
+                <label class="check"><input id="gnAsEnabled" type="checkbox" /> Apply gain settings to this Airspy <span class="faint">(the 2016 R2 firmware this was built on hangs USB on any gain call — if streaming stops, untick and replug)</span></label>
+                <div class="row2">
+                  <label class="field"><span class="lab">Mode</span><select id="gnAsMode"><option value="agc">front-end AGC (LNA + mixer)</option><option value="linearity">linearity preset</option><option value="sensitivity">sensitivity preset</option><option value="manual">manual stages</option></select></label>
+                  <label class="field" id="gnAsPresetField"><span class="lab">Preset 0–21 <span class="mono faint">higher = more gain</span></span><span class="inline"><input id="gnAsPreset" type="range" min="0" max="21" value="12" /><span class="mono small" id="gnAsPresetVal" style="min-width:24px">12</span></span></label>
+                </div>
+                <div id="gnAsManual">
+                  <div class="row3">
+                    <label class="field"><span class="lab">LNA 0–14</span><span class="inline"><input id="gnAsLna" type="range" min="0" max="14" value="8" /><span class="mono small" id="gnAsLnaVal">8</span></span></label>
+                    <label class="field"><span class="lab">Mixer 0–15</span><span class="inline"><input id="gnAsMixer" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsMixerVal">8</span></span></label>
+                    <label class="field"><span class="lab">VGA 0–15</span><span class="inline"><input id="gnAsVga" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsVgaVal">8</span></span></label>
+                  </div>
+                  <div class="inline" style="gap:14px"><label class="check" style="margin:0"><input id="gnAsLnaAgc" type="checkbox" /> LNA AGC</label><label class="check" style="margin:0"><input id="gnAsMixerAgc" type="checkbox" /> mixer AGC</label></div>
+                </div>
+              </div>
+              <div class="inline" style="margin-top:6px"><button class="btn ghost sm" id="gnApply" title="Change the gain on the running radio now">Apply to the running radio</button><span class="mono small" id="gnMeta"></span></div>
               <div class="mono small" id="ppmMeasured">Measured on the next start: the control channel's offset, as ppm of its frequency.</div>
               <div class="inline" style="margin-top:8px"><button class="btn primary" id="dvSave">Save</button><span class="help">Saved per radio (by serial). The follower also measures and compensates tuner error on its own; ppm keeps the band centred where the band centre says.</span></div>
             </div>

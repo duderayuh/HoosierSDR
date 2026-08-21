@@ -48,6 +48,8 @@ struct AppState {
     use_channelizer: Arc<AtomicBool>,
     /// Vocoder unvoiced-synthesis quality (1–64), next start.
     uv_quality: Arc<std::sync::atomic::AtomicI32>,
+    /// Live gain handles of the radios in the current run, by picker key.
+    gain_handles: Arc<Mutex<std::collections::HashMap<String, hs_source::GainHandle>>>,
     /// Bumped per capture/follow start; a finishing run only reports
     /// 'stopped' if it is still the current one.
     run_gen: Arc<std::sync::atomic::AtomicU64>,
@@ -644,7 +646,8 @@ fn start_capture(
 
 /// Open a particular radio: `source` is "airspy" or "rtlsdr"; `device` is
 /// the Airspy serial (hex) or the Seify args that name one RTL-SDR — or
-/// `None` for the first of that kind found.
+/// `None` for the first of that kind found. `gain` is the legacy overall
+/// gain (RTL-SDR dB; `None` = AGC) used when no per-device settings exist.
 fn open_device(
     source: &str,
     device: Option<&str>,
@@ -652,24 +655,46 @@ fn open_device(
     rate: f64,
     gain: Option<f64>,
 ) -> Result<Box<dyn hs_source::SdrSource + Send>, String> {
+    open_device_with_gain(source, device, freq, rate, gain, None).map(|(s, _)| s)
+}
+
+/// As [`open_device`], applying a full gain setting and returning the
+/// handle that changes it while streaming.
+fn open_device_with_gain(
+    source: &str,
+    device: Option<&str>,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+    setting: Option<hs_source::GainSetting>,
+) -> Result<(Box<dyn hs_source::SdrSource + Send>, hs_source::GainHandle), String> {
     use hs_source::airspy::AirspySource;
     use hs_source::rtlsdr::RtlSdrSource;
+    use hs_source::GainSetting;
     Ok(match source {
         "airspy" => {
             let serial = device
                 .filter(|d| !d.is_empty())
                 .and_then(|d| u64::from_str_radix(d.trim_start_matches("0x"), 16).ok());
-            Box::new(
-                AirspySource::open(serial, freq, rate, gain)
-                    .map_err(|e| format!("open Airspy: {e:?}"))?,
-            )
+            let mut src = AirspySource::open(serial, freq, rate, None)
+                .map_err(|e| format!("open Airspy: {e:?}"))?;
+            if let Some(g) = setting.as_ref().filter(|g| !matches!(g, GainSetting::Manual(_))) {
+                src.set_gain(g).map_err(|e| format!("Airspy gain: {e:?}"))?;
+            }
+            let h = src.gain_handle();
+            (Box::new(src), h)
         }
         _ => {
             let args = device.filter(|d| !d.is_empty()).unwrap_or("driver=rtlsdr");
-            Box::new(
-                RtlSdrSource::open(args, freq, rate, gain)
-                    .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
-            )
+            let db = match setting {
+                Some(GainSetting::Manual(db)) => Some(db),
+                Some(GainSetting::Agc) => None,
+                _ => gain,
+            };
+            let src = RtlSdrSource::open(args, freq, rate, db)
+                .map_err(|e| format!("open RTL-SDR: {e:?}"))?;
+            let h = src.gain_handle();
+            (Box::new(src), h)
         }
     })
 }
@@ -768,13 +793,25 @@ fn start_follow(
                 );
                 freq = control;
             }
-            let src = open_device(&source, device.as_deref(), ppm_tune(freq, ppm), rate, gain)?;
+            let primary_setting = devices::settings_for(&app, &source, device.as_deref()).gain_setting(&source);
+            let (src, h) = open_device_with_gain(&source, device.as_deref(), ppm_tune(freq, ppm), rate, gain, primary_setting)?;
+            {
+                let st = app.state::<AppState>();
+                let mut hs = st.gain_handles.lock().unwrap();
+                hs.clear();
+                hs.insert(format!("{source}|{}", device.clone().unwrap_or_default()), h);
+            }
             // Extra radios: a failure to open one is reported, not fatal.
             let mut extras = Vec::new();
             for (i, x) in extra.clone().unwrap_or_default().into_iter().enumerate() {
                 let label = x.label.clone().unwrap_or_else(|| format!("radio {}", i + 2));
-                match open_device(&x.source, x.device.as_deref(), ppm_tune(x.center, x.ppm), x.rate, x.gain) {
-                    Ok(src) => extras.push(follow::ExtraRadio { center_hz: x.center, label, src }),
+                let setting = devices::settings_for(&app, &x.source, x.device.as_deref()).gain_setting(&x.source);
+                match open_device_with_gain(&x.source, x.device.as_deref(), ppm_tune(x.center, x.ppm), x.rate, x.gain, setting) {
+                    Ok((src, h)) => {
+                        let st = app.state::<AppState>();
+                        st.gain_handles.lock().unwrap().insert(format!("{}|{}", x.source, x.device.clone().unwrap_or_default()), h);
+                        extras.push(follow::ExtraRadio { center_hz: x.center, label, src })
+                    }
                     Err(e) => {
                         let _ = app.emit("follow", follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
                     }
@@ -1374,6 +1411,7 @@ fn main() {
             devices::devices_list,
             devices::devices_get,
             devices::devices_set,
+            devices::gain_live,
             alerts::alerts_get,
             alerts::alerts_set,
             alerts::alerts_test,

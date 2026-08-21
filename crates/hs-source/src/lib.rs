@@ -24,6 +24,50 @@ impl From<std::io::Error> for SourceError {
     }
 }
 
+/// A gain setting for a live radio, in SDRTrunk's terms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GainSetting {
+    /// Let the tuner's AGC run.
+    Agc,
+    /// Overall gain in dB (RTL-SDR: the tuner gain from its step list).
+    Manual(f64),
+    /// Airspy presets: one knob 0–21 that sets LNA/mixer/VGA together.
+    AirspyLinearity(u8),
+    AirspySensitivity(u8),
+    /// Airspy stages set by hand (LNA 0–14, mixer 0–15, VGA 0–15) with the
+    /// two front-end AGCs.
+    AirspyManual {
+        lna: u8,
+        mixer: u8,
+        vga: u8,
+        lna_agc: bool,
+        mixer_agc: bool,
+    },
+}
+
+/// A handle for changing a streaming radio's gain from another thread. The
+/// source applies the newest request from inside its own `read`, so the
+/// device is only ever touched by the thread that owns it.
+#[derive(Clone, Default)]
+pub struct GainHandle(std::sync::Arc<std::sync::Mutex<Option<GainSetting>>>);
+
+impl GainHandle {
+    pub fn request(&self, g: GainSetting) {
+        *self.0.lock().unwrap() = Some(g);
+    }
+    /// Take the pending request, if any.
+    pub fn take(&self) -> Option<GainSetting> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+/// The R820T/R828D tuner's gain steps in dB — what an RTL-SDR actually
+/// offers; a value in between is rounded to one of these by the driver.
+pub const RTL_TUNER_GAINS_DB: &[f64] = &[
+    0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7,
+    32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6,
+];
+
 /// A stream of complex baseband samples at a known rate and center frequency.
 pub trait SdrSource {
     fn sample_rate(&self) -> f64;
