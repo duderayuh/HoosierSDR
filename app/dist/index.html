@@ -77,9 +77,21 @@
           <span class="meta" id="rateMeta">2.4 MSPS</span>
         </div>
         <div class="body">
+          <div class="field">
+            <span class="lab">Mode</span>
+            <div class="seg" id="modeSeg" role="group" aria-label="Mode">
+              <button data-v="follow" aria-pressed="true">Follow site<span class="hint">control + calls</span></button>
+              <button data-v="channel" aria-pressed="false">One channel</button>
+            </div>
+          </div>
+
           <label class="field freq-field">
-            <span class="lab">Frequency <span class="mono" style="color:var(--ink-faint)">control ch</span></span>
-            <input id="freq" type="text" value="857.6625M" spellcheck="false" />
+            <span class="lab">Frequency <span class="mono" id="freqHint" style="color:var(--ink-faint)">control ch</span></span>
+            <input id="freq" type="text" value="851.5375M" spellcheck="false" />
+          </label>
+          <label class="field" id="centerField">
+            <span class="lab">Band centre <span class="mono" style="color:var(--ink-faint)">±3.84 MHz @ 10 MSPS · ±0.96 @ 2.5</span></span>
+            <input id="center" type="text" value="855M" spellcheck="false" />
           </label>
 
           <div class="row2">
@@ -105,7 +117,7 @@
             </label>
           </div>
 
-          <div class="field">
+          <div class="field" id="modField">
             <span class="lab">Modulation</span>
             <div class="seg" id="modSeg" role="group" aria-label="Modulation">
               <button data-v="c4fm" aria-pressed="false">C4FM</button>
@@ -113,7 +125,7 @@
             </div>
           </div>
 
-          <div class="field">
+          <div class="field" id="eqField">
             <span class="lab">Equalizer <span class="mono" style="color:var(--ink-faint)">pre-detection</span></span>
             <div class="seg warn" id="eqSeg" role="group" aria-label="Equalizer">
               <button data-v="bypass" aria-pressed="false">Bare</button>
@@ -130,6 +142,34 @@
           <div class="divider"></div>
           <div class="subhead"><span class="eyebrow">Catalog &amp; capture</span><span class="line"></span></div>
 
+          <div class="subhead"><span class="eyebrow">RadioReference</span><span class="line"></span></div>
+          <div class="row2">
+            <label class="field">
+              <span class="lab">Username</span>
+              <input id="rrUser" type="text" autocomplete="username" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">Password</span>
+              <input id="rrPass" type="password" autocomplete="current-password" placeholder="saved in Keychain" />
+            </label>
+          </div>
+          <div class="row2">
+            <label class="field">
+              <span class="lab">App key</span>
+              <input id="rrKey" type="password" placeholder="saved in Keychain" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">System ID <span class="mono" style="color:var(--ink-faint)">radioreference.com/db/sid/…</span></span>
+              <input id="rrSid" type="text" inputmode="numeric" placeholder="e.g. 11" spellcheck="false" />
+            </label>
+          </div>
+          <div class="actions" style="margin-top:2px">
+            <button class="btn ghost" id="rrSave">Save</button>
+            <button class="btn primary" id="rrDownload">Download system</button>
+            <span class="meta" id="rrMeta"></span>
+          </div>
+          <div id="rrSites" class="sites"></div>
+
           <label class="field">
             <span class="lab">Talkgroup catalog · RadioReference CSV</span>
             <span class="inline">
@@ -137,7 +177,20 @@
               <button class="btn ghost" id="loadcat">Load</button>
             </span>
           </label>
-          <div class="row2">
+          <div class="row2" id="followOpts">
+            <label class="field">
+              <span class="lab">Save calls to</span>
+              <input id="callsdir" type="text" placeholder="~/hoosier-calls (blank: don't save)" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lab">Audio</span>
+              <span class="inline" style="align-items:center;gap:8px">
+                <input id="play" type="checkbox" checked style="width:auto" />
+                <span class="mono" style="font-size:12px;color:var(--ink-dim)">play calls as they complete</span>
+              </span>
+            </label>
+          </div>
+          <div class="row2" id="channelOpts">
             <label class="field">
               <span class="lab">Record IQ</span>
               <input id="reciq" type="text" placeholder="run.cf32" spellcheck="false" />
@@ -162,13 +215,18 @@
     <section class="panel calls">
       <div class="head">
         <span class="eyebrow">Decoded dispatch</span>
+        <span class="meta" id="followMeta"></span>
         <button class="btn ghost" id="clear" style="font-size:12px;padding:6px 11px">Clear</button>
+      </div>
+      <div class="lockbar" id="lockbar" style="display:none">
+        <span class="eyebrow">Locked out</span>
+        <span id="lockchips"></span>
       </div>
       <div class="body">
         <div class="tablewrap">
           <table>
             <thead><tr>
-              <th>Time</th><th>Talkgroup</th><th>Source unit</th><th>Downlink</th><th>Channel</th>
+              <th>Time</th><th>Talkgroup</th><th>Source unit</th><th>Downlink</th><th>Call</th><th></th>
             </tr></thead>
             <tbody id="callBody"></tbody>
           </table>

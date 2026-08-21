@@ -14,10 +14,50 @@ use tauri::{AppHandle, Emitter, State};
 use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
+mod follow;
+mod player;
+mod rr;
+
 #[derive(Default)]
 struct AppState {
     running: Arc<AtomicBool>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
+    /// Talkgroups the listener has locked out; read by the follower live.
+    lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
+    /// The audio thread, started on first use. `Some(None)` = no device.
+    audio: Mutex<Option<Option<std::sync::mpsc::Sender<Vec<i16>>>>>,
+}
+
+impl AppState {
+    fn audio(&self) -> Option<std::sync::mpsc::Sender<Vec<i16>>> {
+        self.audio
+            .lock()
+            .unwrap()
+            .get_or_insert_with(player::spawn)
+            .clone()
+    }
+}
+
+/// Front-end diagnostics land in the terminal that launched the app, so a
+/// page that silently does nothing can say why.
+#[tauri::command]
+fn ui_log(msg: String) {
+    eprintln!("[ui] {msg}");
+}
+
+/// Replace the locked-out talkgroup set. Takes effect on the follower's next
+/// block — a call of a newly locked talkgroup already up is dropped.
+#[tauri::command]
+fn set_lockout(tgs: Vec<u16>, state: State<AppState>) {
+    *state.lockout.lock().unwrap() = tgs.into_iter().collect();
+}
+
+/// Replay a saved call through the default audio device.
+#[tauri::command]
+fn play_wav(path: String, state: State<AppState>) -> Result<(), String> {
+    let pcm = player::read_wav(&shellexpand_home(&path))?;
+    let tx = state.audio().ok_or("no audio output device")?;
+    tx.send(pcm).map_err(|_| "audio thread stopped".to_string())
 }
 
 #[derive(Serialize, Clone)]
@@ -89,8 +129,7 @@ fn start_capture(
     let catalog = state.catalog.clone();
     std::thread::spawn(move || {
         let res = capture_loop(
-            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq,
-            record_log,
+            &app, &running, &catalog, &source, freq, rate, gain, cqpsk, &eq, record_iq, record_log,
         );
         if let Err(e) = res {
             let _ = app.emit("error", e);
@@ -99,6 +138,106 @@ fn start_capture(
         let _ = app.emit("stopped", ());
     });
     Ok(())
+}
+
+/// Open the radio the UI picked. `gain` is applied to an RTL-SDR; the Airspy
+/// R2's firmware takes none (see `hs_source::airspy`).
+fn open_source(
+    source: &str,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+) -> Result<Box<dyn hs_source::SdrSource + Send>, String> {
+    use hs_source::airspy::AirspySource;
+    use hs_source::rtlsdr::RtlSdrSource;
+    Ok(match source {
+        "airspy" => Box::new(
+            AirspySource::open(None, freq, rate, gain)
+                .map_err(|e| format!("open Airspy: {e:?}"))?,
+        ),
+        _ => Box::new(
+            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
+                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
+        ),
+    })
+}
+
+/// Follow a trunked site live: `freq` is the band centre the radio tunes to,
+/// `control` the control channel inside it. Emits `follow` events
+/// (`{kind: measured|call_start|call|notice|status|spectrum, ...}`), then
+/// `stopped`, or `error`. Completed calls are played as they finish when
+/// `play` is set, and written to `calls_dir` when given.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn start_follow(
+    app: AppHandle,
+    state: State<AppState>,
+    source: String,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+    control: f64,
+    calls_dir: Option<String>,
+    play: bool,
+) -> Result<(), String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("already running".into());
+    }
+    let running = state.running.clone();
+    let catalog = state.catalog.clone();
+    let lockout = state.lockout.clone();
+    let audio = if play { state.audio() } else { None };
+    std::thread::spawn(move || {
+        let res = (|| -> Result<(), String> {
+            let src = open_source(&source, freq, rate, gain)?;
+            let calls_dir = match calls_dir.filter(|d| !d.trim().is_empty()) {
+                Some(d) => {
+                    let d = std::path::PathBuf::from(shellexpand_home(&d));
+                    std::fs::create_dir_all(&d)
+                        .map_err(|e| format!("calls dir {}: {e}", d.display()))?;
+                    Some(d)
+                }
+                None => None,
+            };
+            let params = follow::FollowParams {
+                center_hz: freq,
+                control_hz: control,
+                calls_dir,
+            };
+            let player = if play { audio } else { None };
+            if play && player.is_none() {
+                let _ = app.emit(
+                    "follow",
+                    follow::FollowEvent::Notice {
+                        text: "no audio output device — calls are not being played".into(),
+                    },
+                );
+            }
+            let cat = catalog.lock().unwrap().clone();
+            follow::run(src, &params, cat.as_ref(), &lockout, &running, &mut |ev| {
+                if let (Some(pl), follow::FollowEvent::Call { pcm, .. }) = (player.as_ref(), &ev) {
+                    if !pcm.is_empty() {
+                        let _ = pl.send(pcm.clone());
+                    }
+                }
+                let _ = app.emit("follow", ev);
+            })
+        })();
+        if let Err(e) = res {
+            let _ = app.emit("error", e);
+        }
+        running.store(false, Ordering::SeqCst);
+        let _ = app.emit("stopped", ());
+    });
+    Ok(())
+}
+
+/// `~/x` → `$HOME/x`.
+fn shellexpand_home(p: &str) -> String {
+    match (p.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+        _ => p.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -116,20 +255,9 @@ fn capture_loop(
     record_log: Option<String>,
 ) -> Result<(), String> {
     use hs_core::stream::{Buffered, Normalized};
-    use hs_source::airspy::AirspySource;
-    use hs_source::rtlsdr::RtlSdrSource;
     use hs_source::SdrSource;
 
-    let raw: Box<dyn SdrSource + Send> = match source {
-        "airspy" => Box::new(
-            AirspySource::open(None, freq, rate, gain)
-                .map_err(|e| format!("open Airspy: {e:?}"))?,
-        ),
-        _ => Box::new(
-            RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
-                .map_err(|e| format!("open RTL-SDR: {e:?}"))?,
-        ),
-    };
+    let raw = open_source(source, freq, rate, gain)?;
     // Normalize an Airspy's 2.5/10 MSPS to 2.4/9.6 on the fly, and drain the
     // radio on its own thread so a busy UI frame never costs samples.
     let mut src = Buffered::new(Normalized::new(raw), 65536);
@@ -320,11 +448,27 @@ fn power_spectrum(block: &[f32], n: usize) -> Vec<f32> {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            // A talkgroup catalog downloaded earlier is loaded on start.
+            use tauri::Manager;
+            let state = app.state::<AppState>();
+            if let Some(cat) = rr::saved_catalog(app.handle()) {
+                *state.catalog.lock().unwrap() = Some(cat);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_catalog,
             start_capture,
             stop_capture,
-            decode_file
+            decode_file,
+            start_follow,
+            set_lockout,
+            play_wav,
+            ui_log,
+            rr::rr_settings,
+            rr::rr_save,
+            rr::rr_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

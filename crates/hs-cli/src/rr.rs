@@ -104,35 +104,6 @@ fn report(sys: &RrSystem) {
 /// Write talkgroups in the RadioReference CSV export format, which
 /// `hs_catalog::CsvCatalog` already parses.
 fn write_talkgroup_csv(sys: &RrSystem, path: &str) -> std::io::Result<usize> {
-    use std::io::Write;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(
-        f,
-        "Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority"
-    )?;
-    for tg in &sys.talkgroups {
-        writeln!(
-            f,
-            "{},{:X},{},{},{},{},{},",
-            tg.id,
-            tg.id,
-            csv_field(tg.alias.as_deref()),
-            if tg.encrypted { "DE" } else { "D" },
-            csv_field(tg.description.as_deref()),
-            csv_field(tg.category.as_deref()),
-            csv_field(tg.category.as_deref()),
-        )?;
-    }
-    f.flush()?;
+    std::fs::write(path, sys.talkgroup_csv())?;
     Ok(sys.talkgroups.len())
-}
-
-/// Quote a field that contains a comma or quote, per the CSV the parser reads.
-fn csv_field(v: Option<&str>) -> String {
-    let v = v.unwrap_or("");
-    if v.contains(',') || v.contains('"') {
-        format!("\"{}\"", v.replace('"', "\"\""))
-    } else {
-        v.to_string()
-    }
 }

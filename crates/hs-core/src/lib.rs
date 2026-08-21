@@ -8,6 +8,7 @@ pub mod diag;
 pub mod follow;
 pub mod scan;
 pub mod stream;
+pub mod wav;
 
 pub use hs_catalog as catalog;
 pub use hs_dsp as dsp;

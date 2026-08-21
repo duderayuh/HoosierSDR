@@ -16,6 +16,20 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 hs-core = { path = "../crates/hs-core" }
 hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy"] }
-hs-catalog = { path = "../crates/hs-catalog" }
+hs-catalog = { path = "../crates/hs-catalog", features = ["radioreference"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+cpal = "0.15"
+
+# `cargo tauri dev` builds the dev profile. Unoptimized, the decode stack is
+# ~50x too slow for a 10 MSPS site follow — the UI starved and showed nothing,
+# which read as "the app doesn't work". Optimize dev builds; debug assertions
+# stay on.
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
