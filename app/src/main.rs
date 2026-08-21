@@ -294,12 +294,25 @@ struct SpectrumMsg {
 /// Load a RadioReference talkgroup CSV from a file path; returns the number
 /// of talkgroups parsed.
 #[tauri::command]
-fn load_catalog(path: String, state: State<AppState>) -> Result<usize, String> {
+fn load_catalog(app: AppHandle, path: String, state: State<AppState>) -> Result<usize, String> {
+    let path = shellexpand_home(&path);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let cat = CsvCatalog::parse(&text);
-    let n = cat.len();
-    *state.catalog.lock().unwrap() = Some(cat);
-    Ok(n)
+    let n = CsvCatalog::parse(&text).len();
+    if n == 0 {
+        return Err("no talkgroups found in that CSV (expected RadioReference export columns)".into());
+    }
+    // Keep a copy so it is merged in on every start.
+    if let Ok(d) = rr::catalogs_dir(&app) {
+        let stem = std::path::Path::new(&path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "import".into());
+        let _ = std::fs::write(d.join(format!("csv_{stem}.csv")), &text);
+    }
+    let merged = rr::merged_catalog(&app);
+    let total = merged.as_ref().map_or(n, |c| c.len());
+    *state.catalog.lock().unwrap() = merged;
+    Ok(total)
 }
 
 /// Stop an in-progress live capture.
@@ -448,7 +461,6 @@ fn start_follow(
                     },
                 );
             }
-            let cat = catalog.lock().unwrap().clone();
             let db_guard = db.lock().unwrap();
             let live = follow::Live {
                 lockout: &lockout,
@@ -459,7 +471,7 @@ fn start_follow(
                 db: db_guard.as_ref(),
                 spectrum: Some(&spectrum),
             };
-            follow::run(src, &params, cat.as_ref(), &live, &running, &mut |ev| {
+            follow::run(src, &params, &catalog, &live, &running, &mut |ev| {
                 if let follow::FollowEvent::Call { pcm, priority, .. } = &ev {
                     if !pcm.is_empty() {
                         if let Some(st) = streamer.lock().unwrap().as_ref() {
@@ -818,6 +830,8 @@ fn main() {
             rr::rr_settings,
             rr::rr_save,
             rr::rr_download,
+            rr::catalogs_list,
+            rr::catalog_remove,
             rr::rr_states,
             rr::rr_state,
             rr::rr_county,

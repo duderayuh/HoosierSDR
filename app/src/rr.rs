@@ -101,8 +101,74 @@ fn prefs_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(config_dir(app)?.join("radioreference.json"))
 }
 
-fn catalog_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(config_dir(app)?.join("talkgroups.csv"))
+/// One CSV per source under `catalogs/`; all are merged into the live
+/// catalog, so several systems can be named at once.
+pub fn catalogs_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let d = config_dir(app)?.join("catalogs");
+    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    Ok(d)
+}
+
+/// Merge every saved catalog file (and the legacy single file, if present).
+pub fn merged_catalog(app: &AppHandle) -> Option<CsvCatalog> {
+    let mut cat = CsvCatalog::default();
+    if let Ok(d) = catalogs_dir(app) {
+        let mut files: Vec<_> = std::fs::read_dir(&d)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "csv"))
+            .collect();
+        files.sort();
+        for f in files {
+            if let Ok(t) = std::fs::read_to_string(&f) {
+                cat.merge(&CsvCatalog::parse(&t));
+            }
+        }
+    }
+    if let Ok(legacy) = config_dir(app).map(|d| d.join("talkgroups.csv")) {
+        if let Ok(t) = std::fs::read_to_string(legacy) {
+            cat.merge(&CsvCatalog::parse(&t));
+        }
+    }
+    (!cat.is_empty()).then_some(cat)
+}
+
+/// Saved catalog sources, for the UI.
+#[derive(Serialize)]
+pub struct CatalogFile {
+    name: String,
+    talkgroups: usize,
+}
+
+#[tauri::command]
+pub fn catalogs_list(app: AppHandle) -> Vec<CatalogFile> {
+    let Ok(d) = catalogs_dir(&app) else { return vec![] };
+    let mut v: Vec<CatalogFile> = std::fs::read_dir(d)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "csv"))
+        .filter_map(|e| {
+            let t = std::fs::read_to_string(e.path()).ok()?;
+            Some(CatalogFile {
+                name: e.file_name().to_string_lossy().trim_end_matches(".csv").to_string(),
+                talkgroups: CsvCatalog::parse(&t).len(),
+            })
+        })
+        .collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+#[tauri::command]
+pub fn catalog_remove(app: AppHandle, state: State<AppState>, name: String) -> Result<usize, String> {
+    let p = catalogs_dir(&app)?.join(format!("{}.csv", name.replace(['/', '\\'], "_")));
+    std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let cat = merged_catalog(&app);
+    let n = cat.as_ref().map_or(0, |c| c.len());
+    *state.catalog.lock().unwrap() = cat;
+    Ok(n)
 }
 
 fn load_prefs(app: &AppHandle) -> Prefs {
@@ -130,11 +196,9 @@ fn get_secret(user: &str) -> Option<String> {
     secret(user).ok()?.get_password().ok()
 }
 
-/// The catalog downloaded on a previous run, if any.
+/// The catalogs saved on previous runs, merged.
 pub fn saved_catalog(app: &AppHandle) -> Option<CsvCatalog> {
-    let text = std::fs::read_to_string(catalog_path(app).ok()?).ok()?;
-    let cat = CsvCatalog::parse(&text);
-    (!cat.is_empty()).then_some(cat)
+    merged_catalog(app)
 }
 
 #[derive(Serialize)]
@@ -236,15 +300,18 @@ pub struct RrDownload {
 pub fn rr_download(app: AppHandle, state: State<AppState>, sid: u32) -> Result<RrDownload, String> {
     let mut p = load_prefs(&app);
     let client = client(&app)?;
-    let sys = client.system(sid).map_err(|e| e.to_string())?;
+    let sys = client.system(sid).map_err(|e| {
+        eprintln!("[rr] download {sid} failed: {e}");
+        e.to_string()
+    })?;
 
     let csv = sys.talkgroup_csv();
-    let cat = CsvCatalog::parse(&csv);
-    let n = cat.len();
-    if let Ok(path) = catalog_path(&app) {
-        let _ = std::fs::write(path, &csv);
+    let n = CsvCatalog::parse(&csv).len();
+    // Saved per system and merged with whatever else is loaded.
+    if let Ok(d) = catalogs_dir(&app) {
+        let _ = std::fs::write(d.join(format!("rr_{sid}.csv")), &csv);
     }
-    *state.catalog.lock().unwrap() = Some(cat);
+    *state.catalog.lock().unwrap() = merged_catalog(&app);
 
     p.sid = Some(sid);
     p.system_name = sys.name.clone();
