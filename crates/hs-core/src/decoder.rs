@@ -477,6 +477,14 @@ impl ChannelDecoder {
                     let pcm = self.vocoder.decode(frame);
                     self.diag.voice_frames += 1;
                     self.diag.pcm_samples += pcm.len() as u64;
+                    let errs = self.vocoder.last_errs.max(0) as u32;
+                    self.diag.voice_frame_errors += errs as u64;
+                    if errs > 5 {
+                        self.diag.voice_frames_holding += 1;
+                    }
+                    if errs > self.diag.voice_error_max {
+                        self.diag.voice_error_max = errs;
+                    }
                     out.pcm.extend_from_slice(&pcm);
                 }
             }
