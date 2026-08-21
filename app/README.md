@@ -65,3 +65,5 @@ set and enable `bundle.active` in `tauri.conf.json`.
 Decodes unencrypted P25 only; encrypted talkgroups are detected and skipped by
 design. Indiana users: run at your dwelling or place of business (IC
 35-44.1-2-7). See the repository root README.
+
+**Front-end load check:** `cd app && npm i --no-save jsdom@24 && node scripts/pagecheck.js` boots `dist/` under jsdom with a fake Tauri bridge and fails on any load-time JavaScript error (which otherwise shows up as an app with every list empty).
