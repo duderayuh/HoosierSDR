@@ -44,21 +44,64 @@ pub enum TrunkState {
     Following,
 }
 
+/// A neighbouring site announced by Adjacent Status Broadcast (0x3C): where a
+/// radio — or a scanner — could go next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neighbour {
+    pub sys_id: u16,
+    pub rfss: u8,
+    pub site: u8,
+    /// Its control channel, in raw channel form (resolve through the plans).
+    pub channel: u16,
+}
+
 /// Site trunking model: holds the channel plan and resolves grants to
 /// tunable downlink frequencies.
 #[derive(Default, Clone)]
 pub struct SiteModel {
     pub state: TrunkState,
     pub system: Option<SystemId>,
+    /// This site's RFSS and site numbers, from RFSS Status Broadcast.
+    pub rfss: Option<u8>,
+    pub site: Option<u8>,
     idens: HashMap<u8, IdenPlan>,
     /// Alternate control channels announced by SCCB (opcode 0x39), in raw
     /// channel form so they resolve against whichever IDEN plan applies.
     secondary_ccs: Vec<u16>,
+    /// Neighbouring sites, in first-heard order.
+    neighbours: Vec<Neighbour>,
 }
 
 impl SiteModel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record this site's identity from an RFSS Status Broadcast.
+    pub fn set_rfss_site(&mut self, rfss: u8, site: u8) {
+        self.rfss = Some(rfss);
+        self.site = Some(site);
+    }
+
+    /// Record a neighbouring site; repeats update the channel in place.
+    pub fn add_neighbour(&mut self, n: Neighbour) {
+        match self
+            .neighbours
+            .iter_mut()
+            .find(|x| x.sys_id == n.sys_id && x.rfss == n.rfss && x.site == n.site)
+        {
+            Some(x) => *x = n,
+            None => self.neighbours.push(n),
+        }
+    }
+
+    /// Neighbouring sites with their control channels resolved to Hz where
+    /// the plan is known (`None` until it is).
+    pub fn neighbours(&self) -> Vec<(Neighbour, Option<u64>)> {
+        self.neighbours
+            .iter()
+            .map(|n| (*n, self.channel_to_freq(n.channel)))
+            .collect()
     }
 
     pub fn set_iden(&mut self, id: u8, plan: IdenPlan) {
@@ -302,5 +345,180 @@ mod patch_tests {
             p.add(957, 10204);
         }
         assert_eq!(p.patches()[0].1, vec![10204]);
+    }
+}
+
+/// What the control channel has said about where radios are.
+///
+/// Affiliation and registration messages are the system's own roster: which
+/// radio joined which talkgroup, who registered and who left. A scanner that
+/// keeps them can answer "who is on this talkgroup right now" without a
+/// single word of voice. Entries are bounded because radios churn all day on
+/// a busy site and the table would otherwise grow without limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobilityEvent {
+    /// A radio affiliated to a talkgroup (or was refused when `accepted` is
+    /// false).
+    Affiliated { unit: u32, group: u16, accepted: bool },
+    /// A radio registered on the system (`status` 0 = accepted).
+    Registered { unit: u32, status: u8 },
+    /// A radio registered its location for a talkgroup.
+    Located { unit: u32, group: u16 },
+    /// A radio de-registered (left the system).
+    Deregistered { unit: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affiliation {
+    pub unit: u32,
+    /// Talkgroup the radio most recently affiliated to, if known.
+    pub group: Option<u16>,
+    /// Whether the radio is known to be registered on this system.
+    pub registered: bool,
+    /// When it was last heard from, in the caller's clock (seconds).
+    pub last_seen_secs: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AffiliationTable {
+    rows: Vec<Affiliation>,
+}
+
+/// Most radios remembered at once; the quietest is forgotten first.
+pub const AFFILIATION_CAP: usize = 4096;
+
+impl AffiliationTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn row(&mut self, unit: u32, now: f64) -> &mut Affiliation {
+        if let Some(i) = self.rows.iter().position(|r| r.unit == unit) {
+            self.rows[i].last_seen_secs = now;
+            return &mut self.rows[i];
+        }
+        if self.rows.len() >= AFFILIATION_CAP {
+            let oldest = self
+                .rows
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.last_seen_secs.total_cmp(&b.1.last_seen_secs))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.rows.swap_remove(oldest);
+        }
+        self.rows.push(Affiliation {
+            unit,
+            group: None,
+            registered: false,
+            last_seen_secs: now,
+        });
+        self.rows.last_mut().unwrap()
+    }
+
+    /// Apply one mobility message heard at `now` seconds.
+    pub fn observe(&mut self, ev: MobilityEvent, now: f64) {
+        match ev {
+            MobilityEvent::Affiliated {
+                unit,
+                group,
+                accepted,
+            } => {
+                let r = self.row(unit, now);
+                if accepted {
+                    r.group = Some(group);
+                }
+            }
+            MobilityEvent::Registered { unit, status } => {
+                let r = self.row(unit, now);
+                r.registered = status == 0;
+            }
+            MobilityEvent::Located { unit, group } => {
+                let r = self.row(unit, now);
+                r.group = Some(group);
+                r.registered = true;
+            }
+            MobilityEvent::Deregistered { unit } => {
+                self.rows.retain(|r| r.unit != unit);
+            }
+        }
+    }
+
+    /// Every radio heard from, most recent first.
+    pub fn rows(&self) -> Vec<Affiliation> {
+        let mut v = self.rows.clone();
+        v.sort_by(|a, b| b.last_seen_secs.total_cmp(&a.last_seen_secs));
+        v
+    }
+
+    /// Radios affiliated to a talkgroup.
+    pub fn members(&self, group: u16) -> Vec<u32> {
+        self.rows
+            .iter()
+            .filter(|r| r.group == Some(group))
+            .map(|r| r.unit)
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod affiliation_tests {
+    use super::*;
+
+    #[test]
+    fn tracks_joins_registrations_and_departures() {
+        let mut t = AffiliationTable::new();
+        t.observe(
+            MobilityEvent::Registered {
+                unit: 790065,
+                status: 0,
+            },
+            1.0,
+        );
+        t.observe(
+            MobilityEvent::Affiliated {
+                unit: 790065,
+                group: 20308,
+                accepted: true,
+            },
+            2.0,
+        );
+        // A refused affiliation is heard but does not move the radio.
+        t.observe(
+            MobilityEvent::Affiliated {
+                unit: 790065,
+                group: 1,
+                accepted: false,
+            },
+            3.0,
+        );
+        assert_eq!(t.members(20308), vec![790065]);
+        let r = t.rows()[0];
+        assert!(r.registered && r.group == Some(20308) && r.last_seen_secs == 3.0);
+        t.observe(MobilityEvent::Deregistered { unit: 790065 }, 4.0);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn the_table_is_bounded_and_forgets_the_quietest() {
+        let mut t = AffiliationTable::new();
+        for u in 0..(AFFILIATION_CAP as u32 + 10) {
+            t.observe(
+                MobilityEvent::Registered { unit: u, status: 0 },
+                u as f64,
+            );
+        }
+        assert_eq!(t.len(), AFFILIATION_CAP);
+        assert!(t.members(0).is_empty());
+        // The ten oldest are gone; the newest remain.
+        assert!(t.rows().iter().all(|r| r.unit >= 10));
     }
 }

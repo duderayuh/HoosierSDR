@@ -55,6 +55,50 @@ pub enum Tsbk {
         channel_b: u16,
         class_b: u8,
     },
+    /// 0x3C — Adjacent Status Broadcast: a neighbouring site of the same
+    /// system, with the channel its control channel sits on. Same layout as
+    /// RFSS Status Broadcast, describing another site instead of this one.
+    AdjacentStatus {
+        sys_id: u16,
+        rfss: u8,
+        site: u8,
+        channel: u16,
+        service_class: u8,
+    },
+    /// 0x28 — Group Affiliation Response: the site telling a radio which
+    /// talkgroup it now belongs to (or refusing). `accepted` is the GAV field
+    /// being zero ("affiliation accepted").
+    GroupAffiliationResponse {
+        accepted: bool,
+        /// Announcement group the talkgroup is a member of.
+        announcement_group: u16,
+        group: u16,
+        target: u32,
+    },
+    /// 0x2C — Unit Registration Response: a radio has registered on this
+    /// system (or was refused / told to go elsewhere).
+    UnitRegistrationResponse {
+        /// RV field: 0 accepted, 1 fail, 2 denied, 3 refused.
+        status: u8,
+        sys_id: u16,
+        source_id: u32,
+        source_address: u32,
+    },
+    /// 0x2B — Location Registration Response: a radio registered its
+    /// location on this RFSS/site for a talkgroup.
+    LocationRegistrationResponse {
+        status: u8,
+        group: u16,
+        rfss: u8,
+        site: u8,
+        target: u32,
+    },
+    /// 0x2F — De-Registration Acknowledge: a radio has left the system.
+    DeregistrationAck {
+        wacn: u32,
+        sys_id: u16,
+        source_id: u32,
+    },
     /// A Motorola Group Regroup (talkgroup patch) message.
     MotoRegroup(crate::moto::MotoRegroup),
     /// A manufacturer-specific block. The opcode space belongs to the vendor,
@@ -141,10 +185,15 @@ pub fn parse(bits96: &[u8]) -> Option<TsbkBlock> {
                 base_freq_hz: base,
             }
         }
+        // LRA(8) | WACN(20) | SysID(12) | Channel(16) | Service class(8).
+        // An earlier split read WACN from bits 43..24 and reported the
+        // Marion County control channel as WACN 0x262, system 5; the real
+        // values — WACN 0xBEE00, system 0x262 — fell out once the fields
+        // were placed where the standard puts them.
         0x3B => Tsbk::NetworkStatus {
-            wacn: ((args >> 24) & 0xF_FFFF) as u32,
-            sys_id: ((args >> 12) & 0xFFF) as u16,
-            channel: ((args) & 0xFFF) as u16,
+            wacn: ((args >> 36) & 0xF_FFFF) as u32,
+            sys_id: ((args >> 24) & 0xFFF) as u16,
+            channel: ((args >> 8) & 0xFFFF) as u16,
         },
         0x39 => Tsbk::SecondaryControl {
             rfss: (args >> 56) as u8,
@@ -158,6 +207,42 @@ pub fn parse(bits96: &[u8]) -> Option<TsbkBlock> {
             rfss: ((args >> 32) & 0xFF) as u8,
             site: ((args >> 24) & 0xFF) as u8,
             channel: ((args >> 8) & 0xFFFF) as u16,
+        },
+        // LRA(8) | reserved(4) SysID(12) | RFSS(8) | Site(8) | Channel(16) | class(8)
+        0x3C => Tsbk::AdjacentStatus {
+            sys_id: ((args >> 40) & 0xFFF) as u16,
+            rfss: ((args >> 32) & 0xFF) as u8,
+            site: ((args >> 24) & 0xFF) as u8,
+            channel: ((args >> 8) & 0xFFFF) as u16,
+            service_class: (args & 0xFF) as u8,
+        },
+        // LG(1) GAV(2) reserved(5) | Announcement Group(16) | Group(16) | Target(24)
+        0x28 => Tsbk::GroupAffiliationResponse {
+            accepted: (args >> 61) & 0x3 == 0,
+            announcement_group: ((args >> 40) & 0xFFFF) as u16,
+            group: ((args >> 24) & 0xFFFF) as u16,
+            target: (args & 0xFF_FFFF) as u32,
+        },
+        // reserved(2) RV(2) SysID(12) | Source ID(24) | Source Address(24)
+        0x2C => Tsbk::UnitRegistrationResponse {
+            status: ((args >> 60) & 0x3) as u8,
+            sys_id: ((args >> 48) & 0xFFF) as u16,
+            source_id: ((args >> 24) & 0xFF_FFFF) as u32,
+            source_address: (args & 0xFF_FFFF) as u32,
+        },
+        // reserved(6) RV(2) | Group(16) | RFSS(8) | Site(8) | Target(24)
+        0x2B => Tsbk::LocationRegistrationResponse {
+            status: ((args >> 56) & 0x3) as u8,
+            group: ((args >> 40) & 0xFFFF) as u16,
+            rfss: ((args >> 32) & 0xFF) as u8,
+            site: ((args >> 24) & 0xFF) as u8,
+            target: (args & 0xFF_FFFF) as u32,
+        },
+        // reserved(8) | WACN(20) | SysID(12) | Source ID(24)
+        0x2F => Tsbk::DeregistrationAck {
+            wacn: ((args >> 36) & 0xF_FFFF) as u32,
+            sys_id: ((args >> 24) & 0xFFF) as u16,
+            source_id: (args & 0xFF_FFFF) as u32,
         },
         _ => Tsbk::Unknown { opcode, mfid, args },
     };
@@ -265,6 +350,90 @@ mod tests {
                 class_a: 0x70,
                 channel_b: 0,
                 class_b: 0,
+            }
+        );
+    }
+
+    /// The mobility messages a scanner turns into an affiliation view: each
+    /// field lands where TIA-102.AABC puts it.
+    #[test]
+    fn affiliation_and_registration_roundtrips() {
+        // Group Affiliation Response: accepted (GAV 0), announcement group
+        // 0x0101, group 0x2F93, target 0xBEEF1.
+        let args = (0x0101u64 << 40) | (0x2F93u64 << 24) | 0xBEEF1;
+        assert_eq!(
+            parse(&build(true, 0x28, 0, args)).unwrap().tsbk,
+            Tsbk::GroupAffiliationResponse {
+                accepted: true,
+                announcement_group: 0x0101,
+                group: 0x2F93,
+                target: 0xBEEF1,
+            }
+        );
+        // GAV = 2 (denied) sets bits 62..61.
+        assert!(matches!(
+            parse(&build(true, 0x28, 0, args | (2u64 << 61))).unwrap().tsbk,
+            Tsbk::GroupAffiliationResponse { accepted: false, .. }
+        ));
+        // Unit Registration Response: RV 0, system 0x6BD, source id and
+        // address both 0xBEEF1.
+        let args = (0x6BDu64 << 48) | (0xBEEF1u64 << 24) | 0xBEEF1;
+        assert_eq!(
+            parse(&build(true, 0x2C, 0, args)).unwrap().tsbk,
+            Tsbk::UnitRegistrationResponse {
+                status: 0,
+                sys_id: 0x6BD,
+                source_id: 0xBEEF1,
+                source_address: 0xBEEF1,
+            }
+        );
+        // Location Registration Response: RV 1, group 0x2F93, RFSS 1 site 5.
+        let args = (1u64 << 56) | (0x2F93u64 << 40) | (1u64 << 32) | (5u64 << 24) | 0xBEEF1;
+        assert_eq!(
+            parse(&build(true, 0x2B, 0, args)).unwrap().tsbk,
+            Tsbk::LocationRegistrationResponse {
+                status: 1,
+                group: 0x2F93,
+                rfss: 1,
+                site: 5,
+                target: 0xBEEF1,
+            }
+        );
+        // De-Registration Acknowledge: WACN 0xBEE00, system 0x6BD.
+        let args = (0xBEE00u64 << 36) | (0x6BDu64 << 24) | 0xBEEF1;
+        assert_eq!(
+            parse(&build(true, 0x2F, 0, args)).unwrap().tsbk,
+            Tsbk::DeregistrationAck {
+                wacn: 0xBEE00,
+                sys_id: 0x6BD,
+                source_id: 0xBEEF1,
+            }
+        );
+        // Adjacent Status Broadcast: system 0x6BD, RFSS 1, site 7, channel
+        // 0x100A, service class 0x70.
+        let args = (0x6BDu64 << 40) | (1u64 << 32) | (7u64 << 24) | (0x100Au64 << 8) | 0x70;
+        assert_eq!(
+            parse(&build(true, 0x3C, 0, args)).unwrap().tsbk,
+            Tsbk::AdjacentStatus {
+                sys_id: 0x6BD,
+                rfss: 1,
+                site: 7,
+                channel: 0x100A,
+                service_class: 0x70,
+            }
+        );
+    }
+
+    #[test]
+    fn network_status_roundtrip() {
+        // WACN 0xBEE00, system 0x262, channel 0x100A, class 0x70.
+        let args = (0xBEE00u64 << 36) | (0x262u64 << 24) | (0x100Au64 << 8) | 0x70;
+        assert_eq!(
+            parse(&build(true, 0x3B, 0, args)).unwrap().tsbk,
+            Tsbk::NetworkStatus {
+                wacn: 0xBEE00,
+                sys_id: 0x262,
+                channel: 0x100A,
             }
         );
     }

@@ -14,6 +14,7 @@ pub mod nid;
 pub mod pdu;
 pub mod soft;
 pub mod synth;
+pub mod talker_alias;
 pub mod trellis;
 pub mod tsbk;
 pub mod voice;

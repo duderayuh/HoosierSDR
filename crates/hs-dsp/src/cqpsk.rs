@@ -419,6 +419,12 @@ impl CqpskReceiver {
         self.acquired
     }
 
+    /// The most recent equalized symbol (the point a constellation display
+    /// plots), once one has been decided.
+    pub fn last_symbol(&self) -> Option<C32> {
+        self.prev_sym
+    }
+
     /// Restart blind acquisition — call after a prolonged loss of sync, when
     /// the tracked bias may have walked onto a neighbouring quarter turn.
     pub fn reacquire(&mut self) {
