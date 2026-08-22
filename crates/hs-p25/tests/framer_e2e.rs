@@ -87,12 +87,7 @@ fn ldu1_voice_frames_roundtrip_through_framer() {
         {
             assert_eq!(nac, 0x293);
             assert_eq!(algid, None);
-            // The framer now emits soft frames; a hard (CERTAIN) push must
-            // reproduce the exact frame bits (the punctured positions carry
-            // conf 0, which is the soft decoder's "no information" marker).
-            for (f, want) in imbe.iter().zip(frames.iter()) {
-                assert_eq!(f.bits, *want, "frame bits must round-trip");
-            }
+            assert_eq!(*imbe, frames);
             saw = true;
         }
     }

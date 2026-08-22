@@ -5,13 +5,10 @@
 //! (every 70 bits) counted from the start of the frame sync; the FSW itself
 //! (24 dibits) is never interrupted.
 
-use crate::imbec::SoftImbeFrame;
 use crate::nid::{Nid, NidCodec};
 use crate::soft::{SoftDibit, CERTAIN};
 use crate::tsbk::{self, TsbkBlock};
-use crate::voice::{
-    ldu2_algid_raw, soft_extract_imbe_frames, LDU_PAYLOAD_BITS,
-};
+use crate::voice::{extract_imbe_frames, ldu2_algid_raw, ImbeFrame, LDU_PAYLOAD_BITS};
 use crate::{Duid, FRAME_SYNC, FRAME_SYNC_BITS};
 
 /// Max bit errors tolerated in the 48-bit sync correlation.
@@ -53,7 +50,7 @@ pub enum FramerEvent {
     Ldu {
         nac: u16,
         duid: Duid,
-        imbe: Box<[SoftImbeFrame; 9]>,
+        imbe: Box<[ImbeFrame; 9]>,
         /// Raw ALGID from LDU2 encryption sync (None for LDU1).
         algid: Option<u8>,
     },
@@ -241,7 +238,7 @@ impl Framer {
                                 events.push(FramerEvent::LinkControl { nac: nid.nac, lcw });
                             }
                         }
-                        if let Some(frames) = soft_extract_imbe_frames(&self.buf) {
+                        if let Some(frames) = extract_imbe_frames(&bits) {
                             let algid = if nid.duid == Duid::LogicalLinkDataUnit2 {
                                 ldu2_algid_raw(&bits)
                             } else {

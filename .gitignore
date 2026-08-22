@@ -21,7 +21,3 @@ rr-dump/
 
 # RadioReference app key for local builds — never commit (see app/build.rs)
 app/.rr_app_key
-
-# capture artifacts (large, transient)
-/captures/
-*.cu8

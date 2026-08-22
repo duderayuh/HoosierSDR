@@ -6,8 +6,6 @@
 //! license, Copyright (C) 2010 DSD Author — see NOTICE).
 
 use crate::bits::read_bits;
-use crate::imbec::SoftImbeFrame;
-use crate::soft::SoftDibit;
 
 /// IMBE interleave schedule: transmitted dibit i places its MSB at
 /// frame[IW[i]][IX[i]] and LSB at frame[IY[i]][IZ[i]].
@@ -81,34 +79,6 @@ pub fn extract_imbe_frames(payload_bits: &[u8]) -> Option<[ImbeFrame; 9]> {
     let mut out = [[[0u8; 23]; 8]; 9];
     for (k, &off) in IMBE_OFFSETS.iter().enumerate() {
         out[k] = deinterleave_imbe(&payload_bits[off..off + 144]);
-    }
-    Some(out)
-}
-
-/// De-interleave 72 soft dibits into a soft 8×23 frame, carrying per-bit
-/// confidence through the exact schedule [`deinterleave_imbe`] uses.
-pub fn soft_deinterleave_imbe(dibits: &[SoftDibit]) -> SoftImbeFrame {
-    assert_eq!(dibits.len(), 72);
-    let mut fr = SoftImbeFrame::default();
-    for (i, d) in dibits.iter().enumerate() {
-        fr.bits[IW[i]][IX[i]] = d.msb();
-        fr.conf[IW[i]][IX[i]] = d.conf[0];
-        fr.bits[IY[i]][IZ[i]] = d.lsb();
-        fr.conf[IY[i]][IZ[i]] = d.conf[1];
-    }
-    fr
-}
-
-/// Extract the nine soft (bit + confidence) IMBE frames from an LDU payload
-/// of soft dibits (status symbols already removed). The offset table is in bit
-/// positions, so each frame is the 72 dibits at `IMBE_OFFSETS[k] / 2`.
-pub fn soft_extract_imbe_frames(payload_dibits: &[SoftDibit]) -> Option<[SoftImbeFrame; 9]> {
-    if payload_dibits.len() < LDU_PAYLOAD_BITS / 2 {
-        return None;
-    }
-    let mut out = [SoftImbeFrame::default(); 9];
-    for (k, &off) in IMBE_OFFSETS.iter().enumerate() {
-        out[k] = soft_deinterleave_imbe(&payload_dibits[off / 2..off / 2 + 72]);
     }
     Some(out)
 }
