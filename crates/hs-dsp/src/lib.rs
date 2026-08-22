@@ -12,6 +12,7 @@ pub mod channelizer;
 pub mod costas;
 pub mod cqpsk;
 pub mod decimate;
+pub mod diversity;
 pub mod equalizer;
 pub mod fft;
 pub mod fir;
