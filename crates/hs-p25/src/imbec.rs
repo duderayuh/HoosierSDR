@@ -94,9 +94,9 @@ fn soft_dist(cw: u32, bits: &[u8; 23], conf: &[u8; 23]) -> u32 {
     d
 }
 
-/// Soft-decision Golay(23,12). Returns the 12 data bits and the hard Hamming
-/// distance between the chosen codeword and the received hard decision (the
-/// same "corrected errors" mbelib reports for its hard decoder).
+/// Soft-decision Golay(23,12). Returns the 12 data bits and the number of
+/// corrected *data* bits (positions 22..11), matching mbelib's `mbe_golay2312`
+/// — which counts only data-bit corrections, not parity changes.
 pub fn soft_golay(bits: &[u8; 23], conf: &[u8; 23]) -> (u16, u32) {
     let book = golay_codebook();
     let mut best_data = 0u16;
@@ -108,18 +108,19 @@ pub fn soft_golay(bits: &[u8; 23], conf: &[u8; 23]) -> (u16, u32) {
             best_data = d as u16;
         }
     }
-    // Hard error count = Hamming distance of the chosen codeword from the
-    // received bits (not the confidence-weighted distance).
     let cw = golay_codeword(best_data);
-    let hard = (0..23)
+    // Data-bit correction count only (the parity half of the codeword is
+    // discarded after decoding, so mbelib never counts a parity change).
+    let hard = (11..=22)
         .map(|i| ((cw >> i) & 1) as u8 ^ bits[i])
         .filter(|&x| x != 0)
         .count() as u32;
     (best_data, hard)
 }
 
-/// Soft-decision Hamming(15,11). Returns the 11 data bits and the hard error
-/// count, mirroring [`soft_golay`].
+/// Soft-decision Hamming(15,11). Returns the 11 data bits and a 0/1 correction
+/// flag, mirroring mbelib's `mbe_hamming1511` (single-error-correcting code:
+/// syndrome zero → 0, else 1 corrected bit).
 pub fn soft_hamming(bits: &[u8; 15], conf: &[u8; 15]) -> (u16, u32) {
     let book = hamming_codebook();
     let mut best_data = 0u16;
@@ -137,11 +138,8 @@ pub fn soft_hamming(bits: &[u8; 15], conf: &[u8; 15]) -> (u16, u32) {
         }
     }
     let cw = hamming_codeword(best_data);
-    let hard = (0..15)
-        .map(|i| ((cw >> i) & 1) as u8 ^ bits[i])
-        .filter(|&x| x != 0)
-        .count() as u32;
-    (best_data, hard)
+    let differs = (0..15).any(|i| ((cw >> i) & 1) as u8 != bits[i]);
+    (best_data, differs as u32)
 }
 
 /// The pseudo-random descrambler used to spread the IMBE frame (mbelib
@@ -158,7 +156,7 @@ fn imbe_prng(seed12: u16) -> [u8; 114] {
 }
 
 /// A soft 8×23 IMBE frame: hard bits plus per-bit confidence.
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SoftImbeFrame {
     /// Hard bit values, `frame[r][c]` = mbelib's `imbe_fr[r][c]`.
     pub bits: [[u8; 23]; 8],
@@ -303,8 +301,10 @@ mod tests {
 
     #[test]
     fn golay_corrects_three_errors_and_matches_hard() {
-        // Every 3-error pattern must decode to the original codeword — the
-        // perfect-code property makes soft and hard agree here.
+        // Every 3-error pattern must decode to the original codeword. The
+        // reported error count matches mbelib: corrected *data* bits only
+        // (positions 11..22), so a pattern with parity-position errors counts
+        // fewer than its total flips.
         let d = 0b1010_1010_1010u16;
         let cw = golay_codeword(d);
         for a in 0..23 {
@@ -317,7 +317,8 @@ mod tests {
                     }
                     let (out, errs) = soft_golay(&bits, &full_conf());
                     assert_eq!(out, d, "errs at {a},{b},{c}");
-                    assert_eq!(errs, 3);
+                    let data_errs = [a, b, c].iter().filter(|&&i| i >= 11).count() as u32;
+                    assert_eq!(errs, data_errs, "data-bit corrections at {a},{b},{c}");
                 }
             }
         }

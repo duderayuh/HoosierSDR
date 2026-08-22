@@ -11,6 +11,7 @@
 #![cfg(feature = "imbe")]
 
 use hs_vocoder::imbe::{ImbeDecoder, SAMPLES_PER_FRAME};
+use hs_p25::imbec::SoftImbeFrame;
 use hs_vocoder::Vocoder;
 
 #[test]
@@ -26,7 +27,11 @@ fn runs_and_returns_bounded_frames() {
                 *cell = ((f as usize * 3 + cw + x) % 2) as u8;
             }
         }
-        let pcm = dec.decode(&fr);
+        let frame = SoftImbeFrame {
+            bits: fr,
+            conf: [[255u8; 23]; 8],
+        };
+        let pcm = dec.decode(&frame);
         assert_eq!(pcm.len(), SAMPLES_PER_FRAME);
         // No assertion on silence: an arbitrary frame may legitimately mute.
         let _ = pcm.iter().copied().max();
