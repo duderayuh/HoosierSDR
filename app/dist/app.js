@@ -699,12 +699,113 @@ function renderMap() {
     const label = f.name || String(u); mctx.font = "bold 11px IBM Plex Sans, sans-serif"; mctx.textAlign = "left";
     const tw = mctx.measureText(label).width; mctx.fillStyle = "rgba(0,0,0,.6)"; mctx.fillRect(px + 8, py - 9, tw + 6, 14); mctx.fillStyle = "#fff"; mctx.fillText(label, px + 11, py + 2);
   }
+  // Survey pins — your receiver locations — amber squares, distinct from the
+  // pink radio fixes.
+  for (const p of surveyPins) {
+    const px = (lon2x(p.lon, z) - x0) * 256, py = (lat2y(p.lat, z) - y0) * 256;
+    mctx.fillStyle = "#e6a23c"; mctx.fillRect(px - 5, py - 5, 10, 10);
+    mctx.strokeStyle = "#fff"; mctx.lineWidth = 1.5; mctx.strokeRect(px - 5, py - 5, 10, 10);
+    const label = p.label || p.id;
+    mctx.font = "bold 11px IBM Plex Sans, sans-serif"; mctx.textAlign = "left";
+    const tw = mctx.measureText(label).width;
+    mctx.fillStyle = "rgba(0,0,0,.6)"; mctx.fillRect(px + 8, py - 9, tw + 6, 14);
+    mctx.fillStyle = "#e6a23c"; mctx.fillText(label, px + 11, py + 2);
+  }
+  // Pending pin — hollow amber square where the next capture will happen.
+  if (surveyPin) {
+    const px = (lon2x(surveyPin.lon, z) - x0) * 256, py = (lat2y(surveyPin.lat, z) - y0) * 256;
+    mctx.strokeStyle = "#e6a23c"; mctx.lineWidth = 2.5; mctx.strokeRect(px - 7, py - 7, 14, 14);
+  }
 }
 mc.onwheel = (e) => { if (!mapView) return; e.preventDefault(); mapView.z = Math.max(3, Math.min(18, mapView.z + (e.deltaY < 0 ? 1 : -1))); renderMap(); };
-mc.onmousedown = (e) => { if (mapView) mapDrag = { x: e.clientX, y: e.clientY, lat: mapView.lat, lon: mapView.lon }; };
+mc.onmousedown = (e) => { surveyDown = { x: e.clientX, y: e.clientY }; if (mapView) mapDrag = { x: e.clientX, y: e.clientY, lat: mapView.lat, lon: mapView.lon }; };
+mc.onmouseup = (e) => { if (surveyDown && surveyMode) { const dx = e.clientX - surveyDown.x, dy = e.clientY - surveyDown.y; if (dx * dx + dy * dy < 25) surveyClick(e); } surveyDown = null; };
 window.addEventListener("mousemove", (e) => { if (!mapDrag) return; const z = mapView.z, s = mc.width / mc.getBoundingClientRect().width; const dx = (e.clientX - mapDrag.x) * s / 256, dy = (e.clientY - mapDrag.y) * s / 256; mapView.lon = x2lon(lon2x(mapDrag.lon, z) - dx, z); mapView.lat = y2lat(lat2y(mapDrag.lat, z) - dy, z); renderMap(); });
 window.addEventListener("mouseup", () => { mapDrag = null; });
 mc.ondblclick = () => { if (fixes.size) { const f = [...fixes.values()].pop(); mapView = { lat: f.lat, lon: f.lon, z: Math.max(mapView ? mapView.z : 12, 12) }; renderMap(); } };
+
+/* ---------- survey: pin your location, capture timed IQ + log ---------- */
+let surveyMode = false;                      // armed: a map tap drops a pin
+let surveyDown = null;                       // mousedown point, to tell tap from drag
+let surveyPin = null;                        // { lat, lon } pending capture
+const surveyPins = store("hs.survey", []);   // completed pins (mirror of corpus survey.json)
+
+function surveyArmed(on) {
+  surveyMode = on;
+  mc.style.cursor = on ? "crosshair" : "grab";
+  $("surveyToggle").textContent = on ? "Survey: on" : "Survey: off";
+  $("surveyToggle").setAttribute("aria-pressed", String(on));
+  if (on && !mapView) { mapView = { lat: 39.7684, lon: -86.1581, z: 12 }; renderMap(); }
+  if (!on) { surveyPin = null; $("surveyForm").style.display = "none"; $("surveyPos").textContent = ""; }
+}
+$("surveyToggle").onclick = () => surveyArmed(!surveyMode);
+
+function surveyClick(e) {
+  if (!mapView) return;
+  const rect = mc.getBoundingClientRect();
+  const s = mc.width / rect.width;
+  const px = (e.clientX - rect.left) * s, py = (e.clientY - rect.top) * s;
+  const z = mapView.z, cx = lon2x(mapView.lon, z), cy = lat2y(mapView.lat, z);
+  const x0 = cx - mc.width / 512, y0 = cy - mc.height / 512;
+  surveyPin = { lat: y2lat(y0 + py / 256, z), lon: x2lon(x0 + px / 256, z) };
+  $("surveyPos").textContent = `${surveyPin.lat.toFixed(5)}, ${surveyPin.lon.toFixed(5)}`;
+  $("surveyForm").style.display = "";
+  renderMap();
+}
+
+$("surveyCancel").onclick = () => { surveyPin = null; $("surveyForm").style.display = "none"; $("surveyPos").textContent = ""; renderMap(); };
+
+$("surveyCapture").onclick = async () => {
+  if (!surveyPin) return;
+  const freq = parseFreq($("freq").value);
+  if (!Number.isFinite(freq)) { uiToast("Set a channel frequency first — tune the control/voice channel you want to survey.", "err"); return; }
+  const label = $("surveyLabel").value.trim() || "pin";
+  const seconds = Math.max(5, parseFloat($("surveySecs").value) || 60);
+  const spec = {
+    source: srcKind(), freq, rate: parseFloat($("rate").value),
+    gain: $("gain").value.trim() === "" ? null : parseFloat($("gain").value),
+    cqpsk: modSel === "cqpsk", eq: eqSel, ppm: ppmVal(), device: srcId() || null,
+    lat: surveyPin.lat, lon: surveyPin.lon, label, seconds,
+    corpus: $("surveyCorpus").value.trim() || "~/hoosier-field/survey", format: "cs16",
+  };
+  const pin = surveyPin;
+  surveyPin = null; $("surveyForm").style.display = "none"; $("surveyLabel").value = "";
+  // A survey capture needs the radio to itself. If a follow/capture is live,
+  // stop it first — the backend joins the old run before opening the radio,
+  // so this is safe even back-to-back.
+  if (TAURI && $("pillText").textContent !== "standby") {
+    try { await invoke("stop_capture"); } catch (_) {}
+    uiToast("Stopping current capture, then surveying…");
+  }
+  try {
+    const entry = await invoke("survey_capture", { spec });
+    logEvent(`survey: recording "${entry.label}" at ${entry.lat.toFixed(5)}, ${entry.lon.toFixed(5)} for ${entry.seconds}s → ${entry.iq.split("/").pop()}`);
+  } catch (err) {
+    surveyPin = pin; $("surveyForm").style.display = "";
+    uiToast("survey: " + err, "err");
+  }
+};
+
+function renderSurveyTable() {
+  const body = $("surveyBody");
+  body.innerHTML = [...surveyPins].reverse().map((p) =>
+    `<tr data-lat="${p.lat}" data-lon="${p.lon}"><td>${esc(p.label || p.id)}</td><td class="mono">${p.lat.toFixed(5)}</td><td class="mono">${p.lon.toFixed(5)}</td><td class="mono">${esc((p.iq || "").split("/").pop())}</td><td class="mono">${ago(p.t * 1000)}</td></tr>`
+  ).join("");
+  body.querySelectorAll("tr").forEach((tr) => {
+    tr.style.cursor = "pointer";
+    tr.onclick = () => { mapView = { lat: parseFloat(tr.dataset.lat), lon: parseFloat(tr.dataset.lon), z: Math.max(mapView ? mapView.z : 12, 15) }; renderMap(); };
+  });
+}
+renderSurveyTable();
+
+if (TAURI) listen("survey_done", (e) => {
+  const en = e.payload;
+  surveyPins.push(en);
+  save("hs.survey", surveyPins);
+  renderSurveyTable();
+  renderMap();
+  uiToast(`Survey pin saved: ${en.label} (${en.seconds}s)`);
+});
 
 /* ================================================================ */
 if (TAURI) {
