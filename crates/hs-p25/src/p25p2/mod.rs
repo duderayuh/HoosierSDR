@@ -15,9 +15,11 @@
 //! 8,359,197). This module extracts and de-FECs the **frame bits** only; the
 //! half-rate codec itself lives behind the `hs-vocoder` plugin boundary.
 
+pub mod deinterleave;
 pub mod duid;
 pub mod isch;
 pub mod scramble;
+pub mod voice;
 
 /// P25 Phase 2 symbol rate (symbols/second).
 pub const SYMBOL_RATE: f64 = 6000.0;
