@@ -15,6 +15,8 @@
 //! 8,359,197). This module extracts and de-FECs the **frame bits** only; the
 //! half-rate codec itself lives behind the `hs-vocoder` plugin boundary.
 
+pub mod duid;
+pub mod isch;
 pub mod scramble;
 
 /// P25 Phase 2 symbol rate (symbols/second).
