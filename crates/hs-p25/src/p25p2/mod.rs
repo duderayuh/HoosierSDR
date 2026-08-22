@@ -18,6 +18,7 @@
 pub mod deinterleave;
 pub mod duid;
 pub mod isch;
+pub mod modulation;
 pub mod scramble;
 pub mod voice;
 
