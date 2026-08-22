@@ -180,7 +180,6 @@ compiler is required for the default build. `cargo build -p hs-vocoder
 
 - **No decryption. Ever.** Encrypted traffic (any P25 ALG ID other than clear) is detected, badged, and skipped. This is an architectural refusal, not a setting. See 18 U.S.C. § 2511/2510.
 - **Phase I IMBE only in-tree.** The IMBE vocoder patents have expired. The Phase II AMBE+2 half-rate vocoder remains patent-encumbered in the US (US 8,359,197, to 2028-05-20) and is supported only via a user-supplied runtime plugin that this project does not distribute.
-- **Indiana users:** IC 35-44.1-2-7 restricts *mobile/portable* police radio receivers. Use of this software at your dwelling or place of business falls under exemption (b)(7). Do not run it in a vehicle or carry it on your person unless you hold an FCC amateur license or written LE permission. This is not legal advice.
 - **No RadioReference data is committed to this repository.** Test fixtures are synthetic.
 
 ## Contributing
