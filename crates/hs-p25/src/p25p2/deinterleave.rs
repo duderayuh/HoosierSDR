@@ -50,6 +50,7 @@ const CSUBSET: [u8; 72] = [
 
 /// Transmitted bits per schedule row — the interleaver's column consumption.
 /// These must equal the actual `C0…C3` lengths (24/23/11/14).
+#[cfg(test)]
 const ROW_BITS: [usize; 4] = [C0.len(), C1.len(), C2.len(), C3.len()];
 
 /// A deinterleaved 4×24 voice frame (96-bit container, 72 transmitted bits).
