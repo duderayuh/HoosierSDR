@@ -14,7 +14,7 @@ This project is **Apache-2.0**. GPL contamination has killed projects in this ec
 
 - **No decryption code.** PRs adding P25 decryption of any kind (ADP/DES/AES) will be closed without discussion.
 - **No RadioReference data in the repo.** Test fixtures must be synthetic. Committing real talkgroup dumps violates RR's terms.
-- **No Phase II AMBE+2 decoder in-tree** until US 8,359,197 expires (2028-05-20) or is confirmed lapsed. Phase II support goes through the `hs-vocoder` plugin boundary.
+- **Phase II vocoder from ISC mbelib.** The AMBE+2 half-rate decoder is available in the ISC-licensed `mbelib` (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame`, plus `ambe3600x2450.c` and ECC helpers); HoosierSDR vendors only the IMBE subset today, so vendoring those `.c` files (same ISC licence as the IMBE already vendored) is the path — the same code SDRTrunk, OP25 and GopherSDR ship Phase II on. Do not port any GPL vocoder (OP25, mbelib-neo, JMBE). The `hs-vocoder` plugin boundary is an optional escape hatch, not a licence requirement.
 - **Benchmarks over vibes.** DSP changes should come with `hs-bench` numbers against the IQ corpus. "Sounds better" is not a metric.
 
 ## Scope

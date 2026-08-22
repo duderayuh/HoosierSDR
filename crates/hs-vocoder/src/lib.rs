@@ -4,8 +4,8 @@
 //!   To be ported from ISC-licensed mbelib with attribution — never from GPL
 //!   forks (mbelib-neo is GPL; do not touch it).
 //! - `plugin`: P25 Phase II AMBE+2 half-rate via a user-supplied dynamic
-//!   library. NOT distributed with this project while US 8,359,197 is active
-//!   (to 2028-05-20). See docs/ARCHITECTURE.md §5.
+//!   library — an optional escape hatch, not a licence requirement. The
+//!   half-rate decoder is available in ISC mbelib (`ambe3600x2400.c`).
 
 pub mod imbe;
 pub mod plugin;

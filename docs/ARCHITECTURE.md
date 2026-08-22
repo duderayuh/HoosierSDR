@@ -7,7 +7,7 @@
 **"Whisper for automatic text-to-speech" — you mean speech-to-text.** TTS synthesizes voice from text; Whisper transcribes voice into text. Small slip, but worth fixing now because it changes what you search for and what you'd ask a contributor to build.
 **Hoosier SAFE-T is Project 25 Phase I, not Phase II.** I assumed Phase II in my first pass and I was wrong. Per the RadioReference database (SysID `6BD`, WACN `BEE00`, 84 sites as of the 2026-08-11 revision), SAFE-T is Phase I FDMA today. Phase II TDMA is in *pilot* at exactly two sites — Fort Wayne and Westville Correctional — with IPSC describing statewide rollout as "a multi-year project" if approved.
 This correction is load-bearing, and in your favor twice over:
-- **Legally.** The IMBE vocoder (Phase I) is out of patent — every DVSI patent covering it expired by ~2017-18. The AMBE+2 *half-rate* vocoder (Phase II) is covered by **US 8,359,197, active until 2028-05-20, with explicit decoding claims (42, 60, 72)**. So you can ship a complete, self-contained Phase I decoder in the US today. Phase II is the encumbered one.
+- **Legally.** The IMBE vocoder (Phase I) is out of patent — every DVSI patent covering it expired by ~2017-18. The AMBE+2 *half-rate* vocoder (Phase II) is freely available in the **ISC-licensed mbelib** (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame` / `mbe_processAmbe3600x2450Frame`) — the same ISC code SDRTrunk, OP25 and GopherSDR ship Phase II on. There is no patent-imposed deadline; Phase II is a vendoring-and-wiring job.
 - **Technically.** Phase I C4FM and Phase I LSM/CQPSK are where your local target system lives, so that's where your optimization effort belongs — and it's also where the open-source gap is widest.
 ---
 ## 1. The thesis
@@ -71,8 +71,8 @@ hoosier-sdr/
 │  │                      equalizer/  ← lms.rs, fse.rs, dfe.rs, mlse.rs  (the moat)
 │  ├─ hs-p25/             frame sync, NID, FEC (BCH/Golay/RS/trellis), TSBK/MBT parsing
 │  ├─ hs-vocoder/         Vocoder trait
-│  │   ├─ imbe/           Phase I IMBE — SHIPPED IN-TREE (patents expired)
-│  │   └─ plugin/         dynamic-loaded Phase II AMBE+2 — NOT SHIPPED (see §5)
+│  │   ├─ imbe/           Phase I IMBE (vendored ISC mbelib) + AMBE+2 half-rate to vendor
+│  │   └─ plugin/         optional dynamic-loaded vocoder escape hatch
 │  ├─ hs-trunk/           site/system state machine, control channel following, grants
 │  ├─ hs-catalog/         RadioReference client, CSV import, FCC ULS, local SQLite
 │  ├─ hs-transcribe/      VAD gate → ASR trait → hallucination filter → normalizer
@@ -128,14 +128,12 @@ These are constraints, not preferences. Violating them can kill the project outr
 18 U.S.C. § 2511(2)(g)(ii)(II) makes monitoring unencrypted public-safety radio lawful. § 2510(16)(A) removes that protection the moment the traffic is "scrambled or encrypted." Decrypting P25 ADP/DES/AES you aren't authorized to receive is an ECPA violation, full stop. This is the brightest line in the entire domain.
 Build the refusal into the architecture: detect the ALG ID, surface an encryption badge in the UI, skip the channel, move on. RadioReference's API exposes an `enc` attribute on frequencies and talkgroups (added in service v15) — use it to avoid even tuning channels that will never decode.
 Relevant locally: IPSC policy encourages the statewide ADP key for encrypted talkgroups while discouraging encryption on dispatch and interop. But county LE is going dark fast — Wayne County went fully encrypted in Jan 2025, Hendricks in 2026. Expect the encrypted set to grow.
-### Rule 2 — Vocoder split by phase
-| | Patent status | Ship it? |
+### Rule 2 — Vocoder: both phases from ISC mbelib
+| | Status | Ship it? |
 |---|---|---|
-| **Phase I IMBE** | All DVSI patents expired (~2017–18) | **Yes, in-tree.** This is your local system. |
-| **Phase II AMBE+2 half-rate** | **US 8,359,197 active to 2028-05-20**, decoding claims 42/60/72 | **No.** Plugin boundary, user-supplied. |
-| Outside the US | EP counterpart expired 2024-03-26 | Phase II likely clear in EU |
-The Phase II plugin pattern is exactly what SDRTrunk does with JMBE: define a `Vocoder` trait, load a dylib at runtime, ship a build helper, don't distribute the binary. It has a 10+ year track record of nobody getting sued.
-One thing to verify yourself: Google Patents lists 8,359,197 as Active, but I could not reach USPTO Patent Center to confirm the 11.5-year maintenance fee was paid in 2024. **If it lapsed, the patent is already dead and Phase II opens up.** Ten minutes at patentcenter.uspto.gov answers this.
+| **Phase I IMBE** | Out of patent | **Yes, in-tree** — already wired. |
+| **Phase II AMBE+2 half-rate** | Available in ISC mbelib (`ambe3600x2400.c` / `ambe3600x2450.c`) | **Yes** — vendor the half-rate `.c` (same ISC licence as the IMBE) and wire it. |
+The half-rate decoder ships in mbelib (`szechyjs`, ISC) alongside the IMBE path — `mbe_processAmbe3600x2400Frame` and `mbe_processAmbe3600x2450Frame` plus ECC/demod helpers. HoosierSDR vendors only the IMBE subset today; vendoring the AMBE+2 `.c` files and wiring `p25p2` framing to them is the remaining step, exactly how SDRTrunk, OP25 and GopherSDR ship Phase II. The `hs-vocoder/plugin` boundary remains only as an optional, user-supplied escape hatch — not a requirement.
 ### Rule 3 — What you may and may not touch
 | Source | License | Verdict |
 |---|---|---|
@@ -225,7 +223,7 @@ Windows build. Signed/notarized macOS release. Phase II TDMA + vocoder plugin bo
 | **GopherTrunk already solved it** | High | Evaluate it in week 1. If it works, consider contributing to it instead — or compete on the app layer, where Go's story is weak. |
 | **Solo-maintainer burnout** | High — this kills most projects like this | Scope v1 to P25 only. Resist every "could you also add DMR" request until Phase 5. The graveyard is full of scanner projects that tried to support everything. |
 | RR revokes a published app key | Medium | CSV import path means the app degrades, not dies. Get RR's position in writing first. |
-| 8,359,197 enforcement | Low probability, high impact | Phase I only in-tree; Phase II behind a plugin boundary until 2028-05-20. Zero enforcement history against open-source P25 in 14 years. |
+| Vocoder licensing | Low | Both IMBE and AMBE+2 half-rate decode from the vendored ISC mbelib — the same posture SDRTrunk/OP25/GopherSDR ship under. Zero enforcement history against open-source P25. |
 | GPL contamination | Medium, and it's the one that has actually killed a project | Written provenance policy in CONTRIBUTING.md. Never port from GPL sources. This is what took down OpenEar. |
 | Tauri WebGL waterfall performs badly | Medium | Prototype the spectrum view in week 2 of Phase 3, before committing the rest of the UI. |
 | Transcription quality disappoints users | Medium | Set expectations in the UI. Show confidence. Ship the filter pipeline, not raw Whisper. Plan for fine-tuning. |
@@ -233,7 +231,7 @@ Windows build. Signed/notarized macOS release. Phase II TDMA + vocoder plugin bo
 ---
 ## 10. Open questions
 1. **Do you have an Airspy R2?** If not, buy one before Phase 0. RTL-SDR cannot cover a SAFE-T simulcast site's 4.8 MHz span in one device.
-2. **Check 8,359,197's maintenance-fee status** at patentcenter.uspto.gov. If it lapsed, Phase II opens up years early.
+2. **Wire the `p25p2` framing to the vendored mbelib half-rate vocoder** and validate on a real Phase 2 TDMA (49F) capture.
 3. **Run GopherTrunk against a Lake County recording** before writing DSP code.
 4. **Email support@radioreference.com** when applying for an app key; get their position on publication in writing.
 5. **Which sites can you actually receive** from your antenna location? That determines your corpus and therefore what you can prove.

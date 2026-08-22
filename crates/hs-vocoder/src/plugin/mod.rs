@@ -1,9 +1,10 @@
-//! Runtime-loaded vocoder plugin boundary (Phase II AMBE+2).
+//! Optional runtime-loaded vocoder plugin boundary (Phase II AMBE+2).
 //!
-//! HoosierSDR does not ship a Phase II vocoder while US 8,359,197 is active
-//! (expires 2028-05-20). Users may supply their own decoder as a dynamic
-//! library implementing this C ABI; a build-helper tool will be provided
-//! (the SDRTrunk/JMBE pattern). Loading lands in Phase 5.
+//! The half-rate AMBE+2 decoder is available in the ISC-licensed mbelib
+//! (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame` / `mbe_processAmbe3600x2450Frame`);
+//! HoosierSDR vendors only the IMBE subset today. This boundary is an escape
+//! hatch, not a licence requirement — a user who prefers their own decoder can
+//! supply a dynamic library implementing this C ABI.
 
 /// Expected symbol names in a user-supplied plugin dylib.
 pub const PLUGIN_INIT_SYMBOL: &str = "hs_vocoder_init";
