@@ -12,7 +12,7 @@
 //! # Scope note
 //! Phase 2 voice is IMBE (full rate, 7200 bps — already in-tree) and
 //! AMBE+2 (half rate, 3600 bps — available in the ISC-licensed mbelib
-//! `ambe3600x2400.c`, `mbe_processAmbe3600x2400Frame` / `mbe_processAmbe3600x2450Frame`;
+//! `ambe3600x2450.c`, `mbe_processAmbe3600x2450Frame`;
 //! HoosierSDR vendors only the IMBE subset today). This module extracts and
 //! de-FECs the **frame bits**; vendoring the half-rate `.c` and feeding those
 //! bits to it is the remaining wiring.

@@ -1,7 +1,7 @@
 //! Optional runtime-loaded vocoder plugin boundary (Phase II AMBE+2).
 //!
 //! The half-rate AMBE+2 decoder is available in the ISC-licensed mbelib
-//! (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame` / `mbe_processAmbe3600x2450Frame`);
+//! (`ambe3600x2450.c` → `mbe_processAmbe3600x2450Frame`);
 //! HoosierSDR vendors only the IMBE subset today. This boundary is an escape
 //! hatch, not a licence requirement — a user who prefers their own decoder can
 //! supply a dynamic library implementing this C ABI.

@@ -179,7 +179,7 @@ compiler is required for the default build. `cargo build -p hs-vocoder
 ## Legal posture (read this)
 
 - **No decryption. Ever.** Encrypted traffic (any P25 ALG ID other than clear) is detected, badged, and skipped. This is an architectural refusal, not a setting. See 18 U.S.C. § 2511/2510.
-- **Phase I IMBE in-tree today.** The IMBE vocoder patents have expired. The Phase II AMBE+2 half-rate vocoder is available under ISC in mbelib (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame`); vendoring and wiring it up is the remaining Phase II work — no patent deadline.
+- **Phase I IMBE in-tree today.** The IMBE vocoder patents have expired. The Phase II AMBE+2 half-rate vocoder is available under ISC in mbelib (`ambe3600x2450.c` → `mbe_processAmbe3600x2450Frame`); vendoring and wiring it up is the remaining Phase II work — no patent deadline.
 - **No RadioReference data is committed to this repository.** Test fixtures are synthetic.
 
 ## Contributing

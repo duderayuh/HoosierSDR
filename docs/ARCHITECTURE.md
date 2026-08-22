@@ -7,7 +7,7 @@
 **"Whisper for automatic text-to-speech" — you mean speech-to-text.** TTS synthesizes voice from text; Whisper transcribes voice into text. Small slip, but worth fixing now because it changes what you search for and what you'd ask a contributor to build.
 **Hoosier SAFE-T is Project 25 Phase I, not Phase II.** I assumed Phase II in my first pass and I was wrong. Per the RadioReference database (SysID `6BD`, WACN `BEE00`, 84 sites as of the 2026-08-11 revision), SAFE-T is Phase I FDMA today. Phase II TDMA is in *pilot* at exactly two sites — Fort Wayne and Westville Correctional — with IPSC describing statewide rollout as "a multi-year project" if approved.
 This correction is load-bearing, and in your favor twice over:
-- **Legally.** The IMBE vocoder (Phase I) is out of patent — every DVSI patent covering it expired by ~2017-18. The AMBE+2 *half-rate* vocoder (Phase II) is freely available in the **ISC-licensed mbelib** (`ambe3600x2400.c` → `mbe_processAmbe3600x2400Frame` / `mbe_processAmbe3600x2450Frame`) — the same ISC code SDRTrunk, OP25 and GopherSDR ship Phase II on. There is no patent-imposed deadline; Phase II is a vendoring-and-wiring job.
+- **Legally.** The IMBE vocoder (Phase I) is out of patent — every DVSI patent covering it expired by ~2017-18. The AMBE+2 *half-rate* vocoder (Phase II) is freely available in the **ISC-licensed mbelib** (`ambe3600x2450.c` → `mbe_processAmbe3600x2450Frame`) — the same ISC code SDRTrunk, OP25 and GopherSDR ship Phase II on. There is no patent-imposed deadline; Phase II is a vendoring-and-wiring job.
 - **Technically.** Phase I C4FM and Phase I LSM/CQPSK are where your local target system lives, so that's where your optimization effort belongs — and it's also where the open-source gap is widest.
 ---
 ## 1. The thesis
@@ -132,8 +132,8 @@ Relevant locally: IPSC policy encourages the statewide ADP key for encrypted tal
 | | Status | Ship it? |
 |---|---|---|
 | **Phase I IMBE** | Out of patent | **Yes, in-tree** — already wired. |
-| **Phase II AMBE+2 half-rate** | Available in ISC mbelib (`ambe3600x2400.c` / `ambe3600x2450.c`) | **Yes** — vendor the half-rate `.c` (same ISC licence as the IMBE) and wire it. |
-The half-rate decoder ships in mbelib (`szechyjs`, ISC) alongside the IMBE path — `mbe_processAmbe3600x2400Frame` and `mbe_processAmbe3600x2450Frame` plus ECC/demod helpers. HoosierSDR vendors only the IMBE subset today; vendoring the AMBE+2 `.c` files and wiring `p25p2` framing to them is the remaining step, exactly how SDRTrunk, OP25 and GopherSDR ship Phase II. The `hs-vocoder/plugin` boundary remains only as an optional, user-supplied escape hatch — not a requirement.
+| **Phase II AMBE+2 half-rate** | Available in ISC mbelib (`ambe3600x2450.c`) | **Yes** — vendor the half-rate `.c` (same ISC licence as the IMBE) and wire it. |
+The half-rate decoder ships in mbelib (`szechyjs`, ISC) alongside the IMBE path — `mbe_processAmbe3600x2450Frame` plus ECC/demod helpers. HoosierSDR vendors only the IMBE subset today; vendoring the AMBE+2 `.c` files and wiring `p25p2` framing to them is the remaining step, exactly how SDRTrunk, OP25 and GopherSDR ship Phase II. The `hs-vocoder/plugin` boundary remains only as an optional, user-supplied escape hatch — not a requirement.
 ### Rule 3 — What you may and may not touch
 | Source | License | Verdict |
 |---|---|---|
