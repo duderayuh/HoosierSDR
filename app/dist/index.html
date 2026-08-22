@@ -369,13 +369,25 @@
             </div>
           </div>
           <div class="panel">
-            <div class="head"><span class="eyebrow">Radio positions · LRRP</span><span class="meta" id="mapMeta"></span></div>
+            <div class="head"><span class="eyebrow">Radio positions · LRRP</span><button id="surveyToggle" class="btn ghost" aria-pressed="false">Survey: off</button><span class="meta" id="mapMeta"></span></div>
             <div class="body tight">
               <div class="mapbox"><canvas id="map" width="560" height="360"></canvas><div class="mapattr">© OpenStreetMap contributors © CARTO</div></div>
+              <div id="surveyForm" class="survey-form" style="display:none">
+                <input id="surveyLabel" type="text" placeholder="pin label" spellcheck="false" style="flex:2;min-width:140px" />
+                <input id="surveySecs" type="number" value="60" min="5" max="3600" step="5" style="width:64px" />
+                <span class="faint">sec</span>
+                <button id="surveyCapture" class="btn primary">Capture here</button>
+                <button id="surveyCancel" class="btn ghost">Cancel</button>
+                <input id="surveyCorpus" type="text" value="~/hoosier-field/survey" title="corpus directory" spellcheck="false" style="flex:3;min-width:180px" />
+                <div class="faint mono" id="surveyPos" style="flex-basis:100%"></div>
+              </div>
               <div class="tablewrap tgs" style="max-height:22vh;margin-top:8px">
                 <table><thead><tr><th>Radio</th><th>Latitude</th><th>Longitude</th><th>Last fix</th></tr></thead><tbody id="mapBody"></tbody></table>
               </div>
-              <p class="help">Position reports ride inside packet data and are often encrypted; a radio appears here only when a clear report decodes. Tiles load from CARTO (OpenStreetMap data) when online.</p>
+              <div class="tablewrap tgs" style="max-height:20vh;margin-top:8px">
+                <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th></tr></thead><tbody id="surveyBody"></tbody></table>
+              </div>
+              <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from CARTO (OpenStreetMap data) when online.</p>
             </div>
           </div>
         </div>
