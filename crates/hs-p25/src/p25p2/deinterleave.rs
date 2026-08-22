@@ -16,7 +16,7 @@
 //! # Wire format
 //! `deinterleave` consumes `input[0..72]` in *slot order* (the first received
 //! bit is `input[0]`) and writes a row-major 4×24 frame, indexed `frame[row][col]`,
-//! identical to `char ambe_fr[4][24]` consumed by `mbe_processAmbe3600x2400Frame`.
+//! identical to `char ambe_fr[4][24]` consumed by `mbe_processAmbe3600x2450Frame`.
 //!
 //! The output grid is *punctured*: 24 positions are never filled by the RX
 //! path (they carry no transmitted bit). Those are the bits mbelib reconstructs
