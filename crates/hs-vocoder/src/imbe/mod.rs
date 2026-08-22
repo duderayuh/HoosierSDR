@@ -5,7 +5,7 @@
 //! `vendor/mbelib/` (see NOTICE). Built only when the `imbe` feature is on.
 
 use crate::{Vocoder, VocoderError};
-use hs_p25::voice::ImbeFrame;
+use hs_p25::imbec::SoftImbeFrame;
 
 /// P25 IMBE emits 160 PCM samples per 20 ms voice frame at 8 kHz.
 pub const SAMPLES_PER_FRAME: usize = 160;
@@ -39,12 +39,14 @@ mod ffi {
 
     extern "C" {
         pub fn mbe_initMbeParms(cur: *mut MbeParms, prev: *mut MbeParms, prev_enh: *mut MbeParms);
-        pub fn mbe_processImbe7200x4400Frame(
+        /// Synthesis from FEC-corrected 88 data bits — the entry point used by
+        /// the soft-decision path, which does its own FEC in `hs_p25::imbec`
+        /// and hands mbelib only the cleaned `imbe_d[88]`.
+        pub fn mbe_processImbe4400Data(
             aout: *mut i16,
             errs: *mut i32,
             errs2: *mut i32,
             err_str: *mut u8,
-            imbe_fr: *const [u8; 23],
             imbe_d: *mut u8,
             cur: *mut MbeParms,
             prev: *mut MbeParms,
@@ -118,23 +120,26 @@ impl ImbeDecoder {
         self.uv_quality
     }
 
-    /// Decode one de-interleaved IMBE frame to 160 PCM samples.
-    pub fn decode(&mut self, frame: &ImbeFrame) -> [i16; SAMPLES_PER_FRAME] {
+    /// Decode one de-interleaved IMBE frame to 160 PCM samples, using the
+    /// soft-decision FEC and mbelib's synthesis-only entry point.
+    pub fn decode(&mut self, frame: &SoftImbeFrame) -> [i16; SAMPLES_PER_FRAME] {
+        // Soft-decision Golay/Hamming in Rust recovers the 88 voice bits by
+        // maximum likelihood on the confidence-weighted frame; mbelib then
+        // only synthesizes from the cleaned bits.
+        let (mut imbe_d, soft_errs) = hs_p25::imbec::soft_decode_imbe(frame);
         let mut out = [0i16; SAMPLES_PER_FRAME];
         let mut errs = 0i32;
-        let mut errs2 = 0i32;
-        let mut err_str = [0u8; 64];
-        let mut imbe_d = [0u8; 88];
-        // SAFETY: mbelib reads imbe_fr as char[8][23] and writes exactly 160
-        // shorts into aout; all buffers are sized to match. err_str is a
-        // C string scratch buffer of ample size.
+        let mut errs2 = soft_errs.min(144) as i32;
+        let mut err_str = [0u8; 256];
+        // SAFETY: mbelib reads imbe_d as char[88] and writes exactly 160
+        // shorts into aout; all buffers are sized to match and err_str is a
+        // generous scratch buffer.
         unsafe {
-            ffi::mbe_processImbe7200x4400Frame(
+            ffi::mbe_processImbe4400Data(
                 out.as_mut_ptr(),
                 &mut errs,
                 &mut errs2,
                 err_str.as_mut_ptr(),
-                frame.as_ptr(),
                 imbe_d.as_mut_ptr(),
                 &mut *self.cur,
                 &mut *self.prev,
@@ -162,7 +167,7 @@ impl ImbeDecoder {
     pub fn new() -> Self {
         Self
     }
-    pub fn decode(&mut self, _frame: &ImbeFrame) -> [i16; SAMPLES_PER_FRAME] {
+    pub fn decode(&mut self, _frame: &SoftImbeFrame) -> [i16; SAMPLES_PER_FRAME] {
         [0; SAMPLES_PER_FRAME]
     }
 }
@@ -187,7 +192,13 @@ impl Vocoder for ImbeDecoder {
         if !cfg!(feature = "imbe") {
             return Err(VocoderError::NotAvailable("build with --features imbe"));
         }
-        let frame = hs_p25::voice::deinterleave_imbe(frame_bits);
+        let hard = hs_p25::voice::deinterleave_imbe(frame_bits);
+        // There is no soft information offline — mark every bit certain, so
+        // the soft decoder reduces to the hard pipeline exactly.
+        let frame = SoftImbeFrame {
+            bits: hard,
+            conf: [[255u8; 23]; 8],
+        };
         pcm_out.extend_from_slice(&self.decode(&frame));
         Ok(())
     }
