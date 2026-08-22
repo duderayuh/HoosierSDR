@@ -68,6 +68,10 @@ pub struct Job {
     pub emergency: bool,
     pub patched_with: Vec<u16>,
     pub system: String,
+    /// Numeric site ID (from the control channel), sent as rdio-scanner's `site`.
+    pub site: Option<u8>,
+    /// Talkgroup service category (e.g. "Fire", "EMS"), sent as `talkgroupGroup`.
+    pub group: String,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -289,6 +293,12 @@ pub fn send_rdio(cfg: &Rdio, job: &Job, base_override: Option<&str>) -> Result<S
         .text("audioType", mime_for(&job.audio));
     if !job.patched_with.is_empty() {
         m = m.text("patches", serde_json::json!(job.patched_with).to_string());
+    }
+    if let Some(site) = job.site {
+        m = m.text("site", site);
+    }
+    if !job.group.is_empty() {
+        m = m.text("talkgroupGroup", &job.group);
     }
     let (ctype, body) = m.finish();
     let (status, text) = post(&format!("{base}/api/call-upload"), &ctype, body)?;
@@ -634,6 +644,16 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
             );
         }
     }
+    let group = state
+        .catalog
+        .lock()
+        .ok()
+        .and_then(|cat| {
+            cat.as_ref()
+                .and_then(|c| c.get(row.tg))
+                .and_then(|t| t.category.clone())
+        })
+        .unwrap_or_default();
     let job = Job {
         id: row.id,
         audio,
@@ -647,6 +667,8 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
         emergency: row.emergency,
         patched_with: row.patched_with,
         system: row.system,
+        site: None,
+        group,
     };
     let mut guard = state.uploader.lock().unwrap();
     if guard.is_none() {
@@ -720,6 +742,8 @@ mod tests {
             emergency: false,
             patched_with: vec![],
             system: "SAFE-T".into(),
+            site: Some(12),
+            group: "Fire".into(),
         }
     }
 
@@ -746,6 +770,8 @@ mod tests {
             "name=\"talkgroup\"\r\n\r\n10103",
             "name=\"frequency\"\r\n\r\n857387500",
             "name=\"talkgroupLabel\"\r\n\r\nIMPD North",
+            "name=\"site\"\r\n\r\n12",
+            "name=\"talkgroupGroup\"\r\n\r\nFire",
             "name=\"audio\"; filename=\"u.wav\"",
             "Content-Type: audio/wav",
             "name=\"sources\"",

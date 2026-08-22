@@ -892,16 +892,23 @@ fn start_follow(
                     unit_name,
                     freq_mhz,
                     secs,
+                    start,
+                    site,
                     emergency,
                     patched_with,
                     ..
                 } = &ev
                 {
                     if let Some(u) = uploader.lock().unwrap().as_ref().filter(|_| allowed(&upload_policy, *tg)) {
+                        let group = catalog
+                            .lock()
+                            .ok()
+                            .and_then(|cat| cat.as_ref().and_then(|c| c.get(*tg)).and_then(|t| t.category.clone()))
+                            .unwrap_or_default();
                         u.submit(upload::Job {
                             id: *id,
                             audio: wav.clone(),
-                            start: library::now(),
+                            start: *start,
                             secs: *secs,
                             tg: *tg,
                             tg_name: name.clone(),
@@ -911,6 +918,8 @@ fn start_follow(
                             emergency: *emergency,
                             patched_with: patched_with.clone(),
                             system: params.system_name.clone(),
+                            site: *site,
+                            group,
                         });
                     }
                 }
