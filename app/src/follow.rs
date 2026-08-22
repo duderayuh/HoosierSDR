@@ -104,6 +104,11 @@ pub enum FollowEvent {
         freq_mhz: f64,
         modulation: String,
         secs: f64,
+        /// Call start time (unix seconds) — the time the keyup began, not the
+        /// completion time. Carried so uploaders stamp the true start.
+        start: i64,
+        /// Numeric site ID from the control channel, if announced.
+        site: Option<u8>,
         emergency: bool,
         patched_with: Vec<u16>,
         priority: u8,
@@ -354,6 +359,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         calls_dir: p.calls_dir.as_deref(),
         system_name: p.system_name.clone(),
         site_name: p.site_name.clone(),
+        site_id: last_site.site,
         name_template: p.name_template.clone(),
         format: p.format.clone(),
         discovery: GrantGate::new(2.0),
@@ -459,6 +465,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             let site = f.site_info();
             if site != last_site {
                 last_site = site;
+                rep.site_id = last_site.site;
                 emit(site_event(&last_site));
             }
         }
@@ -547,6 +554,8 @@ struct Reporter<'a> {
     calls_dir: Option<&'a std::path::Path>,
     system_name: String,
     site_name: String,
+    /// Numeric site ID from the control channel, if announced.
+    site_id: Option<u8>,
     name_template: String,
     format: crate::encode::Format,
     /// Rate limit for discovery grant events, per (talkgroup, channel).
@@ -883,6 +892,8 @@ impl Reporter<'_> {
                 freq_mhz: c.freq_hz as f64 / 1e6,
                 modulation: mod_name(c.modulation),
                 secs,
+                start: start as i64,
+                site: self.site_id,
                 emergency: c.emergency,
                 patched_with: c.patched_with.clone(),
                 priority: self.priority_of(c.talkgroup),
