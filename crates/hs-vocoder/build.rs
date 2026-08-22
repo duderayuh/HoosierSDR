@@ -8,8 +8,9 @@ fn main() {
         println!("cargo:rerun-if-changed={dir}");
         cc::Build::new()
             .file(format!("{dir}/mbelib.c"))
-            .file(format!("{dir}/imbe7200x4400.c"))
             .file(format!("{dir}/ecc.c"))
+            .file(format!("{dir}/imbe7200x4400.c"))
+            .file(format!("{dir}/ambe3600x2450.c"))
             .include(dir)
             .warnings(false)
             .compile("mbe");
