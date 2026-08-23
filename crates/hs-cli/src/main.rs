@@ -38,6 +38,7 @@ struct Args {
     sdr: bool,
     source: String,
     serial: Option<u64>,
+    rtl: usize,
     secs: Option<f64>,
     catalog: Option<String>,
     freq: f64,
@@ -50,6 +51,7 @@ struct Args {
     dual: bool,
     voice_source: String,
     voice_serial: Option<u64>,
+    voice_rtl: usize,
     voice_rate: f64,
     priorities: Vec<(u16, u8)>,
     rr_system: Option<u32>,
@@ -74,6 +76,7 @@ fn parse_args() -> Args {
         sdr: false,
         source: String::new(),
         serial: None,
+        rtl: 0,
         secs: None,
         catalog: None,
         freq: 851_000_000.0,
@@ -86,6 +89,7 @@ fn parse_args() -> Args {
         dual: false,
         voice_source: String::new(),
         voice_serial: None,
+        voice_rtl: 1,
         voice_rate: 0.0,
         priorities: Vec::new(),
         rr_system: None,
@@ -123,6 +127,8 @@ fn parse_args() -> Args {
                     .next()
                     .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
             }
+            "--rtl" => a.rtl = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "--voice-rtl" => a.voice_rtl = it.next().and_then(|s| s.parse().ok()).unwrap_or(1),
             "--voice-rate" => a.voice_rate = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0),
             "--priority" => {
                 let s = it.next().unwrap_or_default();
@@ -587,10 +593,12 @@ fn main() {
         dual::run(dual::DualArgs {
             control_source: args.source.clone(),
             control_serial: args.serial,
+            control_rtl: args.rtl,
             control_hz: args.control,
             control_rate: args.rate,
             voice_source: args.voice_source.clone(),
             voice_serial: args.voice_serial,
+            voice_rtl: args.voice_rtl,
             voice_rate: if args.voice_rate > 0.0 {
                 args.voice_rate
             } else {

@@ -11,11 +11,15 @@ use hs_source::{FreqHandle, SdrSource};
 pub struct DualArgs {
     pub control_source: String,
     pub control_serial: Option<u64>,
+    /// RTL-SDR device index for the control radio (0 = first dongle).
+    pub control_rtl: usize,
     /// The control channel frequency (SDR A's centre).
     pub control_hz: f64,
     pub control_rate: f64,
     pub voice_source: String,
     pub voice_serial: Option<u64>,
+    /// RTL-SDR device index for the voice radio (1 = second dongle).
+    pub voice_rtl: usize,
     pub voice_rate: f64,
     pub gain: Option<f64>,
     pub cqpsk: bool,
@@ -37,6 +41,7 @@ fn default_source() -> String {
 fn open(
     kind: &str,
     serial: Option<u64>,
+    rtl_index: usize,
     freq: f64,
     rate: f64,
     gain: Option<f64>,
@@ -44,9 +49,10 @@ fn open(
     match kind {
         #[cfg(feature = "rtlsdr")]
         "rtlsdr" => {
-            let src = hs_source::rtlsdr::RtlSdrSource::open("driver=rtlsdr", freq, rate, gain)
+            let args = format!("driver=rtlsdr,rtl={rtl_index}");
+            let src = hs_source::rtlsdr::RtlSdrSource::open(&args, freq, rate, gain)
                 .unwrap_or_else(|e| {
-                    eprintln!("could not open RTL-SDR: {e:?}");
+                    eprintln!("could not open RTL-SDR #{rtl_index}: {e:?}");
                     std::process::exit(1);
                 });
             let fh = src.freq_handle();
@@ -102,6 +108,7 @@ pub fn run(args: DualArgs) {
     let (control_src, _) = open(
         &control_source,
         args.control_serial,
+        args.control_rtl,
         args.control_hz,
         args.control_rate,
         args.gain,
@@ -109,6 +116,7 @@ pub fn run(args: DualArgs) {
     let (voice_src, voice_fh) = open(
         &voice_source,
         args.voice_serial,
+        args.voice_rtl,
         args.control_hz,
         args.voice_rate,
         args.gain,
