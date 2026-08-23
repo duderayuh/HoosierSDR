@@ -211,7 +211,7 @@ function addCall(g) {
     `<td class="act">` +
       (g.wav ? `<button title="Replay" data-wav="${esc(g.wav)}">▶</button>` : "") +
       (g.id != null ? `<button title="Add to cart" data-cart="${g.id}" class="${cart.has(g.id) ? "on" : ""}">🛒</button>` : "") +
-      `<button data-pri="${g.tg}">☆</button>` +
+      `<input type="number" class="priin" data-pri="${g.tg}" min="1" max="99" value="${priOf(g.tg)}" title="Priority 1–99 (1 = highest)">` +
       `<button title="Alert tone for TG ${g.tg}" data-bell="${g.tg}">🔔</button>` +
       `<button title="Avoid TG ${g.tg} for a while" data-avoid="${g.tg}">⏱</button>` +
       `<button title="Lock out TG ${g.tg}" data-lock="${g.tg}">⊘</button>` +
@@ -222,7 +222,7 @@ function addCall(g) {
   tr.querySelectorAll("button[data-wav]").forEach((b) => b.onclick = () => replay(b.dataset.wav));
   tr.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => toggleLock(+b.dataset.lock));
   tr.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => avoidFor(+b.dataset.avoid));
-  tr.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => cyclePriority(+b.dataset.pri));
+  tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); });
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
   tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
   const text = `${g.name} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
@@ -244,13 +244,14 @@ $("clear").onclick = () => { tbody.innerHTML = ""; history.length = 0; $("empty"
 /* ---------- per-talkgroup settings (kept in localStorage) ---------- */
 const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (_) { return d; } };
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
-const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 10 | 90
+const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
 const bells = new Set(store("hs.bells", []));
 const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
 function pushPriorities() { if (TAURI) invoke("set_priorities", { entries: [...prio] }).catch((e) => log(`set_priorities: ${e}`)); }
-function cyclePriority(tg) {
-  const cur = prio.get(tg) || 50, next = cur === 50 ? 10 : cur === 10 ? 90 : 50;
-  if (next === 50) prio.delete(tg); else prio.set(tg, next);
+const priOf = (tg) => prio.get(tg) || 50;
+function setPriority(tg, val) {
+  const n = parseInt(val, 10);
+  if (Number.isFinite(n) && n >= 1 && n <= 99 && n !== 50) prio.set(tg, n); else prio.delete(tg);
   save("hs.prio", Object.fromEntries(prio)); pushPriorities(); refreshRowButtons();
 }
 function toggleBell(tg) { bells.has(tg) ? bells.delete(tg) : bells.add(tg); save("hs.bells", [...bells]); refreshRowButtons(); }
@@ -383,7 +384,7 @@ function renderLockout() {
 function refreshRowButtons() {
   tbody.querySelectorAll("button[data-lock]").forEach((b) => b.classList.toggle("on", lockout.has(+b.dataset.lock)));
   tbody.querySelectorAll("button[data-avoid]").forEach((b) => b.classList.toggle("on", avoidUntil.has(+b.dataset.avoid)));
-  tbody.querySelectorAll("button[data-pri]").forEach((b) => { const p = prio.get(+b.dataset.pri) || 50; b.className = p === 10 ? "pri-h" : p === 90 ? "pri-l" : ""; b.textContent = p === 10 ? "★" : p === 90 ? "▽" : "☆"; b.title = `Priority: ${p === 10 ? "high" : p === 90 ? "low" : "normal"} — click to cycle`; });
+  tbody.querySelectorAll("input[data-pri]").forEach((b) => { const p = prio.get(+b.dataset.pri) || 50; b.className = "priin" + (p < 50 ? " pri-h" : p > 50 ? " pri-l" : ""); b.value = p; b.title = `Priority ${p < 50 ? "(high)" : p > 50 ? "(low)" : "(default)"} — type 1–99`; });
   tbody.querySelectorAll("button[data-bell]").forEach((b) => b.classList.toggle("bell", bells.has(+b.dataset.bell)));
 }
 function toggleLock(tg) {
@@ -604,7 +605,7 @@ function renderDiscovery() {
   const rows = Object.entries(disc.tgs).map(([tg, t]) => ({ tg: +tg, ...t })).filter((t) => (!un || !t.named) && (!q || `${t.tg} ${t.name || ""} ${t.freq || ""}`.toLowerCase().includes(q))).sort((a, b) => b.last - a.last);
   $("dcBody").innerHTML = rows.slice(0, 1000).map((t) => `<tr data-tg="${t.tg}"><td class="mono">${t.tg}</td><td>${t.named ? esc(t.name) : `<span class="faint">unnamed</span>`}${t.enc ? ' <span class="badge enc">enc</span>' : ""}</td><td class="mono">${t.n}</td><td class="mono">${t.freq != null ? t.freq.toFixed(4) : "—"}</td><td class="mono">${t.unit || "—"}</td><td class="mono">${ago(t.last)}</td>` +
     `<td class="act"><button data-dcplay="${t.tg}" title="Play the newest recorded call on this talkgroup">▶</button><input type="text" data-name="${t.tg}" placeholder="${t.named ? "rename" : "name it"}" style="width:120px;padding:2px 6px;font-size:11px" /><button data-namego="${t.tg}">✔</button>` +
-    `<button data-pri="${t.tg}">${(prio.get(t.tg) || 50) === 10 ? "★" : (prio.get(t.tg) || 50) === 90 ? "▽" : "☆"}</button><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
+    `<input type="number" class="priin" data-pri="${t.tg}" min="1" max="99" value="${prio.get(t.tg) || 50}" title="Priority 1–99 (1 = highest)"><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
   $("dcEmpty").style.display = rows.length ? "none" : "";
   const all = Object.keys(disc.tgs).length, unnamed = Object.values(disc.tgs).filter((t) => !t.named).length;
   $("dcMeta").textContent = all ? `${all} talkgroups · ${unnamed} unnamed` : "";
@@ -620,7 +621,7 @@ function renderDiscovery() {
     catch (e) { uiToast(`${e}`, "err"); }
   });
   tb.querySelectorAll("input[data-name]").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") tb.querySelector(`[data-namego="${i.dataset.name}"]`).click(); });
-  tb.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => { cyclePriority(+b.dataset.pri); renderDiscovery(); });
+  tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); renderDiscovery(); });
   tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); renderDiscovery(); });
   const fr = Object.entries(disc.freqs).map(([f, v]) => ({ f: +f, ...v })).sort((a, b) => b.n - a.n);
   $("dfBody").innerHTML = fr.slice(0, 300).map((r) => `<tr><td class="mono">${r.f.toFixed(4)}</td><td class="mono">${r.n}</td><td class="mono">${Object.keys(r.tgs).length}</td><td>${bandHi ? (r.f >= bandLo && r.f <= bandHi ? '<span class="badge clear">yes</span>' : '<span class="badge enc">no</span>') : "—"}</td><td class="mono">${ago(r.last)}</td></tr>`).join("");
@@ -1308,7 +1309,7 @@ if (TAURI) {
     const pol = (k, glyph, title) => `<button data-pol="${k}:${r.id}" class="${polAllows(k, r.id) ? "on-ok" : "off"}" title="${title}: ${polAllows(k, r.id) ? "yes" : "no"} — click to toggle">${glyph}</button>`;
     return `<tr class="${r.encrypted ? "enc" : ""}" data-tg="${r.id}" ${c ? `data-color="${c}" style="--tgc:${c}"` : ""}><td><input type="checkbox" data-tick="${r.id}" ${alTicked.has(r.id) ? "checked" : ""}></td><td class="mono">${r.id}</td><td>${esc(r.alias)}</td><td>${esc(r.description)}${rule ? ` <small class="faint" title="range rule">▸ ${esc(rule.name || rule.lo + "–" + rule.hi)}</small>` : ""}</td><td><small>${esc(r.category)}</small></td><td><small class="mono">${esc(srcLabel(r.source))}</small></td>` +
       `<td class="act">${pol("record", "●", "Record audio")}${pol("stream", "▶", "Stream live")}${pol("upload", "↑", "Upload to sharing services")}</td>` +
-      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><button data-pri="${r.id}" class="${p === 10 ? "pri-h" : p === 90 ? "pri-l" : ""}">${p === 10 ? "★" : p === 90 ? "▽" : "☆"}</button>` +
+      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><input type="number" class="priin" data-pri="${r.id}" min="1" max="99" value="${p}" title="Priority 1–99 (1 = highest)">` +
       `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" class="${avoidUntil.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" class="${lockout.has(r.id) || (rule && rule.lock) ? "on" : ""}">⊘</button></td></tr>`;
   }
   const srcLabel = (src) => src.replace(/^rr_(\d+)$/, (m, sid) => { const pl = (typeof playlists !== "undefined" ? playlists : []).find((p) => String(p.sid) === sid); return pl ? `${pl.system_name}` : `RR sid ${sid}`; }).replace(/^csv_user$/, "named by you").replace(/^csv_/, "CSV ");
@@ -1326,7 +1327,7 @@ if (TAURI) {
     const tb = $("alBody");
     tb.querySelectorAll("input[data-tick]").forEach((c) => c.onchange = () => { c.checked ? alTicked.add(+c.dataset.tick) : alTicked.delete(+c.dataset.tick); $("grpMeta").textContent = alTicked.size ? `${alTicked.size} ticked` : ""; });
     tb.querySelectorAll("button[data-pol]").forEach((b) => b.onclick = () => { const [k, tg] = b.dataset.pol.split(":"); polSet(k, +tg, !polAllows(k, +tg)); pushPolicies(); alRender(); });
-    tb.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => { cyclePriority(+b.dataset.pri); alRender(); });
+    tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); alRender(); });
     tb.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => { toggleBell(+b.dataset.bell); alRender(); });
     tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid); alRender(); });
     tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); alRender(); });
@@ -1385,7 +1386,7 @@ if (TAURI) {
   /* ---------- talkgroup range rules ---------- */
   $("rgColor").innerHTML = '<option value="">none</option>' + PALETTE.map((c) => `<option value="${c}" style="color:${c}">${c}</option>`).join("");
   window.renderRules = function renderRules() {
-    $("rgList").innerHTML = tgRules.length ? tgRules.map((r, i) => `<div class="row"><span class="swatch" style="background:${r.color || "transparent"}"></span><span class="grow"><b>${esc(r.name || "")}</b> <span class="mono">${r.lo}–${r.hi}</span><br><small>${[r.pri === 10 ? "high priority" : r.pri === 90 ? "low priority" : "", r.lock ? "locked out" : "", r.bell ? "alert" : ""].filter(Boolean).join(" · ") || "colour only"}</small></span><button class="btn ghost" data-rgdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No range rules.</span></div>';
+    $("rgList").innerHTML = tgRules.length ? tgRules.map((r, i) => `<div class="row"><span class="swatch" style="background:${r.color || "transparent"}"></span><span class="grow"><b>${esc(r.name || "")}</b> <span class="mono">${r.lo}–${r.hi}</span><br><small>${[r.pri ? `priority ${r.pri}` : "", r.lock ? "locked out" : "", r.bell ? "alert" : ""].filter(Boolean).join(" · ") || "colour only"}</small></span><button class="btn ghost" data-rgdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No range rules.</span></div>';
     $("rgList").querySelectorAll("[data-rgdel]").forEach((b) => b.onclick = () => { tgRules.splice(+b.dataset.rgdel, 1); saveRules(); alRender(); });
     $("rgMeta").textContent = tgRules.length ? `${tgRules.length} rule${tgRules.length === 1 ? "" : "s"}` : "";
   };

@@ -287,7 +287,7 @@
                 <label class="field"><span class="lab">Label</span><input id="rgName" type="text" placeholder="Marion County" spellcheck="false" /></label>
               </div>
               <div class="row3">
-                <label class="field"><span class="lab">Priority</span><select id="rgPri"><option value="">normal</option><option value="10">high</option><option value="90">low</option></select></label>
+                <label class="field"><span class="lab">Priority</span><input type="number" id="rgPri" class="priin" min="1" max="99" placeholder="50" title="1 = highest, 99 = lowest; blank = normal" /></label>
                 <label class="field"><span class="lab">Colour</span><select id="rgColor"><option value="">none</option></select></label>
                 <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="rgLock" type="checkbox" /> lock out</label><label class="check" style="margin:0"><input id="rgBell" type="checkbox" /> 🔔</label><button class="btn ghost" id="rgAdd">Add</button></span></label>
               </div>

@@ -213,6 +213,10 @@ tbody tr.emg td { background: color-mix(in srgb, var(--enc) 9%, transparent); }
 .badge.emg { color: var(--enc); background: color-mix(in srgb, var(--enc) 18%, transparent); font-weight: 700; }
 td.act button.pri-h { color: var(--amber); border-color: var(--amber); }
 td.act button.pri-l { opacity: .55; }
+.priin { width: 3.3em; text-align: center; padding: 0 2px; -moz-appearance: textfield; }
+.priin::-webkit-outer-spin-button, .priin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.priin.pri-h { color: var(--amber); border-color: var(--amber); }
+.priin.pri-l { opacity: .55; }
 td.act button.bell { color: var(--signal); border-color: var(--signal); }
 
 /* library */
