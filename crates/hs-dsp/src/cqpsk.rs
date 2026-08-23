@@ -244,7 +244,7 @@ impl EqualizedCqpsk {
 /// [`CqpskReceiver::new_bare`] to bypass the equalizer for A/B comparison.
 pub struct CqpskReceiver {
     dc: crate::agc::DcBlocker,
-    agc: crate::agc::Agc,
+    pub agc: crate::agc::Agc,
     mf: crate::fir::FirC,
     gardner: crate::timing_complex::ComplexGardner,
     eq: FrontEq,

@@ -584,6 +584,11 @@ function handleFollow(ev) {
       break;
     case "status":
       $("r-syncs").textContent = ev.control_syncs;
+      if (ev.signal_dbfs != null) {
+        $("r-signal").textContent = ev.signal_dbfs.toFixed(1) + " dBFS";
+      } else {
+        $("r-signal").textContent = "— dBFS";
+      }
       $("r-grants").textContent = ev.calls;
       $("r-syncerr").textContent = ev.dropped ? `${ev.dropped}` : "0";
       $("r-stream").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)}M · ${ev.dropped || 0}`;

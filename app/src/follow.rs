@@ -187,6 +187,8 @@ pub enum FollowEvent {
         want_msps: f64,
         dropped: u64,
         elapsed_secs: f64,
+        /// Signal power (dBFS) off the control channel.
+        signal_dbfs: Option<f32>,
     },
     Spectrum {
         bins_db: Vec<f32>,
@@ -485,7 +487,8 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 total_pairs,
                 secs,
                 rate,
-                src.dropped().saturating_sub(drop_base) + extra_drops,
+                src.dropped() + extra_drops,
+                f.control_power_dbfs(),
             ));
         }
     }
@@ -500,7 +503,8 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         total_pairs,
         secs,
         rate,
-        src.dropped().saturating_sub(drop_base),
+        src.dropped(),
+        None,
     ));
     Ok(())
 }
@@ -601,7 +605,7 @@ impl Reporter<'_> {
         crate::units::name_for(&units, &rules, id)
     }
 
-    fn status(&self, total_pairs: u64, secs: f64, rate: f64, dropped: u64) -> FollowEvent {
+    fn status(&self, total_pairs: u64, secs: f64, rate: f64, dropped: u64, signal_dbfs: Option<f32>) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
             calls: self.calls,
@@ -609,10 +613,11 @@ impl Reporter<'_> {
             encrypted: self.enc,
             locked: self.locked,
             busy: self.busy,
-            msps: total_pairs as f64 / secs / 1e6,
+            msps: (total_pairs as f64) / secs / 1e6,
             want_msps: rate / 1e6,
             dropped,
             elapsed_secs: secs,
+            signal_dbfs,
         }
     }
 

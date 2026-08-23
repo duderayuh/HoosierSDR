@@ -469,8 +469,13 @@ impl TrunkFollower {
     pub fn set_priorities(&mut self, p: impl IntoIterator<Item = (u16, u8)>) {
         self.priority = p
             .into_iter()
-            .map(|(tg, pr)| (tg, pr.clamp(1, 99)))
+            .map(|(tg, pri)| (tg, pri.clamp(1, 99)))
             .collect();
+    }
+
+    /// Diagnostic: estimated signal power of the control channel in dBFS.
+    pub fn control_power_dbfs(&self) -> Option<f32> {
+        self.control.power_dbfs()
     }
 
     pub fn priority_of(&self, tg: u16) -> u8 {

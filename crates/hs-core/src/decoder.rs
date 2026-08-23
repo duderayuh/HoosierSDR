@@ -231,6 +231,16 @@ impl ChannelDecoder {
         })
     }
 
+    /// Current signal power estimated by the AGC (dBFS).
+    pub fn power_dbfs(&self) -> Option<f32> {
+        // We use the baseband signal power from the CQPSK path if it's there.
+        // `gain()` is the multiplier applied *to* the signal to normalize it,
+        // so actual signal power is inversely proportional to AGC gain.
+        self.cqpsk
+            .as_ref()
+            .map(|c| -10.0 * c.agc.gain().max(1e-12).log10())
+    }
+
     /// How the capture rate is reduced before demodulation.
     pub fn decimation(&self) -> DecimationPlan {
         self.plan
