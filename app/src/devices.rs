@@ -72,6 +72,15 @@ impl DeviceSettings {
                 _ => G::Agc,
             });
         }
+        if kind == "soapy" {
+            // E4000: clamp into its own ladder; default to AGC — there is no
+            // known-good manual value for the E4000 yet, and the R820T2's
+            // 40 dB default does not map onto its −1..42 dB ladder.
+            return Some(match self.gain {
+                Some(db) => G::Manual(hs_source::clamp_e4000_gain(db)),
+                None => G::Agc,
+            });
+        }
         Some(match self.gain {
             Some(db) => G::Manual(hs_source::clamp_rtl_gain(db)),
             None => G::Manual(hs_source::RTL_DEFAULT_GAIN_DB),
@@ -124,6 +133,16 @@ pub fn detect() -> Vec<Device> {
                 rates: vec![2_400_000.0, 1_024_000.0, 250_000.0],
             }),
     );
+    v.extend(
+        hs_source::soapy::SoapyRtlSource::list()
+            .into_iter()
+            .map(|(args, label)| Device {
+                kind: "soapy".into(),
+                id: args,
+                label,
+                rates: vec![2_400_000.0, 1_024_000.0, 250_000.0],
+            }),
+    );
     v
 }
 
@@ -133,6 +152,8 @@ pub struct View {
     pub settings: HashMap<String, DeviceSettings>,
     /// The RTL-SDR tuner's gain steps, for the picker.
     pub rtl_gains_db: Vec<f64>,
+    /// The E4000 tuner's gain steps (Smartee XTR), for the picker.
+    pub e4000_gains_db: Vec<f64>,
 }
 
 /// Detect radios (runs the USB probe off the UI thread).
@@ -145,6 +166,7 @@ pub async fn devices_list(app: AppHandle) -> View {
         devices,
         settings: load(&app),
         rtl_gains_db: hs_source::RTL_TUNER_GAINS_DB.to_vec(),
+        e4000_gains_db: hs_source::E4000_TUNER_GAINS_DB.to_vec(),
     }
 }
 

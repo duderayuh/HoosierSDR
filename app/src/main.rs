@@ -728,6 +728,7 @@ fn open_device_with_gain(
 ) -> Result<(Box<dyn hs_source::SdrSource + Send>, hs_source::GainHandle), String> {
     use hs_source::airspy::AirspySource;
     use hs_source::rtlsdr::RtlSdrSource;
+    use hs_source::soapy::SoapyRtlSource;
     use hs_source::GainSetting;
     Ok(match source {
         "airspy" => {
@@ -742,6 +743,17 @@ fn open_device_with_gain(
             {
                 src.set_gain(g).map_err(|e| format!("Airspy gain: {e:?}"))?;
             }
+            let h = src.gain_handle();
+            (Box::new(src), h)
+        }
+        "soapy" => {
+            let db = match setting {
+                Some(GainSetting::Manual(db)) => Some(db),
+                Some(GainSetting::Agc) => None,
+                _ => gain,
+            };
+            let src = SoapyRtlSource::open(freq, rate, db)
+                .map_err(|e| format!("open RTL-SDR (Soapy): {e:?}"))?;
             let h = src.gain_handle();
             (Box::new(src), h)
         }

@@ -100,10 +100,27 @@ pub const RTL_DEFAULT_GAIN_DB: f64 = 40.0;
 /// than passed to the driver, which would either reject them or pick a garbage
 /// floor — the failure mode behind "-24 dB" garbage voice.
 pub fn clamp_rtl_gain(db: f64) -> f64 {
-    let min = RTL_TUNER_GAINS_DB[0];
-    let max = RTL_TUNER_GAINS_DB[RTL_TUNER_GAINS_DB.len() - 1];
+    clamp_gain_to_steps(db, RTL_TUNER_GAINS_DB)
+}
+
+/// The E4000 tuner's gain steps in dB — the 14 values a Nooelec Smartee XTR (or
+/// any E4000 RTL-SDR) actually offers. A very different ladder from the
+/// R820T/R820T2's 29 steps (0–49.6): −1 to 42 dB, coarse at the low end.
+pub const E4000_TUNER_GAINS_DB: &[f64] = &[
+    -1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5, 19.0, 21.5, 24.0, 29.0, 34.0, 42.0,
+];
+
+/// Clamp an E4000 gain request into its valid step list (nearest step).
+pub fn clamp_e4000_gain(db: f64) -> f64 {
+    clamp_gain_to_steps(db, E4000_TUNER_GAINS_DB)
+}
+
+/// Clamp a gain request into a tuner's valid step list (nearest step).
+pub fn clamp_gain_to_steps(db: f64, steps: &[f64]) -> f64 {
+    let min = steps[0];
+    let max = steps[steps.len() - 1];
     let clamped = db.clamp(min, max);
-    RTL_TUNER_GAINS_DB
+    steps
         .iter()
         .copied()
         .min_by(|a, b| (a - clamped).abs().total_cmp(&(b - clamped).abs()))

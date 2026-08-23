@@ -875,11 +875,13 @@ if (TAURI) {
     devLoadSelected();
   }
   /* ---------- gain controls, SDRTrunk-style ---------- */
+  const E4000_GAINS = () => (devView.e4000_gains_db && devView.e4000_gains_db.length ? devView.e4000_gains_db : [-1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5, 19.0, 21.5, 24.0, 29.0, 34.0, 42.0]);
+  const GAINS = () => (srcKind() === "soapy" ? E4000_GAINS() : RTL_GAINS());
   const RTL_GAINS = () => (devView.rtl_gains_db && devView.rtl_gains_db.length ? devView.rtl_gains_db : [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6]);
   function gainUi() {
     const airspy = srcKind() === "airspy";
     $("gnRtl").style.display = airspy ? "none" : ""; $("gnAirspy").style.display = airspy ? "" : "none";
-    const g = RTL_GAINS(); $("gnRtlGain").max = g.length - 1; $("gnRtlGainVal").textContent = (g[+$("gnRtlGain").value] ?? 0).toFixed(1) + " dB";
+    const g = GAINS(); $("gnRtlGain").max = g.length - 1; $("gnRtlGainVal").textContent = (g[+$("gnRtlGain").value] ?? 0).toFixed(1) + " dB";
     $("gnRtlGain").disabled = $("gnRtlAgc").checked;
     const mode = $("gnAsMode").value, on = $("gnAsEnabled").checked;
     $("gnAsPresetField").style.display = mode === "linearity" || mode === "sensitivity" ? "" : "none"; $("gnAsManual").style.display = mode === "manual" ? "" : "none";
@@ -891,14 +893,14 @@ if (TAURI) {
   }
   ["gnRtlAgc", "gnRtlGain", "gnAsEnabled", "gnAsMode", "gnAsPreset", "gnAsLna", "gnAsMixer", "gnAsVga", "gnAsLnaAgc", "gnAsMixerAgc"].forEach((id) => { $(id).oninput = gainUi; $(id).onchange = gainUi; });
   function gainFromUi(s) {
-    const g = RTL_GAINS();
+    const g = GAINS();
     s.gain = $("gnRtlAgc").checked ? null : (g[+$("gnRtlGain").value] ?? null);
     s.airspy_gain = $("gnAsEnabled").checked; s.airspy_mode = $("gnAsMode").value; s.airspy_preset = +$("gnAsPreset").value;
     s.airspy_lna = +$("gnAsLna").value; s.airspy_mixer = +$("gnAsMixer").value; s.airspy_vga = +$("gnAsVga").value; s.airspy_lna_agc = $("gnAsLnaAgc").checked; s.airspy_mixer_agc = $("gnAsMixerAgc").checked;
     return s;
   }
   function gainToUi(s) {
-    const g = RTL_GAINS();
+    const g = GAINS();
     $("gnRtlAgc").checked = s.gain == null;
     if (s.gain != null) { let best = 0; g.forEach((v, i) => { if (Math.abs(v - s.gain) < Math.abs(g[best] - s.gain)) best = i; }); $("gnRtlGain").value = best; } else $("gnRtlGain").value = g.length - 1;
     $("gnAsEnabled").checked = !!s.airspy_gain; $("gnAsMode").value = s.airspy_mode || "agc"; $("gnAsPreset").value = s.airspy_preset ?? 12;
