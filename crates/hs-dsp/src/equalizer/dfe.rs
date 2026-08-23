@@ -105,7 +105,7 @@ impl CmaDfe {
         }
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.ff.iter_mut().for_each(|t| *t = C32::ZERO);
         let mid = self.ff.len() / 2;
         self.ff[mid] = C32::new(1.0, 0.0);

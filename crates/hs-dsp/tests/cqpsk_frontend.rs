@@ -296,3 +296,107 @@ fn thesis_on_live_iq_cma_beats_bare_on_isi() {
         "CMA did not beat bare: eq {eq:.4} vs bare {bare:.4}"
     );
 }
+
+/// A single NaN sample (front-end overflow, USB drop) must not permanently kill
+/// the receiver. Before the fix the NaN poisoned the DC blocker + AGC IIR state,
+/// every later symbol came out NaN, and the lock watchdog (`> LOCK_ERR_MAX`)
+/// treats NaN as "locked" — so the receiver decoded garbage forever with no
+/// recovery. The front-door guard drops the corrupt sample; decoding must
+/// continue cleanly afterward.
+#[test]
+fn survives_a_nan_sample() {
+    let mut s = 0xDEAD_BEEFu64;
+    let dibits: Vec<u8> = (0..3000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let iq = modulate_iq(&dibits, SPS, BETA);
+    let rx = impair(&iq, 0.006, 0.9, 0.04, 11);
+
+    let mut recv = CqpskReceiver::new(SPS, BETA);
+    let mut out = Vec::new();
+    let nan_at = rx.len() / 2;
+    for (i, &x) in rx.iter().enumerate() {
+        if i == nan_at {
+            assert!(recv.push(C32::new(f32::NAN, 0.0)).is_none());
+        }
+        if let Some(d) = recv.push(x) {
+            out.push(d);
+        }
+    }
+
+    // A poisoned receiver stops emitting (or emits garbage) after the NaN; the
+    // guard must let it keep decoding the whole signal.
+    assert!(
+        out.len() > 2000,
+        "receiver died after NaN: {} symbols",
+        out.len()
+    );
+    let tail = &out[out.len() - 1000..];
+    let e = best_ber(tail, &dibits);
+    eprintln!("post-NaN tail BER = {e:.4}");
+    assert!(
+        e < 0.05,
+        "receiver did not recover after a NaN sample: BER {e:.4}"
+    );
+}
+
+/// A cold-started traffic channel can sit on idle noise for minutes before a
+/// call keys up, and the equalizer adapts on that AGC-normalized unit-power
+/// noise the whole time. The failed-acquisition-window tap reset (every
+/// `ACQ_FAIL_LIMIT` windows) keeps it near identity so it never walks into the
+/// degenerate CM-DFE minimum. This smoke-tests the reset path on both the CMA
+/// and DFE front ends: after a long idle the receiver must still decode the
+/// transmission that follows. (It does not prove the DFE-minimum fix — that
+/// needs the low-level Airspy capture; it pins that the reset doesn't regress.)
+#[test]
+fn recovers_after_a_long_idle() {
+    let mut n = xorshift(0xBAD_F00Du64);
+    // ~5 acquisition windows of idle noise (2.4 s at 10 sps).
+    let idle: Vec<C32> = (0..24_000)
+        .map(|_| C32::new(0.5 * n(), 0.5 * n()))
+        .collect();
+
+    let mut s = 0x1234_CAFEu64;
+    let dibits: Vec<u8> = (0..3000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let sig = impair(&modulate_iq(&dibits, SPS, BETA), 0.006, 0.9, 0.04, 3);
+
+    let run = |mut recv: CqpskReceiver| -> f64 {
+        let mut out = Vec::new();
+        for &x in idle.iter().chain(sig.iter()) {
+            if let Some(d) = recv.push(x) {
+                out.push(d);
+            }
+        }
+        assert!(
+            out.len() > 1000,
+            "too few symbols after long idle: {}",
+            out.len()
+        );
+        let tail = &out[out.len() - 800..];
+        best_ber(tail, &dibits)
+    };
+
+    let cma = run(CqpskReceiver::new(SPS, BETA));
+    let dfe = run(CqpskReceiver::new_dfe(SPS, BETA));
+    eprintln!("long-idle → onset: CMA BER = {cma:.4}, DFE BER = {dfe:.4}");
+    assert!(
+        cma < 0.05,
+        "CMA did not decode after a long idle: BER {cma:.4}"
+    );
+    assert!(
+        dfe < 0.05,
+        "DFE did not decode after a long idle: BER {dfe:.4}"
+    );
+}

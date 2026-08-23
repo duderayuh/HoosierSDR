@@ -43,7 +43,7 @@ impl CmaEqualizer {
     }
 
     /// Reset to the center-spike identity, discarding any diverged taps.
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         for t in self.taps.iter_mut() {
             *t = C32::ZERO;
         }
