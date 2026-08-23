@@ -253,6 +253,30 @@ fn two_ray_iq(iq: &[C32], gain: f32, theta: f32, sps: usize) -> Vec<C32> {
     out
 }
 
+/// Two-ray channel with a *fractional*-symbol echo delay (linearly interpolated
+/// between the surrounding samples) — the simulcast regime the wired equalizers
+/// were never tested against. Real simulcast delay spreads are 0.12–0.34 T, not
+/// integer symbols, and a symbol-spaced equalizer sampling at the main path's
+/// timing cannot cleanly invert a sub-symbol echo.
+fn two_ray_iq_frac(iq: &[C32], gain: f32, theta: f32, delay_syms: f32) -> Vec<C32> {
+    let echo = C32::new(gain * theta.cos(), gain * theta.sin());
+    let d = delay_syms * SPS as f32; // delay in samples, possibly fractional
+    let mut out = vec![C32::ZERO; iq.len()];
+    for i in 0..iq.len() {
+        let mut y = iq[i];
+        let idx = i as f32 - d;
+        if idx >= 0.0 {
+            let i0 = idx.floor() as usize;
+            let frac = idx - i0 as f32;
+            let i1 = (i0 + 1).min(iq.len() - 1);
+            let delayed = iq[i0] + (iq[i1] - iq[i0]).scale(frac);
+            y = y + echo * delayed;
+        }
+        out[i] = y;
+    }
+    out
+}
+
 #[test]
 fn thesis_on_live_iq_cma_beats_bare_on_isi() {
     // The whole story on one channel: ISI (two-ray) + carrier offset + timing
@@ -398,5 +422,64 @@ fn recovers_after_a_long_idle() {
     assert!(
         dfe < 0.05,
         "DFE did not decode after a long idle: BER {dfe:.4}"
+    );
+}
+
+/// Quantify how the wired (symbol-spaced) equalizers handle a *fractional*-delay
+/// echo — the actual simulcast regime (0.12–0.34 T), which the integer-symbol
+/// tests above never exercised. Sweeps echo delay across the regime and prints
+/// bare vs CMA vs DFE BER. The FSE work (M5) exists because a symbol-spaced
+/// equalizer sampling at the main path's timing cannot cleanly invert a
+/// sub-symbol echo; this test is the measurement that motivates and later gates
+/// that work.
+#[test]
+fn fractional_delay_echo_measures_the_symbol_spaced_limit() {
+    let mut s = 0xFACE_0FF0u64;
+    let dibits: Vec<u8> = (0..4000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let iq = modulate_iq(&dibits, SPS, BETA);
+
+    let run = |rx: &[C32], mut recv: CqpskReceiver| -> f64 {
+        let mut out = Vec::new();
+        for &x in rx {
+            if let Some(d) = recv.push(x) {
+                out.push(d);
+            }
+        }
+        let tail = &out[out.len().saturating_sub(1500)..];
+        best_ber(tail, &dibits)
+    };
+
+    eprintln!("fractional-delay echo (theta pi/4):");
+    let (mut t_bare, mut t_cma) = (1.0f64, 1.0f64);
+    for gain in [0.6f32, 0.9] {
+        for delay_t in [0.0f32, 0.15, 0.25, 0.35, 0.5, 1.0] {
+            let isi = two_ray_iq_frac(&iq, gain, std::f32::consts::FRAC_PI_4, delay_t);
+            let rx = impair(&isi, 0.006, 0.9, 0.04, 5);
+            let bare = run(&rx, CqpskReceiver::new_bare(SPS, BETA));
+            let cma = run(&rx, CqpskReceiver::new(SPS, BETA));
+            let dfe = run(&rx, CqpskReceiver::new_dfe(SPS, BETA));
+            eprintln!(
+                "  gain {gain:.1} delay {delay_t:.2} T: bare {bare:.4}  CMA {cma:.4}  DFE {dfe:.4}"
+            );
+            if gain == 0.6 && delay_t == 1.0 {
+                t_bare = bare;
+                t_cma = cma;
+            }
+        }
+    }
+    // The one-symbol echo is where the thesis bites: the equalized path recovers
+    // what the detect-first path loses outright (measured: bare fails to acquire
+    // at 1.0 T / 0.6, CMA decodes perfectly). Fractional delays below ~0.5 T are
+    // absorbed by the RRC matched filter and do not distinguish the paths.
+    assert!(
+        t_cma < t_bare * 0.5,
+        "CMA did not beat bare at 1.0 T / 0.6: {t_cma:.4} vs {t_bare:.4}"
     );
 }
