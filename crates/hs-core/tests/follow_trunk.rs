@@ -415,7 +415,12 @@ fn traffic_audio_decodes_through_the_channelizer() {
         "no CQPSK frame sync on the traffic channel"
     );
     assert!(!call.pcm.is_empty(), "call completed with no audio");
-    assert_eq!(call.modulation, Some(Modulation::Cqpsk));
+    // The winner is not pinned: on this noiseless synthetic channel a C4FM
+    // discriminator genuinely decodes the CQPSK signal too (as it does on
+    // strong real signals), so clean-NID arbitration can legitimately land
+    // either way. The adjacent-channel tests below, where impairment
+    // separates the modulations, do pin the winner.
+    assert!(call.modulation.is_some(), "call reported no modulation");
 }
 
 /// A neighbour one channel over (12.5 kHz, three times the amplitude) must

@@ -83,6 +83,8 @@ pub struct Channelizer {
     /// smears across the block. The taper makes the slice a real lowpass
     /// with a short response, which is what the guard assumes.
     taper: Vec<f32>,
+    /// Blocks processed so far, for the per-block phase correction below.
+    block_idx: u64,
 }
 
 /// Flat passband of the slice taper, Hz each side of the channel centre.
@@ -163,6 +165,7 @@ impl Channelizer {
             out_rate,
             sample_rate,
             taper: make_taper(out_rate),
+            block_idx: 0,
         }
     }
 
@@ -192,6 +195,7 @@ impl Channelizer {
     /// wanted, so the next block is not prefixed with stale samples.
     pub fn reset(&mut self) {
         self.pending.clear();
+        self.block_idx = 0;
     }
 
     /// Rate of every output channel.
@@ -236,12 +240,23 @@ impl Channelizer {
             self.fwd.forward(&mut spectrum);
 
             for (ch, &centre) in self.bins.iter().enumerate() {
+                // Each block's transform treats the block start as time zero,
+                // but blocks hop by half a transform, so mixing this channel
+                // to baseband leaves a residue of exp(jπ·centre) per hop —
+                // for an odd bin, a 180° phase flip on every block. Left in,
+                // that flip lands a discriminator spike every 40 symbols on
+                // half of all channels: audio still decodes, but choppy and
+                // garbled. Undo it here; with a half-block hop the correction
+                // is exactly ±1.
+                let flip = (centre & 1 == 1) && (self.block_idx & 1 == 1);
+                let sign = if flip { -1.0f32 } else { 1.0f32 };
+
                 // Take the bins around this channel, arranged so its centre
                 // lands at DC in the inverse transform.
                 for (j, s) in slice.iter_mut().enumerate() {
                     let off = j as isize - (CHANNEL_BINS as isize) / 2;
                     let idx = (centre + off).rem_euclid(self.n as isize) as usize;
-                    *s = spectrum[idx].scale(self.taper[j]);
+                    *s = spectrum[idx].scale(self.taper[j] * sign);
                 }
                 slice.rotate_left(CHANNEL_BINS / 2);
                 self.inv.inverse(&mut slice);
@@ -258,6 +273,7 @@ impl Channelizer {
                 }
             }
             consumed += self.hop_in;
+            self.block_idx += 1;
         }
 
         if consumed > 0 {
@@ -338,6 +354,46 @@ mod tests {
         };
         assert!(power(4_000.0) > 0.25, "in-channel tone lost");
         assert!(power(23_000.0) < 0.01, "slice-edge tone not removed");
+    }
+
+    /// A pure tone must come out with a continuous phase — no jump where one
+    /// overlap-save block ends and the next begins.
+    ///
+    /// Each block's transform treats the block start as time zero, but blocks
+    /// hop by half a transform, so mixing a channel on bin `c` to baseband
+    /// leaves a residue of `exp(jπ·c)` per hop — a 180° flip on every block
+    /// for any odd-numbered bin. Half of all channels land on odd bins, and
+    /// every flip lands a discriminator spike mid-call: audio decodes, but
+    /// choppy and garbled. A test on an even bin (or one that only measures
+    /// power) cannot see this.
+    #[test]
+    fn phase_is_continuous_across_blocks_on_an_odd_bin() {
+        let fs = 240_000.0;
+        for hz in [12_540.0, -49_980.0] {
+            // 12 540 = bin 209, -49 980 = bin -833: both odd, exactly on-bin
+            // so the output should be a constant (DC) complex value.
+            let mut ch = Channelizer::new(fs, &[hz]);
+            assert_eq!(ch.actual_offsets_hz()[0], hz, "tone not exactly on-bin");
+            let mut iq = Vec::new();
+            for i in 0..120_000 {
+                let p = 2.0 * std::f64::consts::PI * hz * i as f64 / fs;
+                iq.push(p.cos() as f32);
+                iq.push(p.sin() as f32);
+            }
+            let o = ch.process(&iq).remove(0);
+            // Skip the first block, where the filter is still settling.
+            let tail: Vec<C32> = o[800..].chunks(2).map(|c| C32::new(c[0], c[1])).collect();
+            for (i, w) in tail.windows(2).enumerate() {
+                // Sample-to-sample phase step of a DC output is zero; allow a
+                // few degrees for the taper's ripple.
+                let d = (w[1] * w[0].conj()).arg().abs();
+                assert!(
+                    d < 0.1,
+                    "{hz} Hz: {:.0}° phase jump at sample {i}",
+                    d.to_degrees()
+                );
+            }
+        }
     }
 
     #[test]
