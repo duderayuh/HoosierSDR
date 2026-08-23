@@ -31,7 +31,7 @@
 //! policy as the trunk follower's reader thread). Device-side drops the
 //! firmware reports are counted separately.
 
-use crate::{GainHandle, GainSetting, SdrSource, SourceError};
+use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
@@ -181,6 +181,7 @@ pub struct AirspySource {
     pending_pos: usize,
     gain_ignored: Option<f64>,
     gain: GainHandle,
+    freq: FreqHandle,
 }
 
 // SAFETY: the device pointer is only used from the owning thread for
@@ -292,6 +293,7 @@ impl AirspySource {
                 pending_pos: 0,
                 gain_ignored: gain,
                 gain: GainHandle::default(),
+                freq: FreqHandle::default(),
             })
         }
     }
@@ -312,6 +314,13 @@ impl AirspySource {
     /// request is applied on the next `read`.
     pub fn gain_handle(&self) -> GainHandle {
         self.gain.clone()
+    }
+
+    /// A handle that retunes this radio from another thread; the request is
+    /// applied on the next `read` (on the reader's own thread). The dual-SDR
+    /// hopper writes the next voice-channel frequency here.
+    pub fn freq_handle(&self) -> FreqHandle {
+        self.freq.clone()
     }
 
     /// Blocks dropped here because the consumer fell behind.
@@ -342,6 +351,16 @@ impl SdrSource for AirspySource {
         if let Some(g) = self.gain.take() {
             if let Err(e) = self.set_gain(&g) {
                 eprintln!("airspy gain {g:?}: {e:?}");
+            }
+        }
+        if let Some(hz) = self.freq.take() {
+            // SAFETY: `dev` is open for the life of `self`; this runs on the
+            // reader's own thread, same as the gain path.
+            let r = unsafe { airspy_set_freq(self.dev, hz as u32) };
+            if r == AIRSPY_SUCCESS {
+                self.center_freq = hz;
+            } else {
+                eprintln!("airspy retune to {hz} failed ({r})");
             }
         }
         if self.pending_pos >= self.pending.len() {

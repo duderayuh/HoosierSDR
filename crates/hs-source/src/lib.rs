@@ -61,6 +61,25 @@ impl GainHandle {
     }
 }
 
+/// A handle for retuning a streaming radio from another thread. Like
+/// [`GainHandle`], the source applies the newest frequency from inside its
+/// own `read`, so the tuner is only ever touched by the thread that owns it.
+/// This is what a dual-SDR hopper uses to move the voice radio between
+/// channels without sharing the device across threads.
+#[derive(Clone, Default)]
+pub struct FreqHandle(std::sync::Arc<std::sync::Mutex<Option<f64>>>);
+
+impl FreqHandle {
+    /// Request a retune to `hz` (the new centre frequency).
+    pub fn request(&self, hz: f64) {
+        *self.0.lock().unwrap() = Some(hz);
+    }
+    /// Take the pending retune, if any.
+    pub fn take(&self) -> Option<f64> {
+        self.0.lock().unwrap().take()
+    }
+}
+
 /// The R820T/R828D tuner's gain steps in dB — what an RTL-SDR actually
 /// offers; a value in between is rounded to one of these by the driver.
 pub const RTL_TUNER_GAINS_DB: &[f64] = &[

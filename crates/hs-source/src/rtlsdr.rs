@@ -5,7 +5,7 @@
 //! source converts them to the interleaved-f32 blocks the decode chain
 //! consumes. Tune, sample rate, and gain are set at construction.
 
-use crate::{GainHandle, GainSetting, SdrSource, SourceError};
+use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use num_complex::Complex32;
 use seify::{DynDevice, DynRxStreamer, RxStreamer};
 
@@ -17,6 +17,7 @@ pub struct RtlSdrSource {
     center_freq: f64,
     scratch: Vec<Complex32>,
     gain: GainHandle,
+    freq: FreqHandle,
 }
 
 impl RtlSdrSource {
@@ -79,6 +80,7 @@ impl RtlSdrSource {
             center_freq,
             scratch: Vec::new(),
             gain: GainHandle::default(),
+            freq: FreqHandle::default(),
         })
     }
 
@@ -86,6 +88,13 @@ impl RtlSdrSource {
     /// the next `read`, on the reader's own thread).
     pub fn gain_handle(&self) -> GainHandle {
         self.gain.clone()
+    }
+
+    /// A handle that retunes this radio while it streams (applied on the
+    /// next `read`, on the reader's own thread). The dual-SDR hopper writes
+    /// the next voice-channel frequency here.
+    pub fn freq_handle(&self) -> FreqHandle {
+        self.freq.clone()
     }
 
     /// The overall gain range Seify reports for this radio, (min, max, step)
@@ -114,6 +123,13 @@ impl RtlSdrSource {
         }
         Ok(())
     }
+
+    fn apply_freq(&mut self, hz: f64) -> Result<(), seify::Error> {
+        let rx0 = self._dev.rx(0)?;
+        rx0.frequency().set(hz)?;
+        self.center_freq = hz;
+        Ok(())
+    }
 }
 
 impl SdrSource for RtlSdrSource {
@@ -129,6 +145,11 @@ impl SdrSource for RtlSdrSource {
         if let Some(g) = self.gain.take() {
             if let Err(e) = self.apply_gain(&g) {
                 eprintln!("rtl-sdr gain {g:?}: {e:?}");
+            }
+        }
+        if let Some(hz) = self.freq.take() {
+            if let Err(e) = self.apply_freq(hz) {
+                eprintln!("rtl-sdr retune to {hz}: {e:?}");
             }
         }
         let pairs = buf.len() / 2;
