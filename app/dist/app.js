@@ -421,6 +421,8 @@ const MAPS = {
 };
 const wfCfg = store("hs.wf", { fft: 1024, avg: 4, map: "phosphor", min: -95, max: -20, line: true, peak: false });
 let peakHold = null;
+let specCenter = null, specRate = null;   // live SDR passband (MHz, Hz)
+const channelCounts = new Map();            // active voice freq MHz → refcount
 function colour(t) {
   const stops = MAPS[wfCfg.map] || MAPS.phosphor;
   t = Math.max(0, Math.min(1, t));
@@ -458,6 +460,34 @@ function drawSpectrum(db) {
   for (let x = 0; x < sw; x++) { const v = db[Math.floor((x / sw) * n)]; x ? spctx.lineTo(x, yOf(v)) : spctx.moveTo(x, yOf(v)); }
   spctx.stroke();
   spctx.lineTo(sw, sh); spctx.lineTo(0, sh); spctx.closePath(); spctx.fillStyle = "rgba(52,224,207,.12)"; spctx.fill();
+  drawSpectrumOverlay();
+}
+function drawSpectrumOverlay() {
+  const sw = sp.width, sh = sp.height;
+  if (!specCenter || !specRate) return;
+  const lo = specCenter - specRate / 2e6, hi = specCenter + specRate / 2e6;
+  const xOf = (mhz) => ((mhz - lo) / (hi - lo)) * sw;
+  // Full-bandwidth frequency axis.
+  const step = (hi - lo) > 6 ? 1 : (hi - lo) > 3 ? 0.5 : 0.25;
+  spctx.textAlign = "center";
+  spctx.font = "10px 'IBM Plex Mono', monospace";
+  spctx.fillStyle = "rgba(180,220,214,.6)";
+  spctx.strokeStyle = "rgba(180,220,214,.28)";
+  spctx.lineWidth = 1;
+  for (let mhz = Math.ceil(lo / step) * step; mhz <= hi; mhz += step) {
+    const x = xOf(mhz);
+    spctx.beginPath(); spctx.moveTo(x, sh - 14); spctx.lineTo(x, sh - 6); spctx.stroke();
+    spctx.fillText(mhz.toFixed(step < 1 ? 2 : 1), x, sh - 17);
+  }
+  // Active voice-channel ribbons (the ranges being followed).
+  for (const freq of channelCounts.keys()) {
+    const x = xOf(freq);
+    if (x < 0 || x > sw) continue;
+    spctx.fillStyle = "rgba(52,224,207,.10)";
+    spctx.fillRect(x - 4, 0, 8, sh);
+    spctx.strokeStyle = "rgba(52,224,207,.4)";
+    spctx.beginPath(); spctx.moveTo(x, 0); spctx.lineTo(x, sh); spctx.stroke();
+  }
 }
 function wfApply() {
   $("wfFft").value = wfCfg.fft; $("wfAvg").value = wfCfg.avg; $("wfMap").value = wfCfg.map; $("wfMin").value = wfCfg.min; $("wfMax").value = wfCfg.max; $("wfLine").checked = wfCfg.line; $("wfPeak").checked = wfCfg.peak;
@@ -510,15 +540,19 @@ function handleFollow(ev) {
       }
       $("wfAxis").textContent = `${(ev.center_mhz ?? parseFreq($("center").value) / 1e6).toFixed(4)} MHz ± ${(ev.rate / 2e6).toFixed(2)} MHz`;
       if (ev.center_mhz != null) $("center").value = ev.center_mhz.toFixed(4) + "M";
+      specCenter = ev.center_mhz ?? parseFreq($("center").value) / 1e6;
+      specRate = ev.rate;
       $("followMeta").textContent = "";
       activeRefresh();
       break;
     case "call_start":
       activeStart(ev);
+      channelCounts.set(ev.freq_mhz, (channelCounts.get(ev.freq_mhz) || 0) + 1);
       if (bellFor(ev.tg)) tone("bell");
       break;
     case "call":
       activeEnd(ev);
+      { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
       followVoice += ev.secs;
       if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
       addCall({ tg: ev.tg, name: ev.name, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: false,
