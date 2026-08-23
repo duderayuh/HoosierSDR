@@ -6,6 +6,7 @@ pub mod decoder;
 pub mod derotate;
 pub mod diag;
 pub mod follow;
+pub mod priority;
 pub mod scan;
 pub mod stream;
 pub mod wav;
