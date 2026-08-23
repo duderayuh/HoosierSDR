@@ -105,6 +105,14 @@ impl CmaDfe {
         }
     }
 
+    /// Set the feedforward and feedback step sizes. Used to gear-shift the
+    /// feedforward from the fast acquisition step to the slow tracking step
+    /// once the eye is open (the feedback step is effectively constant).
+    pub fn set_step(&mut self, mu_ff: f32, mu_fb: f32) {
+        self.mu_ff = mu_ff;
+        self.mu_fb = mu_fb;
+    }
+
     pub fn reset(&mut self) {
         self.ff.iter_mut().for_each(|t| *t = C32::ZERO);
         let mid = self.ff.len() / 2;

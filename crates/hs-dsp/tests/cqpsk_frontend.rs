@@ -483,3 +483,44 @@ fn fractional_delay_echo_measures_the_symbol_spaced_limit() {
         "CMA did not beat bare at 1.0 T / 0.6: {t_cma:.4} vs {t_bare:.4}"
     );
 }
+
+/// The DFE's slow feedforward step (0.001) cannot open the eye inside a short
+/// voice burst, so the blind acquisition's coherence threshold is never met and
+/// the receiver decodes nothing (out.len = 0, never acquires). The gear-shifted
+/// step — fast feedforward during acquisition, slow after — must acquire and
+/// decode a short burst on the same 1.0 T / 0.6 echo that defeats the
+/// detect-first path.
+#[test]
+fn dfe_acquires_on_short_burst() {
+    let mut s = 0xFACE_0FF0u64;
+    let dibits: Vec<u8> = (0..4000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s & 3) as u8
+        })
+        .collect();
+    let iq = modulate_iq(&dibits, SPS, BETA);
+    let isi = two_ray_iq(&iq, 0.6, std::f32::consts::FRAC_PI_4, SPS);
+    let rx = impair(&isi, 0.006, 0.9, 0.04, 5);
+
+    let mut recv = CqpskReceiver::new_dfe(SPS, BETA);
+    let mut out = Vec::new();
+    for &x in &rx {
+        if let Some(d) = recv.push(x) {
+            out.push(d);
+        }
+    }
+
+    assert!(recv.acquired(), "DFE never acquired on the short burst");
+    assert!(
+        out.len() > 2000,
+        "DFE decoded too few symbols: {}",
+        out.len()
+    );
+    let tail = &out[out.len() - 1000..];
+    let e = best_ber(tail, &dibits);
+    eprintln!("DFE short-burst tail BER = {e:.4}");
+    assert!(e < 0.05, "DFE did not decode the short burst: BER {e:.4}");
+}

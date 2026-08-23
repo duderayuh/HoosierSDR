@@ -53,6 +53,17 @@ impl FrontEq {
             FrontEq::Dfe(eq) => eq.reset(),
         }
     }
+
+    /// Gear-shift the equalizer's step sizes. Only the DFE reacts; the CMA's
+    /// single step and the `None` baseline ignore this (the CMA needs no
+    /// gear-shift — its one step serves both acquisition and tracking).
+    fn set_step(&mut self, mu_ff: f32, mu_fb: f32) {
+        match self {
+            FrontEq::None => {}
+            FrontEq::Cma(_) => {}
+            FrontEq::Dfe(eq) => eq.set_step(mu_ff, mu_fb),
+        }
+    }
 }
 
 /// Differential phase increment for a dibit (radians).
@@ -266,6 +277,20 @@ const ACQ_SYMS: u32 = 400;
 /// Resetting after a few windows keeps the receiver at the best possible cold
 /// start. No gate or threshold — identity only helps acquisition.
 const ACQ_FAIL_LIMIT: u32 = 4;
+/// DFE feedforward step during acquisition — fast enough to open the eye within
+/// the acquisition window on a short voice burst, so the blind carrier
+/// acquisition's coherence threshold is met. Gear-shifted to [`DFE_FF_TRACK`]
+/// on acquisition.
+const DFE_FF_ACQ: f32 = 0.05;
+/// DFE feedforward step during tracking — slow, for low steady-state
+/// misadjustment. A fast feedforward left running in steady-state costs ~6
+/// TSBKs on the Marion control channel (187 vs 193). Reached by the gear-shift
+/// on acquisition.
+const DFE_FF_TRACK: f32 = 0.001;
+/// DFE feedback step — always slow. The recursive feedback section rings and
+/// injects noise (and once collapsed a control channel to 6 syncs) at an
+/// aggressive step, so it never gear-shifts.
+const DFE_FB: f32 = 0.0005;
 /// Minimum coherence |Σ exp(j·(4Δφ−π))| / N for the acquisition to be believed.
 /// Real CQPSK approaches 1; noise sits near 1/√N ≈ 0.05 at N = 400. A threshold
 /// well above the noise floor but far below a real lock cleanly separates them.
@@ -301,12 +326,19 @@ impl CqpskReceiver {
     /// linear CMA leaves in a deep spectral null. Same phase-blind placement
     /// before differential detection (see [`CmaDfe`](crate::equalizer::CmaDfe)).
     pub fn new_dfe(sps: usize, beta: f64) -> Self {
-        // 9 feedforward + 6 feedback taps. Both sections adapt gently — the
-        // recursive feedback loop rings and injects noise at an aggressive
-        // step, and a jointly slow convergence settles into a better minimum
-        // than a fast feedforward reaches. Swept on the Marion County and
-        // live261 control channels; this lifts 192 → 202 and 203 → 207 TSBKs.
-        Self::build(sps, beta, FrontEq::Dfe(CmaDfe::new(9, 6, 0.001, 0.0005)))
+        // 9 feedforward + 6 feedback taps. The feedforward starts at the fast
+        // acquisition step so the eye opens during blind acquisition — a slow
+        // feedforward never converges inside a short voice burst, and the
+        // acquisition coherence then never clears its threshold — and
+        // gear-shifts to the slow tracking step on acquisition in `push_phase`.
+        // The feedback stays slow throughout (see [`DFE_FB`]). This lifts the
+        // Marion County control channel 192 → 202 TSBKs without sacrificing
+        // short-burst acquisition.
+        Self::build(
+            sps,
+            beta,
+            FrontEq::Dfe(CmaDfe::new(9, 6, DFE_FF_ACQ, DFE_FB)),
+        )
     }
 
     fn build(sps: usize, beta: f64, eq: FrontEq) -> Self {
@@ -423,6 +455,9 @@ impl CqpskReceiver {
                     if coherence > ACQ_COHERENCE_MIN {
                         self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
                         self.acquired = true;
+                        // The eye is open: gear-shift the DFE feedforward from
+                        // the fast acquisition step to the slow tracking step.
+                        self.eq.set_step(DFE_FF_TRACK, DFE_FB);
                     } else {
                         // Not signal yet. Slide the window forward rather than
                         // restart cold, so onset is caught within one window.
@@ -506,6 +541,8 @@ impl CqpskReceiver {
         // transmission starts from the centre-spike identity, not a stale
         // solution converged on an idle channel.
         self.eq.reset();
+        // Back to the fast acquisition step for the next acquisition.
+        self.eq.set_step(DFE_FF_ACQ, DFE_FB);
     }
 
     /// Smoothed decision-directed phase error: low when locked, near 0.39 on
