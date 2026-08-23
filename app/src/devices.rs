@@ -123,16 +123,11 @@ pub fn detect() -> Vec<Device> {
             rates: vec![10_000_000.0, 2_500_000.0],
         })
         .collect();
-    v.extend(
-        hs_source::rtlsdr::RtlSdrSource::list()
-            .into_iter()
-            .map(|(args, label)| Device {
-                kind: "rtlsdr".into(),
-                id: args,
-                label,
-                rates: vec![2_400_000.0, 1_024_000.0, 250_000.0],
-            }),
-    );
+    // RTL-SDRs are enumerated only through SoapySDR (librtlsdr), which drives
+    // every tuner — R820T/R820T2, R828D, FC0012/13, and the E4000 (Nooelec
+    // Smartee XTR). The pure-Rust `rtlsdr` backend is a *subset* (R820T/R820T2
+    // only) and panics on an E4000 with "Failed to find tuner, aborting", so
+    // listing it here would surface a second, broken entry for the same dongle.
     v.extend(
         hs_source::soapy::SoapyRtlSource::list()
             .into_iter()
