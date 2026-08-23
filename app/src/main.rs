@@ -27,6 +27,7 @@ mod names;
 mod player;
 mod playlists;
 mod rr;
+mod secrets;
 mod stream;
 mod sysstat;
 mod transcribe;
@@ -1388,6 +1389,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
         .setup(|app| {
+            crate::secrets::init(app.handle());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
             if let Some(cat) = rr::saved_catalog(app.handle()) {

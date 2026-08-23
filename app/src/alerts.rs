@@ -24,7 +24,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 
-const SERVICE: &str = "HoosierSDR Telegram";
 const TOKEN_USER: &str = "bot-token";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -201,11 +200,7 @@ fn store(app: &AppHandle, s: &Settings) -> Result<(), String> {
 }
 
 fn token() -> Option<String> {
-    keyring::Entry::new(SERVICE, TOKEN_USER)
-        .ok()?
-        .get_password()
-        .ok()
-        .filter(|t| !t.is_empty())
+    crate::secrets::get(TOKEN_USER)
 }
 
 // ---------------------------------------------------------------------------
@@ -901,14 +896,11 @@ pub fn alerts_set(
 
 #[tauri::command]
 pub fn telegram_save(token: String) -> Result<(), String> {
-    let e = keyring::Entry::new(SERVICE, TOKEN_USER).map_err(|e| format!("keyring: {e}"))?;
     if token.trim().is_empty() {
-        let _ = e.delete_credential();
+        crate::secrets::remove(TOKEN_USER)
     } else {
-        e.set_password(token.trim())
-            .map_err(|e| format!("keyring: {e}"))?;
+        crate::secrets::set(TOKEN_USER, token.trim())
     }
-    Ok(())
 }
 
 #[tauri::command]

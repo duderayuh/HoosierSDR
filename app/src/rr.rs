@@ -14,8 +14,6 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
-const SERVICE: &str = "HoosierSDR RadioReference";
-
 include!(concat!(env!("OUT_DIR"), "/rr_key.rs"));
 const MASK: [u8; 16] = [
     0x5a, 0xc3, 0x91, 0x2e, 0x77, 0xb8, 0x04, 0xe5, 0x3c, 0x6f, 0xd2, 0x19, 0x8b, 0x40, 0xa7, 0xf1,
@@ -329,12 +327,8 @@ fn save_prefs(app: &AppHandle, p: &Prefs) -> Result<(), String> {
     .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn secret(user: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, user).map_err(|e| format!("credential store: {e}"))
-}
-
 fn get_secret(user: &str) -> Option<String> {
-    secret(user).ok()?.get_password().ok()
+    crate::secrets::get(user)
 }
 
 /// The catalogs saved on previous runs, merged.
@@ -389,17 +383,13 @@ pub fn rr_save(
     p.username = username.trim().to_string();
     p.sid = sid;
     if !app_key.trim().is_empty() {
-        secret("app_key")?
-            .set_password(app_key.trim())
-            .map_err(|e| format!("save app key: {e}"))?;
+        crate::secrets::set("app_key", app_key.trim())?;
     }
     if !password.is_empty() {
         if p.username.is_empty() {
             return Err("enter the username the password belongs to".into());
         }
-        secret(&format!("password:{}", p.username))?
-            .set_password(&password)
-            .map_err(|e| format!("save password: {e}"))?;
+        crate::secrets::set(&format!("password:{}", p.username), &password)?;
     }
     save_prefs(&app, &p)
 }
