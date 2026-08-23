@@ -322,7 +322,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         // The control channel appears `correction` away from nominal because
         // the oscillator runs the other way: a tuner `p` ppm high puts a
         // signal at F at baseband F − C·p, so the error is −correction/F.
-        ppm: -f.correction_hz() / p.control_hz * 1e6,
+        ppm: -f.correction_ppm(),
     });
 
     if let Some((h, q)) = p.hang_secs {
