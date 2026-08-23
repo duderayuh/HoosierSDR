@@ -30,6 +30,9 @@ pub struct Talkgroup {
     /// From RR's `enc` attribute or on-air ALGID observation. Encrypted
     /// talkgroups are greyed out and never tuned for audio.
     pub encrypted: bool,
+    /// SDRTrunk-style priority, 1 (highest) .. 99 (lowest). From the RR
+    /// export's "Priority" column; `None` when absent or blank.
+    pub priority: Option<u8>,
 }
 
 #[derive(Debug, Clone)]

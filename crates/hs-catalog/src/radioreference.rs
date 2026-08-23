@@ -730,6 +730,8 @@ fn parse_talkgroup(n: &&Node) -> Option<Talkgroup> {
         category: n.get_any(&["tgCat", "category", "tag"]).map(str::to_string),
         // RR encodes encryption in the mode string: a trailing "E".
         encrypted: mode.to_ascii_uppercase().contains('E'),
+        // Priority is a per-user setting, not an RR database field.
+        priority: None,
     })
 }
 

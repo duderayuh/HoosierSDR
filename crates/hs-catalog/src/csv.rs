@@ -99,6 +99,7 @@ struct ColumnMap {
     mode: Option<usize>,
     description: Option<usize>,
     category: Option<usize>,
+    priority: Option<usize>,
 }
 
 impl ColumnMap {
@@ -110,6 +111,7 @@ impl ColumnMap {
             mode: Some(3),
             description: Some(4),
             category: Some(6),
+            priority: Some(7),
         }
     }
 
@@ -127,6 +129,7 @@ impl ColumnMap {
             mode: find(&["Mode"]),
             description: find(&["Description"]),
             category: find(&["Category", "Tag"]),
+            priority: find(&["Priority"]),
         }
     }
 
@@ -146,12 +149,19 @@ impl ColumnMap {
             .and_then(|i| fields.get(i))
             .map(|m| m.trim().to_ascii_uppercase().contains('E'))
             .unwrap_or(false);
+        let priority = self
+            .priority
+            .and_then(|i| fields.get(i))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<u8>().ok());
         Some(Talkgroup {
             id,
             alias: pick(self.alpha),
             description: pick(self.description),
             category: pick(self.category),
             encrypted,
+            priority,
         })
     }
 }
@@ -211,6 +221,7 @@ Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority
         assert_eq!(medic.alias.as_deref(), Some("MEDIC 4"));
         assert_eq!(medic.category.as_deref(), Some("EMS"));
         assert!(!medic.encrypted);
+        assert_eq!(medic.priority, Some(1));
         assert_eq!(cat.label(12179), "MEDIC 4");
         assert_eq!(cat.label(9999), "TG 9999");
     }
