@@ -7,6 +7,7 @@
 //!   library. NOT distributed with this project while US 8,359,197 is active
 //!   (to 2028-05-20). See docs/ARCHITECTURE.md §5.
 
+pub mod ambe2;
 pub mod imbe;
 pub mod plugin;
 
