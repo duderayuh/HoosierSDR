@@ -28,7 +28,6 @@ struct Clip {
     queued_at: std::time::Instant,
 }
 
-#[derive(Default)]
 struct Queue {
     clips: VecDeque<Clip>,
     /// Clips that have waited longer than this are dropped unplayed
@@ -42,6 +41,19 @@ struct Queue {
     /// Recently played clips, newest last, bounded by `HISTORY_SAMPLES`.
     history: VecDeque<Vec<i16>>,
     history_samples: usize,
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            clips: VecDeque::new(),
+            max_wait_secs: 60.0, // Default to 60s queue to prevent choppy dropout on busy sites
+            dropped: 0,
+            current: None,
+            history: VecDeque::new(),
+            history_samples: 0,
+        }
+    }
 }
 
 impl Queue {
@@ -315,9 +327,16 @@ fn open_stream(
     let out_rate = config.sample_rate().0 as f64;
     let channels = config.channels() as usize;
     let mut interp = SincInterp::new(8000.0, out_rate);
+
+    // Request a generous fixed buffer to prevent macOS underruns (distortion).
+    // The default config often leaves the buffer size unspecified (Default),
+    // which the OS can make too small for a software interpolator.
+    let mut stream_config = config.config();
+    stream_config.buffer_size = cpal::BufferSize::Fixed(2048);
+
     let stream = device
         .build_output_stream(
-            &config.config(),
+            &stream_config,
             move |data: &mut [f32], _| {
                 let mut q = queue.lock().unwrap();
                 let g = f32::from_bits(gain.load(std::sync::atomic::Ordering::Relaxed));
