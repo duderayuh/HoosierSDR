@@ -12,6 +12,8 @@ mod wav;
 
 use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
 
+#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+mod dual;
 mod follow;
 
 #[cfg(feature = "radioreference")]
@@ -45,6 +47,11 @@ struct Args {
     follow: bool,
     control: f64,
     control_measured: Option<f64>,
+    dual: bool,
+    voice_source: String,
+    voice_serial: Option<u64>,
+    voice_rate: f64,
+    priorities: Vec<(u16, u8)>,
     rr_system: Option<u32>,
     rr_dump: Option<String>,
     scan: bool,
@@ -76,6 +83,11 @@ fn parse_args() -> Args {
         follow: false,
         control: 0.0,
         control_measured: None,
+        dual: false,
+        voice_source: String::new(),
+        voice_serial: None,
+        voice_rate: 0.0,
+        priorities: Vec::new(),
         rr_system: None,
         rr_dump: None,
         scan: false,
@@ -104,6 +116,22 @@ fn parse_args() -> Args {
             "--follow" => a.follow = true,
             "--control" => a.control = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
             "--control-measured" => a.control_measured = it.next().and_then(|s| parse_freq(&s)),
+            "--dual" => a.dual = true,
+            "--voice-source" => a.voice_source = it.next().unwrap_or_default(),
+            "--voice-serial" => {
+                a.voice_serial = it
+                    .next()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            }
+            "--voice-rate" => a.voice_rate = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            "--priority" => {
+                let s = it.next().unwrap_or_default();
+                if let Some((tg, pr)) = s.split_once('=') {
+                    if let (Ok(t), Ok(p)) = (tg.parse::<u16>(), pr.parse::<u8>()) {
+                        a.priorities.push((t, p.clamp(1, 99)));
+                    }
+                }
+            }
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
@@ -191,6 +219,13 @@ fn print_help() {
              --control <HZ> Nominal control-channel frequency to follow.\n\
              --control-measured <HZ>  Where it actually is, if the tuner is far\n\
              \x20              enough off that auto-detection struggles.\n\
+             --dual         Dual-SDR priority follow: one radio locks the control\n\
+             \x20              channel, a second narrow radio hops voice channels by\n\
+             \x20              talkgroup priority (1 = highest, 99 = lowest). Needs\n\
+             \x20              --control. --source/--rate/--gain set the control radio;\n\
+             \x20              --voice-source/--voice-serial/--voice-rate the voice\n\
+             \x20              radio. --priority <TG=1..99> (repeatable) overrides the\n\
+             \x20              catalog's Priority column.\n\
              --scan         Sweep the whole captured band and report which channels\n\
              \x20              actually carry P25 — by decoding, not by signal power.\n\
              \x20              Marks control vs voice channels and reports each NAC.\n\
@@ -541,6 +576,39 @@ fn main() {
     if args.sdr {
         run_sdr(&args);
         return;
+    }
+
+    #[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+    if args.dual {
+        if args.control <= 0.0 {
+            eprintln!("--dual needs --control <HZ> (the control-channel frequency)");
+            std::process::exit(2);
+        }
+        dual::run(dual::DualArgs {
+            control_source: args.source.clone(),
+            control_serial: args.serial,
+            control_hz: args.control,
+            control_rate: args.rate,
+            voice_source: args.voice_source.clone(),
+            voice_serial: args.voice_serial,
+            voice_rate: if args.voice_rate > 0.0 {
+                args.voice_rate
+            } else {
+                args.rate
+            },
+            gain: args.gain,
+            cqpsk: args.cqpsk,
+            priorities: args.priorities.clone(),
+            catalog: args.catalog.as_deref().and_then(load_catalog),
+            secs: args.secs,
+            wav_out: args.wav_out.clone(),
+        });
+        return;
+    }
+    #[cfg(not(any(feature = "rtlsdr", feature = "airspy")))]
+    if args.dual {
+        eprintln!("--dual needs a live radio (build --features rtlsdr,airspy)");
+        std::process::exit(2);
     }
 
     if args.input.is_none() && !args.demo {
