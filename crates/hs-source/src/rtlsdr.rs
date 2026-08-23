@@ -141,6 +141,10 @@ impl SdrSource for RtlSdrSource {
         self.center_freq
     }
 
+    fn freq_handle(&self) -> FreqHandle {
+        self.freq.clone()
+    }
+
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
         if let Some(g) = self.gain.take() {
             if let Err(e) = self.apply_gain(&g) {

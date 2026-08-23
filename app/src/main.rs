@@ -18,6 +18,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 mod alerts;
 mod conversations;
 mod devices;
+mod dual;
 mod encode;
 mod follow;
 mod hook;
@@ -1395,6 +1396,7 @@ fn main() {
             stop_capture,
             decode_file,
             start_follow,
+            dual::dual_start,
             set_lockout,
             set_allowlist,
             set_hold,

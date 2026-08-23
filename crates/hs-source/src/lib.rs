@@ -120,6 +120,13 @@ pub trait SdrSource {
     fn dropped(&self) -> u64 {
         0
     }
+    /// A handle that retunes this radio while it streams. Radios that support
+    /// retuning return their handle; others (files, wrappers) return a no-op.
+    /// The dual-SDR hopper writes the next voice-channel frequency here, and
+    /// the radio applies it inside its own `read`.
+    fn freq_handle(&self) -> FreqHandle {
+        FreqHandle::default()
+    }
 }
 
 impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
@@ -134,6 +141,9 @@ impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
     }
     fn dropped(&self) -> u64 {
         (**self).dropped()
+    }
+    fn freq_handle(&self) -> FreqHandle {
+        (**self).freq_handle()
     }
 }
 

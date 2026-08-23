@@ -343,6 +343,10 @@ impl SdrSource for AirspySource {
         self.center_freq
     }
 
+    fn freq_handle(&self) -> FreqHandle {
+        self.freq.clone()
+    }
+
     fn dropped(&self) -> u64 {
         self.queue_drops() + self.device_drops()
     }

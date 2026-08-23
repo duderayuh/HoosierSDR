@@ -53,11 +53,14 @@
               <div class="seg" id="modeSeg" role="group" aria-label="Mode">
                 <button data-v="follow" aria-pressed="true">Follow site</button>
                 <button data-v="channel" aria-pressed="false">One channel</button>
+                <button data-v="dual" aria-pressed="false">Dual SDR</button>
               </div>
               <label class="field"><span class="lab">Frequency <span class="mono faint" id="freqHint">control channel</span></span>
                 <input id="freq" class="big" type="text" value="851.5375M" spellcheck="false" /></label>
               <label class="field" id="centerField"><span class="lab">Band centre <span class="mono faint">10 M spans ±3.84 MHz</span></span>
                 <input id="center" type="text" value="855M" spellcheck="false" /></label>
+              <label class="field" id="voiceSrcField" style="display:none"><span class="lab">Voice radio <span class="mono faint">hopping</span></span>
+                <select id="voiceSrc"></select></label>
               <label class="field" id="tmodField"><span class="lab">Traffic modulation <span class="mono faint">simulcast sites are CQPSK</span></span>
                 <select id="tmod"><option value="auto">auto — decode both, keep the cleaner</option><option value="cqpsk">CQPSK / LSM only</option><option value="c4fm">C4FM only</option></select></label>
               <div class="field" id="modField"><span class="lab">Modulation</span>

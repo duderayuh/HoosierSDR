@@ -82,7 +82,7 @@ let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
 let measuredPpm = null;
 const ppmVal = () => { const v = parseFloat($("ppm").value); return Number.isFinite(v) ? v : null; };
 function applyMode() {
-  const follow = modeSel === "follow";
+  const follow = modeSel === "follow" || modeSel === "dual";
   $("centerField").style.display = follow ? "" : "none";
   $("tmodField").style.display = follow ? "" : "none";
   $("modField").style.display = follow ? "none" : "";
@@ -91,6 +91,9 @@ function applyMode() {
   $("followOpts").style.display = follow ? "" : "none";
   $("channelOpts").style.display = follow ? "none" : "";
   $("freqHint").textContent = follow ? "control channel" : "channel";
+  const dual = modeSel === "dual";
+  if (dual) { $("centerField").style.display = "none"; $("tmodField").style.display = "none"; $("modField").style.display = ""; $("eqField").style.display = "none"; }
+  $("voiceSrcField").style.display = dual ? "" : "none";
   $("emptyHint").textContent = follow ? "Pick a playlist or set a control channel, then press Start." : "Set a channel and press Start. One-channel mode decodes one channel and counts voice but does not play it; on a control channel it only announces grants (Discovery, Events) — use Follow site to listen.";
 }
 wireSeg($("modeSeg"), (v) => { modeSel = v; applyMode(); });
@@ -740,7 +743,17 @@ if (TAURI) {
       setState(modeSel === "follow" ? "measuring" : "capturing");
       log(`start: mode=${modeSel} source=${$("source").value} rate=${$("rate").value} freq=${$("freq").value} center=${$("center").value}`);
       followVoice = 0;
-      if (modeSel === "follow") {
+      if (modeSel === "dual") {
+        const vk = $("voiceSrc").value.split("|")[0];
+        const vid = $("voiceSrc").value.split("|")[1] || null;
+        await invoke("dual_start", {
+          controlSource: srcKind(), controlDevice: srcId() || null,
+          controlRate: parseFloat($("rate").value),
+          voiceSource: vk, voiceDevice: vid, voiceRate: parseFloat($("rate").value),
+          gain: opts().gain, control: parseFreq($("freq").value),
+          cqpsk: modSel === "cqpsk", play: $("play").checked,
+        });
+      } else if (modeSel === "follow") {
         const o = opts();
         $("followMeta").textContent = "measuring the control channel…";
         $("tunedHz").textContent = mhz(o.freq);
@@ -810,6 +823,8 @@ if (TAURI) {
     // Prefer what was in use, then the saved radio, then the first Airspy, then anything.
     $("source").value = vals.includes(cur) && cur.includes("|") ? cur : vals.includes(saved) ? saved : (vals.find((v) => v.startsWith("airspy|")) || vals[0]);
     if ($("source").value !== cur) { const a = srcKind() === "airspy"; if ($("pillText").textContent === "standby") { $("rate").value = a ? (modeSel === "follow" ? "10000000" : "2500000") : "2400000"; syncRate(); } }
+    $("voiceSrc").innerHTML = opts.map((o) => `<option value="${esc(o.v)}">${esc(o.t)}</option>`).join("");
+    $("voiceSrc").value = vals[1] || vals[0] || "";
     devLoadSelected();
   }
   /* ---------- gain controls, SDRTrunk-style ---------- */
