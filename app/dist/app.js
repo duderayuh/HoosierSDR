@@ -244,6 +244,18 @@ $("clear").onclick = () => { tbody.innerHTML = ""; history.length = 0; $("empty"
 /* ---------- per-talkgroup settings (kept in localStorage) ---------- */
 const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (_) { return d; } };
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+/* ---------- theme ---------- */
+const THEMES = [["dark", "Slate"], ["light", "Paper"], ["amber", "Amber"], ["terminal", "Terminal"], ["midnight", "Midnight"], ["solarized", "Solarized"]];
+function applyTheme(name) { document.documentElement.setAttribute("data-theme", name); save("hs.theme", name); }
+(function initTheme() {
+  const saved = store("hs.theme", "dark");
+  document.documentElement.setAttribute("data-theme", saved);
+  const chips = $("themeChips");
+  if (!chips) return;
+  chips.innerHTML = THEMES.map(([v, label]) => `<span class="chip ${saved === v ? "on" : ""}" data-th="${v}">${label}</span>`).join("");
+  chips.querySelectorAll("[data-th]").forEach((c) => c.onclick = () => { applyTheme(c.dataset.th); chips.querySelectorAll("[data-th]").forEach((x) => x.classList.toggle("on", x.dataset.th === c.dataset.th)); });
+})();
 const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
 const bells = new Set(store("hs.bells", []));
 const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
