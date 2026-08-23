@@ -2,7 +2,7 @@
 
 **A P25 trunked-radio receiver in Rust — the first P25 decoder that equalizes the channel before differential detection.**
 
-Desktop-first (macOS primary, Windows port planned). Built for Indiana's Hoosier SAFE-T system (P25 Phase I), useful for any P25 Phase I network.
+Desktop-first (macOS and Windows). Built for Indiana's Hoosier SAFE-T system (P25 Phase I), useful for any P25 Phase I network.
 
 > Status: **pre-alpha, and it decodes real off-air P25.** A 27-second RTL-SDR
 > capture from Marion County, Indiana decodes end to end — NAC 0x261, 151 frame
@@ -26,7 +26,7 @@ below.
 cargo run -p hs-cli -- --demo
 ```
 
-Synthesizes a P25 control-channel + clear-voice transmission, runs it through the whole pipeline (C4FM demod → framer → BCH/trellis/CRC FEC → trunking state machine → IMBE vocoder), resolves the voice grant to its downlink frequency, and writes decoded audio to `hoosier_out.wav`. To decode a real recording at an RTL-SDR's native rate: `cargo run -p hs-cli --
+Synthesizes a P25 control-channel transmission plus a voice grant and runs it through the whole pipeline (C4FM demod → framer → BCH/trellis/CRC FEC → trunking state machine → IMBE vocoder), resolving the grant to its downlink frequency. It's a **no-hardware smoke test**: it proves framing, trunking and grant resolution, but the synthesized IMBE voice frames are not valid FEC codewords, so the vocoder outputs silence and `hoosier_out.wav` is a silent placeholder. To decode a real recording at an RTL-SDR's native rate: `cargo run -p hs-cli --
 --rate 240000 --offset 50k --cqpsk capture.cf32`. The front end decimates to the
 demodulators' working rate and `--offset` tunes to any 12.5 kHz channel inside
 the captured band, so one wideband recording covers a whole slice of spectrum.
