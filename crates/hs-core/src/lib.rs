@@ -5,6 +5,7 @@
 pub mod decoder;
 pub mod derotate;
 pub mod diag;
+pub mod dual;
 pub mod follow;
 pub mod hop;
 pub mod priority;
