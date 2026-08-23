@@ -7,6 +7,8 @@ use std::io::Read;
 pub mod airspy;
 #[cfg(feature = "rtlsdr")]
 pub mod rtlsdr;
+#[cfg(feature = "soapy")]
+pub mod soapy;
 
 /// Complex IQ sample pair as delivered by a source, interleaved f32.
 pub type IqBlock = Vec<f32>;

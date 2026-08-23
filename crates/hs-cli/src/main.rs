@@ -12,7 +12,7 @@ mod wav;
 
 use hs_core::decoder::{ChannelDecoder, DecodeOutput, EqMode, Modulation};
 
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 mod dual;
 mod follow;
 
@@ -198,9 +198,11 @@ fn print_help() {
              \x20              channels; this picks one without re-recording.\n\
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
-             --sdr          Capture live from a radio (build --features rtlsdr,airspy)
---source <S>   Which radio: rtlsdr or airspy (default: whichever this
-               build has; rtlsdr when it has both). An Airspy R2 runs at
+             --sdr          Capture live from a radio (build --features rtlsdr,airspy,soapy)
+--source <S>   Which radio: rtlsdr, airspy, or soapy (default: whichever
+               this build has; rtlsdr when it has it). soapy drives RTL-SDRs
+               through SoapySDR/librtlsdr — needed for an E4000 (Smartee XTR)
+               the pure-Rust driver can't drive. An Airspy R2 runs at
                --rate 2500000 or 10000000; the stream is normalized to
                2.4/9.6 MSPS on the fly. Its firmware takes no gain setting.
 --serial <HEX> Pick one of several Airspys by serial (see airspy_info)
@@ -584,7 +586,7 @@ fn main() {
         return;
     }
 
-    #[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+    #[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
     if args.dual {
         if args.control <= 0.0 {
             eprintln!("--dual needs --control <HZ> (the control-channel frequency)");
@@ -613,7 +615,7 @@ fn main() {
         });
         return;
     }
-    #[cfg(not(any(feature = "rtlsdr", feature = "airspy")))]
+    #[cfg(not(any(feature = "rtlsdr", feature = "airspy", feature = "soapy")))]
     if args.dual {
         eprintln!("--dual needs a live radio (build --features rtlsdr,airspy)");
         std::process::exit(2);
@@ -767,7 +769,7 @@ fn save_iq(path: &str, iq: &[f32]) -> std::io::Result<()> {
 
 /// Live capture: stream from an RTL-SDR into the decoder until interrupted,
 /// printing grants as they resolve and accumulating decoded voice to a WAV.
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 fn run_sdr(args: &Args) {
     use hs_core::stream::Normalized;
 
@@ -776,8 +778,10 @@ fn run_sdr(args: &Args) {
     let source = if args.source.is_empty() {
         if cfg!(feature = "rtlsdr") {
             "rtlsdr"
-        } else {
+        } else if cfg!(feature = "airspy") {
             "airspy"
+        } else {
+            "soapy"
         }
     } else {
         args.source.as_str()
@@ -822,9 +826,21 @@ fn run_sdr(args: &Args) {
             }
             run_sdr_with(src, args);
         }
+        #[cfg(feature = "soapy")]
+        "soapy" => {
+            use hs_source::soapy::SoapyRtlSource;
+            let src = match SoapyRtlSource::open(args.freq, args.rate, args.gain) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("could not open RTL-SDR via SoapySDR: {e:?}");
+                    std::process::exit(1);
+                }
+            };
+            run_sdr_with(Normalized::new(src), args);
+        }
         other => {
             eprintln!(
-                "unknown --source {other:?} (or not compiled in); this build supports:{}{}",
+                "unknown --source {other:?} (or not compiled in); this build supports:{}{}{}",
                 if cfg!(feature = "rtlsdr") {
                     " rtlsdr"
                 } else {
@@ -832,6 +848,11 @@ fn run_sdr(args: &Args) {
                 },
                 if cfg!(feature = "airspy") {
                     " airspy"
+                } else {
+                    ""
+                },
+                if cfg!(feature = "soapy") {
+                    " soapy"
                 } else {
                     ""
                 },
@@ -844,7 +865,7 @@ fn run_sdr(args: &Args) {
 /// Live capture from an already-open, rate-normalized source: follow a trunk
 /// or decode one channel until interrupted, printing grants as they resolve
 /// and accumulating decoded voice to a WAV.
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 fn run_sdr_with<S: hs_source::SdrSource + Send + 'static>(src: S, args: &Args) {
     use hs_core::stream;
     use hs_source::SdrSource;
@@ -932,13 +953,13 @@ fn run_sdr_with<S: hs_source::SdrSource + Send + 'static>(src: S, args: &Args) {
 
 /// A source that reports end-of-stream after a deadline, so `--secs` ends a
 /// live run the same way a file does — cleanly, with the summary printed.
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 struct Timed<S> {
     inner: S,
     deadline: Option<std::time::Instant>,
 }
 
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 impl<S> Timed<S> {
     fn new(inner: S, secs: Option<f64>) -> Self {
         Self {
@@ -949,7 +970,7 @@ impl<S> Timed<S> {
     }
 }
 
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 impl<S: hs_source::SdrSource> hs_source::SdrSource for Timed<S> {
     fn sample_rate(&self) -> f64 {
         self.inner.sample_rate()
@@ -972,13 +993,13 @@ impl<S: hs_source::SdrSource> hs_source::SdrSource for Timed<S> {
 }
 
 /// A source that tees everything it delivers into a `.cf32` file.
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 struct Recorded<S> {
     inner: S,
     out: Option<(String, std::io::BufWriter<std::fs::File>)>,
 }
 
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 impl<S> Recorded<S> {
     fn new(inner: S, path: Option<&str>) -> Self {
         let out = path.and_then(|p| {
@@ -1003,7 +1024,7 @@ impl<S> Recorded<S> {
     }
 }
 
-#[cfg(any(feature = "rtlsdr", feature = "airspy"))]
+#[cfg(any(feature = "rtlsdr", feature = "airspy", feature = "soapy"))]
 impl<S: hs_source::SdrSource> hs_source::SdrSource for Recorded<S> {
     fn sample_rate(&self) -> f64 {
         self.inner.sample_rate()
@@ -1028,13 +1049,15 @@ impl<S: hs_source::SdrSource> hs_source::SdrSource for Recorded<S> {
     }
 }
 
-#[cfg(not(any(feature = "rtlsdr", feature = "airspy")))]
+#[cfg(not(any(feature = "rtlsdr", feature = "airspy", feature = "soapy")))]
 fn run_sdr(_args: &Args) {
     eprintln!(
-        "Live SDR capture needs a build with the rtlsdr and/or airspy feature:\n\
+        "Live SDR capture needs a build with the rtlsdr, airspy and/or soapy feature:\n\
          \n    RUSTFLAGS=\"-C target-cpu=native\" \\\n\
-         \n      cargo run -p hs-cli --release --features rtlsdr,airspy -- --sdr --freq 851.0125M\n\
-         \n(rtlsdr pulls Seify + libusb; airspy links libairspy. On macOS: `brew install libusb airspy`.)\n\
+         \n      cargo run -p hs-cli --release --features rtlsdr,airspy,soapy -- --sdr --freq 851.0125M\n\
+         \n(rtlsdr pulls Seify + libusb; airspy links libairspy; soapy links SoapySDR + librtlsdr,\n\
+         \nand is the path for an E4000-tuner dongle like the Nooelec Smartee XTR.\n\
+         \nOn macOS: `brew install libusb airspy soapysdr soapyrtlsdr`.)\n\
          \nThe target-cpu=native flag matters for --follow at 2.4 MHz: without it\n\
          the pipeline can run just under real time and the radio drops samples.\n\
          Pass a fixed --gain (e.g. 40) rather than relying on the tuner's AGC."
