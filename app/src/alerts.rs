@@ -746,6 +746,20 @@ pub(crate) fn delete_message(chat_id: &str, id: i64) -> Result<(), String> {
     check(status, &out).map(|_| ())
 }
 
+/// Edit a message the bot sent, in place (Telegram allows this for 48 hours).
+pub(crate) fn edit_message(chat_id: &str, id: i64, text: &str) -> Result<(), String> {
+    if chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let body = serde_json::json!({ "chat_id": chat_id.trim(), "message_id": id, "text": text });
+    let (status, out) = crate::upload::post(
+        &telegram_api("editMessageText")?,
+        "application/json",
+        body.to_string().into_bytes(),
+    )?;
+    check(status, &out).map(|_| ())
+}
+
 /// Free-text completion from the local model (no JSON mode): the summary
 /// path. Same `think: false` handling as the gate.
 pub(crate) fn ollama_complete(o: &Ollama, prompt: &str) -> Result<String, String> {
