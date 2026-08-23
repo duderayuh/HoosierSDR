@@ -104,7 +104,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | Feature | SDRTrunk | DSDPlus | HoosierSDR |
 |---|:-:|:-:|:-:|
 | P25 Phase I | ✅ | ✅ | ✅ (pre-detection equalizer — unique) |
-| P25 Phase II TDMA | ✅ | ✅ | ➖ (patent window, ARCHITECTURE §5) |
+| P25 Phase II TDMA | ✅ | ✅ | ➖ (framing done; half-rate vocoder is ISC mbelib — vendor + wire) |
 | DMR / NXDN / EDACS / LTR | ✅ / — | ✅ | ➖ |
 | LRRP / GPS map | ✅ | ✅ | ✅ positions on an OSM tile map + table (parser unverified on air, see lrrp.rs) |
 | Transcription | ❌ | ❌ | ✅ faster-whisper / openai-whisper, model picker, editable, searchable |

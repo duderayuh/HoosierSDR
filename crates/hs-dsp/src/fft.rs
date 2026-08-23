@@ -268,11 +268,18 @@ fn transform(out: &mut [C32], inp: &[C32], stride: usize, tw: &[C32], n_total: u
     let step = n_total / n;
 
     if r == n || r > MAX_RADIX {
-        // Prime length (or an awkward one): evaluate the DFT directly.
+        // Prime length (or an awkward one): evaluate the DFT directly. The
+        // root index j·k mod n advances by k per term; wrap by subtraction
+        // rather than a `%` per multiply (see the combine loop below).
         for (k, o) in out.iter_mut().enumerate() {
             let mut acc = C32::ZERO;
+            let mut idx = 0usize;
             for j in 0..n {
-                acc = acc + inp[j * stride] * tw[(j * k % n) * step];
+                acc = acc + inp[j * stride] * tw[idx * step];
+                idx += k;
+                if idx >= n {
+                    idx -= n;
+                }
             }
             *o = acc;
         }
@@ -302,17 +309,37 @@ fn transform(out: &mut [C32], inp: &[C32], stride: usize, tw: &[C32], n_total: u
         return;
     }
 
+    // The r-point DFT's roots W_r^{pq} repeat with period r in both p and q,
+    // so they are r·r entries of the shared table, gathered once per node.
+    // Fetching them (and the W_n^{qk} twiddles below) by incremental index
+    // instead of a `%` per butterfly roughly halved the whole transform's
+    // cost — the modulo was the single most expensive thing in the loop.
+    let mut wr = [[C32::ZERO; MAX_RADIX]; MAX_RADIX];
+    let stride_r = m * step; // n_total / r
+    for (p, row) in wr.iter_mut().enumerate().take(r) {
+        for (q, w) in row.iter_mut().enumerate().take(r) {
+            *w = tw[(p * q % r) * stride_r];
+        }
+    }
+
     let mut t = [C32::ZERO; MAX_RADIX];
     for k in 0..m {
-        // Twiddle each sub-transform's contribution: W_n^{qk}.
+        // Twiddle each sub-transform's contribution: W_n^{qk}. The index
+        // q·k·step grows by k·step (< n_total) per q, so wrap by subtraction.
+        let base = k * step;
+        let mut idx = 0usize;
         for (q, tq) in t.iter_mut().enumerate().take(r) {
-            *tq = out[q * m + k] * tw[(q * k * step) % n_total];
+            *tq = out[q * m + k] * tw[idx];
+            idx += base;
+            if idx >= n_total {
+                idx -= n_total;
+            }
         }
-        // Then an r-point DFT across them: W_r^{pq} = W_n_total^{pq·m·step}.
-        for p in 0..r {
+        // Then an r-point DFT across them.
+        for (p, row) in wr.iter().enumerate().take(r) {
             let mut acc = C32::ZERO;
             for (q, &tq) in t.iter().enumerate().take(r) {
-                acc = acc + tq * tw[(p * q * m * step) % n_total];
+                acc = acc + tq * row[q];
             }
             out[p * m + k] = acc;
         }

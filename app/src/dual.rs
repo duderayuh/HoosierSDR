@@ -27,6 +27,8 @@ struct CurrentCall {
     tg: u16,
     freq_hz: u64,
     priority: u8,
+    /// Call keyup start time (unix seconds), for uploader stamping.
+    start: i64,
 }
 
 fn mod_name(cqpsk: bool) -> String {
@@ -175,6 +177,10 @@ fn handle_retune(
                 tg: *talkgroup,
                 freq_hz: *freq_hz,
                 priority: pri,
+                start: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
             });
             pcm.clear();
             let _ = app.emit(
@@ -241,6 +247,8 @@ fn finish_call(
             freq_mhz: c.freq_hz as f64 / 1e6,
             modulation: String::new(),
             secs,
+            start: c.start,
+            site: None,
             emergency: false,
             patched_with: Vec::new(),
             priority: c.priority,

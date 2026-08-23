@@ -960,16 +960,23 @@ fn start_follow(
                     unit_name,
                     freq_mhz,
                     secs,
+                    start,
+                    site,
                     emergency,
                     patched_with,
                     ..
                 } = &ev
                 {
                     if let Some(u) = uploader.lock().unwrap().as_ref().filter(|_| allowed(&upload_policy, *tg)) {
+                        let group = catalog
+                            .lock()
+                            .ok()
+                            .and_then(|cat| cat.as_ref().and_then(|c| c.get(*tg)).and_then(|t| t.category.clone()))
+                            .unwrap_or_default();
                         u.submit(upload::Job {
                             id: *id,
                             audio: wav.clone(),
-                            start: library::now(),
+                            start: *start,
                             secs: *secs,
                             tg: *tg,
                             tg_name: name.clone(),
@@ -979,6 +986,8 @@ fn start_follow(
                             emergency: *emergency,
                             patched_with: patched_with.clone(),
                             system: params.system_name.clone(),
+                            site: *site,
+                            group,
                         });
                     }
                 }
@@ -1133,6 +1142,73 @@ fn shellexpand_home(p: &str) -> String {
     }
 }
 
+/// Recorded-IQ format, chosen by the output file's extension. The live decode
+/// reads the `f32` stream regardless; this only decides how the sink encodes
+/// the same samples to disk. Native `cu8` (RTL-SDR) / `cs16` (Airspy-class)
+/// is 2–4× smaller than `cf32` and is what the offline CLI already ingests.
+#[derive(Clone, Copy)]
+enum IqFmt {
+    Cf32,
+    Cs16,
+    Cu8,
+}
+
+fn iq_fmt_from_path(p: &str) -> IqFmt {
+    let lower = p.to_ascii_lowercase();
+    if lower.ends_with(".cu8") {
+        IqFmt::Cu8
+    } else if lower.ends_with(".cs16") {
+        IqFmt::Cs16
+    } else {
+        IqFmt::Cf32
+    }
+}
+
+fn write_iq_block(f: &mut std::fs::File, block: &[f32], fmt: IqFmt) -> std::io::Result<()> {
+    match fmt {
+        IqFmt::Cf32 => {
+            let mut b = Vec::with_capacity(block.len() * 4);
+            for s in block {
+                b.extend_from_slice(&s.to_le_bytes());
+            }
+            f.write_all(&b)
+        }
+        IqFmt::Cs16 => {
+            let mut b = Vec::with_capacity(block.len() * 2);
+            for s in block {
+                let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            f.write_all(&b)
+        }
+        IqFmt::Cu8 => {
+            let mut b = Vec::with_capacity(block.len());
+            for s in block {
+                b.push(((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8);
+            }
+            f.write_all(&b)
+        }
+    }
+}
+
+/// `My Spot #2` → `my_spot_2` — a safe, readable filename stem.
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let t = out.trim_matches('_').to_string();
+    if t.is_empty() {
+        "survey".to_string()
+    } else {
+        t
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_loop(
     app: &AppHandle,
@@ -1160,6 +1236,7 @@ fn capture_loop(
     // Everything downstream runs at the rate the source *delivers*.
     let rate = src.sample_rate();
     let mut dec = new_decoder(rate, cqpsk, eq);
+    let iq_fmt = record_iq.as_deref().map(iq_fmt_from_path);
     let mut iq_file = match record_iq {
         Some(p) => Some(std::fs::File::create(&p).map_err(|e| format!("record IQ: {e}"))?),
         None => None,
@@ -1181,11 +1258,7 @@ fn capture_loop(
         let block = &buf[..n];
 
         if let Some(f) = iq_file.as_mut() {
-            let mut bytes = Vec::with_capacity(block.len() * 4);
-            for s in block {
-                bytes.extend_from_slice(&s.to_le_bytes());
-            }
-            let _ = f.write_all(&bytes);
+            let _ = write_iq_block(f, block, iq_fmt.unwrap_or(IqFmt::Cf32));
         }
 
         let out = dec.process(block);
@@ -1247,6 +1320,174 @@ fn capture_loop(
         let _ = std::fs::write(&p, dec.diagnostics().to_json());
     }
     Ok(())
+}
+
+/// One pinned, timed capture in a drive survey.
+#[derive(serde::Deserialize, Clone)]
+struct SurveySpec {
+    source: String,
+    freq: f64,
+    rate: f64,
+    gain: Option<f64>,
+    cqpsk: bool,
+    eq: String,
+    ppm: Option<f64>,
+    device: Option<String>,
+    lat: f64,
+    lon: f64,
+    label: String,
+    seconds: f64,
+    corpus: String,
+    /// "cs16" (default), "cu8", or "cf32".
+    format: Option<String>,
+}
+
+/// One completed survey pin, as recorded to disk.
+#[derive(serde::Serialize, Clone)]
+struct SurveyEntry {
+    id: String,
+    label: String,
+    lat: f64,
+    lon: f64,
+    t: i64,
+    seconds: f64,
+    freq: f64,
+    rate: f64,
+    source: String,
+    iq: String,
+    log: String,
+}
+
+/// Pinned, timed capture for a drive survey: records IQ + diagnostics for
+/// `seconds` at a tapped location, stamps the pin into a per-capture sidecar
+/// and the corpus `survey.json`, then emits `survey_done` with the entry
+/// (success or error) so the UI can mark the pin regardless.
+#[tauri::command]
+fn survey_capture(
+    app: AppHandle,
+    state: State<AppState>,
+    spec: SurveySpec,
+) -> Result<SurveyEntry, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("already capturing".into());
+    }
+    let running = Arc::new(AtomicBool::new(true));
+    *state.run_flag.lock().unwrap() = Some(running.clone());
+    let catalog = state.catalog.clone();
+    let spectrum_cfg = state.spectrum.clone();
+    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let prev = take_previous(&state);
+
+    let corpus = shellexpand_home(&spec.corpus);
+    let dir = std::path::Path::new(&corpus);
+    std::fs::create_dir_all(dir).map_err(|e| format!("survey dir: {e}"))?;
+    let ext = match spec.format.as_deref() {
+        Some("cu8") => "cu8",
+        Some("cf32") => "cf32",
+        _ => "cs16",
+    };
+    let t = library::now();
+    let stem = format!(
+        "{}_{:.5}_{:.5}_{}",
+        slugify(&spec.label),
+        spec.lat,
+        spec.lon,
+        t
+    );
+    let iq_path = dir
+        .join(format!("{stem}.{ext}"))
+        .to_string_lossy()
+        .into_owned();
+    let log_path = dir
+        .join(format!("{stem}.json"))
+        .to_string_lossy()
+        .into_owned();
+
+    let entry = SurveyEntry {
+        id: stem.clone(),
+        label: spec.label.clone(),
+        lat: spec.lat,
+        lon: spec.lon,
+        t,
+        seconds: spec.seconds,
+        freq: spec.freq,
+        rate: spec.rate,
+        source: spec.source.clone(),
+        iq: iq_path.clone(),
+        log: log_path.clone(),
+    };
+
+    let source = spec.source.clone();
+    let freq = spec.freq;
+    let rate = spec.rate;
+    let gain = spec.gain;
+    let cqpsk = spec.cqpsk;
+    let eq = spec.eq.clone();
+    let ppm = spec.ppm;
+    let device = spec.device.clone();
+    let seconds = spec.seconds;
+
+    let ret = entry.clone();
+    let handle = std::thread::spawn(move || {
+        join_previous(prev);
+        let timer_flag = running.clone();
+        let _timer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs_f64(seconds.max(1.0)));
+            timer_flag.store(false, Ordering::SeqCst);
+        });
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_loop(
+                &app,
+                &running,
+                &catalog,
+                &source,
+                freq,
+                rate,
+                gain,
+                cqpsk,
+                &eq,
+                Some(iq_path.clone()),
+                Some(log_path.clone()),
+                spectrum_cfg,
+                ppm,
+                device.as_deref(),
+            )
+        }))
+        .unwrap_or_else(|p| Err(format!("capture crashed: {}", panic_text(&p))));
+        write_survey(&entry);
+        finish_run(&app, my_gen, res);
+        let _ = app.emit("survey_done", entry);
+    });
+    *state.run_thread.lock().unwrap() = Some(handle);
+    Ok(ret)
+}
+
+/// Write the per-pin sidecar (`<stem>.survey.json` beside the log) and append
+/// the entry to the corpus `survey.json`, replacing any prior entry with the
+/// same id so re-recording a pin doesn't duplicate it.
+fn write_survey(entry: &SurveyEntry) {
+    let sidecar = std::path::Path::new(&entry.log)
+        .with_extension("survey.json")
+        .to_string_lossy()
+        .into_owned();
+    if let Ok(s) = serde_json::to_string_pretty(entry) {
+        let _ = std::fs::write(&sidecar, s);
+    }
+    let corpus = std::path::Path::new(&entry.log)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let manifest = corpus.join("survey.json");
+    let mut list: Vec<serde_json::Value> = std::fs::read_to_string(&manifest)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    list.retain(|v| v.get("id").and_then(|i| i.as_str()) != Some(entry.id.as_str()));
+    if let Ok(v) = serde_json::to_value(entry) {
+        list.push(v);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&list) {
+        let _ = std::fs::write(&manifest, s);
+    }
 }
 
 /// Decode an on-disk `.cf32` recording; emits grants + a final status.
@@ -1476,6 +1717,7 @@ fn main() {
             load_catalog,
             start_capture,
             stop_capture,
+            survey_capture,
             decode_file,
             start_follow,
             dual::dual_start,

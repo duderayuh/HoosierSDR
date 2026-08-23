@@ -355,6 +355,8 @@ tbody tr[data-color] td:first-child { box-shadow: inset 3px 0 0 var(--tgc); }
 .mapbox canvas { display: block; width: 100%; height: auto; aspect-ratio: 560 / 360; cursor: grab; }
 .mapbox canvas.dragging { cursor: grabbing; }
 .mapattr { position: absolute; right: 6px; bottom: 4px; font-size: 10px; color: rgba(200,230,225,.7); background: rgba(0,0,0,.35); padding: 1px 5px; border-radius: 3px; }
+.survey-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.survey-form input { flex: 1 1 auto; min-width: 0; }
 td.alias { font-size: 11px; color: var(--signal); }
 /* in-app dialogs */
 #toasts { position: fixed; right: 14px; bottom: 36px; display: flex; flex-direction: column; gap: 6px; z-index: 50; max-width: 420px; }
