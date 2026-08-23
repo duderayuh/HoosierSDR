@@ -717,9 +717,9 @@ function renderMap() {
   }
 }
 mc.onwheel = (e) => { if (!mapView) return; e.preventDefault(); mapView.z = Math.max(3, Math.min(18, mapView.z + (e.deltaY < 0 ? 1 : -1))); renderMap(); };
-mc.onmousedown = (e) => { if (mapView) mapDrag = { x: e.clientX, y: e.clientY, lat: mapView.lat, lon: mapView.lon }; };
-window.addEventListener("mousemove", (e) => { if (!mapDrag) return; const z = mapView.z, s = mc.width / mc.getBoundingClientRect().width; const dx = (e.clientX - mapDrag.x) * s / 256, dy = (e.clientY - mapDrag.y) * s / 256; mapView.lon = x2lon(lon2x(mapDrag.lon, z) - dx, z); mapView.lat = y2lat(lat2y(mapDrag.lat, z) - dy, z); renderMap(); });
-window.addEventListener("mouseup", () => { mapDrag = null; });
+mc.onpointerdown = (e) => { if (!mapView) return; e.preventDefault(); mc.setPointerCapture(e.pointerId); mc.classList.add("dragging"); mapDrag = { x: e.clientX, y: e.clientY, lat: mapView.lat, lon: mapView.lon, z: mapView.z }; };
+mc.onpointermove = (e) => { if (!mapDrag) return; const rect = mc.getBoundingClientRect(); const sx = mc.width / rect.width, sy = mc.height / rect.height; const dx = (e.clientX - mapDrag.x) * sx / 256, dy = (e.clientY - mapDrag.y) * sy / 256; mapView.lon = x2lon(lon2x(mapDrag.lon, mapDrag.z) - dx, mapDrag.z); mapView.lat = y2lat(lat2y(mapDrag.lat, mapDrag.z) - dy, mapDrag.z); renderMap(); };
+mc.onpointerup = mc.onpointercancel = () => { mapDrag = null; mc.classList.remove("dragging"); };
 mc.ondblclick = () => { if (fixes.size) { const f = [...fixes.values()].pop(); mapView = { lat: f.lat, lon: f.lon, z: Math.max(mapView ? mapView.z : 12, 12) }; renderMap(); } };
 
 /* ================================================================ */
