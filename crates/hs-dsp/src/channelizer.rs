@@ -19,9 +19,12 @@
 //! Overlap-save with brick-wall bin selection. Each block of `N` input samples
 //! is transformed, the `W` bins covering a wanted channel are taken, and those
 //! are inverse-transformed to give `W` samples at `sample_rate × W / N` —
-//! slicing bins *is* the decimation. Blocks overlap by half and only the
-//! middle half of each output block is kept, which discards the edges where
-//! the transform's circular wrap-around corrupts the result.
+//! slicing bins *is* the decimation. Blocks overlap by a quarter and only the
+//! middle three quarters of each output block are kept, which discards the
+//! edges where the transform's circular wrap-around corrupts the result. (The
+//! discarded guard has to outlast the slice filter's ringing; with the taper
+//! below the ringing is ~7 samples against a 100-sample guard, and the
+//! smaller overlap is a third fewer forward transforms — the dominant cost.)
 //!
 //! An earlier attempt windowed each block and overlap-*added* instead. That is
 //! a valid filter-bank structure but not with these sizes: folding `N` bins
@@ -51,17 +54,18 @@ const OUT_SPS: usize = 10;
 /// This is a correctness parameter, not a tuning knob. Selecting bins gives a
 /// brick-wall channel filter, whose impulse response is a long sinc, so each
 /// output block is corrupted at its edges by the transform's circular
-/// wrap-around and only the middle half is usable. The guard that discards is
-/// a *fraction* of the block, so it must be long enough in absolute terms to
+/// wrap-around and only the middle is usable. The guard that discards is a
+/// *fraction* of the block, so it must be long enough in absolute terms to
 /// contain the filter's ringing: at 80 bins the guard was 20 samples and
-/// nothing decoded, while at 800 it is 200 samples and everything does.
+/// nothing decoded, while at 800 (with the taper making the ringing short)
+/// it is 100 samples and everything does.
 const CHANNEL_BINS: usize = 800;
 
 /// One wideband stream in, many narrowband channels out.
 pub struct Channelizer {
     n: usize,
     hop_in: usize,
-    /// Output samples kept per block (the middle half).
+    /// Output samples kept per block (the middle three quarters).
     keep_out: usize,
     /// Centre bin of each requested channel.
     bins: Vec<isize>,
@@ -127,7 +131,7 @@ impl Channelizer {
         let n_f = sample_rate * CHANNEL_BINS as f64 / out_rate;
         let n = n_f.round() as usize;
         assert!(
-            (n_f - n as f64).abs() < 1e-6 && n.is_multiple_of(2),
+            (n_f - n as f64).abs() < 1e-6 && n.is_multiple_of(4),
             "sample rate {sample_rate} does not divide into whole blocks"
         );
 
@@ -155,8 +159,8 @@ impl Channelizer {
 
         Self {
             n,
-            hop_in: n / 2,
-            keep_out: CHANNEL_BINS / 2,
+            hop_in: 3 * n / 4,
+            keep_out: 3 * CHANNEL_BINS / 4,
             bins,
             actual_hz,
             pending: Vec::with_capacity(n * 2),
@@ -241,30 +245,36 @@ impl Channelizer {
 
             for (ch, &centre) in self.bins.iter().enumerate() {
                 // Each block's transform treats the block start as time zero,
-                // but blocks hop by half a transform, so mixing this channel
-                // to baseband leaves a residue of exp(jπ·centre) per hop —
-                // for an odd bin, a 180° phase flip on every block. Left in,
-                // that flip lands a discriminator spike every 40 symbols on
-                // half of all channels: audio still decodes, but choppy and
-                // garbled. Undo it here; with a half-block hop the correction
-                // is exactly ±1.
-                let flip = (centre & 1 == 1) && (self.block_idx & 1 == 1);
-                let sign = if flip { -1.0f32 } else { 1.0f32 };
+                // but blocks hop by 3N/4, so mixing this channel to baseband
+                // leaves a residue of exp(-jπ/2·centre) per hop — a quarter
+                // turn of phase per block on most bins. Left in, each block
+                // boundary lands a discriminator spike mid-call: audio still
+                // decodes, but choppy and garbled (found as a 180° flip when
+                // the hop was N/2). Undo it: the correction for block k is
+                // exactly j^(centre·k mod 4).
+                let q = (centre.rem_euclid(4) as u64 * (self.block_idx & 3)) & 3;
+                let factor = [
+                    C32::new(1.0, 0.0),
+                    C32::new(0.0, 1.0),
+                    C32::new(-1.0, 0.0),
+                    C32::new(0.0, -1.0),
+                ][q as usize];
 
                 // Take the bins around this channel, arranged so its centre
                 // lands at DC in the inverse transform.
                 for (j, s) in slice.iter_mut().enumerate() {
                     let off = j as isize - (CHANNEL_BINS as isize) / 2;
                     let idx = (centre + off).rem_euclid(self.n as isize) as usize;
-                    *s = spectrum[idx].scale(self.taper[j] * sign);
+                    *s = (spectrum[idx] * factor).scale(self.taper[j]);
                 }
                 slice.rotate_left(CHANNEL_BINS / 2);
                 self.inv.inverse(&mut slice);
 
-                // Overlap-save: keep the middle half, where the block is free
-                // of the transform's circular wrap-around. Consecutive blocks
-                // overlap by half the input, so these middles join up.
-                let start = CHANNEL_BINS / 4;
+                // Overlap-save: keep the middle three quarters, where the
+                // block is free of the transform's circular wrap-around.
+                // Consecutive blocks overlap by a quarter of the input, so
+                // these middles join up.
+                let start = CHANNEL_BINS / 8;
                 let o = &mut out[ch];
                 for v in &slice[start..start + self.keep_out] {
                     let v = v.scale(scale);
@@ -360,18 +370,19 @@ mod tests {
     /// overlap-save block ends and the next begins.
     ///
     /// Each block's transform treats the block start as time zero, but blocks
-    /// hop by half a transform, so mixing a channel on bin `c` to baseband
-    /// leaves a residue of `exp(jπ·c)` per hop — a 180° flip on every block
-    /// for any odd-numbered bin. Half of all channels land on odd bins, and
-    /// every flip lands a discriminator spike mid-call: audio decodes, but
-    /// choppy and garbled. A test on an even bin (or one that only measures
-    /// power) cannot see this.
+    /// hop by a fraction of a transform, so mixing a channel on bin `c` to
+    /// baseband leaves a per-hop phase residue that depends on `c` — found
+    /// as a 180° flip on every block of every odd-bin channel when the hop
+    /// was N/2. Every flip lands a discriminator spike mid-call: audio
+    /// decodes, but choppy and garbled. A test that only measures power
+    /// cannot see this, so this one watches the phase itself, on a bin of
+    /// each residue class the correction distinguishes.
     #[test]
-    fn phase_is_continuous_across_blocks_on_an_odd_bin() {
+    fn phase_is_continuous_across_blocks_on_every_bin_class() {
         let fs = 240_000.0;
-        for hz in [12_540.0, -49_980.0] {
-            // 12 540 = bin 209, -49 980 = bin -833: both odd, exactly on-bin
-            // so the output should be a constant (DC) complex value.
+        for hz in [12_000.0, 12_540.0, 12_120.0, -49_980.0] {
+            // Bins 200, 209, 202, -833: one of each residue mod 4, exactly
+            // on-bin so the output should be a constant (DC) complex value.
             let mut ch = Channelizer::new(fs, &[hz]);
             assert_eq!(ch.actual_offsets_hz()[0], hz, "tone not exactly on-bin");
             let mut iq = Vec::new();
@@ -381,8 +392,8 @@ mod tests {
                 iq.push(p.sin() as f32);
             }
             let o = ch.process(&iq).remove(0);
-            // Skip the first block, where the filter is still settling.
-            let tail: Vec<C32> = o[800..].chunks(2).map(|c| C32::new(c[0], c[1])).collect();
+            // Skip the first blocks, where the filter is still settling.
+            let tail: Vec<C32> = o[2400..].chunks(2).map(|c| C32::new(c[0], c[1])).collect();
             for (i, w) in tail.windows(2).enumerate() {
                 // Sample-to-sample phase step of a DC output is zero; allow a
                 // few degrees for the taper's ripple.
