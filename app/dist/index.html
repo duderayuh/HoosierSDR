@@ -674,6 +674,14 @@
               <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly</span></div>
               <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
               <p class="help" id="trHelp">Runs locally with Python: <code>pip install faster-whisper</code> (fast, CPU-friendly) or <code>openai-whisper</code>. Models download on first use.</p>
+              <div class="lab" style="margin-top:10px">Transcript corrections <span class="mono faint">per talkgroup — "Rirey" → "Riley"</span></div>
+              <div id="tcList"></div>
+              <div class="row3" style="margin-top:6px">
+                <label class="field"><span class="lab">TG</span><input id="tcTg" type="text" inputmode="numeric" placeholder="10147" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Misheard</span><input id="tcFrom" type="text" placeholder="Rirey" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Should be</span><input id="tcTo" type="text" placeholder="Riley" spellcheck="false" /></label>
+              </div>
+              <button class="btn ghost sm" id="tcAdd" style="margin-top:4px">Add correction</button>
             </div>
           </div>
           <div class="panel">

@@ -1283,6 +1283,31 @@ if (TAURI) {
   setInterval(autoPrune, 12 * 3600 * 1000);
   trRefresh(); libStatsRefresh();
 
+  /* ---------- per-talkgroup transcript corrections ---------- */
+  let tcRules = [];
+  async function tcLoad() {
+    try { const v = await invoke("tg_corrections_get"); tcRules = (v || []).flatMap(([tg, pairs]) => (pairs || []).map(([from, to]) => ({ tg, from, to }))); }
+    catch (e) { log(`tg_corrections_get: ${e}`); }
+    tcRender();
+  }
+  function tcPersist() {
+    const m = new Map();
+    tcRules.forEach((r) => { if (!m.has(r.tg)) m.set(r.tg, []); m.get(r.tg).push([r.from, r.to]); });
+    invoke("tg_corrections_set", { entries: [...m] }).catch((e) => log(`tg_corrections_set: ${e}`));
+  }
+  function tcRender() {
+    $("tcList").innerHTML = tcRules.length ? tcRules.map((r, i) => `<div class="row"><span class="grow"><span class="mono">TG ${r.tg}</span> <b>${esc(r.from)}</b> → ${esc(r.to)}</span><button class="btn ghost" data-tcdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No corrections yet — add the words your talkgroups keep getting wrong.</span></div>';
+    $("tcList").querySelectorAll("[data-tcdel]").forEach((b) => b.onclick = () => { tcRules.splice(+b.dataset.tcdel, 1); tcPersist(); tcRender(); });
+  }
+  $("tcAdd").onclick = () => {
+    const tg = parseInt($("tcTg").value, 10), from = $("tcFrom").value.trim(), to = $("tcTo").value.trim();
+    if (!Number.isFinite(tg) || !from || !to) { alert("Enter a talkgroup, the misheard word, and the correct word."); return; }
+    tcRules.push({ tg, from, to });
+    $("tcFrom").value = $("tcTo").value = ""; $("tcTg").value = "";
+    tcPersist(); tcRender();
+  };
+  tcLoad();
+
   /* ---------- bottom status strip ---------- */
   let lastStream = "—";
   async function sbTick() {

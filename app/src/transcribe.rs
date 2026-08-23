@@ -231,11 +231,29 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                 let id = v["id"].as_i64();
                 if let (Some(id), Some(text)) = (id, v["text"].as_str()) {
                     let model = v["model"].as_str().unwrap_or("whisper");
+                    // Per-talkgroup transcript corrections (e.g. "Rirey" → "Riley").
+                    let corrected = {
+                        let guard = state.db.lock().unwrap();
+                        let tg = guard.as_ref().and_then(|db| {
+                            library::get(&db.lock().unwrap(), id)
+                                .ok()
+                                .flatten()
+                                .map(|r| r.tg)
+                        });
+                        let corr = state.tg_corrections.lock().unwrap();
+                        match tg {
+                            Some(tg) => crate::apply_corrections(
+                                corr.get(&tg).map(|v| v.as_slice()).unwrap_or(&[]),
+                                text,
+                            ),
+                            None => text.to_string(),
+                        }
+                    };
                     let res = {
                         let guard = state.db.lock().unwrap();
                         match guard.as_ref() {
                             Some(db) => {
-                                library::set_transcript(&db.lock().unwrap(), id, text, model)
+                                library::set_transcript(&db.lock().unwrap(), id, &corrected, model)
                             }
                             None => Err("library not open".into()),
                         }
@@ -243,10 +261,10 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                     if res.is_ok() {
                         let _ = app2.emit(
                             "transcript",
-                            serde_json::json!({ "id": id, "text": text, "model": model }),
+                            serde_json::json!({ "id": id, "text": corrected, "model": model }),
                         );
-                        crate::alerts::on_transcript(&app2, id, text);
-                        crate::conversations::on_transcript(&app2, id, text);
+                        crate::alerts::on_transcript(&app2, id, &corrected);
+                        crate::conversations::on_transcript(&app2, id, &corrected);
                     }
                 } else if let Some(err) = v["error"].as_str() {
                     let _ = app2.emit("transcribe_error", format!("call {:?}: {err}", id));
