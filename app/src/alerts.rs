@@ -24,7 +24,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
 
-const SERVICE: &str = "HoosierSDR Telegram";
 const TOKEN_USER: &str = "bot-token";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -201,11 +200,7 @@ fn store(app: &AppHandle, s: &Settings) -> Result<(), String> {
 }
 
 fn token() -> Option<String> {
-    keyring::Entry::new(SERVICE, TOKEN_USER)
-        .ok()?
-        .get_password()
-        .ok()
-        .filter(|t| !t.is_empty())
+    crate::secrets::get(TOKEN_USER)
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +741,20 @@ pub(crate) fn delete_message(chat_id: &str, id: i64) -> Result<(), String> {
     check(status, &out).map(|_| ())
 }
 
+/// Edit a message the bot sent, in place (Telegram allows this for 48 hours).
+pub(crate) fn edit_message(chat_id: &str, id: i64, text: &str) -> Result<(), String> {
+    if chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let body = serde_json::json!({ "chat_id": chat_id.trim(), "message_id": id, "text": text });
+    let (status, out) = crate::upload::post(
+        &telegram_api("editMessageText")?,
+        "application/json",
+        body.to_string().into_bytes(),
+    )?;
+    check(status, &out).map(|_| ())
+}
+
 /// Free-text completion from the local model (no JSON mode): the summary
 /// path. Same `think: false` handling as the gate.
 pub(crate) fn ollama_complete(o: &Ollama, prompt: &str) -> Result<String, String> {
@@ -887,14 +896,11 @@ pub fn alerts_set(
 
 #[tauri::command]
 pub fn telegram_save(token: String) -> Result<(), String> {
-    let e = keyring::Entry::new(SERVICE, TOKEN_USER).map_err(|e| format!("keyring: {e}"))?;
     if token.trim().is_empty() {
-        let _ = e.delete_credential();
+        crate::secrets::remove(TOKEN_USER)
     } else {
-        e.set_password(token.trim())
-            .map_err(|e| format!("keyring: {e}"))?;
+        crate::secrets::set(TOKEN_USER, token.trim())
     }
-    Ok(())
 }
 
 #[tauri::command]

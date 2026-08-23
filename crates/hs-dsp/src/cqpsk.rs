@@ -42,6 +42,28 @@ impl FrontEq {
             FrontEq::Dfe(eq) => eq.push(x, adapt),
         }
     }
+
+    /// Reset the taps to the centre-spike identity, discarding any solution
+    /// walked onto noise. Called on re-acquisition so a fresh transmission
+    /// never inherits taps converged on an idle channel.
+    fn reset(&mut self) {
+        match self {
+            FrontEq::None => {}
+            FrontEq::Cma(eq) => eq.reset(),
+            FrontEq::Dfe(eq) => eq.reset(),
+        }
+    }
+
+    /// Gear-shift the equalizer's step sizes. Only the DFE reacts; the CMA's
+    /// single step and the `None` baseline ignore this (the CMA needs no
+    /// gear-shift — its one step serves both acquisition and tracking).
+    fn set_step(&mut self, mu_ff: f32, mu_fb: f32) {
+        match self {
+            FrontEq::None => {}
+            FrontEq::Cma(_) => {}
+            FrontEq::Dfe(eq) => eq.set_step(mu_ff, mu_fb),
+        }
+    }
 }
 
 /// Differential phase increment for a dibit (radians).
@@ -222,7 +244,7 @@ impl EqualizedCqpsk {
 /// [`CqpskReceiver::new_bare`] to bypass the equalizer for A/B comparison.
 pub struct CqpskReceiver {
     dc: crate::agc::DcBlocker,
-    agc: crate::agc::Agc,
+    pub agc: crate::agc::Agc,
     mf: crate::fir::FirC,
     gardner: crate::timing_complex::ComplexGardner,
     eq: FrontEq,
@@ -234,6 +256,8 @@ pub struct CqpskReceiver {
     /// Blind (non-data-aided) acquisition accumulator: Σ exp(j·(4Δφ − π)).
     acq: C32,
     acq_n: u32,
+    /// Consecutive failed acquisition windows; drives the idle-channel tap reset.
+    acq_failures: u32,
     acquired: bool,
     /// Smoothed magnitude of the decision-directed phase error, the receiver's
     /// own measure of whether it is locked.
@@ -246,6 +270,27 @@ pub struct CqpskReceiver {
 const SETTLE_SYMS: u32 = 64;
 /// Symbols averaged by the blind carrier-bias estimator (~90 ms at 4800 baud).
 const ACQ_SYMS: u32 = 400;
+/// Consecutive failed acquisition windows before the equalizer taps are reset
+/// to identity. A cold-started traffic channel sits on idle noise (which the
+/// AGC normalizes to unit power) until a call keys up; over minutes the DFE in
+/// particular can settle into the degenerate CM-DFE minimum from that input.
+/// Resetting after a few windows keeps the receiver at the best possible cold
+/// start. No gate or threshold — identity only helps acquisition.
+const ACQ_FAIL_LIMIT: u32 = 4;
+/// DFE feedforward step during acquisition — fast enough to open the eye within
+/// the acquisition window on a short voice burst, so the blind carrier
+/// acquisition's coherence threshold is met. Gear-shifted to [`DFE_FF_TRACK`]
+/// on acquisition.
+const DFE_FF_ACQ: f32 = 0.05;
+/// DFE feedforward step during tracking — slow, for low steady-state
+/// misadjustment. A fast feedforward left running in steady-state costs ~6
+/// TSBKs on the Marion control channel (187 vs 193). Reached by the gear-shift
+/// on acquisition.
+const DFE_FF_TRACK: f32 = 0.001;
+/// DFE feedback step — always slow. The recursive feedback section rings and
+/// injects noise (and once collapsed a control channel to 6 syncs) at an
+/// aggressive step, so it never gear-shifts.
+const DFE_FB: f32 = 0.0005;
 /// Minimum coherence |Σ exp(j·(4Δφ−π))| / N for the acquisition to be believed.
 /// Real CQPSK approaches 1; noise sits near 1/√N ≈ 0.05 at N = 400. A threshold
 /// well above the noise floor but far below a real lock cleanly separates them.
@@ -281,12 +326,19 @@ impl CqpskReceiver {
     /// linear CMA leaves in a deep spectral null. Same phase-blind placement
     /// before differential detection (see [`CmaDfe`](crate::equalizer::CmaDfe)).
     pub fn new_dfe(sps: usize, beta: f64) -> Self {
-        // 9 feedforward + 6 feedback taps. Both sections adapt gently — the
-        // recursive feedback loop rings and injects noise at an aggressive
-        // step, and a jointly slow convergence settles into a better minimum
-        // than a fast feedforward reaches. Swept on the Marion County and
-        // live261 control channels; this lifts 192 → 202 and 203 → 207 TSBKs.
-        Self::build(sps, beta, FrontEq::Dfe(CmaDfe::new(9, 6, 0.001, 0.0005)))
+        // 9 feedforward + 6 feedback taps. The feedforward starts at the fast
+        // acquisition step so the eye opens during blind acquisition — a slow
+        // feedforward never converges inside a short voice burst, and the
+        // acquisition coherence then never clears its threshold — and
+        // gear-shifts to the slow tracking step on acquisition in `push_phase`.
+        // The feedback stays slow throughout (see [`DFE_FB`]). This lifts the
+        // Marion County control channel 192 → 202 TSBKs without sacrificing
+        // short-burst acquisition.
+        Self::build(
+            sps,
+            beta,
+            FrontEq::Dfe(CmaDfe::new(9, 6, DFE_FF_ACQ, DFE_FB)),
+        )
     }
 
     fn build(sps: usize, beta: f64, eq: FrontEq) -> Self {
@@ -303,6 +355,7 @@ impl CqpskReceiver {
             settle: 0,
             acq: C32::ZERO,
             acq_n: 0,
+            acq_failures: 0,
             acquired: false,
             err_ewma: 0.0,
             bad_run: 0,
@@ -330,12 +383,31 @@ impl CqpskReceiver {
     /// trusted, and discarding it is what forces every stage downstream into
     /// hard decisions.
     pub fn push_phase(&mut self, iq: C32) -> Option<(u8, f32)> {
+        // Front-door guard: a single non-finite sample (front-end overflow, USB
+        // drop, tuner glitch) would otherwise poison the IIR state of the DC
+        // blocker and AGC permanently — their EWMA/feedback state carries no
+        // finite guard, and a NaN there can never recover, because `reacquire()`
+        // does not reset those stages. Dropping the corrupt sample before it
+        // reaches any filter state is the only place recovery is free. The
+        // `raw` guard below is defense-in-depth for NaN arising internally.
+        if !iq.re.is_finite() || !iq.im.is_finite() {
+            return None;
+        }
         let cleaned = self.agc.push(self.dc.push(iq));
         let filtered = self.mf.push(cleaned)?;
         let sym = self.gardner.push(filtered)?;
         self.settle = self.settle.saturating_add(1);
         // Equalize before differential detection (the thesis). Freeze the
         // taps until the timing loop has settled so it adapts on a real eye.
+        //
+        // Do NOT gate this on `acquired`. The blind carrier acquisition depends
+        // on the equalizer having already opened the eye on multipath — freezing
+        // the taps until acquisition completes drops the acquisition coherence
+        // below its threshold and deadlocks (observed on the 0.6-echo ISI test:
+        // coherence ~0.07 < ACQ_COHERENCE_MIN 0.30, so acquisition never fires).
+        // "Adapting to idle noise" is instead handled by the lock-loss
+        // re-acquisition (the err_ewma watch below) plus the tap reset in
+        // `reacquire()`.
         let sym = self.eq.push(sym, self.settle > 32);
         let prev = match self.prev_sym {
             Some(p) => p,
@@ -345,6 +417,16 @@ impl CqpskReceiver {
             }
         };
         let raw = differential_detect(sym, prev);
+        // A single non-finite sample upstream (front-end overflow, USB drop,
+        // AGC divide) poisons `raw` and, through `err`/`err_ewma`/`freq_bias`,
+        // the whole receiver. The lock watchdog below is `> LOCK_ERR_MAX`,
+        // which is false for NaN, so without this guard a NaN would make the
+        // receiver decode garbage forever with no recovery path. Recover before
+        // the poison can spread.
+        if !raw.is_finite() {
+            self.reacquire();
+            return None;
+        }
         self.prev_sym = Some(sym);
 
         // Phase 1 — blind carrier acquisition. The four ideal differential
@@ -373,11 +455,26 @@ impl CqpskReceiver {
                     if coherence > ACQ_COHERENCE_MIN {
                         self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
                         self.acquired = true;
+                        // The eye is open: gear-shift the DFE feedforward from
+                        // the fast acquisition step to the slow tracking step.
+                        self.eq.set_step(DFE_FF_TRACK, DFE_FB);
                     } else {
                         // Not signal yet. Slide the window forward rather than
                         // restart cold, so onset is caught within one window.
                         self.acq = C32::ZERO;
                         self.acq_n = 0;
+                        // Idle-channel recovery. This branch is the ONLY place
+                        // reachable before acquisition completes — `reacquire()`
+                        // cannot fire here because there is no lock to lose.
+                        // After a few failed windows the taps are prima facie
+                        // not opening an eye (or there is no signal yet), so
+                        // reset them to identity; identity is the best possible
+                        // cold start and the reset cannot hurt acquisition.
+                        self.acq_failures += 1;
+                        if self.acq_failures >= ACQ_FAIL_LIMIT {
+                            self.eq.reset();
+                            self.acq_failures = 0;
+                        }
                     }
                 }
             }
@@ -402,7 +499,9 @@ impl CqpskReceiver {
         // estimate through the entire transmission that follows. A control
         // channel never exposes this because it transmits continuously.
         self.err_ewma += 0.002 * (err.abs() - self.err_ewma);
-        if self.err_ewma > LOCK_ERR_MAX {
+        // `!(<=)` rather than `>` so a NaN err_ewma (poisoned upstream) counts
+        // as unlocked and re-acquires, instead of comparing false forever.
+        if !(self.err_ewma <= LOCK_ERR_MAX) {
             self.bad_run += 1;
             if self.bad_run >= BAD_RUN_LIMIT {
                 self.reacquire();
@@ -436,6 +535,14 @@ impl CqpskReceiver {
         self.bad_run = 0;
         self.freq_bias = 0.0;
         self.prev_sym = None;
+        self.acq_failures = 0;
+        // Discard any taps the equalizer walked onto the noise in the window
+        // between the transmission ending and this re-acquisition. The next
+        // transmission starts from the centre-spike identity, not a stale
+        // solution converged on an idle channel.
+        self.eq.reset();
+        // Back to the fast acquisition step for the next acquisition.
+        self.eq.set_step(DFE_FF_ACQ, DFE_FB);
     }
 
     /// Smoothed decision-directed phase error: low when locked, near 0.39 on

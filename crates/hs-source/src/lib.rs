@@ -7,6 +7,8 @@ use std::io::Read;
 pub mod airspy;
 #[cfg(feature = "rtlsdr")]
 pub mod rtlsdr;
+#[cfg(feature = "soapy")]
+pub mod soapy;
 
 /// Complex IQ sample pair as delivered by a source, interleaved f32.
 pub type IqBlock = Vec<f32>;
@@ -61,6 +63,25 @@ impl GainHandle {
     }
 }
 
+/// A handle for retuning a streaming radio from another thread. Like
+/// [`GainHandle`], the source applies the newest frequency from inside its
+/// own `read`, so the tuner is only ever touched by the thread that owns it.
+/// This is what a dual-SDR hopper uses to move the voice radio between
+/// channels without sharing the device across threads.
+#[derive(Clone, Default)]
+pub struct FreqHandle(std::sync::Arc<std::sync::Mutex<Option<f64>>>);
+
+impl FreqHandle {
+    /// Request a retune to `hz` (the new centre frequency).
+    pub fn request(&self, hz: f64) {
+        *self.0.lock().unwrap() = Some(hz);
+    }
+    /// Take the pending retune, if any.
+    pub fn take(&self) -> Option<f64> {
+        self.0.lock().unwrap().take()
+    }
+}
+
 /// The R820T/R828D tuner's gain steps in dB — what an RTL-SDR actually
 /// offers; a value in between is rounded to one of these by the driver.
 pub const RTL_TUNER_GAINS_DB: &[f64] = &[
@@ -79,10 +100,27 @@ pub const RTL_DEFAULT_GAIN_DB: f64 = 40.0;
 /// than passed to the driver, which would either reject them or pick a garbage
 /// floor — the failure mode behind "-24 dB" garbage voice.
 pub fn clamp_rtl_gain(db: f64) -> f64 {
-    let min = RTL_TUNER_GAINS_DB[0];
-    let max = RTL_TUNER_GAINS_DB[RTL_TUNER_GAINS_DB.len() - 1];
+    clamp_gain_to_steps(db, RTL_TUNER_GAINS_DB)
+}
+
+/// The E4000 tuner's gain steps in dB — the 14 values a Nooelec Smartee XTR (or
+/// any E4000 RTL-SDR) actually offers. A very different ladder from the
+/// R820T/R820T2's 29 steps (0–49.6): −1 to 42 dB, coarse at the low end.
+pub const E4000_TUNER_GAINS_DB: &[f64] = &[
+    -1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5, 19.0, 21.5, 24.0, 29.0, 34.0, 42.0,
+];
+
+/// Clamp an E4000 gain request into its valid step list (nearest step).
+pub fn clamp_e4000_gain(db: f64) -> f64 {
+    clamp_gain_to_steps(db, E4000_TUNER_GAINS_DB)
+}
+
+/// Clamp a gain request into a tuner's valid step list (nearest step).
+pub fn clamp_gain_to_steps(db: f64, steps: &[f64]) -> f64 {
+    let min = steps[0];
+    let max = steps[steps.len() - 1];
     let clamped = db.clamp(min, max);
-    RTL_TUNER_GAINS_DB
+    steps
         .iter()
         .copied()
         .min_by(|a, b| (a - clamped).abs().total_cmp(&(b - clamped).abs()))
@@ -101,6 +139,13 @@ pub trait SdrSource {
     fn dropped(&self) -> u64 {
         0
     }
+    /// A handle that retunes this radio while it streams. Radios that support
+    /// retuning return their handle; others (files, wrappers) return a no-op.
+    /// The dual-SDR hopper writes the next voice-channel frequency here, and
+    /// the radio applies it inside its own `read`.
+    fn freq_handle(&self) -> FreqHandle {
+        FreqHandle::default()
+    }
 }
 
 impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
@@ -115,6 +160,9 @@ impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
     }
     fn dropped(&self) -> u64 {
         (**self).dropped()
+    }
+    fn freq_handle(&self) -> FreqHandle {
+        (**self).freq_handle()
     }
 }
 

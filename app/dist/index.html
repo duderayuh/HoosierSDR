@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -53,11 +53,14 @@
               <div class="seg" id="modeSeg" role="group" aria-label="Mode">
                 <button data-v="follow" aria-pressed="true">Follow site</button>
                 <button data-v="channel" aria-pressed="false">One channel</button>
+                <button data-v="dual" aria-pressed="false">Dual SDR</button>
               </div>
               <label class="field"><span class="lab">Frequency <span class="mono faint" id="freqHint">control channel</span></span>
                 <input id="freq" class="big" type="text" value="851.5375M" spellcheck="false" /></label>
               <label class="field" id="centerField"><span class="lab">Band centre <span class="mono faint">10 M spans ±3.84 MHz</span></span>
                 <input id="center" type="text" value="855M" spellcheck="false" /></label>
+              <label class="field" id="voiceSrcField" style="display:none"><span class="lab">Voice radio <span class="mono faint">hopping</span></span>
+                <select id="voiceSrc"></select></label>
               <label class="field" id="tmodField"><span class="lab">Traffic modulation <span class="mono faint">simulcast sites are CQPSK</span></span>
                 <select id="tmod"><option value="auto">auto — decode both, keep the cleaner</option><option value="cqpsk">CQPSK / LSM only</option><option value="c4fm">C4FM only</option></select></label>
               <div class="field" id="modField"><span class="lab">Modulation</span>
@@ -85,6 +88,7 @@
               <div class="kv">
                 <div><span class="k">Frequency</span><span class="v mono" id="tunedHz">—</span></div>
                 <div><span class="k">NAC · System</span><span class="v mono" id="r-site">—</span></div>
+                <div><span class="k">Signal</span><span class="v mono" id="r-signal">— dBFS</span></div>
                 <div><span class="k">Syncs</span><span class="v mono" id="r-syncs">0</span></div>
                 <div><span class="k">Calls</span><span class="v mono sig" id="r-grants">0</span></div>
                 <div><span class="k">Voice</span><span class="v mono" id="r-voice">0.0<small>s</small></span></div>
@@ -284,7 +288,7 @@
                 <label class="field"><span class="lab">Label</span><input id="rgName" type="text" placeholder="Marion County" spellcheck="false" /></label>
               </div>
               <div class="row3">
-                <label class="field"><span class="lab">Priority</span><select id="rgPri"><option value="">normal</option><option value="10">high</option><option value="90">low</option></select></label>
+                <label class="field"><span class="lab">Priority</span><input type="number" id="rgPri" class="priin" min="1" max="99" placeholder="50" title="1 = highest, 99 = lowest; blank = normal" /></label>
                 <label class="field"><span class="lab">Colour</span><select id="rgColor"><option value="">none</option></select></label>
                 <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="rgLock" type="checkbox" /> lock out</label><label class="check" style="margin:0"><input id="rgBell" type="checkbox" /> 🔔</label><button class="btn ghost" id="rgAdd">Add</button></span></label>
               </div>
@@ -476,7 +480,7 @@
             <div class="head"><span class="eyebrow">Telegram</span><span class="meta" id="tgMeta2"></span></div>
             <div class="body">
               <div class="row2">
-                <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · kept in the Keychain</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Chat ID <span class="mono faint">your user or group id</span></span><input id="tgChat" type="text" placeholder="123456789" spellcheck="false" /></label>
               </div>
               <div class="inline"><button class="btn primary" id="tgSave">Save</button><button class="btn ghost" id="tgTest">Send a test message</button><span class="help">Audio goes as MP3 via ffmpeg (as a WAV document without it).</span></div>
@@ -641,6 +645,14 @@
       <section class="two-col">
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Appearance</span></div>
+            <div class="body">
+              <div class="lab">Theme</div>
+              <div class="chips" id="themeChips"></div>
+              <p class="help" style="margin-top:8px">Six colour schemes; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Radio</span></div>
             <div class="body">
               <p class="help">Gain and frequency correction are per radio, in the <b>Devices</b> tab. Radio and sample rate are in the top bar. Airspy at 10 M covers a whole site (±3.84 MHz); 2.5 M covers ±0.96 MHz; RTL-SDR covers ±1.2 MHz. The follower measures and compensates tuner error on its own; the ppm value keeps the radio centred where the band centre says, which matters at the band edges.</p>
@@ -683,6 +695,14 @@
               <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly</span></div>
               <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
               <p class="help" id="trHelp">Runs locally with Python: <code>pip install faster-whisper</code> (fast, CPU-friendly) or <code>openai-whisper</code>. Models download on first use.</p>
+              <div class="lab" style="margin-top:10px">Transcript corrections <span class="mono faint">per talkgroup — "Rirey" → "Riley"</span></div>
+              <div id="tcList"></div>
+              <div class="row3" style="margin-top:6px">
+                <label class="field"><span class="lab">TG</span><input id="tcTg" type="text" inputmode="numeric" placeholder="10147" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Misheard</span><input id="tcFrom" type="text" placeholder="Rirey" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Should be</span><input id="tcTo" type="text" placeholder="Riley" spellcheck="false" /></label>
+              </div>
+              <button class="btn ghost sm" id="tcAdd" style="margin-top:4px">Add correction</button>
             </div>
           </div>
           <div class="panel">
@@ -690,7 +710,7 @@
             <div class="body">
               <div class="mono small" id="libDir">—</div>
               <div class="row2" style="margin-top:8px">
-                <label class="field"><span class="lab">Delete calls older than (days) <span class="mono faint">starred calls are kept</span></span><input id="pruneDays" type="text" inputmode="numeric" placeholder="never" /></label>
+                <label class="field"><span class="lab">Delete calls older than (days) <span class="mono faint">auto-prunes daily · starred kept</span></span><input id="pruneDays" type="text" inputmode="numeric" placeholder="never" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="pruneNow" style="width:100%">Prune now</button></label>
               </div>
             </div>
@@ -811,10 +831,10 @@
                 <label class="field"><span class="lab">Password</span><input id="rrPass" type="password" autocomplete="current-password" /></label>
               </div>
               <label class="field" id="rrKeyField"><span class="lab">App key <span class="mono faint">this build has none embedded</span></span><input id="rrKey" type="password" spellcheck="false" /></label>
-              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Secrets are kept in the Keychain on this Mac.</span></div>
+              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Secrets are saved on this Mac.</span></div>
             </div>
           </div>
-          <p class="legal"><b>Decodes unencrypted P25 only.</b> Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC&nbsp;35-44.1-2-7).</p>
+          <span class="legal" title="Decodes unencrypted P25 only. Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC 35-44.1-2-7).">ⓘ&nbsp;legal</span>
         </div>
       </section>
     </div>

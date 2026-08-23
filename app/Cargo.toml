@@ -18,13 +18,12 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hs-core = { path = "../crates/hs-core" }
-hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy"] }
+hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy", "soapy"] }
 hs-catalog = { path = "../crates/hs-catalog", features = ["radioreference"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
-keyring = { version = "3", features = ["apple-native", "windows-native"] }
 cpal = "0.15"
 regex = "1"
 

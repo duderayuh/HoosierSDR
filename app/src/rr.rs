@@ -1,9 +1,9 @@
 //! RadioReference from inside the app: credentials saved on this machine,
 //! one click to download a system's talkgroups and control channels.
 //!
-//! The password and app key go in the OS credential store (macOS Keychain,
-//! Windows Credential Manager) via `keyring`; the username and system id —
-//! not secrets — in a small JSON file in the app's config directory, next to
+//! The password and app key go in the local secret store (a 0600 file in the
+//! app config dir — see `crate::secrets`); the username and system id — not
+//! secrets — in a small JSON file in the app's config directory, next to
 //! the downloaded talkgroup CSV, which is loaded again on every start so the
 //! catalog works offline afterwards.
 
@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
-
-const SERVICE: &str = "HoosierSDR RadioReference";
 
 include!(concat!(env!("OUT_DIR"), "/rr_key.rs"));
 const MASK: [u8; 16] = [
@@ -329,12 +327,8 @@ fn save_prefs(app: &AppHandle, p: &Prefs) -> Result<(), String> {
     .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn secret(user: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, user).map_err(|e| format!("credential store: {e}"))
-}
-
 fn get_secret(user: &str) -> Option<String> {
-    secret(user).ok()?.get_password().ok()
+    crate::secrets::get(user)
 }
 
 /// The catalogs saved on previous runs, merged.
@@ -389,17 +383,13 @@ pub fn rr_save(
     p.username = username.trim().to_string();
     p.sid = sid;
     if !app_key.trim().is_empty() {
-        secret("app_key")?
-            .set_password(app_key.trim())
-            .map_err(|e| format!("save app key: {e}"))?;
+        crate::secrets::set("app_key", app_key.trim())?;
     }
     if !password.is_empty() {
         if p.username.is_empty() {
             return Err("enter the username the password belongs to".into());
         }
-        secret(&format!("password:{}", p.username))?
-            .set_password(&password)
-            .map_err(|e| format!("save password: {e}"))?;
+        crate::secrets::set(&format!("password:{}", p.username), &password)?;
     }
     save_prefs(&app, &p)
 }

@@ -16,6 +16,9 @@ default = []
 audio = ["dep:cpal"]
 # Live RTL-SDR capture (pulls Seify + libusb). Off by default.
 rtlsdr = ["hs-source/rtlsdr"]
+# Live RTL-SDR capture via SoapySDR (librtlsdr) — supports the E4000 (Smartee
+# XTR) and other non-R820T2 tuners the pure-Rust driver cannot. Off by default.
+soapy = ["hs-source/soapy"]
 # Live Airspy capture over libairspy (`brew install airspy`). Off by default.
 airspy = ["hs-source/airspy"]
 # Download system/site/talkgroup data from RadioReference. Off by default:

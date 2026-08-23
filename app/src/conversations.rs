@@ -606,18 +606,40 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
         "(no transcript — audio only)".to_string()
     };
     let message = render(&r, &c, &summary);
-    // 2. Delete what an earlier revision sent.
+    let files: Vec<String> = c.pieces.iter().filter_map(|p| p.audio.clone()).collect();
+    let text_only = !r.attach_audio || files.is_empty();
     let mut detail = String::new();
-    if !c.sent_ids.is_empty() {
+    let mut reused_id: Option<i64> = None;
+
+    // 2. Revise in place when we can (a single earlier message and a text-only
+    // send); otherwise delete the old and send fresh. Audio can't be edited in
+    // place, so those keep the delete + re-send behaviour.
+    if text_only && c.sent_ids.len() == 1 {
+        let id = c.sent_ids[0];
+        match crate::alerts::edit_message(&c.sent_chat, id, &message) {
+            Ok(()) => {
+                reused_id = Some(id);
+                detail.push_str("edited in place; ");
+            }
+            Err(e) => {
+                detail.push_str(&format!("edit failed ({e}); "));
+                if let Err(de) = crate::alerts::delete_message(&c.sent_chat, id) {
+                    detail.push_str(&format!("could not delete earlier message {id}: {de}; "));
+                }
+            }
+        }
+    } else if !c.sent_ids.is_empty() {
         for id in &c.sent_ids {
             if let Err(e) = crate::alerts::delete_message(&c.sent_chat, *id) {
                 detail.push_str(&format!("could not delete earlier message {id}: {e}; "));
             }
         }
     }
-    // 3. Send, with the combined audio.
-    let files: Vec<String> = c.pieces.iter().filter_map(|p| p.audio.clone()).collect();
-    let sent = if r.attach_audio && !files.is_empty() {
+
+    // 3. Send (or reuse the edited message), with the combined audio.
+    let sent = if let Some(id) = reused_id {
+        Ok(vec![id])
+    } else if r.attach_audio && !files.is_empty() {
         match crate::alerts::combine_clips(&files, &format!("conv_{}", c.tg)) {
             Ok((path, mp3)) => {
                 let res = crate::alerts::send_audio_id(

@@ -18,6 +18,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 mod alerts;
 mod conversations;
 mod devices;
+mod dual;
 mod encode;
 mod follow;
 mod hook;
@@ -26,6 +27,7 @@ mod names;
 mod player;
 mod playlists;
 mod rr;
+mod secrets;
 mod stream;
 mod sysstat;
 mod transcribe;
@@ -67,6 +69,8 @@ struct AppState {
     /// Locked-out and prioritised talkgroup ranges (inclusive).
     lockout_ranges: Arc<Mutex<Vec<(u16, u16)>>>,
     priority_ranges: Arc<Mutex<Vec<(u16, u16, u8)>>>,
+    /// Per-talkgroup transcript corrections: tg → [(wrong, right)].
+    tg_corrections: Arc<Mutex<std::collections::HashMap<u16, Vec<(String, String)>>>>,
     /// Radio-ID aliases, and the wildcard rules behind them.
     units: units::Units,
     unit_rules: units::Rules,
@@ -142,6 +146,58 @@ fn set_lockout_ranges(ranges: Vec<(u16, u16)>, state: State<AppState>) {
 #[tauri::command]
 fn set_priority_ranges(ranges: Vec<(u16, u16, u8)>, state: State<AppState>) {
     *state.priority_ranges.lock().unwrap() = ranges;
+}
+
+/// Apply per-talkgroup transcript corrections: each `(wrong, right)` pair is a
+/// case-insensitive, whole-word substitution (so "rirey"/"RIREY" → "Riley" but
+/// "shirey" is left alone). Applied before a transcript is stored or acted on.
+pub(crate) fn apply_corrections(rules: &[(String, String)], text: &str) -> String {
+    let mut out = text.to_string();
+    for (from, to) in rules {
+        let from = from.trim();
+        if from.is_empty() {
+            continue;
+        }
+        let pat = format!(r"(?i)\b{}\b", regex::escape(from));
+        if let Ok(re) = regex::Regex::new(&pat) {
+            out = re
+                .replace_all(&out, regex::NoExpand(to.as_str()))
+                .into_owned();
+        }
+    }
+    out
+}
+
+/// Per-talkgroup transcript corrections (tg → [(wrong, right)]).
+#[tauri::command]
+fn tg_corrections_get(state: State<AppState>) -> Vec<(u16, Vec<(String, String)>)> {
+    state
+        .tg_corrections
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect()
+}
+
+#[tauri::command]
+fn tg_corrections_set(
+    app: AppHandle,
+    state: State<AppState>,
+    entries: Vec<(u16, Vec<(String, String)>)>,
+) {
+    let map: std::collections::HashMap<u16, Vec<(String, String)>> = entries
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    *state.tg_corrections.lock().unwrap() = map.clone();
+    if let Ok(d) = app.path().app_config_dir() {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(
+            d.join("tg_corrections.json"),
+            serde_json::to_string_pretty(&map).unwrap_or_default(),
+        );
+    }
 }
 
 /// Speaker gain 0 (mute) … 1 (unity) … 2. Applies to live calls, replay and
@@ -672,6 +728,7 @@ fn open_device_with_gain(
 ) -> Result<(Box<dyn hs_source::SdrSource + Send>, hs_source::GainHandle), String> {
     use hs_source::airspy::AirspySource;
     use hs_source::rtlsdr::RtlSdrSource;
+    use hs_source::soapy::SoapyRtlSource;
     use hs_source::GainSetting;
     Ok(match source {
         "airspy" => {
@@ -686,6 +743,17 @@ fn open_device_with_gain(
             {
                 src.set_gain(g).map_err(|e| format!("Airspy gain: {e:?}"))?;
             }
+            let h = src.gain_handle();
+            (Box::new(src), h)
+        }
+        "soapy" => {
+            let db = match setting {
+                Some(GainSetting::Manual(db)) => Some(db),
+                Some(GainSetting::Agc) => None,
+                _ => gain,
+            };
+            let src = SoapyRtlSource::open(freq, rate, db)
+                .map_err(|e| format!("open RTL-SDR (Soapy): {e:?}"))?;
             let h = src.gain_handle();
             (Box::new(src), h)
         }
@@ -1574,6 +1642,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
         .setup(|app| {
+            crate::secrets::init(app.handle());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
             if let Some(cat) = rr::saved_catalog(app.handle()) {
@@ -1589,6 +1658,20 @@ fn main() {
                 .and_then(|t| serde_json::from_str(&t).ok())
             {
                 *state.names.lock().unwrap() = n;
+            }
+            if let Some(c) = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .and_then(|d| std::fs::read_to_string(d.join("tg_corrections.json")).ok())
+                .and_then(|t| {
+                    serde_json::from_str::<std::collections::HashMap<u16, Vec<(String, String)>>>(
+                        &t,
+                    )
+                    .ok()
+                })
+            {
+                *state.tg_corrections.lock().unwrap() = c;
             }
             state.max_calls.store(12, Ordering::SeqCst);
             state.use_channelizer.store(true, Ordering::SeqCst);
@@ -1637,12 +1720,15 @@ fn main() {
             survey_capture,
             decode_file,
             start_follow,
+            dual::dual_start,
             set_lockout,
             set_allowlist,
             set_hold,
             set_priorities,
             set_lockout_ranges,
             set_priority_ranges,
+            tg_corrections_get,
+            tg_corrections_set,
             set_volume,
             get_volume,
             names_get,
@@ -1729,4 +1815,20 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");
+}
+
+#[cfg(test)]
+mod corrections_tests {
+    use super::apply_corrections;
+
+    #[test]
+    fn corrections_are_word_boundary_and_case_insensitive() {
+        let rules = vec![("Rirey".to_string(), "Riley".to_string())];
+        assert_eq!(apply_corrections(&rules, "Unit 5 to Rirey station"), "Unit 5 to Riley station");
+        assert_eq!(apply_corrections(&rules, "rirey and RIREY"), "Riley and Riley");
+        assert_eq!(apply_corrections(&rules, "Rireyfield untouched"), "Rireyfield untouched");
+        assert_eq!(apply_corrections(&rules, "shirey untouched"), "shirey untouched");
+        // No rules → unchanged.
+        assert_eq!(apply_corrections(&[], "hello"), "hello");
+    }
 }

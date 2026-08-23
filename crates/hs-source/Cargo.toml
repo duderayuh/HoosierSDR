@@ -10,11 +10,15 @@ build = "build.rs"
 # Live RTL-SDR capture via Seify. Off by default so the core build stays
 # pure-Rust and libusb-free (see docs/ARCHITECTURE.md §2).
 default = []
-rtlsdr = ["dep:seify", "dep:num-complex"]
+rtlsdr = ["dep:seify", "dep:num-complex", "seify/rtlsdr"]
+# Live RTL-SDR capture via SoapySDR (librtlsdr) — supports every RTL tuner,
+# including the E4000 (Nooelec Smartee XTR) the pure-Rust driver cannot drive.
+# `brew install soapysdr soapyrtlsdr librtlsdr`.
+soapy = ["dep:seify", "dep:num-complex", "seify/soapy"]
 # Live Airspy (R2) capture over libairspy directly — `brew install airspy`.
 # Off by default for the same reason.
 airspy = []
 
 [dependencies]
-seify = { version = "0.23", default-features = false, features = ["rtlsdr"], optional = true }
+seify = { version = "0.23", default-features = false, optional = true }
 num-complex = { version = "0.4", optional = true }

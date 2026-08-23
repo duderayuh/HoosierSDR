@@ -82,7 +82,7 @@ let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
 let measuredPpm = null;
 const ppmVal = () => { const v = parseFloat($("ppm").value); return Number.isFinite(v) ? v : null; };
 function applyMode() {
-  const follow = modeSel === "follow";
+  const follow = modeSel === "follow" || modeSel === "dual";
   $("centerField").style.display = follow ? "" : "none";
   $("tmodField").style.display = follow ? "" : "none";
   $("modField").style.display = follow ? "none" : "";
@@ -91,6 +91,9 @@ function applyMode() {
   $("followOpts").style.display = follow ? "" : "none";
   $("channelOpts").style.display = follow ? "none" : "";
   $("freqHint").textContent = follow ? "control channel" : "channel";
+  const dual = modeSel === "dual";
+  if (dual) { $("centerField").style.display = "none"; $("tmodField").style.display = "none"; $("modField").style.display = ""; $("eqField").style.display = "none"; }
+  $("voiceSrcField").style.display = dual ? "" : "none";
   $("emptyHint").textContent = follow ? "Pick a playlist or set a control channel, then press Start." : "Set a channel and press Start. One-channel mode decodes one channel and counts voice but does not play it; on a control channel it only announces grants (Discovery, Events) — use Follow site to listen.";
 }
 wireSeg($("modeSeg"), (v) => { modeSel = v; applyMode(); });
@@ -208,7 +211,7 @@ function addCall(g) {
     `<td class="act">` +
       (g.wav ? `<button title="Replay" data-wav="${esc(g.wav)}">▶</button>` : "") +
       (g.id != null ? `<button title="Add to cart" data-cart="${g.id}" class="${cart.has(g.id) ? "on" : ""}">🛒</button>` : "") +
-      `<button data-pri="${g.tg}">☆</button>` +
+      `<input type="number" class="priin" data-pri="${g.tg}" min="1" max="99" value="${priOf(g.tg)}" title="Priority 1–99 (1 = highest)">` +
       `<button title="Alert tone for TG ${g.tg}" data-bell="${g.tg}">🔔</button>` +
       `<button title="Avoid TG ${g.tg} for a while" data-avoid="${g.tg}">⏱</button>` +
       `<button title="Lock out TG ${g.tg}" data-lock="${g.tg}">⊘</button>` +
@@ -219,7 +222,7 @@ function addCall(g) {
   tr.querySelectorAll("button[data-wav]").forEach((b) => b.onclick = () => replay(b.dataset.wav));
   tr.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => toggleLock(+b.dataset.lock));
   tr.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => avoidFor(+b.dataset.avoid));
-  tr.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => cyclePriority(+b.dataset.pri));
+  tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); });
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
   tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
   const text = `${g.name} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
@@ -241,13 +244,26 @@ $("clear").onclick = () => { tbody.innerHTML = ""; history.length = 0; $("empty"
 /* ---------- per-talkgroup settings (kept in localStorage) ---------- */
 const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (_) { return d; } };
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
-const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 10 | 90
+
+/* ---------- theme ---------- */
+const THEMES = [["dark", "Slate"], ["light", "Paper"], ["amber", "Amber"], ["terminal", "Terminal"], ["midnight", "Midnight"], ["solarized", "Solarized"]];
+function applyTheme(name) { document.documentElement.setAttribute("data-theme", name); save("hs.theme", name); }
+(function initTheme() {
+  const saved = store("hs.theme", "dark");
+  document.documentElement.setAttribute("data-theme", saved);
+  const chips = $("themeChips");
+  if (!chips) return;
+  chips.innerHTML = THEMES.map(([v, label]) => `<span class="chip ${saved === v ? "on" : ""}" data-th="${v}">${label}</span>`).join("");
+  chips.querySelectorAll("[data-th]").forEach((c) => c.onclick = () => { applyTheme(c.dataset.th); chips.querySelectorAll("[data-th]").forEach((x) => x.classList.toggle("on", x.dataset.th === c.dataset.th)); });
+})();
+const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
 const bells = new Set(store("hs.bells", []));
 const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
 function pushPriorities() { if (TAURI) invoke("set_priorities", { entries: [...prio] }).catch((e) => log(`set_priorities: ${e}`)); }
-function cyclePriority(tg) {
-  const cur = prio.get(tg) || 50, next = cur === 50 ? 10 : cur === 10 ? 90 : 50;
-  if (next === 50) prio.delete(tg); else prio.set(tg, next);
+const priOf = (tg) => prio.get(tg) || 50;
+function setPriority(tg, val) {
+  const n = parseInt(val, 10);
+  if (Number.isFinite(n) && n >= 1 && n <= 99 && n !== 50) prio.set(tg, n); else prio.delete(tg);
   save("hs.prio", Object.fromEntries(prio)); pushPriorities(); refreshRowButtons();
 }
 function toggleBell(tg) { bells.has(tg) ? bells.delete(tg) : bells.add(tg); save("hs.bells", [...bells]); refreshRowButtons(); }
@@ -380,7 +396,7 @@ function renderLockout() {
 function refreshRowButtons() {
   tbody.querySelectorAll("button[data-lock]").forEach((b) => b.classList.toggle("on", lockout.has(+b.dataset.lock)));
   tbody.querySelectorAll("button[data-avoid]").forEach((b) => b.classList.toggle("on", avoidUntil.has(+b.dataset.avoid)));
-  tbody.querySelectorAll("button[data-pri]").forEach((b) => { const p = prio.get(+b.dataset.pri) || 50; b.className = p === 10 ? "pri-h" : p === 90 ? "pri-l" : ""; b.textContent = p === 10 ? "★" : p === 90 ? "▽" : "☆"; b.title = `Priority: ${p === 10 ? "high" : p === 90 ? "low" : "normal"} — click to cycle`; });
+  tbody.querySelectorAll("input[data-pri]").forEach((b) => { const p = prio.get(+b.dataset.pri) || 50; b.className = "priin" + (p < 50 ? " pri-h" : p > 50 ? " pri-l" : ""); b.value = p; b.title = `Priority ${p < 50 ? "(high)" : p > 50 ? "(low)" : "(default)"} — type 1–99`; });
   tbody.querySelectorAll("button[data-bell]").forEach((b) => b.classList.toggle("bell", bells.has(+b.dataset.bell)));
 }
 function toggleLock(tg) {
@@ -405,6 +421,8 @@ const MAPS = {
 };
 const wfCfg = store("hs.wf", { fft: 1024, avg: 4, map: "phosphor", min: -95, max: -20, line: true, peak: false });
 let peakHold = null;
+let specCenter = null, specRate = null;   // live SDR passband (MHz, Hz)
+const channelCounts = new Map();            // active voice freq MHz → refcount
 function colour(t) {
   const stops = MAPS[wfCfg.map] || MAPS.phosphor;
   t = Math.max(0, Math.min(1, t));
@@ -442,6 +460,34 @@ function drawSpectrum(db) {
   for (let x = 0; x < sw; x++) { const v = db[Math.floor((x / sw) * n)]; x ? spctx.lineTo(x, yOf(v)) : spctx.moveTo(x, yOf(v)); }
   spctx.stroke();
   spctx.lineTo(sw, sh); spctx.lineTo(0, sh); spctx.closePath(); spctx.fillStyle = "rgba(52,224,207,.12)"; spctx.fill();
+  drawSpectrumOverlay();
+}
+function drawSpectrumOverlay() {
+  const sw = sp.width, sh = sp.height;
+  if (!specCenter || !specRate) return;
+  const lo = specCenter - specRate / 2e6, hi = specCenter + specRate / 2e6;
+  const xOf = (mhz) => ((mhz - lo) / (hi - lo)) * sw;
+  // Full-bandwidth frequency axis.
+  const step = (hi - lo) > 6 ? 1 : (hi - lo) > 3 ? 0.5 : 0.25;
+  spctx.textAlign = "center";
+  spctx.font = "10px 'IBM Plex Mono', monospace";
+  spctx.fillStyle = "rgba(180,220,214,.6)";
+  spctx.strokeStyle = "rgba(180,220,214,.28)";
+  spctx.lineWidth = 1;
+  for (let mhz = Math.ceil(lo / step) * step; mhz <= hi; mhz += step) {
+    const x = xOf(mhz);
+    spctx.beginPath(); spctx.moveTo(x, sh - 14); spctx.lineTo(x, sh - 6); spctx.stroke();
+    spctx.fillText(mhz.toFixed(step < 1 ? 2 : 1), x, sh - 17);
+  }
+  // Active voice-channel ribbons (the ranges being followed).
+  for (const freq of channelCounts.keys()) {
+    const x = xOf(freq);
+    if (x < 0 || x > sw) continue;
+    spctx.fillStyle = "rgba(52,224,207,.10)";
+    spctx.fillRect(x - 4, 0, 8, sh);
+    spctx.strokeStyle = "rgba(52,224,207,.4)";
+    spctx.beginPath(); spctx.moveTo(x, 0); spctx.lineTo(x, sh); spctx.stroke();
+  }
 }
 function wfApply() {
   $("wfFft").value = wfCfg.fft; $("wfAvg").value = wfCfg.avg; $("wfMap").value = wfCfg.map; $("wfMin").value = wfCfg.min; $("wfMax").value = wfCfg.max; $("wfLine").checked = wfCfg.line; $("wfPeak").checked = wfCfg.peak;
@@ -494,15 +540,19 @@ function handleFollow(ev) {
       }
       $("wfAxis").textContent = `${(ev.center_mhz ?? parseFreq($("center").value) / 1e6).toFixed(4)} MHz ± ${(ev.rate / 2e6).toFixed(2)} MHz`;
       if (ev.center_mhz != null) $("center").value = ev.center_mhz.toFixed(4) + "M";
+      specCenter = ev.center_mhz ?? parseFreq($("center").value) / 1e6;
+      specRate = ev.rate;
       $("followMeta").textContent = "";
       activeRefresh();
       break;
     case "call_start":
       activeStart(ev);
+      channelCounts.set(ev.freq_mhz, (channelCounts.get(ev.freq_mhz) || 0) + 1);
       if (bellFor(ev.tg)) tone("bell");
       break;
     case "call":
       activeEnd(ev);
+      { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
       followVoice += ev.secs;
       if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
       addCall({ tg: ev.tg, name: ev.name, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: false,
@@ -534,6 +584,11 @@ function handleFollow(ev) {
       break;
     case "status":
       $("r-syncs").textContent = ev.control_syncs;
+      if (ev.signal_dbfs != null) {
+        $("r-signal").textContent = ev.signal_dbfs.toFixed(1) + " dBFS";
+      } else {
+        $("r-signal").textContent = "— dBFS";
+      }
       $("r-grants").textContent = ev.calls;
       $("r-syncerr").textContent = ev.dropped ? `${ev.dropped}` : "0";
       $("r-stream").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)}M · ${ev.dropped || 0}`;
@@ -601,7 +656,7 @@ function renderDiscovery() {
   const rows = Object.entries(disc.tgs).map(([tg, t]) => ({ tg: +tg, ...t })).filter((t) => (!un || !t.named) && (!q || `${t.tg} ${t.name || ""} ${t.freq || ""}`.toLowerCase().includes(q))).sort((a, b) => b.last - a.last);
   $("dcBody").innerHTML = rows.slice(0, 1000).map((t) => `<tr data-tg="${t.tg}"><td class="mono">${t.tg}</td><td>${t.named ? esc(t.name) : `<span class="faint">unnamed</span>`}${t.enc ? ' <span class="badge enc">enc</span>' : ""}</td><td class="mono">${t.n}</td><td class="mono">${t.freq != null ? t.freq.toFixed(4) : "—"}</td><td class="mono">${t.unit || "—"}</td><td class="mono">${ago(t.last)}</td>` +
     `<td class="act"><button data-dcplay="${t.tg}" title="Play the newest recorded call on this talkgroup">▶</button><input type="text" data-name="${t.tg}" placeholder="${t.named ? "rename" : "name it"}" style="width:120px;padding:2px 6px;font-size:11px" /><button data-namego="${t.tg}">✔</button>` +
-    `<button data-pri="${t.tg}">${(prio.get(t.tg) || 50) === 10 ? "★" : (prio.get(t.tg) || 50) === 90 ? "▽" : "☆"}</button><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
+    `<input type="number" class="priin" data-pri="${t.tg}" min="1" max="99" value="${prio.get(t.tg) || 50}" title="Priority 1–99 (1 = highest)"><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
   $("dcEmpty").style.display = rows.length ? "none" : "";
   const all = Object.keys(disc.tgs).length, unnamed = Object.values(disc.tgs).filter((t) => !t.named).length;
   $("dcMeta").textContent = all ? `${all} talkgroups · ${unnamed} unnamed` : "";
@@ -617,7 +672,7 @@ function renderDiscovery() {
     catch (e) { uiToast(`${e}`, "err"); }
   });
   tb.querySelectorAll("input[data-name]").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") tb.querySelector(`[data-namego="${i.dataset.name}"]`).click(); });
-  tb.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => { cyclePriority(+b.dataset.pri); renderDiscovery(); });
+  tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); renderDiscovery(); });
   tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); renderDiscovery(); });
   const fr = Object.entries(disc.freqs).map(([f, v]) => ({ f: +f, ...v })).sort((a, b) => b.n - a.n);
   $("dfBody").innerHTML = fr.slice(0, 300).map((r) => `<tr><td class="mono">${r.f.toFixed(4)}</td><td class="mono">${r.n}</td><td class="mono">${Object.keys(r.tgs).length}</td><td>${bandHi ? (r.f >= bandLo && r.f <= bandHi ? '<span class="badge clear">yes</span>' : '<span class="badge enc">no</span>') : "—"}</td><td class="mono">${ago(r.last)}</td></tr>`).join("");
@@ -841,7 +896,17 @@ if (TAURI) {
       setState(modeSel === "follow" ? "measuring" : "capturing");
       log(`start: mode=${modeSel} source=${$("source").value} rate=${$("rate").value} freq=${$("freq").value} center=${$("center").value}`);
       followVoice = 0;
-      if (modeSel === "follow") {
+      if (modeSel === "dual") {
+        const vk = $("voiceSrc").value.split("|")[0];
+        const vid = $("voiceSrc").value.split("|")[1] || null;
+        await invoke("dual_start", {
+          controlSource: srcKind(), controlDevice: srcId() || null,
+          controlRate: parseFloat($("rate").value),
+          voiceSource: vk, voiceDevice: vid, voiceRate: parseFloat($("rate").value),
+          gain: opts().gain, control: parseFreq($("freq").value),
+          cqpsk: modSel === "cqpsk", play: $("play").checked,
+        });
+      } else if (modeSel === "follow") {
         const o = opts();
         $("followMeta").textContent = "measuring the control channel…";
         $("tunedHz").textContent = mhz(o.freq);
@@ -911,14 +976,18 @@ if (TAURI) {
     // Prefer what was in use, then the saved radio, then the first Airspy, then anything.
     $("source").value = vals.includes(cur) && cur.includes("|") ? cur : vals.includes(saved) ? saved : (vals.find((v) => v.startsWith("airspy|")) || vals[0]);
     if ($("source").value !== cur) { const a = srcKind() === "airspy"; if ($("pillText").textContent === "standby") { $("rate").value = a ? (modeSel === "follow" ? "10000000" : "2500000") : "2400000"; syncRate(); } }
+    $("voiceSrc").innerHTML = opts.map((o) => `<option value="${esc(o.v)}">${esc(o.t)}</option>`).join("");
+    $("voiceSrc").value = vals[1] || vals[0] || "";
     devLoadSelected();
   }
   /* ---------- gain controls, SDRTrunk-style ---------- */
+  const E4000_GAINS = () => (devView.e4000_gains_db && devView.e4000_gains_db.length ? devView.e4000_gains_db : [-1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5, 19.0, 21.5, 24.0, 29.0, 34.0, 42.0]);
+  const GAINS = () => (srcKind() === "soapy" ? E4000_GAINS() : RTL_GAINS());
   const RTL_GAINS = () => (devView.rtl_gains_db && devView.rtl_gains_db.length ? devView.rtl_gains_db : [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6]);
   function gainUi() {
     const airspy = srcKind() === "airspy";
     $("gnRtl").style.display = airspy ? "none" : ""; $("gnAirspy").style.display = airspy ? "" : "none";
-    const g = RTL_GAINS(); $("gnRtlGain").max = g.length - 1; $("gnRtlGainVal").textContent = (g[+$("gnRtlGain").value] ?? 0).toFixed(1) + " dB";
+    const g = GAINS(); $("gnRtlGain").max = g.length - 1; $("gnRtlGainVal").textContent = (g[+$("gnRtlGain").value] ?? 0).toFixed(1) + " dB";
     $("gnRtlGain").disabled = $("gnRtlAgc").checked;
     const mode = $("gnAsMode").value, on = $("gnAsEnabled").checked;
     $("gnAsPresetField").style.display = mode === "linearity" || mode === "sensitivity" ? "" : "none"; $("gnAsManual").style.display = mode === "manual" ? "" : "none";
@@ -930,14 +999,14 @@ if (TAURI) {
   }
   ["gnRtlAgc", "gnRtlGain", "gnAsEnabled", "gnAsMode", "gnAsPreset", "gnAsLna", "gnAsMixer", "gnAsVga", "gnAsLnaAgc", "gnAsMixerAgc"].forEach((id) => { $(id).oninput = gainUi; $(id).onchange = gainUi; });
   function gainFromUi(s) {
-    const g = RTL_GAINS();
+    const g = GAINS();
     s.gain = $("gnRtlAgc").checked ? null : (g[+$("gnRtlGain").value] ?? null);
     s.airspy_gain = $("gnAsEnabled").checked; s.airspy_mode = $("gnAsMode").value; s.airspy_preset = +$("gnAsPreset").value;
     s.airspy_lna = +$("gnAsLna").value; s.airspy_mixer = +$("gnAsMixer").value; s.airspy_vga = +$("gnAsVga").value; s.airspy_lna_agc = $("gnAsLnaAgc").checked; s.airspy_mixer_agc = $("gnAsMixerAgc").checked;
     return s;
   }
   function gainToUi(s) {
-    const g = RTL_GAINS();
+    const g = GAINS();
     $("gnRtlAgc").checked = s.gain == null;
     if (s.gain != null) { let best = 0; g.forEach((v, i) => { if (Math.abs(v - s.gain) < Math.abs(g[best] - s.gain)) best = i; }); $("gnRtlGain").value = best; } else $("gnRtlGain").value = g.length - 1;
     $("gnAsEnabled").checked = !!s.airspy_gain; $("gnAsMode").value = s.airspy_mode || "agc"; $("gnAsPreset").value = s.airspy_preset ?? 12;
@@ -1076,7 +1145,7 @@ if (TAURI) {
   async function akRefresh() {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved in Keychain" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
+      $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;
       akRenderList(); akLogRefresh(); olRefresh(true);
@@ -1350,12 +1419,48 @@ if (TAURI) {
   async function libStatsRefresh() {
     try { const [n, secs, tr, dir] = await invoke("library_stats"); $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
   }
+  const RET_KEY = "hs.retention";
+  const retentionDays = () => { const d = parseInt(store(RET_KEY, ""), 10); return Number.isFinite(d) && d >= 0 ? d : null; };
+  $("pruneDays").value = store(RET_KEY, "");
+  $("pruneDays").onchange = () => { save(RET_KEY, $("pruneDays").value); uiToast("Retention saved — calls older than this are auto-pruned (starred kept)."); };
+  async function autoPrune() {
+    const d = retentionDays(); if (d == null) return;
+    try { const n = await invoke("library_prune", { days: d }); if (n > 0) { log(`auto-prune: ${n} call${n === 1 ? "" : "s"} older than ${d} days deleted`); libStatsRefresh(); } } catch (e) { log(`auto-prune: ${e}`); }
+  }
   $("pruneNow").onclick = async () => {
     const d = parseInt($("pruneDays").value, 10); if (!Number.isFinite(d)) { alert("Enter a number of days."); return; }
+    save(RET_KEY, $("pruneDays").value);
     if (!(await uiConfirm(`Delete unstarred calls older than ${d} days?`, "Delete"))) return;
     try { const n = await invoke("library_prune", { days: d }); alert(`${n} calls deleted`); libStatsRefresh(); } catch (e) { alert(e); }
   };
+  autoPrune();
+  setInterval(autoPrune, 12 * 3600 * 1000);
   trRefresh(); libStatsRefresh();
+
+  /* ---------- per-talkgroup transcript corrections ---------- */
+  let tcRules = [];
+  async function tcLoad() {
+    try { const v = await invoke("tg_corrections_get"); tcRules = (v || []).flatMap(([tg, pairs]) => (pairs || []).map(([from, to]) => ({ tg, from, to }))); }
+    catch (e) { log(`tg_corrections_get: ${e}`); }
+    tcRender();
+  }
+  function tcPersist() {
+    const m = new Map();
+    tcRules.forEach((r) => { if (!m.has(r.tg)) m.set(r.tg, []); m.get(r.tg).push([r.from, r.to]); });
+    invoke("tg_corrections_set", { entries: [...m] }).catch((e) => log(`tg_corrections_set: ${e}`));
+  }
+  function tcRender() {
+    $("tcList").innerHTML = tcRules.length ? tcRules.map((r, i) => `<div class="row"><span class="grow"><span class="mono">TG ${r.tg}</span> <b>${esc(r.from)}</b> → ${esc(r.to)}</span><button class="btn ghost" data-tcdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No corrections yet — add the words your talkgroups keep getting wrong.</span></div>';
+    $("tcList").querySelectorAll("[data-tcdel]").forEach((b) => b.onclick = () => { tcRules.splice(+b.dataset.tcdel, 1); tcPersist(); tcRender(); });
+  }
+  $("tcAdd").onclick = () => {
+    const tg = parseInt($("tcTg").value, 10), from = $("tcFrom").value.trim(), to = $("tcTo").value.trim();
+    if (!Number.isFinite(tg) || !from || !to) { alert("Enter a talkgroup, the misheard word, and the correct word."); return; }
+    tcRules.push({ tg, from, to });
+    $("tcFrom").value = $("tcTo").value = ""; $("tcTg").value = "";
+    tcPersist(); tcRender();
+  };
+  tcLoad();
 
   /* ---------- bottom status strip ---------- */
   let lastStream = "—";
@@ -1394,7 +1499,7 @@ if (TAURI) {
     const pol = (k, glyph, title) => `<button data-pol="${k}:${r.id}" class="${polAllows(k, r.id) ? "on-ok" : "off"}" title="${title}: ${polAllows(k, r.id) ? "yes" : "no"} — click to toggle">${glyph}</button>`;
     return `<tr class="${r.encrypted ? "enc" : ""}" data-tg="${r.id}" ${c ? `data-color="${c}" style="--tgc:${c}"` : ""}><td><input type="checkbox" data-tick="${r.id}" ${alTicked.has(r.id) ? "checked" : ""}></td><td class="mono">${r.id}</td><td>${esc(r.alias)}</td><td>${esc(r.description)}${rule ? ` <small class="faint" title="range rule">▸ ${esc(rule.name || rule.lo + "–" + rule.hi)}</small>` : ""}</td><td><small>${esc(r.category)}</small></td><td><small class="mono">${esc(srcLabel(r.source))}</small></td>` +
       `<td class="act">${pol("record", "●", "Record audio")}${pol("stream", "▶", "Stream live")}${pol("upload", "↑", "Upload to sharing services")}</td>` +
-      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><button data-pri="${r.id}" class="${p === 10 ? "pri-h" : p === 90 ? "pri-l" : ""}">${p === 10 ? "★" : p === 90 ? "▽" : "☆"}</button>` +
+      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><input type="number" class="priin" data-pri="${r.id}" min="1" max="99" value="${p}" title="Priority 1–99 (1 = highest)">` +
       `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" class="${avoidUntil.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" class="${lockout.has(r.id) || (rule && rule.lock) ? "on" : ""}">⊘</button></td></tr>`;
   }
   const srcLabel = (src) => src.replace(/^rr_(\d+)$/, (m, sid) => { const pl = (typeof playlists !== "undefined" ? playlists : []).find((p) => String(p.sid) === sid); return pl ? `${pl.system_name}` : `RR sid ${sid}`; }).replace(/^csv_user$/, "named by you").replace(/^csv_/, "CSV ");
@@ -1412,7 +1517,7 @@ if (TAURI) {
     const tb = $("alBody");
     tb.querySelectorAll("input[data-tick]").forEach((c) => c.onchange = () => { c.checked ? alTicked.add(+c.dataset.tick) : alTicked.delete(+c.dataset.tick); $("grpMeta").textContent = alTicked.size ? `${alTicked.size} ticked` : ""; });
     tb.querySelectorAll("button[data-pol]").forEach((b) => b.onclick = () => { const [k, tg] = b.dataset.pol.split(":"); polSet(k, +tg, !polAllows(k, +tg)); pushPolicies(); alRender(); });
-    tb.querySelectorAll("button[data-pri]").forEach((b) => b.onclick = () => { cyclePriority(+b.dataset.pri); alRender(); });
+    tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); alRender(); });
     tb.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => { toggleBell(+b.dataset.bell); alRender(); });
     tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid); alRender(); });
     tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); alRender(); });
@@ -1471,7 +1576,7 @@ if (TAURI) {
   /* ---------- talkgroup range rules ---------- */
   $("rgColor").innerHTML = '<option value="">none</option>' + PALETTE.map((c) => `<option value="${c}" style="color:${c}">${c}</option>`).join("");
   window.renderRules = function renderRules() {
-    $("rgList").innerHTML = tgRules.length ? tgRules.map((r, i) => `<div class="row"><span class="swatch" style="background:${r.color || "transparent"}"></span><span class="grow"><b>${esc(r.name || "")}</b> <span class="mono">${r.lo}–${r.hi}</span><br><small>${[r.pri === 10 ? "high priority" : r.pri === 90 ? "low priority" : "", r.lock ? "locked out" : "", r.bell ? "alert" : ""].filter(Boolean).join(" · ") || "colour only"}</small></span><button class="btn ghost" data-rgdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No range rules.</span></div>';
+    $("rgList").innerHTML = tgRules.length ? tgRules.map((r, i) => `<div class="row"><span class="swatch" style="background:${r.color || "transparent"}"></span><span class="grow"><b>${esc(r.name || "")}</b> <span class="mono">${r.lo}–${r.hi}</span><br><small>${[r.pri ? `priority ${r.pri}` : "", r.lock ? "locked out" : "", r.bell ? "alert" : ""].filter(Boolean).join(" · ") || "colour only"}</small></span><button class="btn ghost" data-rgdel="${i}">✕</button></div>`).join("") : '<div class="row"><span class="grow" style="color:var(--ink-faint)">No range rules.</span></div>';
     $("rgList").querySelectorAll("[data-rgdel]").forEach((b) => b.onclick = () => { tgRules.splice(+b.dataset.rgdel, 1); saveRules(); alRender(); });
     $("rgMeta").textContent = tgRules.length ? `${tgRules.length} rule${tgRules.length === 1 ? "" : "s"}` : "";
   };
@@ -1614,9 +1719,9 @@ if (TAURI) {
       const st = await invoke("rr_settings");
       $("rrUser").value = st.username || "";
       if (st.sid && !$("rrSid").value) $("rrSid").value = st.sid;
-      $("rrPass").placeholder = st.has_password ? "saved in Keychain" : "";
+      $("rrPass").placeholder = st.has_password ? "saved on this Mac" : "";
       $("rrKeyField").style.display = st.embedded_key ? "none" : "";
-      $("rrKey").placeholder = st.has_app_key ? "saved in Keychain" : "";
+      $("rrKey").placeholder = st.has_app_key ? "saved on this Mac" : "";
       const missing = [];
       if (!st.has_app_key) missing.push("app key");
       if (!st.username) missing.push("username");

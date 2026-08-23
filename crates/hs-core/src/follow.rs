@@ -300,8 +300,9 @@ pub struct TrunkFollower {
     /// Unvoiced-synthesis quality handed to each call's vocoder (1–64).
     uv_quality: i32,
     center_hz: f64,
-    /// Added to every nominal frequency to find where it really is.
-    correction_hz: f64,
+    /// Tuner error in parts per million; every nominal frequency is multiplied
+    /// by `1 + ppm/1e6` to find where it really appears.
+    correction_ppm: f64,
     /// Seconds without a sync before a call is considered over. The fallback
     /// for when the terminator is lost to noise. Measured in seconds of IQ,
     /// not blocks: callers feed blocks of wildly different lengths (the CLI
@@ -381,7 +382,7 @@ impl TrunkFollower {
         control_measured_hz: f64,
         modulation: Modulation,
     ) -> Self {
-        let correction_hz = control_measured_hz - control_nominal_hz;
+        let correction_ppm = (control_measured_hz - control_nominal_hz) / control_nominal_hz * 1e6;
         let control_offset = control_measured_hz - center_hz;
         Self {
             sample_rate,
@@ -403,7 +404,7 @@ impl TrunkFollower {
             forced: None,
             uv_quality: hs_vocoder::imbe::DEFAULT_UV_QUALITY,
             center_hz,
-            correction_hz,
+            correction_ppm,
             quiet_secs: 2.0,
             hang_secs: 0.3,
             max_calls: 12,
@@ -468,8 +469,13 @@ impl TrunkFollower {
     pub fn set_priorities(&mut self, p: impl IntoIterator<Item = (u16, u8)>) {
         self.priority = p
             .into_iter()
-            .map(|(tg, pr)| (tg, pr.clamp(1, 99)))
+            .map(|(tg, pri)| (tg, pri.clamp(1, 99)))
             .collect();
+    }
+
+    /// Diagnostic: estimated signal power of the control channel in dBFS.
+    pub fn control_power_dbfs(&self) -> Option<f32> {
+        self.control.power_dbfs()
     }
 
     pub fn priority_of(&self, tg: u16) -> u8 {
@@ -685,9 +691,15 @@ impl TrunkFollower {
         &self.lockout
     }
 
-    /// The tuner error being compensated for.
+    /// The tuner error being compensated for, as parts per million.
+    pub fn correction_ppm(&self) -> f64 {
+        self.correction_ppm
+    }
+
+    /// The tuner error as a Hz offset at the current control channel, for
+    /// display ("tuner error +123 Hz").
     pub fn correction_hz(&self) -> f64 {
-        self.correction_hz
+        self.correction_ppm * self.control_nominal_hz as f64 / 1e6
     }
 
     /// Nominal frequency of the control channel currently being followed.
@@ -906,7 +918,7 @@ impl TrunkFollower {
             // radio's, or an extra radio parked elsewhere on the site's span.
             // A trunked system grants across its whole band, most of which a
             // single tuner cannot see — that is what the extra radios are for.
-            let corrected = g.freq_hz as f64 + self.correction_hz;
+            let corrected = g.freq_hz as f64 * (1.0 + self.correction_ppm / 1e6);
             let (which, offset) = if let Some(off) = self.band.offset_of(corrected) {
                 (None, off)
             } else if let Some((bi, off)) = self
@@ -1178,7 +1190,7 @@ impl TrunkFollower {
             .copied()
             .filter(|&hz| {
                 self.band
-                    .offset_of(hz as f64 + self.correction_hz)
+                    .offset_of(hz as f64 * (1.0 + self.correction_ppm / 1e6))
                     .is_some()
             })
             .collect();
@@ -1195,7 +1207,7 @@ impl TrunkFollower {
         };
         self.hunt_next += 1;
 
-        let offset = next_hz as f64 + self.correction_hz - self.center_hz;
+        let offset = next_hz as f64 * (1.0 + self.correction_ppm / 1e6) - self.center_hz;
         let mut next = ChannelDecoder::with_offset(
             self.sample_rate,
             self.modulation,
