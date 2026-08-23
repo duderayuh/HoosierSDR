@@ -464,6 +464,24 @@ channels where the burst events are rare; the degraded-location capture is
 where the DFE is expected to pull decisively ahead of the linear path, and
 `--dfe` vs default is the A/B to run on it.
 
+**Short-burst convergence — the feedforward gear-shift (2026-08-23).** The
+0.001 feedforward above is tuned for the *continuous* control channel, but it
+is ~50× slower than the CMA and cannot open the eye within the ~464-symbol
+blind-acquisition window on a short voice burst: the acquisition coherence
+never clears its threshold and the receiver emits zero symbols
+(`acquired=false`, `out.len=0`). A 0.05 feedforward (CMA speed) acquires and
+decodes the burst, but left running in steady-state it costs ~6 TSBKs (187 vs
+193) through higher misadjustment. The fix gear-shifts the feedforward on
+`acquired` — `DFE_FF_ACQ = 0.05` while acquiring, `DFE_FF_TRACK = 0.001` once
+the eye is open (back to fast on `reacquire()`); the feedback stays
+`DFE_FB = 0.0005` throughout (recursive, rings if fast). On the wideband
+Marion control channel the gear-shifted DFE decodes **200 TSBKs** (vs 202
+slow-only, 192 CMA) — a ~1% regression in exchange for short-burst acquisition
+the slow step cannot do at all. Regression test `dfe_acquires_on_short_burst`
+pins it. Residual ~2 TSBKs are the fast phase's misadjustment; a continuous
+step decay or a per-symbol (non-block) coherence check would close it, but
+that is acquisition work, not an equalizer tweak.
+
 **Airspy R2 (2026-08-20) — the degenerate minimum, and its fix.** The first
 DFE run on an Airspy capture *collapsed*: 209 → 46 TSBKs, syncing at full
 rate for ~1.5 s and then never again, at the same elapsed time from any start
