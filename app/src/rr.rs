@@ -1,9 +1,9 @@
 //! RadioReference from inside the app: credentials saved on this machine,
 //! one click to download a system's talkgroups and control channels.
 //!
-//! The password and app key go in the OS credential store (macOS Keychain,
-//! Windows Credential Manager) via `keyring`; the username and system id —
-//! not secrets — in a small JSON file in the app's config directory, next to
+//! The password and app key go in the local secret store (a 0600 file in the
+//! app config dir — see `crate::secrets`); the username and system id — not
+//! secrets — in a small JSON file in the app's config directory, next to
 //! the downloaded talkgroup CSV, which is loaded again on every start so the
 //! catalog works offline afterwards.
 

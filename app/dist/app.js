@@ -1037,7 +1037,7 @@ if (TAURI) {
   async function akRefresh() {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved in Keychain" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
+      $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;
       akRenderList(); akLogRefresh(); olRefresh(true);
@@ -1611,9 +1611,9 @@ if (TAURI) {
       const st = await invoke("rr_settings");
       $("rrUser").value = st.username || "";
       if (st.sid && !$("rrSid").value) $("rrSid").value = st.sid;
-      $("rrPass").placeholder = st.has_password ? "saved in Keychain" : "";
+      $("rrPass").placeholder = st.has_password ? "saved on this Mac" : "";
       $("rrKeyField").style.display = st.embedded_key ? "none" : "";
-      $("rrKey").placeholder = st.has_app_key ? "saved in Keychain" : "";
+      $("rrKey").placeholder = st.has_app_key ? "saved on this Mac" : "";
       const missing = [];
       if (!st.has_app_key) missing.push("app key");
       if (!st.username) missing.push("username");
