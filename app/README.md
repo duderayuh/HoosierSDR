@@ -13,12 +13,34 @@ without WebKit) never try to build it. Build it here, on macOS or Windows.
 
 ```sh
 # Rust (if not already): https://rustup.rs
-brew install libusb                       # RTL-SDR USB access (Seify backend)
+brew install airspy soapysdr soapyrtlsdr librtlsdr libusb pkg-config
 cargo install tauri-cli --version '^2.0'  # the `cargo tauri` command
 ```
 
+The app enables the `rtlsdr`, `airspy` and `soapy` SDR backends, so the build
+links `libairspy`, `libSoapySDR`, `librtlsdr` and `libusb` — every Homebrew
+formula above is required. (The `soapy` backend is what drives E4000-tuner
+RTL-SDRs like the Nooelec Smartee XTR.) If you're missing one, `cargo tauri dev`
+fails at link time with `library not found for -l…`.
+
 macOS ships the WebKit webview, so nothing else is needed. On Windows, install
 the WebView2 runtime (usually already present) and the MSVC toolchain.
+
+### Transcription (optional)
+
+Auto-transcribing decoded calls is a runtime feature the app can start without —
+the Transcribe panel just reports "no whisper found" if the module is missing.
+To enable it, `faster-whisper` (or `openai-whisper`) must be importable from a
+Python the app can find. The app probes `/usr/local/bin/python3` and
+`/opt/homebrew/bin/python3` first (then falls back to `python3` on `PATH`):
+
+```sh
+python3 -m pip install --user faster-whisper
+```
+
+Apple's CommandLineTools Python 3.9 has no `ctranslate2` wheel, so if `python3`
+resolves there, install into a Homebrew/python.org 3.11+ interpreter instead, or
+pin one explicitly with the `TRANSCRIBE_PYTHON` env var.
 
 ## Run it
 
