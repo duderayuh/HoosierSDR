@@ -136,7 +136,7 @@ function activeStart(ev) {
   if (activeCalls.has(key)) return;
   const el = document.createElement("div");
   el.className = "call" + (ev.priority && ev.priority < 50 ? " pri" : "");
-  el.innerHTML = `<span class="tg">${esc(ev.name)}</span><span class="t">0:00</span><span class="sub">TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)}</span>`;
+  el.innerHTML = `<span class="tg">${esc(ev.name)}</span><span class="t">0:00</span><span class="sub">${ev.desc ? esc(ev.desc) + " · " : ""}TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)}</span>`;
   el.dataset.tg = ev.tg; applyColor(el, ev.tg);
   $("active").prepend(el);
   activeCalls.set(key, { el, start: Date.now() });
@@ -202,7 +202,7 @@ function addCall(g) {
   const len = g.secs != null ? `${g.secs.toFixed(1)}s` : "";
   tr.innerHTML =
     `<td class="time">${now()}</td>` +
-    `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}</span></td>` +
+    `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}</span>${g.desc ? `<span class="desc">${esc(g.desc)}</span>` : ""}</td>` +
     `<td class="src">${g.unit_name ? `${esc(g.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">${g.source}</span>` : (g.source ? g.source : "—")}${g.talker_alias ? `<span class="alias" style="display:block" title="alias broadcast over the air">“${esc(g.talker_alias)}”</span>` : ""}</td>` +
     `<td class="tr" data-trid="${g.id != null ? g.id : ""}" title="${esc(g.transcript || "")}">${g.transcript ? esc(g.transcript) : `<span class="faint">${g.id != null ? "…" : ""}</span>`}</td>` +
     `<td class="dl">${g.freq_mhz.toFixed(4)}</td>` +
@@ -225,7 +225,7 @@ function addCall(g) {
   tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); });
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
   tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
-  const text = `${g.name} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
+  const text = `${g.name} ${g.desc || ""} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
   history.unshift({ el: tr, text, id: g.id });
   tbody.prepend(tr);
   while (history.length > 500) history.pop().el.remove();
@@ -505,6 +505,88 @@ $("wfLine").onchange = () => { wfCfg.line = $("wfLine").checked; wfApply(); };
 $("wfPeak").onchange = () => { wfCfg.peak = $("wfPeak").checked; wfApply(); };
 wfApply();
 
+/* ---------- waterfall height (drag the divider to resize) ---------- */
+let wfH = store("hs.wfHeight", null);   // null = untouched (CSS default)
+function resizeWaterfallBuffer(rows) {
+  rows = Math.max(60, Math.min(900, Math.round(rows)));
+  const cw = wf.width, ch = wf.height;
+  if (ch === rows) return;
+  // Preserve the existing waterfall: copy it off, resize, then paste back
+  // anchored to the top (newest row at the top; history accrues downward).
+  const tmp = document.createElement("canvas");
+  tmp.width = cw; tmp.height = ch;
+  tmp.getContext("2d").drawImage(wf, 0, 0);
+  wf.height = rows;
+  wctx.fillStyle = "#05090a"; wctx.fillRect(0, 0, cw, rows);
+  const copyH = Math.min(ch, rows);
+  wctx.drawImage(tmp, 0, 0, cw, copyH, 0, 0, cw, copyH);
+}
+function applyWfHeight() {
+  if (wfH == null) return;
+  resizeWaterfallBuffer(wfH);
+  wf.style.height = wfH + "px";
+}
+const wfResize = document.getElementById("wfResize");
+let wfDrag = null;
+wfResize.addEventListener("pointerdown", (e) => {
+  wfDrag = { startY: e.clientY, startH: wf.getBoundingClientRect().height, cur: wf.getBoundingClientRect().height };
+  wfResize.classList.add("dragging");
+  document.body.style.cursor = "ns-resize";
+  document.body.style.userSelect = "none";
+  e.preventDefault();
+});
+window.addEventListener("pointermove", (e) => {
+  if (!wfDrag) return;
+  wfDrag.cur = Math.max(60, Math.min(900, Math.round(wfDrag.startH + (e.clientY - wfDrag.startY))));
+  wf.style.height = wfDrag.cur + "px";   // live preview — cheap, scaled by the GPU
+});
+window.addEventListener("pointerup", () => {
+  if (!wfDrag) return;
+  wfResize.classList.remove("dragging");
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  wfH = wfDrag.cur;
+  save("hs.wfHeight", wfH);
+  resizeWaterfallBuffer(wfH);   // one crisp 1:1 resize on release
+  wfDrag = null;
+});
+applyWfHeight();   // restore a saved height on launch
+
+/* ---------- transcript tooltip (full text on hover, when truncated) ---------- */
+const tip = document.createElement("div");
+tip.className = "tip";
+document.body.appendChild(tip);
+function positionTip(x, y) {
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let left = x + pad, top = y + pad;
+  if (left + w > innerWidth - 8) left = Math.max(8, innerWidth - w - 8);
+  if (top + h > innerHeight - 8) top = Math.max(8, innerHeight - h - 8);
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+function showTip(text, x, y) {
+  tip.textContent = text;
+  tip.style.display = "block";
+  positionTip(x, y);
+}
+function hideTip() { tip.style.display = "none"; }
+function tdTruncated(td) { return td.scrollWidth > td.clientWidth + 1; }
+document.addEventListener("mouseover", (e) => {
+  const td = e.target.closest && e.target.closest("td.tr");
+  if (!td) { hideTip(); return; }
+  const full = (td.getAttribute("title") || "").trim();
+  if (!full || !tdTruncated(td)) { hideTip(); return; }
+  showTip(full, e.clientX, e.clientY);
+});
+document.addEventListener("mousemove", (e) => {
+  if (tip.style.display !== "block") return;
+  if (!(e.target.closest && e.target.closest("td.tr"))) return;
+  positionTip(e.clientX, e.clientY);
+});
+document.addEventListener("mouseout", (e) => {
+  if (e.target.closest && e.target.closest("td.tr") && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("td.tr"))) hideTip();
+});
+
 /* ---------- readouts shared by both modes ---------- */
 let followVoice = 0;
 function setStatus(s) {
@@ -555,7 +637,7 @@ function handleFollow(ev) {
       { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
       followVoice += ev.secs;
       if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
-      addCall({ tg: ev.tg, name: ev.name, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: false,
+      addCall({ tg: ev.tg, name: ev.name, desc: ev.desc, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: false,
                 secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk });
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
       if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);

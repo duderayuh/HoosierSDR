@@ -48,6 +48,14 @@ fn name_of(catalog: &CatalogHandle, tg: u16) -> String {
         .unwrap_or_else(|| format!("TG {tg}"))
 }
 
+fn desc_of(catalog: &CatalogHandle, tg: u16) -> Option<String> {
+    catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.get(tg).and_then(|t| t.description.clone()))
+}
+
 /// Run the dual-SDR loop until `running` clears. `control_hz` is the control
 /// channel frequency (also SDR B's park frequency). Emits `follow` events.
 pub fn run(
@@ -188,6 +196,7 @@ fn handle_retune(
                 FollowEvent::CallStart {
                     tg: *talkgroup,
                     name: name_of(catalog, *talkgroup),
+                    desc: desc_of(catalog, *talkgroup),
                     freq_mhz: *freq_hz as f64 / 1e6,
                     priority: pri,
                 },
@@ -242,6 +251,7 @@ fn finish_call(
         FollowEvent::Call {
             tg: c.tg,
             name: String::new(), // filled by the front end from its own lookup
+            desc: None,
             source: 0,
             unit_name: None,
             freq_mhz: c.freq_hz as f64 / 1e6,

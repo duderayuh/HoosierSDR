@@ -478,3 +478,14 @@ td.act button.off { opacity: .35; text-decoration: line-through; }
 td.tr { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-dim); }
 .chips .chip.muted { opacity: .55; text-decoration: line-through; }
 tbody tr.noaudio td { opacity: .55; }
+
+/* ---------- waterfall divider / resize handle ---------- */
+.wf-resize { position: relative; flex: none; height: 9px; margin: -6px 0 -5px; cursor: ns-resize; }
+.wf-resize::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 42px; height: 3px; border-radius: 2px; background: var(--line); transition: width .15s, background .15s; }
+.wf-resize:hover::after, .wf-resize.dragging::after { width: 64px; background: var(--signal); }
+
+/* ---------- talkgroup description (the human-readable alias) ---------- */
+td.tg .desc { display: block; font-size: 11px; font-weight: 500; color: var(--signal); line-height: 1.25; }
+
+/* ---------- transcript tooltip ---------- */
+.tip { position: fixed; z-index: 120; max-width: 520px; max-height: 60vh; overflow: auto; padding: 10px 13px; font-size: 12.5px; line-height: 1.45; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere; display: none; }
