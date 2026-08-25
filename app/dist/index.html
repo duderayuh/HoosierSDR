@@ -727,6 +727,10 @@
                   <select id="fmtMode"><option value="vbr">Variable (VBR)</option><option value="cbr">Constant (CBR)</option></select></label>
               </div>
               <p class="help" id="fmtHelp">WAV is always captured first; other formats are made by ffmpeg and replace it. Speech at 8 kHz sounds fine at 24–32 kbit/s.</p>
+              <div style="margin-top:6px">
+                <button class="btn ghost" id="fmtReencode">Re-encode existing to <span id="fmtReencodeCodec">WAV</span></button>
+                <span class="meta" id="fmtReencodeMeta" style="margin-left:8px"></span>
+              </div>
               <label class="field"><span class="lab">Voice synthesis · unvoiced quality <span class="mono faint">higher = smoother, less metallic · applies on the next Start</span></span>
                 <select id="uvQuality"><option value="3">3 (mbelib default)</option><option value="8">8</option><option value="16" selected>16</option><option value="32">32</option><option value="64">64 (smoothest)</option></select></label>
               <label class="field" style="margin-top:8px"><span class="lab">File name template <span class="mono faint" id="fnExample"></span></span>

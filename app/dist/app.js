@@ -1655,6 +1655,7 @@ if (TAURI) {
       const f = await invoke("format_get");
       $("fmtCodec").value = f.format.codec; $("fmtKbps").value = String(f.format.bitrate_kbps); $("fmtMode").value = f.format.mode;
       $("fmtMeta").textContent = f.ffmpeg ? f.ffmpeg.replace(/ Copyright.*/, "") : "ffmpeg not found — WAV only";
+      $("fmtReencodeCodec").textContent = f.format.codec.toUpperCase();
       [...$("fmtCodec").options].forEach((o) => { if (o.value !== "wav") o.disabled = !f.ffmpeg; });
     } catch (e) { log(`format_get: ${e}`); }
   }
@@ -1664,6 +1665,29 @@ if (TAURI) {
   };
   $("fmtCodec").onchange = $("fmtKbps").onchange = $("fmtMode").onchange = fmtSave;
   fmtRefresh();
+
+  /* ---------- re-encode existing files ---------- */
+  const fmtReencode = async () => {
+    const btn = $("fmtReencode"), meta = $("fmtReencodeMeta");
+    btn.disabled = true; meta.textContent = "starting…";
+    try { await invoke("library_reencode"); }
+    catch (e) { btn.disabled = false; meta.textContent = `error: ${e}`; }
+  };
+  $("fmtReencode").onclick = fmtReencode;
+  if (listen) {
+    listen("reencode_progress", (e) => {
+      const p = e.payload;
+      $("fmtReencodeMeta").textContent = `${p.converted} converted · ${p.skipped} skipped · ${p.failed} failed · ${p.done}/${p.total}`;
+    });
+    listen("reencode_done", (e) => {
+      const p = e.payload;
+      $("fmtReencode").disabled = false;
+      $("fmtReencodeMeta").textContent = `done — ${p.converted} converted, ${p.skipped} skipped, ${p.failed} failed`;
+    });
+    listen("reencode_error", (e) => {
+      log(`reencode: ${e.payload.path}: ${e.payload.error}`);
+    });
+  }
 
   /* ---------- call sharing ---------- */
   const upSettings = () => ({

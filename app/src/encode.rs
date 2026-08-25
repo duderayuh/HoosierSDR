@@ -101,6 +101,28 @@ pub fn transcode(wav: &Path, f: &Format) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Re-encode a stored audio file (any of wav/mp3/m4a/opus) to `target`,
+/// replacing it in place. Returns the new path, or the original unchanged if it
+/// is already at the target format. On failure returns Err and leaves the
+/// original file untouched.
+pub fn reencode(src: &Path, target: &Format) -> Result<PathBuf, String> {
+    let cur = src.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+    if cur == target.codec {
+        return Ok(src.to_path_buf());
+    }
+    if target.codec == "wav" {
+        // Convert any source back to 8 kHz mono WAV (ffmpeg can't round-trip a
+        // lossy source through the capture-time `transcode`, which assumes WAV
+        // input).
+        let pcm = decode_to_pcm(src)?;
+        let out = src.with_extension("wav");
+        hs_core::wav::write_wav(out.to_str().ok_or("bad path")?, 8000, &pcm)
+            .map_err(|e| format!("write wav: {e}"))?;
+        return Ok(out);
+    }
+    transcode(src, target)
+}
+
 /// Decode any format ffmpeg knows back to 8 kHz mono i16 for the speaker.
 pub fn decode_to_pcm(path: &Path) -> Result<Vec<i16>, String> {
     if path.extension().and_then(|e| e.to_str()) == Some("wav") {
@@ -169,5 +191,43 @@ mod tests {
             );
         }
         assert_eq!(transcode(&wav, &Format::default()).unwrap(), wav);
+    }
+
+    /// `reencode` skips same-format files and round-trips mp3 → wav → mp3.
+    #[test]
+    fn reencode_round_trips_and_skips_same_format() {
+        if ffmpeg_available().is_none() {
+            eprintln!("no ffmpeg; skipping");
+            return;
+        }
+        let pcm: Vec<i16> = (0..16000)
+            .map(|i| ((i as f32 * 0.2).sin() * 6000.0) as i16)
+            .collect();
+        let dir = std::env::temp_dir().join(format!("hs_re_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("c.wav");
+        hs_core::wav::write_wav(wav.to_str().unwrap(), 8000, &pcm).unwrap();
+
+        // Same format is a no-op — returns the input path unchanged.
+        let same = reencode(&wav, &Format::default()).unwrap();
+        assert_eq!(same, wav);
+
+        // wav → mp3 produces the sibling path.
+        let mp3 = reencode(
+            &wav,
+            &Format {
+                codec: "mp3".into(),
+                bitrate_kbps: 32,
+                mode: "vbr".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(mp3, wav.with_extension("mp3"));
+        assert!(mp3.exists());
+
+        // mp3 → wav converts back through the decode_to_pcm + write_wav path.
+        let back = reencode(&mp3, &Format::default()).unwrap();
+        assert_eq!(back, wav);
+        assert!(back.exists());
     }
 }

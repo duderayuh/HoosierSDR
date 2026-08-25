@@ -55,6 +55,8 @@ struct AppState {
     /// Bumped per capture/follow start; a finishing run only reports
     /// 'stopped' if it is still the current one.
     run_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// Set while a library re-encode is running (one at a time).
+    reencode_running: Arc<AtomicBool>,
     /// The previous run's thread, joined before a new radio is opened.
     run_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
@@ -408,6 +410,84 @@ fn format_set(
             serde_json::to_string_pretty(&format).unwrap_or_default(),
         );
     }
+    Ok(())
+}
+
+/// Re-encode every stored audio file that isn't already at the current
+/// format. Runs on a background thread; emits `reencode_progress` (per file),
+/// `reencode_error` (per failed file), and `reencode_done` (summary).
+#[tauri::command]
+fn library_reencode(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let format = state.format.lock().unwrap().clone();
+    if format.codec != "wav" && encode::ffmpeg_available().is_none() {
+        return Err("ffmpeg is not installed (brew install ffmpeg); WAV only until it is".into());
+    }
+    if state.reencode_running.swap(true, Ordering::SeqCst) {
+        return Err("a re-encode is already running".into());
+    }
+    let rows = match state.db.lock().unwrap().clone() {
+        Some(db) => {
+            let c = db.lock().unwrap();
+            library::all_audio(&c)?
+        }
+        None => {
+            state.reencode_running.store(false, Ordering::SeqCst);
+            return Err("library not open".into());
+        }
+    };
+    let total = rows.len();
+    std::thread::spawn(move || {
+        let mut converted = 0usize;
+        let mut skipped = 0usize;
+        let mut failed = 0usize;
+        for (i, (id, path)) in rows.iter().enumerate() {
+            let _ = app.emit(
+                "reencode_progress",
+                serde_json::json!({
+                    "done": i, "total": total,
+                    "converted": converted, "skipped": skipped, "failed": failed,
+                    "current": path,
+                }),
+            );
+            let src = std::path::Path::new(path);
+            if !src.exists() {
+                skipped += 1;
+                continue;
+            }
+            let out = match encode::reencode(src, &format) {
+                Ok(p) => p,
+                Err(e) => {
+                    failed += 1;
+                    let _ = app.emit(
+                        "reencode_error",
+                        serde_json::json!({ "id": id, "path": path, "error": e }),
+                    );
+                    continue;
+                }
+            };
+            if out.as_path() == src {
+                skipped += 1;
+                continue;
+            }
+            let _ = std::fs::remove_file(src);
+            let st = app.state::<AppState>();
+            if let Some(db) = st.db.lock().unwrap().clone() {
+                let c = db.lock().unwrap();
+                if library::set_audio(&c, *id, out.to_str().unwrap_or_default()).is_err() {
+                    failed += 1;
+                    continue;
+                }
+            }
+            converted += 1;
+        }
+        app.state::<AppState>()
+            .reencode_running
+            .store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            "reencode_done",
+            serde_json::json!({ "total": total, "converted": converted, "skipped": skipped, "failed": failed }),
+        );
+    });
     Ok(())
 }
 
@@ -1782,6 +1862,7 @@ fn main() {
             set_archive_mode,
             format_get,
             format_set,
+            library_reencode,
             stream::stream_get,
             stream::stream_configure,
             sysstat::sys_status,
