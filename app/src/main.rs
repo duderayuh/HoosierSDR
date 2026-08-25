@@ -825,12 +825,15 @@ fn open_device_with_gain(
             (Box::new(src), h)
         }
         "soapy" => {
+            let args = device
+                .filter(|d| !d.is_empty())
+                .unwrap_or("driver=soapy,soapy_driver=rtlsdr");
             let db = match setting {
                 Some(GainSetting::Manual(db)) => Some(db),
                 Some(GainSetting::Agc) => None,
                 _ => gain,
             };
-            let src = SoapyRtlSource::open(freq, rate, db)
+            let src = SoapyRtlSource::open(args, freq, rate, db)
                 .map_err(|e| format!("open RTL-SDR (Soapy): {e:?}"))?;
             let h = src.gain_handle();
             (Box::new(src), h)

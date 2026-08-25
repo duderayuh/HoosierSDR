@@ -13,12 +13,6 @@ use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use num_complex::Complex32;
 use seify::{DynDevice, DynRxStreamer, RxStreamer};
 
-/// Seify args selecting the RTL-SDR module through SoapySDR. `driver=soapy`
-/// picks Seify's Soapy backend; `soapy_driver=rtlsdr` is the SoapySDR module
-/// (the SoapyRTLSDR plugin over librtlsdr). Swap `rtlsdr` for another module
-/// name to drive a different SoapySDR device.
-const SOAPY_RTL_ARGS: &str = "driver=soapy,soapy_driver=rtlsdr";
-
 /// A live RTL-SDR source opened through SoapySDR. Owns the device and an active
 /// RX streamer; the `SdrSource` impl is the same contract the pure-Rust RTL-SDR
 /// and Airspy paths satisfy, so it drops into the decode chain unchanged.
@@ -60,37 +54,48 @@ fn clamp_to_range(db: f64, r: &seify::Range) -> f64 {
 
 impl SoapyRtlSource {
     /// The RTL-SDRs SoapySDR can see, as (reopen args, human label).
+    ///
+    /// Enumerates the `rtlsdr` SoapySDR module directly. seify 0.23's own Soapy
+    /// probe is unusable for enumeration: it forwards the seify-level
+    /// `driver=soapy` key into `SoapySDRDevice_enumerate`, which filters on a
+    /// module literally named "soapy" (none exists) and returns nothing. The
+    /// reopen args below carry `soapy_driver=rtlsdr`, which `open()` translates
+    /// back into SoapySDR's `driver` correctly.
     pub fn list() -> Vec<(String, String)> {
-        seify::enumerate_with_args(SOAPY_RTL_ARGS)
-            .unwrap_or_default()
-            .into_iter()
+        let devs = match soapysdr::enumerate("driver=rtlsdr") {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        devs.into_iter()
             .map(|a| {
                 let label = a
-                    .get::<String>("label")
-                    .or_else(|_| a.get::<String>("product"))
-                    .unwrap_or_else(|_| "RTL-SDR (Soapy)".into());
-                let serial = a.get::<String>("serial").unwrap_or_default();
-                (
-                    a.to_string(),
-                    if serial.is_empty() {
-                        label
-                    } else {
-                        format!("{label} · {serial}")
-                    },
-                )
+                    .get("label")
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| a.get("product"))
+                    .unwrap_or("RTL-SDR (Soapy)")
+                    .to_string();
+                let serial = a.get("serial").unwrap_or("");
+                let args = if serial.is_empty() {
+                    "driver=soapy,soapy_driver=rtlsdr".to_string()
+                } else {
+                    format!("driver=soapy,soapy_driver=rtlsdr,serial={serial}")
+                };
+                (args, label)
             })
             .collect()
     }
 
-    /// Open the RTL-SDR at `center_freq` Hz / `sample_rate` S/s, with manual
-    /// `gain` dB or tuner AGC when `gain` is `None`.
+    /// Open the RTL-SDR selected by `args` (from [`Self::list`]) at
+    /// `center_freq` Hz / `sample_rate` S/s, with manual `gain` dB or tuner
+    /// AGC when `gain` is `None`.
     pub fn open(
+        args: &str,
         center_freq: f64,
         sample_rate: f64,
         gain: Option<f64>,
     ) -> Result<Self, SourceError> {
         let map = |e: seify::Error| SourceError::Unsupported(format!("soapy: {e:?}"));
-        let dev = DynDevice::from_args(SOAPY_RTL_ARGS).map_err(map)?;
+        let dev = DynDevice::from_args(args).map_err(map)?;
         let rx0 = dev.rx(0).map_err(map)?;
         rx0.sample_rate().set(sample_rate).map_err(map)?;
         rx0.frequency().set(center_freq).map_err(map)?;
@@ -213,5 +218,21 @@ impl Drop for SoapyRtlSource {
     /// as the pure-Rust path).
     fn drop(&mut self) {
         let _ = self.rx.deactivate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `list()` returns well-formed seify reopen args, and an empty list (not a
+    /// panic) when no RTL-SDR is attached (e.g. CI).
+    #[test]
+    fn list_returns_seify_reopen_args() {
+        for (args, label) in SoapyRtlSource::list() {
+            assert!(args.contains("driver=soapy"), "bad args: {args}");
+            assert!(args.contains("soapy_driver=rtlsdr"), "bad args: {args}");
+            assert!(!label.is_empty());
+        }
     }
 }
