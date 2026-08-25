@@ -73,12 +73,16 @@ impl DeviceSettings {
             });
         }
         if kind == "soapy" {
-            // E4000: clamp into its own ladder; default to AGC — there is no
-            // known-good manual value for the E4000 yet, and the R820T2's
-            // 40 dB default does not map onto its −1..42 dB ladder.
+            // RTL-SDR through SoapySDR. The tuner reports its own gain ladder
+            // at open() (R820T2 0–49.6 dB, E4000 −1–42 dB) and SoapyRtlSource
+            // clamps the value into that range, so pass the raw dB through and
+            // let the device decide. R820T/R820T2 hardware AGC is unreliable —
+            // it garbled voice and, at floor gain, could not lock the control
+            // channel — so a fresh device defaults to a fixed manual gain like
+            // the pure-Rust path, never AGC.
             return Some(match self.gain {
-                Some(db) => G::Manual(hs_source::clamp_e4000_gain(db)),
-                None => G::Agc,
+                Some(db) => G::Manual(db),
+                None => G::Manual(hs_source::RTL_DEFAULT_GAIN_DB),
             });
         }
         Some(match self.gain {
