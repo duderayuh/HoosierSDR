@@ -254,6 +254,7 @@ fn finish_call(
             priority: c.priority,
             syncs_c4fm: 0,
             syncs_cqpsk: 0,
+            voice_frame_errors: 0,
             talker_alias: None,
             wav: None,
             id: None,

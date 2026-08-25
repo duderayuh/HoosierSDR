@@ -152,6 +152,9 @@ pub struct Call {
     /// Frame syncs each modulation achieved, the evidence for that choice.
     pub syncs_c4fm: u32,
     pub syncs_cqpsk: u32,
+    /// Voice-frame FEC error count the chosen decoder accumulated over the
+    /// call — surfaced to the app as the upload `errorCount`.
+    pub voice_frame_errors: u64,
     /// Talkgroups patched to this one; audio may be shared with them.
     pub patched_with: Vec<u16>,
     /// A radio signalled emergency during the call (link-control service
@@ -823,9 +826,15 @@ impl TrunkFollower {
             (0, Some(l)) => l.source_unit,
             (s, _) => s,
         };
+        let voice_frame_errors = if pick_c4fm {
+            c.c4fm.diagnostics().voice_frame_errors
+        } else {
+            c.cqpsk.diagnostics().voice_frame_errors
+        };
         Call {
             syncs_c4fm: c.syncs_c4fm,
             syncs_cqpsk: c.syncs_cqpsk,
+            voice_frame_errors,
             talkgroup: c.talkgroup,
             source_unit,
             freq_hz: c.freq_hz,

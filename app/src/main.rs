@@ -186,10 +186,8 @@ fn tg_corrections_set(
     state: State<AppState>,
     entries: Vec<(u16, Vec<(String, String)>)>,
 ) {
-    let map: std::collections::HashMap<u16, Vec<(String, String)>> = entries
-        .into_iter()
-        .filter(|(_, v)| !v.is_empty())
-        .collect();
+    let map: std::collections::HashMap<u16, Vec<(String, String)>> =
+        entries.into_iter().filter(|(_, v)| !v.is_empty()).collect();
     *state.tg_corrections.lock().unwrap() = map.clone();
     if let Ok(d) = app.path().app_config_dir() {
         let _ = std::fs::create_dir_all(&d);
@@ -964,6 +962,7 @@ fn start_follow(
                     site,
                     emergency,
                     patched_with,
+                    voice_frame_errors,
                     ..
                 } = &ev
                 {
@@ -987,6 +986,7 @@ fn start_follow(
                             patched_with: patched_with.clone(),
                             system: params.system_name.clone(),
                             site: *site,
+                            voice_frame_errors: *voice_frame_errors,
                             group,
                         });
                     }
@@ -1824,10 +1824,22 @@ mod corrections_tests {
     #[test]
     fn corrections_are_word_boundary_and_case_insensitive() {
         let rules = vec![("Rirey".to_string(), "Riley".to_string())];
-        assert_eq!(apply_corrections(&rules, "Unit 5 to Rirey station"), "Unit 5 to Riley station");
-        assert_eq!(apply_corrections(&rules, "rirey and RIREY"), "Riley and Riley");
-        assert_eq!(apply_corrections(&rules, "Rireyfield untouched"), "Rireyfield untouched");
-        assert_eq!(apply_corrections(&rules, "shirey untouched"), "shirey untouched");
+        assert_eq!(
+            apply_corrections(&rules, "Unit 5 to Rirey station"),
+            "Unit 5 to Riley station"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "rirey and RIREY"),
+            "Riley and Riley"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "Rireyfield untouched"),
+            "Rireyfield untouched"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "shirey untouched"),
+            "shirey untouched"
+        );
         // No rules → unchanged.
         assert_eq!(apply_corrections(&[], "hello"), "hello");
     }

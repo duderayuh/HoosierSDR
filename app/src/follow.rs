@@ -116,6 +116,8 @@ pub enum FollowEvent {
         /// that produced no audio.
         syncs_c4fm: u32,
         syncs_cqpsk: u32,
+        /// Voice-frame FEC errors over the call (for the upload errorCount).
+        voice_frame_errors: u64,
         /// Over-the-air alias the radio's system broadcast, if any.
         talker_alias: Option<String>,
         wav: Option<String>,
@@ -614,7 +616,14 @@ impl Reporter<'_> {
         crate::units::name_for(&units, &rules, id)
     }
 
-    fn status(&self, total_pairs: u64, secs: f64, rate: f64, dropped: u64, signal_dbfs: Option<f32>) -> FollowEvent {
+    fn status(
+        &self,
+        total_pairs: u64,
+        secs: f64,
+        rate: f64,
+        dropped: u64,
+        signal_dbfs: Option<f32>,
+    ) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
             calls: self.calls,
@@ -904,6 +913,7 @@ impl Reporter<'_> {
                 priority: self.priority_of(c.talkgroup),
                 syncs_c4fm: c.syncs_c4fm,
                 syncs_cqpsk: c.syncs_cqpsk,
+                voice_frame_errors: c.voice_frame_errors,
                 talker_alias: c.talker_alias.clone(),
                 wav,
                 id,
