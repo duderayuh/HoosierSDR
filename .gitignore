@@ -11,6 +11,8 @@ node_modules/
 /dist/
 !app/dist/
 .DS_Store
+# Local Hermes agent state — never belongs in the repo
+.hermes/
 !crates/hs-vocoder/vendor/
 
 # Downloaded RadioReference data stays on the user's machine — the database is
