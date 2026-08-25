@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{library, AppState};
@@ -47,6 +49,70 @@ pub struct Worker {
 }
 
 pub type Shared = Arc<Mutex<Worker>>;
+
+/// Which importable module backs each engine — used to check that a Python
+/// interpreter can actually run the engine before we hand it work.
+fn engine_module(engine: &str) -> &'static str {
+    match engine {
+        "openai-whisper" => "whisper",
+        _ => "faster_whisper",
+    }
+}
+
+fn python_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve a Python interpreter that can import `engine`'s module.
+///
+/// `Command::new("python3")` breaks for a Dock-launched .app on macOS: the app
+/// inherits a minimal `PATH` (`/usr/bin:/bin:…`), where `python3` is Apple's
+/// CommandLineTools 3.9 — which has no faster-whisper / whisper. Prefer real
+/// installs (Homebrew, python.org framework) and confirm each by importing the
+/// module before using it. `TRANSCRIBE_PYTHON` overrides everything for pinning.
+fn find_python(engine: &str) -> String {
+    if let Ok(p) = std::env::var("TRANSCRIBE_PYTHON") {
+        let p = p.trim().to_string();
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    let module = engine_module(engine);
+    if let Some(hit) = python_cache().lock().unwrap().get(module).cloned() {
+        return hit;
+    }
+    let candidates = [
+        "/usr/local/bin/python3",
+        "/opt/homebrew/bin/python3",
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+        "python3",
+    ];
+    let mut found = "python3".to_string();
+    for py in candidates {
+        let probe = format!(
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('{module}') else 1)"
+        );
+        let ok = Command::new(py)
+            .arg("-c")
+            .arg(&probe)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            found = py.to_string();
+            break;
+        }
+    }
+    python_cache()
+        .lock()
+        .unwrap()
+        .insert(module.to_string(), found.clone());
+    found
+}
 
 fn script_path(app: &AppHandle) -> std::path::PathBuf {
     // Dev: beside the crate. Bundled: resource dir.
@@ -99,7 +165,7 @@ pub async fn transcribe_probe(app: AppHandle) -> Probe {
 
 fn transcribe_probe_blocking(app: AppHandle) -> Probe {
     let state = app.state::<AppState>();
-    let out = Command::new("python3")
+    let out = Command::new(find_python("faster-whisper"))
         .arg(script_path(&app))
         .arg("--probe")
         .output()
@@ -173,7 +239,7 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
         return true;
     }
     let s = w.settings.clone();
-    let mut child = match Command::new("python3")
+    let mut child = match Command::new(find_python(&s.engine))
         .arg(script_path(app))
         .args([
             "--engine",
@@ -366,7 +432,7 @@ pub fn transcribe_download(app: AppHandle, engine: String, model: String) -> Res
             "transcribe_download",
             serde_json::json!({"engine": engine, "model": model, "state": "started"}),
         );
-        let out = Command::new("python3")
+        let out = Command::new(find_python(&engine))
             .arg(&script)
             .args(["--engine", &engine, "--model", &model, "--download"])
             .output();
