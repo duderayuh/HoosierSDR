@@ -476,6 +476,32 @@
               <p class="help">Needs transcription on (Settings) and an Ollama model chosen above. The summary waits up to 90 s past the quiet gap for transcripts to land.</p>
             </div>
           </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Digests · periodic "what's happening"</span><span class="meta" id="dgMeta"></span><button class="btn primary sm" id="dgNew">+ New digest</button></div>
+            <div class="body tight">
+              <div id="dgList" class="list" style="max-height:16vh"></div>
+              <div class="empty small" id="dgEmpty">A digest rolls up the transcripts on a set of talkgroups every few minutes and sends "what's happening" to Telegram. Set the cadence, the look-back window, and the question the model answers.</div>
+              <div class="tablewrap tgs" style="max-height:16vh;margin-top:6px"><table><thead><tr><th>Time</th><th>Digest</th><th>Result</th></tr></thead><tbody id="dgLog"></tbody></table></div>
+            </div>
+          </div>
+          <div class="panel" id="dgEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit digest</span><span class="meta" id="dgEdMeta"></span><button class="btn ghost sm" id="dgTest">Run now</button><button class="btn ghost sm" id="dgDelete">Delete</button><button class="btn primary sm" id="dgSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="dgName" type="text" placeholder="Southeast" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="dgTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="dgEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Every (min)</span><input id="dgInterval" type="text" inputmode="numeric" value="15" /></label>
+                <label class="field"><span class="lab">Window (min) <span class="mono faint">how far back</span></span><input id="dgWindow" type="text" inputmode="numeric" value="15" /></label>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
+              </div>
+              <label class="field"><span class="lab">Prompt <span class="mono faint">the question the model answers</span></span><textarea id="dgPrompt" style="min-height:64px"></textarea></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {name} {count} {window} {time} {transcript}</span></span><textarea id="dgMessage" style="min-height:56px"></textarea></label>
+              <p class="help">Runs on its own timer once the interval elapses. The window is how far back each digest looks.</p>
+            </div>
+          </div>
         </div>
         <div class="stack">
           <div class="panel">

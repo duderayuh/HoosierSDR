@@ -18,6 +18,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 mod alerts;
 mod conversations;
 mod devices;
+mod digest;
 mod dual;
 mod encode;
 mod follow;
@@ -88,6 +89,8 @@ struct AppState {
     alerts: alerts::Shared,
     /// Conversation rules and the conversations in progress.
     conversations: conversations::Shared,
+    /// Periodic channel digests ("what's happening" roll-ups).
+    digests: digest::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -1809,6 +1812,8 @@ fn main() {
             *state.alerts.lock().unwrap() = alerts::load(app.handle());
             *state.conversations.lock().unwrap() = conversations::load(app.handle());
             conversations::spawn_ticker(app.handle().clone());
+            *state.digests.lock().unwrap() = digest::load(app.handle());
+            digest::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -1887,6 +1892,10 @@ fn main() {
             conversations::conversations_state,
             conversations::conversation_test,
             conversations::conversation_resend,
+            digest::digests_get,
+            digest::digests_set,
+            digest::digests_log,
+            digest::digest_test,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,
