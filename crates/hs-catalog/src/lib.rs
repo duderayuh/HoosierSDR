@@ -25,7 +25,9 @@ pub struct Talkgroup {
     pub alias: Option<String>,
     /// Longer description.
     pub description: Option<String>,
-    /// Service tag / category (e.g. "Law Dispatch", "EMS").
+    /// Service type (RadioReference "Tag", e.g. "Law Dispatch", "Fire-Tac").
+    pub tag: Option<String>,
+    /// Agency/group (RadioReference "Category", e.g. "Police", "EMS").
     pub category: Option<String>,
     /// From RR's `enc` attribute or on-air ALGID observation. Encrypted
     /// talkgroups are greyed out and never tuned for audio.

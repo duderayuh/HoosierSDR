@@ -1573,6 +1573,53 @@ fn write_survey(entry: &SurveyEntry) {
     }
 }
 
+/// Identify one survey pin to delete by its on-disk paths.
+#[derive(serde::Deserialize)]
+struct SurveyDelete {
+    id: String,
+    iq: String,
+    log: String,
+}
+
+/// Delete one survey pin and everything collected at that position: the IQ
+/// capture, its diagnostics log, the per-pin sidecar, and the manifest entry.
+#[tauri::command]
+fn survey_delete(spec: SurveyDelete) -> Result<(), String> {
+    let iq = shellexpand_home(&spec.iq);
+    let log = shellexpand_home(&spec.log);
+    let sidecar = std::path::Path::new(&log)
+        .with_extension("survey.json")
+        .to_string_lossy()
+        .into_owned();
+
+    // The IQ capture, the diagnostics log, and the sidecar (if present).
+    for p in [iq.as_str(), log.as_str(), sidecar.as_str()] {
+        match std::fs::remove_file(p) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("survey_delete: remove {p}: {e}"),
+        }
+    }
+
+    // Rewrite the corpus manifest without this id.
+    let manifest = std::path::Path::new(&log)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("survey.json");
+    let list: Vec<serde_json::Value> = std::fs::read_to_string(&manifest)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let kept: Vec<serde_json::Value> = list
+        .into_iter()
+        .filter(|v| v.get("id").and_then(|i| i.as_str()) != Some(spec.id.as_str()))
+        .collect();
+    if let Ok(s) = serde_json::to_string_pretty(&kept) {
+        let _ = std::fs::write(&manifest, s);
+    }
+    Ok(())
+}
+
 /// Decode an on-disk `.cf32` recording; emits grants + a final status.
 #[tauri::command]
 async fn decode_file(
@@ -1801,6 +1848,7 @@ fn main() {
             start_capture,
             stop_capture,
             survey_capture,
+            survey_delete,
             decode_file,
             start_follow,
             dual::dual_start,

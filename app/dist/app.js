@@ -202,7 +202,7 @@ function addCall(g) {
   const len = g.secs != null ? `${g.secs.toFixed(1)}s` : "";
   tr.innerHTML =
     `<td class="time">${now()}</td>` +
-    `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}</span>${g.desc ? `<span class="desc">${esc(g.desc)}</span>` : ""}</td>` +
+    `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}${g.site_name ? ` · ${esc(g.site_name)}` : ""}</span>${g.service ? `<span class="svc">${esc(g.service)}</span>` : ""}${g.category ? `<span class="cat">${esc(g.category)}</span>` : ""}${g.desc ? `<span class="desc">${esc(g.desc)}</span>` : ""}</td>` +
     `<td class="src">${g.unit_name ? `${esc(g.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">${g.source}</span>` : (g.source ? g.source : "—")}${g.talker_alias ? `<span class="alias" style="display:block" title="alias broadcast over the air">“${esc(g.talker_alias)}”</span>` : ""}</td>` +
     `<td class="tr" data-trid="${g.id != null ? g.id : ""}" title="${esc(g.transcript || "")}">${g.transcript ? esc(g.transcript) : `<span class="faint">${g.id != null ? "…" : ""}</span>`}</td>` +
     `<td class="dl">${g.freq_mhz.toFixed(4)}</td>` +
@@ -225,7 +225,7 @@ function addCall(g) {
   tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); });
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
   tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
-  const text = `${g.name} ${g.desc || ""} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
+  const text = `${g.name} ${g.desc || ""} ${g.service || ""} ${g.category || ""} ${g.system || ""} ${g.site_name || ""} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
   history.unshift({ el: tr, text, id: g.id });
   tbody.prepend(tr);
   while (history.length > 500) history.pop().el.remove();
@@ -635,10 +635,10 @@ function handleFollow(ev) {
     case "call":
       activeEnd(ev);
       { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
-      followVoice += ev.secs;
+      if (!ev.encrypted) followVoice += ev.secs;
       if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
-      addCall({ tg: ev.tg, name: ev.name, desc: ev.desc, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: false,
-                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk });
+      addCall({ tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,
+                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk, system: ev.system, site_name: ev.site_name });
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
       if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);
       $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
@@ -926,12 +926,32 @@ $("surveyCapture").onclick = async () => {
 function renderSurveyTable() {
   const body = $("surveyBody");
   body.innerHTML = [...surveyPins].reverse().map((p) =>
-    `<tr data-lat="${p.lat}" data-lon="${p.lon}"><td>${esc(p.label || p.id)}</td><td class="mono">${p.lat.toFixed(5)}</td><td class="mono">${p.lon.toFixed(5)}</td><td class="mono">${esc((p.iq || "").split("/").pop())}</td><td class="mono">${ago(p.t * 1000)}</td></tr>`
+    `<tr data-lat="${p.lat}" data-lon="${p.lon}" data-id="${esc(p.id || "")}"><td>${esc(p.label || p.id)}</td><td class="mono">${p.lat.toFixed(5)}</td><td class="mono">${p.lon.toFixed(5)}</td><td class="mono">${esc((p.iq || "").split("/").pop())}</td><td class="mono">${ago(p.t * 1000)}</td><td><button class="btn ghost sm" data-survey-del title="Delete this position and its collected data">✕</button></td></tr>`
   ).join("");
   body.querySelectorAll("tr").forEach((tr) => {
     tr.style.cursor = "pointer";
     tr.onclick = () => { mapView = { lat: parseFloat(tr.dataset.lat), lon: parseFloat(tr.dataset.lon), z: Math.max(mapView ? mapView.z : 12, 15) }; renderMap(); };
   });
+  body.querySelectorAll("button[data-survey-del]").forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const id = b.closest("tr").dataset.id;
+      const pin = surveyPins.find((p) => (p.id || "") === id);
+      if (pin) surveyDeletePin(pin);
+    };
+  });
+}
+
+async function surveyDeletePin(pin) {
+  const name = pin.label || pin.id;
+  if (!(await uiConfirm(`Delete position "${name}" and its captured IQ + log?`, "Delete"))) return;
+  try {
+    await invoke("survey_delete", { spec: { id: pin.id, iq: pin.iq, log: pin.log } });
+  } catch (e) { alert("survey_delete: " + e); return; }
+  surveyPins.splice(surveyPins.indexOf(pin), 1);
+  save("hs.survey", surveyPins);
+  renderSurveyTable(); renderMap();
+  logEvent(`survey: deleted position "${name}"`);
 }
 renderSurveyTable();
 
@@ -1369,7 +1389,7 @@ if (TAURI) {
   function libRowHtml(r) {
     const t = r.transcript_edited || r.transcript || "";
     return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
-      `<td class="time">${fmtT(r.start)}</td><td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span></td>` +
+      `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}</td>` +
       `<td class="src">${esc(r.unit_name || r.unit || "—")}</td><td class="len">${r.secs.toFixed(1)}s</td>` +
       `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
       `<td class="act">${r.audio ? `<button title="Play" data-lplay="${r.id}">▶</button>` : ""}<button title="Star" data-lstar="${r.id}" class="${r.starred ? "pri-h" : ""}">★</button>` +
@@ -1428,8 +1448,8 @@ if (TAURI) {
       const r = await invoke("library_get", { id }); if (!r) return;
       $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}`;
       $("detBody").innerHTML = `<div class="det">
-        <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span> · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
-        <div class="faint">${fmtT(r.start)} · ${esc(r.system || "")} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
+        <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
         <div class="machine">${esc(r.transcript || "—")}</div>
@@ -1826,10 +1846,7 @@ if (TAURI) {
       $("rrUser").value = st.username || "";
       if (st.sid && !$("rrSid").value) $("rrSid").value = st.sid;
       $("rrPass").placeholder = st.has_password ? "saved on this Mac" : "";
-      $("rrKeyField").style.display = st.embedded_key ? "none" : "";
-      $("rrKey").placeholder = st.has_app_key ? "saved on this Mac" : "";
       const missing = [];
-      if (!st.has_app_key) missing.push("app key");
       if (!st.username) missing.push("username");
       if (st.username && !st.has_password) missing.push("password");
       $("rrMeta").textContent = missing.length ? `missing: ${missing.join(", ")}`
@@ -1840,8 +1857,8 @@ if (TAURI) {
     } catch (e) { log(`rr_settings: ${e}`); }
   }
   async function rrSaveCreds() {
-    await invoke("rr_save", { appKey: $("rrKey").value, username: $("rrUser").value, password: $("rrPass").value, sid: sidVal() });
-    $("rrPass").value = ""; $("rrKey").value = "";
+    await invoke("rr_save", { username: $("rrUser").value, password: $("rrPass").value, sid: sidVal() });
+    $("rrPass").value = "";
   }
   const sidVal = () => { const m = String($("rrSid").value).match(/(\d+)\s*$/); const v = m ? parseInt(m[1], 10) : NaN; return Number.isFinite(v) ? v : null; };
   $("rrSave").onclick = async () => { try { await rrSaveCreds(); $("rrMeta").textContent = "saved"; await rrRefresh(); } catch (e) { alert(e); } };
@@ -1890,7 +1907,7 @@ if (TAURI) {
   async function loadSystem(sid) {
     try {
       $("rrDownload").disabled = true; $("findMeta").textContent = "downloading system…";
-      if ($("rrPass").value || $("rrKey").value) await rrSaveCreds();
+      if ($("rrPass").value) await rrSaveCreds();
       sys = await invoke("rr_download", { sid });
       $("findMeta").textContent = "";
       $("sysPanel").style.display = "";

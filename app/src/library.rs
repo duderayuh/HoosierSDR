@@ -18,11 +18,14 @@ pub struct CallRow {
     pub secs: f64,
     pub tg: u16,
     pub tg_name: String,
+    pub service: String,
+    pub category: String,
     pub unit: u32,
     pub unit_name: Option<String>,
     pub freq_hz: u64,
     pub modulation: String,
     pub emergency: bool,
+    pub encrypted: bool,
     pub patched_with: Vec<u16>,
     pub system: String,
     pub site: String,
@@ -52,6 +55,7 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
             freq_hz INTEGER NOT NULL,
             modulation TEXT NOT NULL,
             emergency INTEGER NOT NULL DEFAULT 0,
+            encrypted INTEGER NOT NULL DEFAULT 0,
             patched_with TEXT NOT NULL DEFAULT '',
             system TEXT NOT NULL DEFAULT '',
             site TEXT NOT NULL DEFAULT '',
@@ -62,7 +66,9 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
             transcribed_at INTEGER,
             transcript_edited TEXT,
             edited_at INTEGER,
-            starred INTEGER NOT NULL DEFAULT 0
+            starred INTEGER NOT NULL DEFAULT 0,
+            service TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS calls_start ON calls(start);
         CREATE INDEX IF NOT EXISTS calls_tg ON calls(tg, start);
@@ -87,7 +93,34 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
         "#,
     )
     .map_err(|e| format!("schema: {e}"))?;
+    // Migrate databases created before service/category/encrypted were tracked.
+    for (col, ty) in [
+        ("service", "TEXT NOT NULL DEFAULT ''"),
+        ("category", "TEXT NOT NULL DEFAULT ''"),
+        ("encrypted", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !column_exists(&c, "calls", col)? {
+            c.execute(&format!("ALTER TABLE calls ADD COLUMN {col} {ty}"), [])
+                .map_err(|e| format!("migrate {col}: {e}"))?;
+        }
+    }
     Ok(c)
+}
+
+/// Whether a table already has a column (used for additive schema migrations).
+fn column_exists(c: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = c
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("pragma table_info: {e}"))?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("pragma table_info: {e}"))?;
+    for name in names {
+        if name.map_err(|e| format!("pragma row: {e}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
@@ -107,18 +140,21 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
         None => None,
     };
     c.execute(
-        "INSERT INTO calls (start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             r.start,
             r.secs,
             r.tg,
             r.tg_name,
+            r.service,
+            r.category,
             r.unit,
             r.unit_name,
             r.freq_hz as i64,
             r.modulation,
             r.emergency,
+            r.encrypted,
             r.patched_with.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" "),
             r.system,
             r.site,
@@ -147,7 +183,7 @@ pub struct Query {
     pub after_id: Option<i64>,
 }
 
-const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred";
+const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     let patched: String = r.get(10)?;
@@ -175,6 +211,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         transcript_edited: r.get(17)?,
         edited_at: r.get(18)?,
         starred: r.get::<_, i64>(19)? != 0,
+        service: r.get(20)?,
+        category: r.get(21)?,
+        encrypted: r.get::<_, i64>(22)? != 0,
     })
 }
 
