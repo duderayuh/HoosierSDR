@@ -1,0 +1,9 @@
+[package]
+name = "hs-decoders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hs-dsp = { path = "../hs-dsp" }

@@ -29,5 +29,6 @@ radioreference = ["hs-core/radioreference"]
 hs-core = { path = "../hs-core" }
 hs-p25 = { path = "../hs-p25" }
 hs-dsp = { path = "../hs-dsp" }
+hs-decoders = { path = "../hs-decoders" }
 hs-source = { path = "../hs-source" }
 cpal = { version = "0.15", optional = true }

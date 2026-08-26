@@ -67,6 +67,35 @@ Builds compile for the host CPU by default (`.cargo/config.toml`); at 10 MSPS th
 The app follows a site the same way the CLI does — **Follow site** mode takes a band centre and a control channel, measures where the control channel really is and which modulation it uses, then decodes every call it grants, listing each in the dispatch feed with its duration, playing completed calls through the default audio device, and (optionally) saving one WAV per call. **One channel** mode is the single-channel decoder with the equalizer selector. The follow loop is shared with the CLI (`hs_core::follow`) and is verified headless over a recorded Airspy capture in the app's tests.
 
 
+## Other protocols (beyond P25)
+
+P25 is the focus, but the receiver front end (downconvert → channel-filter →
+demodulate) is useful for the conventional and trunked signals that share the
+same VHF/UHF land-mobile bands. These live in `hs-decoders` behind a common
+`SignalDecoder` trait and are selected with `--decoder`:
+
+```sh
+# demodulate an NBFM channel out of a wideband capture, 25 kHz up from centre
+hoosier-sdr --rate 240000 --offset 25k --decoder nbfm --squelch 0.3 capture.cf32
+# AM (e.g. aviation)                     # DCS sub-audible squelch code + audio
+hoosier-sdr --decoder am  capture.cf32   hoosier-sdr --decoder dcs capture.cf32
+```
+
+Each writes recovered audio to the WAV output and prints typed events (squelch
+open/close, DCS code). In the desktop app the same decoders appear as a
+**Decoder** picker in one-channel mode, run over a recording via *Decode a
+recording*.
+
+**Implemented today:** AM, FM/NBFM with noise squelch, DCS (Golay(23,12), with
+polarity detection). **On the roadmap** (declared in the picker, not yet
+decoding): MDC-1200, Fleetsync II, Tait 1200, LJ1200, LTR-Standard, LTR-Net,
+Passport, MPT-1327. All are implemented clean-room from published
+specifications — no GPL-derived code (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+Correctness today rests on synthetic modulate→demodulate round-trip tests;
+off-air field validation is pending, as no captures are committed to this
+repo. TETRA is out of scope (its ACELP voice codec is patent-encumbered and its
+voice is commonly TEA-encrypted).
+
 ## Finding the control channel
 
 A power sweep won't find it. That method put the first field capture 50 kHz off
@@ -154,6 +183,7 @@ That is the whole claim in one number — a categorical win, because differentia
 |---|---|
 | `hs-source` | `SdrSource` trait; RTL-SDR (Seify), Airspy R2 (libairspy) and IQ-file backends |
 | `hs-dsp` | Filters, resamplers, channelizer, AGC, timing/carrier recovery, and `equalizer/` (LMS FSE, CMA, DFE, MLSE) |
+| `hs-decoders` | Pluggable non-P25 decoders behind a `SignalDecoder` trait: AM, FM/NBFM + squelch, DCS today; MDC-1200, Fleetsync II, Tait, LTR, MPT-1327 on the roadmap |
 | `hs-p25` | Frame sync, NID, FEC (BCH/Golay/RS/trellis), TSBK/MBT parsing |
 | `hs-vocoder` | `Vocoder` trait; Phase I IMBE in-tree, Phase II behind a plugin boundary |
 | `hs-trunk` | Trunking state machine, control-channel following, grants |

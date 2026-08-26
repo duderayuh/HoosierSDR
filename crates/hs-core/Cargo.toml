@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 hs-source = { path = "../hs-source" }
 hs-dsp = { path = "../hs-dsp" }
+hs-decoders = { path = "../hs-decoders" }
 hs-p25 = { path = "../hs-p25" }
 hs-vocoder = { path = "../hs-vocoder" }
 hs-trunk = { path = "../hs-trunk" }
