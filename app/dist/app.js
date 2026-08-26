@@ -1325,6 +1325,56 @@ if (TAURI) {
   $("cvTest").onclick = async () => { if (!cvRead()) return; if (!(await cvPersist())) return; try { uiToast(await invoke("conversation_test", { id: cvSel })); setTimeout(cvStateRefresh, 5000); setTimeout(cvStateRefresh, 30000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
   cvRefresh();
 
+  /* ---------- periodic digests: "what's happening" roll-ups ---------- */
+  let dgView = null, dgSel = null;
+  const DG_DEFAULT = { id: "", name: "", enabled: true, tgs: [], interval_secs: 900, window_secs: 900,
+    prompt: "Summarise what is happening on these radio channels right now. Group by talkgroup; list the units involved and any notable events (emergencies, fires, pursuits, medical calls, road closures, weather). Stick to what was actually said; mark anything unclear as unclear.",
+    message: "📡 {name}\n{summary}\n\n{count} transmissions in the last {window} · {time}", chat_id: "" };
+  function dgRenderList() {
+    const rules = dgView ? dgView.rules : [];
+    $("dgEmpty").style.display = rules.length ? "none" : ""; $("dgMeta").textContent = rules.length ? `${rules.filter((r) => r.enabled).length} of ${rules.length} enabled` : "";
+    $("dgList").innerHTML = rules.map((r) => `<div class="row ${dgSel === r.id ? "on" : ""}" data-dg="${esc(r.id)}"><span class="grow"><b>${esc(r.name)}</b> ${r.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>TG ${r.tgs.join(",") || "—"} · every ${Math.round(r.interval_secs / 60)} min · last ${Math.round(r.window_secs / 60)} min</small></span><label class="check" style="margin:0"><input type="checkbox" data-dgen="${esc(r.id)}" ${r.enabled ? "checked" : ""}></label></div>`).join("");
+    $("dgList").querySelectorAll(".row[data-dg]").forEach((row) => row.onclick = (e) => { if (e.target.closest("input")) return; dgEdit(row.dataset.dg); });
+    $("dgList").querySelectorAll("input[data-dgen]").forEach((c) => c.onchange = async () => { const r = dgView.rules.find((x) => x.id === c.dataset.dgen); r.enabled = c.checked; await dgPersist(); });
+  }
+  function dgEdit(id) {
+    const r = dgView.rules.find((x) => x.id === id); if (!r) return;
+    dgSel = id; dgRenderList(); $("dgEditor").style.display = "";
+    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); $("dgEnabled").checked = r.enabled;
+    $("dgInterval").value = Math.round(r.interval_secs / 60); $("dgWindow").value = Math.round(r.window_secs / 60);
+    $("dgPrompt").value = r.prompt; $("dgMessage").value = r.message; $("dgChat").value = r.chat_id;
+    $("dgEdMeta").textContent = `${r.tgs.length} talkgroups`;
+  }
+  function dgRead() {
+    const r = dgView.rules.find((x) => x.id === dgSel); if (!r) return null;
+    r.name = $("dgName").value.trim(); r.tgs = nums($("dgTgs").value); r.enabled = $("dgEnabled").checked;
+    r.interval_secs = Math.max(1, parseInt($("dgInterval").value, 10) || 15) * 60;
+    r.window_secs = Math.max(1, parseInt($("dgWindow").value, 10) || 15) * 60;
+    r.prompt = $("dgPrompt").value; r.message = $("dgMessage").value; r.chat_id = $("dgChat").value.trim();
+    return r;
+  }
+  async function dgPersist() {
+    if (!dgView) { uiToast("Digests did not load — reopen the Alerts tab", "err"); return false; }
+    try { await invoke("digests_set", { rules: dgView.rules }); }
+    catch (e) { log(`digests_set failed: ${e}`); uiToast(`Could not save the digest: ${e}`, "err"); return false; }
+    try { dgView = await invoke("digests_get"); } catch (e) { log(`digests_get failed: ${e}`); }
+    dgRenderList(); return true;
+  }
+  async function dgRefresh() { try { dgView = await invoke("digests_get"); dgRenderList(); } catch (e) { log(`digests_get: ${e}`); } }
+  async function dgLogRefresh() {
+    try {
+      const log = await invoke("digests_log");
+      $("dgLog").innerHTML = log.map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)} <small>· ${l.calls} transmissions</small></td><td><span class="badge ${l.ok ? "clear" : "enc"}">${l.ok ? "sent" : "failed"}</span> <small title="${esc(l.summary)}">${esc(l.detail)}</small></td></tr>`).join("");
+    } catch (e) { log(`digests_log: ${e}`); }
+  }
+  listen("digests", () => { if ($("view-alerts").style.display !== "none") dgLogRefresh(); });
+  setInterval(() => { if ($("view-alerts").style.display !== "none") dgLogRefresh(); }, 15000);
+  $("dgNew").onclick = () => { if (!dgView) return; const id = `d${Date.now()}`; dgView.rules.push({ ...DG_DEFAULT, id, name: "Digest" }); dgRenderList(); dgEdit(id); };
+  $("dgSave").onclick = async () => { if (!dgRead()) return; if (await dgPersist()) { uiToast("Digest saved"); dgEdit(dgSel); if (!$("trEnabled").checked) uiToast("Digests need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model above for the summaries", "err"); } };
+  $("dgDelete").onclick = async () => { if (!(await uiConfirm("Delete this digest?", "Delete"))) return; dgView.rules = dgView.rules.filter((x) => x.id !== dgSel); dgSel = null; $("dgEditor").style.display = "none"; await dgPersist(); };
+  $("dgTest").onclick = async () => { if (!dgRead()) return; if (!(await dgPersist())) return; try { uiToast(await invoke("digest_test", { id: dgSel })); setTimeout(dgLogRefresh, 3000); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
+  dgRefresh(); dgLogRefresh();
+
   /* ---------- file name template ---------- */
   async function fnRefresh() {
     try { const v = await invoke("names_get"); $("fnTemplate").value = v.settings.template; $("fnExample").textContent = v.example; $("fnTokens").innerHTML = v.tokens.map(([t, d]) => `<b>${esc(t)}</b> ${esc(d)}`).join(" · "); } catch (e) { log(`names_get: ${e}`); }
