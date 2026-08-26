@@ -61,7 +61,7 @@ impl SoapyRtlSource {
     /// module literally named "soapy" (none exists) and returns nothing. The
     /// reopen args below carry `soapy_driver=rtlsdr`, which `open()` translates
     /// back into SoapySDR's `driver` correctly.
-    pub fn list() -> Vec<(String, String)> {
+    pub fn list() -> Vec<(String, String, String)> {
         let devs = match soapysdr::enumerate("driver=rtlsdr") {
             Ok(v) => v,
             Err(_) => return Vec::new(),
@@ -75,12 +75,13 @@ impl SoapyRtlSource {
                     .unwrap_or("RTL-SDR (Soapy)")
                     .to_string();
                 let serial = a.get("serial").unwrap_or("");
+                let tuner = a.get("tuner").map(|s| s.to_string()).unwrap_or_default();
                 let args = if serial.is_empty() {
                     "driver=soapy,soapy_driver=rtlsdr".to_string()
                 } else {
                     format!("driver=soapy,soapy_driver=rtlsdr,serial={serial}")
                 };
-                (args, label)
+                (args, label, tuner)
             })
             .collect()
     }
@@ -229,7 +230,7 @@ mod tests {
     /// panic) when no RTL-SDR is attached (e.g. CI).
     #[test]
     fn list_returns_seify_reopen_args() {
-        for (args, label) in SoapyRtlSource::list() {
+        for (args, label, _tuner) in SoapyRtlSource::list() {
             assert!(args.contains("driver=soapy"), "bad args: {args}");
             assert!(args.contains("soapy_driver=rtlsdr"), "bad args: {args}");
             assert!(!label.is_empty());
