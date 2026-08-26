@@ -55,6 +55,8 @@ struct AppState {
     /// Bumped per capture/follow start; a finishing run only reports
     /// 'stopped' if it is still the current one.
     run_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// Set while a library re-encode is running (one at a time).
+    reencode_running: Arc<AtomicBool>,
     /// The previous run's thread, joined before a new radio is opened.
     run_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
@@ -186,10 +188,8 @@ fn tg_corrections_set(
     state: State<AppState>,
     entries: Vec<(u16, Vec<(String, String)>)>,
 ) {
-    let map: std::collections::HashMap<u16, Vec<(String, String)>> = entries
-        .into_iter()
-        .filter(|(_, v)| !v.is_empty())
-        .collect();
+    let map: std::collections::HashMap<u16, Vec<(String, String)>> =
+        entries.into_iter().filter(|(_, v)| !v.is_empty()).collect();
     *state.tg_corrections.lock().unwrap() = map.clone();
     if let Ok(d) = app.path().app_config_dir() {
         let _ = std::fs::create_dir_all(&d);
@@ -410,6 +410,84 @@ fn format_set(
             serde_json::to_string_pretty(&format).unwrap_or_default(),
         );
     }
+    Ok(())
+}
+
+/// Re-encode every stored audio file that isn't already at the current
+/// format. Runs on a background thread; emits `reencode_progress` (per file),
+/// `reencode_error` (per failed file), and `reencode_done` (summary).
+#[tauri::command]
+fn library_reencode(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let format = state.format.lock().unwrap().clone();
+    if format.codec != "wav" && encode::ffmpeg_available().is_none() {
+        return Err("ffmpeg is not installed (brew install ffmpeg); WAV only until it is".into());
+    }
+    if state.reencode_running.swap(true, Ordering::SeqCst) {
+        return Err("a re-encode is already running".into());
+    }
+    let rows = match state.db.lock().unwrap().clone() {
+        Some(db) => {
+            let c = db.lock().unwrap();
+            library::all_audio(&c)?
+        }
+        None => {
+            state.reencode_running.store(false, Ordering::SeqCst);
+            return Err("library not open".into());
+        }
+    };
+    let total = rows.len();
+    std::thread::spawn(move || {
+        let mut converted = 0usize;
+        let mut skipped = 0usize;
+        let mut failed = 0usize;
+        for (i, (id, path)) in rows.iter().enumerate() {
+            let _ = app.emit(
+                "reencode_progress",
+                serde_json::json!({
+                    "done": i, "total": total,
+                    "converted": converted, "skipped": skipped, "failed": failed,
+                    "current": path,
+                }),
+            );
+            let src = std::path::Path::new(path);
+            if !src.exists() {
+                skipped += 1;
+                continue;
+            }
+            let out = match encode::reencode(src, &format) {
+                Ok(p) => p,
+                Err(e) => {
+                    failed += 1;
+                    let _ = app.emit(
+                        "reencode_error",
+                        serde_json::json!({ "id": id, "path": path, "error": e }),
+                    );
+                    continue;
+                }
+            };
+            if out.as_path() == src {
+                skipped += 1;
+                continue;
+            }
+            let _ = std::fs::remove_file(src);
+            let st = app.state::<AppState>();
+            if let Some(db) = st.db.lock().unwrap().clone() {
+                let c = db.lock().unwrap();
+                if library::set_audio(&c, *id, out.to_str().unwrap_or_default()).is_err() {
+                    failed += 1;
+                    continue;
+                }
+            }
+            converted += 1;
+        }
+        app.state::<AppState>()
+            .reencode_running
+            .store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            "reencode_done",
+            serde_json::json!({ "total": total, "converted": converted, "skipped": skipped, "failed": failed }),
+        );
+    });
     Ok(())
 }
 
@@ -747,12 +825,15 @@ fn open_device_with_gain(
             (Box::new(src), h)
         }
         "soapy" => {
+            let args = device
+                .filter(|d| !d.is_empty())
+                .unwrap_or("driver=soapy,soapy_driver=rtlsdr");
             let db = match setting {
                 Some(GainSetting::Manual(db)) => Some(db),
                 Some(GainSetting::Agc) => None,
                 _ => gain,
             };
-            let src = SoapyRtlSource::open(freq, rate, db)
+            let src = SoapyRtlSource::open(args, freq, rate, db)
                 .map_err(|e| format!("open RTL-SDR (Soapy): {e:?}"))?;
             let h = src.gain_handle();
             (Box::new(src), h)
@@ -964,6 +1045,7 @@ fn start_follow(
                     site,
                     emergency,
                     patched_with,
+                    voice_frame_errors,
                     ..
                 } = &ev
                 {
@@ -987,6 +1069,7 @@ fn start_follow(
                             patched_with: patched_with.clone(),
                             system: params.system_name.clone(),
                             site: *site,
+                            voice_frame_errors: *voice_frame_errors,
                             group,
                         });
                     }
@@ -1782,6 +1865,7 @@ fn main() {
             set_archive_mode,
             format_get,
             format_set,
+            library_reencode,
             stream::stream_get,
             stream::stream_configure,
             sysstat::sys_status,
@@ -1824,10 +1908,22 @@ mod corrections_tests {
     #[test]
     fn corrections_are_word_boundary_and_case_insensitive() {
         let rules = vec![("Rirey".to_string(), "Riley".to_string())];
-        assert_eq!(apply_corrections(&rules, "Unit 5 to Rirey station"), "Unit 5 to Riley station");
-        assert_eq!(apply_corrections(&rules, "rirey and RIREY"), "Riley and Riley");
-        assert_eq!(apply_corrections(&rules, "Rireyfield untouched"), "Rireyfield untouched");
-        assert_eq!(apply_corrections(&rules, "shirey untouched"), "shirey untouched");
+        assert_eq!(
+            apply_corrections(&rules, "Unit 5 to Rirey station"),
+            "Unit 5 to Riley station"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "rirey and RIREY"),
+            "Riley and Riley"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "Rireyfield untouched"),
+            "Rireyfield untouched"
+        );
+        assert_eq!(
+            apply_corrections(&rules, "shirey untouched"),
+            "shirey untouched"
+        );
         // No rules → unchanged.
         assert_eq!(apply_corrections(&[], "hello"), "hello");
     }

@@ -73,12 +73,16 @@ impl DeviceSettings {
             });
         }
         if kind == "soapy" {
-            // E4000: clamp into its own ladder; default to AGC — there is no
-            // known-good manual value for the E4000 yet, and the R820T2's
-            // 40 dB default does not map onto its −1..42 dB ladder.
+            // RTL-SDR through SoapySDR. The tuner reports its own gain ladder
+            // at open() (R820T2 0–49.6 dB, E4000 −1–42 dB) and SoapyRtlSource
+            // clamps the value into that range, so pass the raw dB through and
+            // let the device decide. R820T/R820T2 hardware AGC is unreliable —
+            // it garbled voice and, at floor gain, could not lock the control
+            // channel — so a fresh device defaults to a fixed manual gain like
+            // the pure-Rust path, never AGC.
             return Some(match self.gain {
-                Some(db) => G::Manual(hs_source::clamp_e4000_gain(db)),
-                None => G::Agc,
+                Some(db) => G::Manual(db),
+                None => G::Manual(hs_source::RTL_DEFAULT_GAIN_DB),
             });
         }
         Some(match self.gain {
@@ -123,22 +127,54 @@ pub fn detect() -> Vec<Device> {
             rates: vec![10_000_000.0, 2_500_000.0],
         })
         .collect();
-    // RTL-SDRs are enumerated only through SoapySDR (librtlsdr), which drives
-    // every tuner — R820T/R820T2, R828D, FC0012/13, and the E4000 (Nooelec
-    // Smartee XTR). The pure-Rust `rtlsdr` backend is a *subset* (R820T/R820T2
-    // only) and panics on an E4000 with "Failed to find tuner, aborting", so
-    // listing it here would surface a second, broken entry for the same dongle.
-    v.extend(
-        hs_source::soapy::SoapyRtlSource::list()
-            .into_iter()
-            .map(|(args, label)| Device {
-                kind: "soapy".into(),
+    // RTL-SDRs: route by tuner. The pure-Rust `rtlsdr` driver applies manual
+    // gain correctly and decodes the control channel; the SoapySDR path leaves
+    // R820T-family tuners at AGC/floor gain (SoapyRTLSDR never switches them
+    // out of auto gain mode) so the control channel is ~35 dB weak and cannot
+    // be found. The pure-Rust driver can't open an E4000, so those (and any
+    // other tuner it doesn't support) stay on the SoapySDR path.
+    let rtl_rates = vec![2_400_000.0, 1_024_000.0, 250_000.0];
+    let soapy_devs = hs_source::soapy::SoapyRtlSource::list(); // (args, label, tuner)
+    // The pure-Rust enumeration reports no tuner, so map serial → tuner from
+    // SoapySDR (which does report it) to decide which path each dongle takes.
+    let mut tuner_by_serial: HashMap<String, String> = HashMap::new();
+    for (args, _, tuner) in &soapy_devs {
+        if let Some(serial) = serial_from_args(args) {
+            tuner_by_serial.insert(serial, tuner.clone());
+        }
+    }
+    let is_rtl_tuner = |t: &str| t.contains("R820T") || t.contains("R828D");
+    for (args, label) in hs_source::rtlsdr::RtlSdrSource::list() {
+        let tuner = serial_from_args(&args).and_then(|s| tuner_by_serial.get(&s).cloned());
+        if tuner.as_deref().map(is_rtl_tuner).unwrap_or(true) {
+            v.push(Device {
+                kind: "rtlsdr".into(),
                 id: args,
                 label,
-                rates: vec![2_400_000.0, 1_024_000.0, 250_000.0],
-            }),
-    );
+                rates: rtl_rates.clone(),
+            });
+        }
+    }
+    for (args, label, tuner) in soapy_devs {
+        if is_rtl_tuner(&tuner) {
+            continue; // already listed above via the pure-Rust driver
+        }
+        v.push(Device {
+            kind: "soapy".into(),
+            id: args,
+            label,
+            rates: rtl_rates.clone(),
+        });
+    }
     v
+}
+
+/// Pull the `serial=` value out of a seify/SoapySDR args string, if present.
+fn serial_from_args(args: &str) -> Option<String> {
+    args.split(',').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k.trim() == "serial" && !v.trim().is_empty()).then(|| v.trim().to_string())
+    })
 }
 
 #[derive(Serialize)]

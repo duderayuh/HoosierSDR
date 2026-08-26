@@ -3,10 +3,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/duderayuh/HoosierSDR/main/tools/install-mac.sh | bash
 #
-# Installs every dependency (Xcode CLT, Homebrew, Rust, airspy + libusb),
-# clones the repo to ~/HoosierSDR (or updates it if already there), builds the
-# release CLI, and verifies it with a no-hardware demo decode. Idempotent —
-# re-running only does what is missing. Works on Apple Silicon and Intel.
+# Installs every dependency (Xcode CLT, Homebrew, Rust, the SDR capture libs
+# — airspy, libusb, soapysdr, soapyrtlsdr, librtlsdr — plus tauri-cli), clones
+# the repo to ~/HoosierSDR (or updates it if already there), builds the release
+# CLI, and verifies it with a no-hardware demo decode. Idempotent — re-running
+# only does what is missing. Works on Apple Silicon and Intel.
 set -euo pipefail
 
 REPO_URL="https://github.com/duderayuh/HoosierSDR.git"
@@ -62,8 +63,11 @@ else
 fi
 
 # ── 4. SDR capture tools ──
-say "SDR capture tools (airspy, libusb)"
-for pkg in airspy libusb; do
+# The desktop app enables the rtlsdr + airspy + soapy backends, so it links
+# libairspy, libSoapySDR, librtlsdr and libusb. Install them all up front so
+# `cargo tauri dev` works on first try, not just the CLI.
+say "SDR capture tools (airspy, libusb, soapysdr, soapyrtlsdr, librtlsdr)"
+for pkg in airspy libusb soapysdr soapyrtlsdr librtlsdr pkg-config; do
   if brew list --formula "$pkg" >/dev/null 2>&1; then
     ok "$pkg already installed"
   else
@@ -71,7 +75,29 @@ for pkg in airspy libusb; do
   fi
 done
 
-# ── 5. Clone or update the repo ──
+# ── 5. Tauri CLI + app transcription (for the desktop app) ──
+say "Tauri CLI"
+if cargo tauri --version >/dev/null 2>&1; then
+  ok "tauri-cli already installed"
+else
+  warn "installing tauri-cli (needed to build/run the desktop app)"
+  cargo install tauri-cli --version '^2.0'
+fi
+
+# Transcription is a runtime feature the app can start without; make a
+# best-effort attempt to provide faster-whisper and degrade gracefully.
+say "App transcription (faster-whisper, optional)"
+if python3 -c "import faster_whisper" >/dev/null 2>&1; then
+  ok "faster-whisper already available"
+elif command -v python3 >/dev/null 2>&1; then
+  warn "attempting \`python3 -m pip install --user faster-whisper\`"
+  python3 -m pip install --user faster-whisper \
+    || warn "could not install faster-whisper automatically — see app/README.md"
+else
+  warn "no python3 found; transcription disabled (the app still runs)"
+fi
+
+# ── 6. Clone or update the repo ──
 say "HoosierSDR source → $DEST"
 if [ -d "$DEST/.git" ]; then
   git -C "$DEST" pull --ff-only && ok "updated"
@@ -79,7 +105,7 @@ else
   git clone "$REPO_URL" "$DEST"
 fi
 
-# ── 6. Build the release CLI ──
+# ── 7. Build the release CLI ──
 say "Building the release CLI (first build takes a few minutes)"
 # libairspy is installed above, so build live Airspy capture in.
 ( cd "$DEST" && cargo build --release -p hs-cli --features airspy )
@@ -87,7 +113,7 @@ BIN="$DEST/target/release/hoosier-sdr"
 [ -x "$BIN" ] || die "build finished but $BIN is missing"
 ok "built $BIN"
 
-# ── 7. Verify with a no-hardware demo decode ──
+# ── 8. Verify with a no-hardware demo decode ──
 # Capture the whole output before grepping: piping straight into `grep -q`
 # would SIGPIPE the decoder, which `set -o pipefail` reads as a failure.
 say "Verifying with a synthesized decode (no radio needed)"
@@ -98,7 +124,7 @@ else
   die "the demo decode did not produce output — something is wrong with the build"
 fi
 
-# ── 8. Offer to put the binary on PATH ──
+# ── 9. Offer to put the binary on PATH ──
 say "Done."
 LINE='export PATH="'"$DEST"'/target/release:$PATH"'
 if ! grep -qsF "$LINE" "$HOME/.zshrc" 2>/dev/null; then
@@ -117,8 +143,13 @@ cat <<EOF
     hoosier-sdr --sdr --source airspy --rate 10000000 --freq 855M \\
                 --follow --control 851.5375M         # follow a whole site live
 
-  Optional extras:
-    cd $DEST && cargo build --release -p hs-cli --features rtlsdr   # live RTL-SDR
-    cargo install tauri-cli --version '^2.0' && cd $DEST/app && cargo tauri dev  # GUI
+  Desktop app (deps already installed above):
+    cd $DEST/app && cargo tauri dev                 # launch the GUI
+
+  App transcription (optional — see app/README.md):
+    # needs faster-whisper importable from a Python at /usr/local/bin/python3
+    # or /opt/homebrew/bin/python3. Run:
+    #   python3 -m pip install --user faster-whisper
+    # (or set TRANSCRIBE_PYTHON to a specific interpreter)
 
 EOF

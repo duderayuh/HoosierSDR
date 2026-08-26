@@ -256,6 +256,30 @@ pub fn get(c: &Connection, id: i64) -> Result<Option<CallRow>, String> {
     .map_err(|e| format!("get: {e}"))
 }
 
+/// Every call that has an audio file: (id, path), oldest first.
+pub fn all_audio(c: &Connection) -> Result<Vec<(i64, String)>, String> {
+    let mut st = c
+        .prepare("SELECT id, audio FROM calls WHERE audio IS NOT NULL ORDER BY id ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// Point a call's audio at a new path and recompute its capture hash.
+pub fn set_audio(c: &Connection, id: i64, path: &str) -> Result<(), String> {
+    let sha = sha256_file(Path::new(path))?;
+    c.execute(
+        "UPDATE calls SET audio = ?2, sha256 = ?3 WHERE id = ?1",
+        params![id, path, sha],
+    )
+    .map_err(|e| format!("set audio: {e}"))?;
+    Ok(())
+}
+
 /// Audio files of up to `n` calls on `tg` that ended within `window_secs`
 /// before call `id`, newest first — the earlier traffic an alert may attach.
 pub fn previous_on_talkgroup(

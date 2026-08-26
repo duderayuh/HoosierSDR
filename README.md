@@ -15,10 +15,11 @@ Desktop-first (macOS and Windows). Built for Indiana's Hoosier SAFE-T system (P2
 curl -fsSL https://raw.githubusercontent.com/duderayuh/HoosierSDR/main/tools/install-mac.sh | bash
 ```
 
-Installs every dependency (Xcode CLT, Homebrew, Rust, airspy + libusb), clones
-to `~/HoosierSDR`, builds the release CLI, and verifies it with a no-hardware
-decode. Idempotent — safe to re-run. Linux/Windows: see [Building](#building)
-below.
+Installs every dependency (Xcode CLT, Homebrew, Rust, the SDR capture libs
+`airspy libusb soapysdr soapyrtlsdr librtlsdr`, plus `tauri-cli`), clones to
+`~/HoosierSDR`, builds the release CLI, and verifies it with a no-hardware
+decode. Also makes the desktop app buildable on first try. Idempotent — safe to
+re-run. Linux/Windows: see [Building](#building) below.
 
 ## Try it now
 
@@ -118,7 +119,7 @@ calls decode live with talkgroup names, a spectrum waterfall, and one-click
 CSV via `hs-catalog` (also available on the CLI: `--catalog talkgroups.csv`).
 
 ```sh
-cd app && cargo tauri dev      # macOS: brew install libusb; cargo install tauri-cli
+cd app && cargo tauri dev      # macOS: brew install airspy soapysdr soapyrtlsdr librtlsdr libusb; cargo install tauri-cli
 ```
 
 ## What's not done yet

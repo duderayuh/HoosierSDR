@@ -92,6 +92,9 @@ pub enum FollowEvent {
     CallStart {
         tg: u16,
         name: String,
+        /// Human-readable description (RadioReference "Description"), e.g.
+        /// "IU Methodist" alongside the alpha tag "49M-03".
+        desc: Option<String>,
         freq_mhz: f64,
         priority: u8,
     },
@@ -99,6 +102,8 @@ pub enum FollowEvent {
     Call {
         tg: u16,
         name: String,
+        /// Human-readable description (RadioReference "Description").
+        desc: Option<String>,
         source: u32,
         unit_name: Option<String>,
         freq_mhz: f64,
@@ -116,6 +121,8 @@ pub enum FollowEvent {
         /// that produced no audio.
         syncs_c4fm: u32,
         syncs_cqpsk: u32,
+        /// Voice-frame FEC errors over the call (for the upload errorCount).
+        voice_frame_errors: u64,
         /// Over-the-air alias the radio's system broadcast, if any.
         talker_alias: Option<String>,
         wav: Option<String>,
@@ -590,6 +597,16 @@ impl Reporter<'_> {
         }
     }
 
+    /// The catalog's long description for a talkgroup ("IU Methodist") — the
+    /// human-readable alias shown alongside the alpha tag. `None` when the
+    /// talkgroup is unknown or has no description.
+    fn description_of(&self, tg: u16) -> Option<String> {
+        self.catalog.lock().ok().and_then(|c| {
+            c.as_ref()
+                .and_then(|k| k.get(tg).and_then(|t| t.description.clone()))
+        })
+    }
+
     fn is_named(&self, tg: u16) -> bool {
         self.catalog
             .lock()
@@ -614,7 +631,14 @@ impl Reporter<'_> {
         crate::units::name_for(&units, &rules, id)
     }
 
-    fn status(&self, total_pairs: u64, secs: f64, rate: f64, dropped: u64, signal_dbfs: Option<f32>) -> FollowEvent {
+    fn status(
+        &self,
+        total_pairs: u64,
+        secs: f64,
+        rate: f64,
+        dropped: u64,
+        signal_dbfs: Option<f32>,
+    ) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
             calls: self.calls,
@@ -732,6 +756,7 @@ impl Reporter<'_> {
             emit(FollowEvent::CallStart {
                 tg: *tg,
                 name: self.name_of(*tg),
+                desc: self.description_of(*tg),
                 freq_mhz: *hz as f64 / 1e6,
                 priority: self.priority_of(*tg),
             });
@@ -781,6 +806,7 @@ impl Reporter<'_> {
                 .unwrap_or_else(epoch_secs);
             let secs = c.pcm.len() as f64 / 8000.0;
             let name = self.name_of(c.talkgroup);
+            let desc = self.description_of(c.talkgroup);
             let unit_name = self.unit_name(c.source_unit);
             // A keyup with no voice leaves nothing worth a file; nor does a
             // talkgroup the listener chose not to record.
@@ -892,6 +918,7 @@ impl Reporter<'_> {
             emit(FollowEvent::Call {
                 tg: c.talkgroup,
                 name,
+                desc,
                 source: c.source_unit,
                 unit_name,
                 freq_mhz: c.freq_hz as f64 / 1e6,
@@ -904,6 +931,7 @@ impl Reporter<'_> {
                 priority: self.priority_of(c.talkgroup),
                 syncs_c4fm: c.syncs_c4fm,
                 syncs_cqpsk: c.syncs_cqpsk,
+                voice_frame_errors: c.voice_frame_errors,
                 talker_alias: c.talker_alias.clone(),
                 wav,
                 id,

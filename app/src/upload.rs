@@ -72,6 +72,8 @@ pub struct Job {
     pub site: Option<u8>,
     /// Talkgroup service category (e.g. "Fire", "EMS"), sent as `talkgroupGroup`.
     pub group: String,
+    /// Voice-frame FEC errors over the call, sent as `frequencies[].errorCount`.
+    pub voice_frame_errors: u64,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -278,10 +280,11 @@ pub fn send_rdio(cfg: &Rdio, job: &Job, base_override: Option<&str>) -> Result<S
             },
         )
         .text("dateTime", job.start)
+        .text("timestamp", job.start * 1000)
         .text("frequency", job.freq_hz)
         .text(
             "frequencies",
-            serde_json::json!([{ "freq": job.freq_hz, "pos": 0.0, "len": job.secs }]).to_string(),
+            serde_json::json!([{ "freq": job.freq_hz, "pos": 0.0, "len": job.secs, "errorCount": job.voice_frame_errors }]).to_string(),
         )
         .text("talkgroup", job.tg)
         .text("talkgroupLabel", &job.tg_name)
@@ -669,6 +672,7 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
         system: row.system,
         site: None,
         group,
+        voice_frame_errors: 0,
     };
     let mut guard = state.uploader.lock().unwrap();
     if guard.is_none() {
@@ -744,6 +748,7 @@ mod tests {
             system: "SAFE-T".into(),
             site: Some(12),
             group: "Fire".into(),
+            voice_frame_errors: 42,
         }
     }
 
@@ -767,8 +772,10 @@ mod tests {
             "name=\"key\"\r\n\r\nK",
             "name=\"system\"\r\n\r\n7",
             "name=\"dateTime\"\r\n\r\n1700000000",
+            "name=\"timestamp\"\r\n\r\n1700000000000",
             "name=\"talkgroup\"\r\n\r\n10103",
             "name=\"frequency\"\r\n\r\n857387500",
+            "errorCount\":42",
             "name=\"talkgroupLabel\"\r\n\r\nIMPD North",
             "name=\"site\"\r\n\r\n12",
             "name=\"talkgroupGroup\"\r\n\r\nFire",
