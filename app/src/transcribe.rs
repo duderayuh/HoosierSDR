@@ -333,7 +333,28 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                         crate::conversations::on_transcript(&app2, id, &corrected);
                     }
                 } else if let Some(err) = v["error"].as_str() {
-                    let _ = app2.emit("transcribe_error", format!("call {:?}: {err}", id));
+                    // A decode/transcribe failure on this file is terminal: mark
+                    // it so the pump does not retry the same corrupt call forever
+                    // and stall the whole queue behind it.
+                    let label = match id {
+                        Some(id) => {
+                            let _ = {
+                                let guard = state.db.lock().unwrap();
+                                match guard.as_ref() {
+                                    Some(db) => library::set_transcript(
+                                        &db.lock().unwrap(),
+                                        id,
+                                        "",
+                                        "transcribe-error",
+                                    ),
+                                    None => Err("library not open".into()),
+                                }
+                            };
+                            id.to_string()
+                        }
+                        None => "?".to_string(),
+                    };
+                    let _ = app2.emit("transcribe_error", format!("call {label}: {err}"));
                 }
                 shared2.lock().unwrap().busy.store(false, Ordering::SeqCst);
             }
