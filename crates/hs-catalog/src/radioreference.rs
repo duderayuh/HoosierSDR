@@ -211,7 +211,7 @@ impl RrSystem {
                 field(tg.alias.as_deref()),
                 if tg.encrypted { "DE" } else { "D" },
                 field(tg.description.as_deref()),
-                field(tg.category.as_deref()),
+                field(tg.tag.as_deref()),
                 field(tg.category.as_deref()),
             ));
         }
@@ -727,7 +727,12 @@ fn parse_talkgroup(n: &&Node) -> Option<Talkgroup> {
         description: n
             .get_any(&["tgDescr", "tgDescription", "description"])
             .map(str::to_string),
-        category: n.get_any(&["tgCat", "category", "tag"]).map(str::to_string),
+        tag: n
+            .get_any(&["tgTag", "tgService", "tag"])
+            .map(str::to_string),
+        category: n
+            .get_any(&["tgCat", "tgCategory", "category"])
+            .map(str::to_string),
         // RR encodes encryption in the mode string: a trailing "E".
         encrypted: mode.to_ascii_uppercase().contains('E'),
         // Priority is a per-user setting, not an RR database field.

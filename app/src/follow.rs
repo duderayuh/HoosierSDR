@@ -104,6 +104,10 @@ pub enum FollowEvent {
         name: String,
         /// Human-readable description (RadioReference "Description").
         desc: Option<String>,
+        /// Service type (RadioReference "Tag"), e.g. "Law Dispatch".
+        service: Option<String>,
+        /// Agency/group (RadioReference "Category"), e.g. "Police".
+        category: Option<String>,
         source: u32,
         unit_name: Option<String>,
         freq_mhz: f64,
@@ -115,6 +119,11 @@ pub enum FollowEvent {
         /// Numeric site ID from the control channel, if announced.
         site: Option<u8>,
         emergency: bool,
+        encrypted: bool,
+        /// System label (e.g. "SAFE-T") the call was heard on.
+        system: String,
+        /// Site label (e.g. "Marion Co Simulcast") the call was heard on.
+        site_name: String,
         patched_with: Vec<u16>,
         priority: u8,
         /// Frame syncs each decoder achieved — the evidence behind a call
@@ -381,6 +390,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         busy: 0,
         gate: GrantGate::new(5.0),
         started: std::collections::HashMap::new(),
+        encrypted_active: std::collections::HashMap::new(),
         priorities: std::collections::HashMap::new(),
         unnamed: std::collections::HashSet::new(),
     };
@@ -553,6 +563,26 @@ fn epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// An encrypted transmission in progress, tracked by voice frequency. Its
+/// duration is unknowable (the voice is ciphertext), so the end is inferred
+/// from the grant going quiet rather than decoded frames.
+#[derive(Clone, Copy)]
+struct EncAct {
+    tg: u16,
+    unit: u32,
+    /// First grant (epoch s).
+    start: u64,
+    /// Most recent grant (epoch s) — the call's true visible duration is
+    /// `last - start`.
+    last: u64,
+    /// Seconds since the last re-broadcast of this grant.
+    quiet: f64,
+}
+
+/// How long a frequency must go ungranted before an encrypted transmission is
+/// considered over.
+const ENC_QUIET_SECS: f64 = 5.0;
+
 /// Turns follower output into events and keeps the running counts.
 struct Reporter<'a> {
     catalog: &'a std::sync::Mutex<Option<CsvCatalog>>,
@@ -581,6 +611,8 @@ struct Reporter<'a> {
     gate: GrantGate,
     /// When each active call started (epoch s), by (tg, freq).
     started: std::collections::HashMap<(u16, u64), u64>,
+    /// Active encrypted transmissions by voice frequency.
+    encrypted_active: std::collections::HashMap<u64, EncAct>,
     priorities: std::collections::HashMap<u16, u8>,
 }
 
@@ -607,6 +639,23 @@ impl Reporter<'_> {
         })
     }
 
+    /// The catalog's service type (RadioReference "Tag") for a talkgroup —
+    /// e.g. "Law Dispatch", "Fire-Tac". `None` when unknown or untagged.
+    fn service_of(&self, tg: u16) -> Option<String> {
+        self.catalog.lock().ok().and_then(|c| {
+            c.as_ref()
+                .and_then(|k| k.get(tg).and_then(|t| t.tag.clone()))
+        })
+    }
+
+    /// The catalog's agency/group (RadioReference "Category") for a talkgroup.
+    fn category_of(&self, tg: u16) -> Option<String> {
+        self.catalog.lock().ok().and_then(|c| {
+            c.as_ref()
+                .and_then(|k| k.get(tg).and_then(|t| t.category.clone()))
+        })
+    }
+
     fn is_named(&self, tg: u16) -> bool {
         self.catalog
             .lock()
@@ -629,6 +678,142 @@ impl Reporter<'_> {
         let units = self.units.lock().ok()?;
         let rules = self.unit_rules.lock().ok()?;
         crate::units::name_for(&units, &rules, id)
+    }
+
+    /// Track encrypted grants so each encrypted transmission becomes one muted
+    /// call in the history and library (no audio, never decoded).
+    fn track_encrypted(
+        &mut self,
+        out: &hs_core::follow::FollowOutput,
+        secs: f64,
+        emit: &mut dyn FnMut(FollowEvent),
+    ) {
+        let now = epoch_secs();
+        for a in self.encrypted_active.values_mut() {
+            a.quiet += secs;
+        }
+        // Observe this block's encrypted grants. A frequency regranted to
+        // another talkgroup ends the old transmission; a silent one ends by
+        // timeout.
+        let mut done: Vec<(u16, u32, u64, u64, u64)> = Vec::new();
+        for g in &out.grants {
+            if !g.encrypted {
+                continue;
+            }
+            match self.encrypted_active.get_mut(&g.freq_hz) {
+                Some(a) if a.tg == g.talkgroup => {
+                    a.last = now;
+                    a.quiet = 0.0;
+                }
+                Some(a) => {
+                    done.push((a.tg, a.unit, g.freq_hz, a.start, a.last));
+                    *a = EncAct {
+                        tg: g.talkgroup,
+                        unit: g.source_unit,
+                        start: now,
+                        last: now,
+                        quiet: 0.0,
+                    };
+                }
+                None => {
+                    self.encrypted_active.insert(
+                        g.freq_hz,
+                        EncAct {
+                            tg: g.talkgroup,
+                            unit: g.source_unit,
+                            start: now,
+                            last: now,
+                            quiet: 0.0,
+                        },
+                    );
+                }
+            }
+        }
+        self.encrypted_active.retain(|freq, a| {
+            if a.quiet >= ENC_QUIET_SECS {
+                done.push((a.tg, a.unit, *freq, a.start, a.last));
+                false
+            } else {
+                true
+            }
+        });
+        for (tg, unit, freq, start, last) in done {
+            self.emit_encrypted(tg, unit, freq, start, last, emit);
+        }
+    }
+
+    /// Emit one finished encrypted transmission as a muted call: a library row
+    /// (no audio) plus a `Call` event the front end renders as "Encrypted".
+    fn emit_encrypted(
+        &self,
+        tg: u16,
+        unit: u32,
+        freq_hz: u64,
+        start: u64,
+        last: u64,
+        emit: &mut dyn FnMut(FollowEvent),
+    ) {
+        let secs = last.saturating_sub(start) as f64;
+        let name = self.name_of(tg);
+        let service = self.service_of(tg);
+        let category = self.category_of(tg);
+        let unit_name = self.unit_name(unit);
+
+        let id = self.db.and_then(|db| {
+            let row = crate::library::CallRow {
+                id: 0,
+                start: start as i64,
+                secs,
+                tg,
+                tg_name: name.clone(),
+                service: service.clone().unwrap_or_default(),
+                category: category.clone().unwrap_or_default(),
+                unit,
+                unit_name: unit_name.clone(),
+                freq_hz,
+                modulation: "encrypted".to_string(),
+                emergency: false,
+                encrypted: true,
+                ..Default::default()
+            };
+            match crate::library::insert(&*db.lock().ok()?, &row) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    emit(FollowEvent::Notice {
+                        text: format!("library: {e}"),
+                    });
+                    None
+                }
+            }
+        });
+
+        emit(FollowEvent::Call {
+            tg,
+            name,
+            desc: self.description_of(tg),
+            service,
+            category,
+            source: unit,
+            unit_name,
+            freq_mhz: freq_hz as f64 / 1e6,
+            modulation: "encrypted".to_string(),
+            secs,
+            start: start as i64,
+            site: self.site_id,
+            emergency: false,
+            encrypted: true,
+            system: self.system_name.clone(),
+            site_name: self.site_name.clone(),
+            patched_with: Vec::new(),
+            priority: self.priority_of(tg),
+            syncs_c4fm: 0,
+            syncs_cqpsk: 0,
+            voice_frame_errors: 0,
+            talker_alias: None,
+            wav: None,
+            id,
+            pcm: Vec::new(),
+        });
     }
 
     fn status(
@@ -678,6 +863,7 @@ impl Reporter<'_> {
                 });
             }
         }
+        self.track_encrypted(&out, secs, emit);
         for m in &out.mobility {
             use hs_core::trunk::MobilityEvent;
             let (kind, unit, tg) = match *m {
@@ -807,6 +993,8 @@ impl Reporter<'_> {
             let secs = c.pcm.len() as f64 / 8000.0;
             let name = self.name_of(c.talkgroup);
             let desc = self.description_of(c.talkgroup);
+            let service = self.service_of(c.talkgroup);
+            let category = self.category_of(c.talkgroup);
             let unit_name = self.unit_name(c.source_unit);
             // A keyup with no voice leaves nothing worth a file; nor does a
             // talkgroup the listener chose not to record.
@@ -894,11 +1082,14 @@ impl Reporter<'_> {
                     secs,
                     tg: c.talkgroup,
                     tg_name: name.clone(),
+                    service: service.clone().unwrap_or_default(),
+                    category: category.clone().unwrap_or_default(),
                     unit: c.source_unit,
                     unit_name: unit_name.clone(),
                     freq_hz: c.freq_hz,
                     modulation: mod_name(c.modulation),
                     emergency: c.emergency,
+                    encrypted: false,
                     patched_with: c.patched_with.clone(),
                     system: self.system_name.clone(),
                     site: self.site_name.clone(),
@@ -919,6 +1110,8 @@ impl Reporter<'_> {
                 tg: c.talkgroup,
                 name,
                 desc,
+                service,
+                category,
                 source: c.source_unit,
                 unit_name,
                 freq_mhz: c.freq_hz as f64 / 1e6,
@@ -927,6 +1120,9 @@ impl Reporter<'_> {
                 start: start as i64,
                 site: self.site_id,
                 emergency: c.emergency,
+                encrypted: false,
+                system: self.system_name.clone(),
+                site_name: self.site_name.clone(),
                 patched_with: c.patched_with.clone(),
                 priority: self.priority_of(c.talkgroup),
                 syncs_c4fm: c.syncs_c4fm,

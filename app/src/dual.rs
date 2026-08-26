@@ -252,6 +252,8 @@ fn finish_call(
             tg: c.tg,
             name: String::new(), // filled by the front end from its own lookup
             desc: None,
+            service: None,
+            category: None,
             source: 0,
             unit_name: None,
             freq_mhz: c.freq_hz as f64 / 1e6,
@@ -260,6 +262,9 @@ fn finish_call(
             start: c.start,
             site: None,
             emergency: false,
+            encrypted: false,
+            system: String::new(),
+            site_name: String::new(),
             patched_with: Vec::new(),
             priority: c.priority,
             syncs_c4fm: 0,

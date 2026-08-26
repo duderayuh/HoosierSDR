@@ -33,15 +33,16 @@ fn embedded_key() -> Option<String> {
     (!k.is_empty()).then_some(k)
 }
 
-/// The app key to use: this build's embedded key, else one the user saved.
+/// The app key to use: always the key embedded in this build. It is the
+/// project's key (bundled with every install), not a per-user secret, so
+/// users only ever supply their own RadioReference username and password.
 fn app_key() -> Option<String> {
-    embedded_key().or_else(|| get_secret("app_key").filter(|k| !k.is_empty()))
+    embedded_key()
 }
 
 fn client(app: &AppHandle) -> Result<RrClient, String> {
     let p = load_prefs(app);
-    let key = app_key()
-        .ok_or("no RadioReference app key: this build has none embedded, so enter one in Config")?;
+    let key = app_key().ok_or("no RadioReference app key embedded in this build")?;
     if p.username.is_empty() {
         return Err("save your RadioReference username and password first".into());
     }
@@ -170,6 +171,7 @@ pub struct AliasRow {
     pub id: u16,
     pub alias: String,
     pub description: String,
+    pub tag: String,
     pub category: String,
     pub encrypted: bool,
     pub source: String,
@@ -205,6 +207,7 @@ pub fn catalog_rows(app: AppHandle) -> Vec<AliasRow> {
                     id: tg.id,
                     alias: tg.alias.unwrap_or_default(),
                     description: tg.description.unwrap_or_default(),
+                    tag: tg.tag.unwrap_or_default(),
                     category: tg.category.unwrap_or_default(),
                     encrypted: tg.encrypted,
                     source: source.clone(),
@@ -341,8 +344,6 @@ pub struct RrSettings {
     username: String,
     sid: Option<u32>,
     has_app_key: bool,
-    /// The key is built in; the app-key field is not needed.
-    embedded_key: bool,
     has_password: bool,
     system_name: Option<String>,
     /// Talkgroups in the catalog currently loaded (from disk at start).
@@ -355,7 +356,6 @@ pub fn rr_settings(app: AppHandle, state: State<AppState>) -> RrSettings {
     let p = load_prefs(&app);
     RrSettings {
         has_app_key: app_key().is_some(),
-        embedded_key: embedded_key().is_some(),
         has_password: !p.username.is_empty()
             && get_secret(&format!("password:{}", p.username)).is_some_and(|k| !k.is_empty()),
         username: p.username,
@@ -370,11 +370,11 @@ pub fn rr_settings(app: AppHandle, state: State<AppState>) -> RrSettings {
     }
 }
 
-/// Save credentials. Empty `app_key` / `password` keep what is stored.
+/// Save credentials. An empty `password` keeps what is stored. The
+/// RadioReference app key is embedded in the build and is never user-supplied.
 #[tauri::command]
 pub fn rr_save(
     app: AppHandle,
-    app_key: String,
     username: String,
     password: String,
     sid: Option<u32>,
@@ -382,9 +382,6 @@ pub fn rr_save(
     let mut p = load_prefs(&app);
     p.username = username.trim().to_string();
     p.sid = sid;
-    if !app_key.trim().is_empty() {
-        crate::secrets::set("app_key", app_key.trim())?;
-    }
     if !password.is_empty() {
         if p.username.is_empty() {
             return Err("enter the username the password belongs to".into());
@@ -411,6 +408,7 @@ pub struct RrTalkgroup {
     id: u16,
     alias: String,
     description: String,
+    tag: String,
     category: String,
     encrypted: bool,
 }
@@ -500,6 +498,7 @@ fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> 
             id: t.id,
             alias: t.alias.clone().unwrap_or_default(),
             description: t.description.clone().unwrap_or_default(),
+            tag: t.tag.clone().unwrap_or_default(),
             category: t.category.clone().unwrap_or_default(),
             encrypted: t.encrypted,
         })

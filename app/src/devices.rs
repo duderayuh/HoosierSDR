@@ -135,8 +135,8 @@ pub fn detect() -> Vec<Device> {
     // other tuner it doesn't support) stay on the SoapySDR path.
     let rtl_rates = vec![2_400_000.0, 1_024_000.0, 250_000.0];
     let soapy_devs = hs_source::soapy::SoapyRtlSource::list(); // (args, label, tuner)
-    // The pure-Rust enumeration reports no tuner, so map serial → tuner from
-    // SoapySDR (which does report it) to decide which path each dongle takes.
+                                                               // The pure-Rust enumeration reports no tuner, so map serial → tuner from
+                                                               // SoapySDR (which does report it) to decide which path each dongle takes.
     let mut tuner_by_serial: HashMap<String, String> = HashMap::new();
     for (args, _, tuner) in &soapy_devs {
         if let Some(serial) = serial_from_args(args) {

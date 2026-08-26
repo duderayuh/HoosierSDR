@@ -486,6 +486,8 @@ tbody tr.noaudio td { opacity: .55; }
 
 /* ---------- talkgroup description (the human-readable alias) ---------- */
 td.tg .desc { display: block; font-size: 11px; font-weight: 500; color: var(--signal); line-height: 1.25; }
+.svc { display: inline-block; font-family: var(--mono); font-size: 9.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-right: 6px; color: #7aa2ff; background: color-mix(in srgb, #7aa2ff 16%, transparent); }
+.cat { display: inline-block; font-size: 10.5px; font-weight: 500; color: var(--ink-faint); margin-right: 6px; }
 
 /* ---------- transcript tooltip ---------- */
 .tip { position: fixed; z-index: 120; max-width: 520px; max-height: 60vh; overflow: auto; padding: 10px 13px; font-size: 12.5px; line-height: 1.45; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere; display: none; }

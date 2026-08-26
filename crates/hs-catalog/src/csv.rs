@@ -98,6 +98,7 @@ struct ColumnMap {
     alpha: Option<usize>,
     mode: Option<usize>,
     description: Option<usize>,
+    tag: Option<usize>,
     category: Option<usize>,
     priority: Option<usize>,
 }
@@ -110,6 +111,7 @@ impl ColumnMap {
             alpha: Some(2),
             mode: Some(3),
             description: Some(4),
+            tag: Some(5),
             category: Some(6),
             priority: Some(7),
         }
@@ -128,7 +130,8 @@ impl ColumnMap {
             alpha: find(&["Alpha Tag", "Alpha", "Name"]),
             mode: find(&["Mode"]),
             description: find(&["Description"]),
-            category: find(&["Category", "Tag"]),
+            tag: find(&["Tag"]),
+            category: find(&["Category"]),
             priority: find(&["Priority"]),
         }
     }
@@ -159,6 +162,7 @@ impl ColumnMap {
             id,
             alias: pick(self.alpha),
             description: pick(self.description),
+            tag: pick(self.tag),
             category: pick(self.category),
             encrypted,
             priority,
@@ -219,6 +223,7 @@ Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority
         assert_eq!(cat.len(), 3);
         let medic = cat.get(12179).unwrap();
         assert_eq!(medic.alias.as_deref(), Some("MEDIC 4"));
+        assert_eq!(medic.tag.as_deref(), Some("EMS Dispatch"));
         assert_eq!(medic.category.as_deref(), Some("EMS"));
         assert!(!medic.encrypted);
         assert_eq!(medic.priority, Some(1));
