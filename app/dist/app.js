@@ -1201,7 +1201,7 @@ if (TAURI) {
     const list = akSettings ? akSettings.alerts : [];
     $("akEmpty").style.display = list.length ? "none" : "";
     $("akMeta").textContent = list.length ? `${list.filter((a) => a.enabled).length} of ${list.length} enabled` : "";
-    $("akList").innerHTML = list.map((a) => `<div class="row ${akSel === a.id ? "on" : ""}" data-ak="${esc(a.id)}"><span class="grow"><b>${esc(a.name)}</b> ${a.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>${akKindLabel[a.trigger.kind] || a.trigger.kind}${a.trigger.keywords.length ? ": " + esc(a.trigger.keywords.slice(0, 4).join(", ")) + (a.trigger.keywords.length > 4 ? "…" : "") : ""} · TG ${a.trigger.tgs.length ? a.trigger.tgs.join(",") : "any"}${a.telegram ? " · Telegram" : ""}${a.ai_gate ? " · AI" : ""}</small></span><label class="check" style="margin:0" title="enabled"><input type="checkbox" data-aken="${esc(a.id)}" ${a.enabled ? "checked" : ""}></label></div>`).join("");
+    $("akList").innerHTML = list.map((a) => `<div class="row ${akSel === a.id ? "on" : ""}" data-ak="${esc(a.id)}"><span class="grow"><b>${esc(a.name)}</b> ${a.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>${akKindLabel[a.trigger.kind] || a.trigger.kind}${a.trigger.keywords.length ? ": " + esc(a.trigger.keywords.slice(0, 4).join(", ")) + (a.trigger.keywords.length > 4 ? "…" : "") : ""} · TG ${a.trigger.tgs.length ? a.trigger.tgs.join(",") : "any"}${a.telegram ? " · Telegram" : ""}${a.bluesky ? " · Bluesky" : ""}${a.ai_gate ? " · AI" : ""}</small></span><label class="check" style="margin:0" title="enabled"><input type="checkbox" data-aken="${esc(a.id)}" ${a.enabled ? "checked" : ""}></label></div>`).join("");
     $("akList").querySelectorAll(".row[data-ak]").forEach((r) => r.onclick = (e) => { if (e.target.closest("input")) return; akEdit(r.dataset.ak); });
     $("akList").querySelectorAll("input[data-aken]").forEach((c) => c.onchange = async () => { const a = akSettings.alerts.find((x) => x.id === c.dataset.aken); a.enabled = c.checked; await akPersist(); });
   }
@@ -1211,7 +1211,7 @@ if (TAURI) {
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
     $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt;
+    $("akTelegram").checked = a.telegram; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt;
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
     akKindUi();
   }
@@ -1223,11 +1223,12 @@ if (TAURI) {
     a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
     a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
     a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value;
+    a.telegram = $("akTelegram").checked; a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value;
     return a;
   }
   async function akPersist() {
     akSettings.telegram.chat_id = $("tgChat").value.trim();
+    akSettings.bluesky = { handle: $("bsHandle").value.trim() };
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
     try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
   }
@@ -1248,6 +1249,7 @@ if (TAURI) {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings;
       $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
+      $("bsHandle").value = v.settings.bluesky.handle; $("bsPassword").placeholder = v.has_bluesky ? "saved on this Mac" : "xxxx-xxxx-xxxx-xxxx"; $("bsMeta").textContent = v.has_bluesky ? (v.settings.bluesky.handle ? "configured" : "password saved — add a handle") : "no app password";
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;
       akRenderList(); akLogRefresh(); olRefresh(true);
@@ -1260,6 +1262,8 @@ if (TAURI) {
   $("olRefresh").onclick = () => olRefresh(false);
   ["olModel", "olTimeout", "olFailOpen", "olUrl"].forEach((id) => $(id).onchange = akPersist);
   $("tgSave").onclick = async () => { try { if ($("tgToken").value.trim()) { await invoke("telegram_save", { token: $("tgToken").value.trim() }); $("tgToken").value = ""; } if (await akPersist()) { uiToast("Telegram settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
+  $("bsSave").onclick = async () => { try { if ($("bsPassword").value.trim()) { await invoke("bluesky_save", { password: $("bsPassword").value.trim() }); $("bsPassword").value = ""; } if (await akPersist()) { uiToast("Bluesky settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
+  $("bsTest").onclick = async () => { try { await $("bsSave").onclick(); uiToast(await invoke("bluesky_test")); } catch (e) { uiToast(`Bluesky test failed: ${e}`, "err"); } };
   $("tgTest").onclick = async () => {
     await $("tgSave").onclick();
     const id = `t${Date.now()}`;

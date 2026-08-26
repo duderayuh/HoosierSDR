@@ -53,6 +53,9 @@ pub struct Alert {
     /// Seconds before the same alert may fire again for the same talkgroup.
     pub cooldown_secs: u32,
     pub telegram: bool,
+    /// Also post to Bluesky.
+    #[serde(default)]
+    pub bluesky: bool,
     pub tone: bool,
     pub attach_audio: bool,
     /// Also attach this many earlier calls on the same talkgroup…
@@ -77,6 +80,7 @@ impl Default for Alert {
             message: "🚨 {alert}\n{tgname} (TG {tg}) · {unitname} · {time}\n{transcript}".into(),
             cooldown_secs: 300,
             telegram: true,
+            bluesky: false,
             tone: true,
             attach_audio: true,
             combine_prev: 0,
@@ -90,6 +94,13 @@ impl Default for Alert {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Telegram {
     pub chat_id: String,
+}
+
+/// Bluesky account to post alerts to. The handle is public; the app password
+/// is a secret held in the local secret store, not in these settings.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Bluesky {
+    pub handle: String,
 }
 
 /// The alerts' Telegram chat and Ollama settings, for the conversation
@@ -113,6 +124,8 @@ pub struct Settings {
     pub alerts: Vec<Alert>,
     pub telegram: Telegram,
     pub ollama: Ollama,
+    #[serde(default)]
+    pub bluesky: Bluesky,
 }
 
 impl Default for Settings {
@@ -128,6 +141,7 @@ impl Default for Settings {
                 timeout_secs: 60,
                 fail_open: true,
             },
+            bluesky: Bluesky::default(),
         }
     }
 }
@@ -420,6 +434,29 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
                 Err(e) => {
                     ok = false;
                     detail = e;
+                }
+            }
+        }
+        if a.bluesky {
+            let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
+            let res = bluesky_password()
+                .ok_or_else(|| "no Bluesky app password".to_string())
+                .and_then(|pw| post_to_bluesky(&handle, &pw, &message));
+            match res {
+                Ok(d) => {
+                    detail = if detail.is_empty() {
+                        d
+                    } else {
+                        format!("{detail}; {d}")
+                    }
+                }
+                Err(e) => {
+                    ok = false;
+                    detail = if detail.is_empty() {
+                        e
+                    } else {
+                        format!("{detail}; {e}")
+                    };
                 }
             }
         }
@@ -855,6 +892,82 @@ fn send_telegram(
 }
 
 // ---------------------------------------------------------------------------
+// Bluesky (AT Protocol)
+// ---------------------------------------------------------------------------
+
+/// The Bluesky app password, from the local secret store.
+fn bluesky_password() -> Option<String> {
+    crate::secrets::get("bluesky-password")
+}
+
+/// Post text to Bluesky. Returns the created post's at-URI on success.
+fn post_to_bluesky(handle: &str, password: &str, text: &str) -> Result<String, String> {
+    if handle.trim().is_empty() {
+        return Err("no Bluesky handle".into());
+    }
+    if password.is_empty() {
+        return Err("no Bluesky app password".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    // 1. createSession → accessJwt + did.
+    let login =
+        serde_json::json!({ "identifier": handle.trim(), "password": password }).to_string();
+    let mut r = agent
+        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
+        .header("Content-Type", "application/json")
+        .send(login.as_bytes())
+        .map_err(|e| format!("Bluesky login: {e}"))?;
+    let status = r.status().as_u16();
+    let body = r.body_mut().read_to_string().unwrap_or_default();
+    if status != 200 {
+        return Err(format!(
+            "Bluesky login HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Bluesky login reply: {e}"))?;
+    let token = v["accessJwt"]
+        .as_str()
+        .ok_or("Bluesky login: no accessJwt")?
+        .to_string();
+    let did = v["did"]
+        .as_str()
+        .ok_or("Bluesky login: no did")?
+        .to_string();
+
+    // 2. createRecord — a plain text post (truncated to Bluesky's limit).
+    let text = text.chars().take(280).collect::<String>();
+    let created = crate::library::utc(crate::library::now()).replace(' ', "T") + "Z";
+    let post = serde_json::json!({
+        "repo": did,
+        "collection": "app.bsky.feed.post",
+        "record": { "$type": "app.bsky.feed.post", "text": text, "createdAt": created }
+    });
+    let mut r2 = agent
+        .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
+        .header("Content-Type", "application/json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send(post.to_string().as_bytes())
+        .map_err(|e| format!("Bluesky post: {e}"))?;
+    let status2 = r2.status().as_u16();
+    let body2 = r2.body_mut().read_to_string().unwrap_or_default();
+    if status2 != 200 {
+        return Err(format!(
+            "Bluesky post HTTP {status2}: {}",
+            body2.chars().take(200).collect::<String>()
+        ));
+    }
+    let v2: serde_json::Value = serde_json::from_str(&body2).unwrap_or_default();
+    Ok(v2["uri"].as_str().unwrap_or("posted").to_string())
+}
+
+// ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
 
@@ -862,6 +975,7 @@ fn send_telegram(
 pub struct View {
     pub settings: Settings,
     pub has_token: bool,
+    pub has_bluesky: bool,
     pub ffmpeg: bool,
 }
 
@@ -870,6 +984,7 @@ pub fn alerts_get(state: State<AppState>) -> View {
     View {
         settings: state.alerts.lock().unwrap().settings.clone(),
         has_token: token().is_some(),
+        has_bluesky: bluesky_password().is_some(),
         ffmpeg: crate::encode::ffmpeg_available().is_some(),
     }
 }
@@ -901,6 +1016,31 @@ pub fn telegram_save(token: String) -> Result<(), String> {
     } else {
         crate::secrets::set(TOKEN_USER, token.trim())
     }
+}
+
+/// Save the Bluesky app password. Empty removes it. The handle is stored in
+/// the alerts settings (via `alerts_set`), not here.
+#[tauri::command]
+pub fn bluesky_save(password: String) -> Result<(), String> {
+    if password.trim().is_empty() {
+        crate::secrets::remove("bluesky-password")
+    } else {
+        crate::secrets::set("bluesky-password", password.trim())
+    }
+}
+
+/// Post a fixed test message with the saved handle + password.
+#[tauri::command]
+pub async fn bluesky_test(state: State<'_, AppState>) -> Result<String, String> {
+    let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
+    let pw = bluesky_password()
+        .ok_or("no Bluesky app password")?
+        .to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        post_to_bluesky(&handle, &pw, "✅ HoosierSDR can reach Bluesky.")
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
