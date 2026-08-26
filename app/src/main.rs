@@ -1886,6 +1886,8 @@ fn main() {
             alerts::alerts_test,
             alerts::alerts_log,
             alerts::telegram_save,
+            alerts::bluesky_save,
+            alerts::bluesky_test,
             alerts::ollama_models,
             conversations::conversations_get,
             conversations::conversations_set,
