@@ -629,6 +629,16 @@
       <section class="two-col">
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Username</span><input id="rrUser" type="text" autocomplete="username" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Password</span><input id="rrPass" type="password" autocomplete="current-password" /></label>
+              </div>
+              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Log in here, then find and load a system below. Secrets are saved on this Mac.</span></div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Find a system</span><span class="meta" id="findMeta"></span></div>
             <div class="body">
               <div class="row3">
@@ -864,16 +874,6 @@
                 <label class="field"><span class="lab">Description</span><input id="stDesc" type="text" spellcheck="false" /></label>
               </div>
               <p class="help">Broadcastify feeds: use the host, port, mount and source password from your feed's "Feed Technical Details" page. Encoding and connection are done by ffmpeg.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Username</span><input id="rrUser" type="text" autocomplete="username" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Password</span><input id="rrPass" type="password" autocomplete="current-password" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Secrets are saved on this Mac.</span></div>
             </div>
           </div>
           <span class="legal" title="Decodes unencrypted P25 only. Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. In Indiana, use at your own dwelling or place of business (IC 35-44.1-2-7).">ⓘ&nbsp;legal</span>
