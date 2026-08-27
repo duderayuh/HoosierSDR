@@ -14,7 +14,15 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
-include!(concat!(env!("OUT_DIR"), "/rr_key.rs"));
+/// The project's RadioReference app key, XOR-masked so it isn't plaintext in
+/// the repo. This is obfuscation, not encryption — the mask below ships with
+/// it, so the key is recoverable by anyone with the source. That's fine: it's
+/// a revocable per-application key, not a user secret; users still supply
+/// their own RadioReference username and password.
+const RR_KEY_MASKED: &[u8] = &[
+    108, 251, 240, 26, 17, 140, 49, 213, 17, 86, 179, 33, 239, 109, 150, 192, 60, 242, 188, 76,
+    21, 139, 54, 200, 12, 10, 180, 32, 188, 116, 148, 194, 56, 246, 247, 23,
+];
 const MASK: [u8; 16] = [
     0x5a, 0xc3, 0x91, 0x2e, 0x77, 0xb8, 0x04, 0xe5, 0x3c, 0x6f, 0xd2, 0x19, 0x8b, 0x40, 0xa7, 0xf1,
 ];
