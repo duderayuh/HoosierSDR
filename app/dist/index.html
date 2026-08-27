@@ -20,6 +20,7 @@
       <button data-v="aliases" aria-pressed="false">Aliases</button>
       <button data-v="discovery" aria-pressed="false">Discovery</button>
       <button data-v="alerts" aria-pressed="false">Alerts</button>
+      <button data-v="analyzers" aria-pressed="false">Analyzers</button>
       <button data-v="devices" aria-pressed="false">Devices</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
@@ -566,6 +567,83 @@
             <div class="head"><span class="eyebrow">Fired</span><span class="meta" id="akLogMeta"></span><button class="btn ghost sm" id="akLogRefresh">↻</button></div>
             <div class="body tight">
               <div class="tablewrap tgs" style="max-height:32vh"><table><thead><tr><th>Time</th><th>Alert</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="akLog"></tbody></table></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ===================== ANALYZERS ===================== -->
+    <div class="view" id="view-analyzers" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Add a template…</button><button class="btn primary sm" id="azNew">+ New analyzer</button></div>
+            <div class="body tight">
+              <div id="azList" class="list" style="max-height:26vh"></div>
+              <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a template — the ECPR candidate screen ships built-in.</div>
+            </div>
+          </div>
+          <div class="panel" id="azEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit analyzer</span><span class="meta" id="azEdMeta"></span><button class="btn ghost sm" id="azTest">Test on recent call</button><button class="btn ghost sm" id="azDelete">Delete</button><button class="btn primary sm" id="azSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="azName" type="text" placeholder="ECPR candidate" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated · blank = any</span></span><input id="azTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <label class="field"><span class="lab">Only run when the transcript contains <span class="mono faint">one per line · blank = every transcript</span></span><textarea id="azKeywords" style="min-height:44px" placeholder="cardiac arrest&#10;working arrest&#10;CPR"></textarea></label>
+              <label class="field"><span class="lab">Instructions to the model <span class="mono faint">what to look for and how to judge it</span></span><textarea id="azInstructions" style="min-height:120px"></textarea></label>
+              <div class="head" style="padding-left:0"><span class="eyebrow">Fields to extract</span><span class="spacer"></span><button class="btn ghost sm" id="azFieldAdd">+ Field</button></div>
+              <div id="azFields" class="list" style="max-height:22vh"></div>
+              <div class="row3">
+                <label class="field"><span class="lab">Send when</span><select id="azMatch"><option value="all">all conditions hold</option><option value="any">any condition holds</option><option value="">always (just extract & notify)</option></select></label>
+                <label class="field" style="grid-column:span 2"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="azCondAdd" style="justify-self:start">+ Condition</button></label>
+              </div>
+              <div id="azConds" class="list" style="max-height:18vh"></div>
+              <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select></label>
+                <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
+                <label class="field"><span class="lab">&nbsp;</span></label>
+              </div>
+              <p class="help">Local Ollama uses the server/model set in <b>Alerts → AI gate · Ollama</b>. Cloud uses the provider configured in the panel on the right. Bluesky posts to the account set in <b>Settings → Bluesky</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Cloud model · for analyzers set to "Cloud"</span><span class="meta" id="azcMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
+                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
+              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
+              <p class="help">OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">How it works</span></div>
+            <div class="body">
+              <p class="help">Each finished call is transcribed, then every enabled analyzer whose talkgroups (and keywords, if set) match runs its prompt against the transcript. The model returns the fields you defined as JSON; if your condition over those fields holds, the message is sent to your chosen destinations (Telegram and/or Bluesky) with the extracted values filled in. This is the app-native version of the n8n "cardiac arrest? → ECPR candidate? → alert" flow.</p>
+              <p class="help"><b>Test on recent call</b> runs the prompt against the newest stored call that passes the pre-filter and shows you the extracted JSON and the message it would send, without waiting for live traffic.</p>
+            </div>
+          </div>
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="azLogMeta"></span><button class="btn ghost sm" id="azLogRefresh">↻</button></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:52vh"><table><thead><tr><th>Time</th><th>Analyzer</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="azLog"></tbody></table></div>
             </div>
           </div>
         </div>

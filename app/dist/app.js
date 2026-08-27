@@ -66,8 +66,9 @@ function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttri
 
 /* ---------- views ---------- */
 function showView(v) {
-  ["monitor", "library", "playlists", "aliases", "discovery", "alerts", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  ["monitor", "library", "playlists", "aliases", "discovery", "alerts", "analyzers", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "alerts" && typeof alertsOnShow === "function") alertsOnShow();
+  if (v === "analyzers" && typeof analyzersOnShow === "function") analyzersOnShow();
   if (v === "devices" && typeof devicesOnShow === "function") devicesOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
   if (v === "aliases" && typeof aliasesOnShow === "function") aliasesOnShow();
@@ -1412,6 +1413,112 @@ if (TAURI) {
   $("dgDelete").onclick = async () => { if (!(await uiConfirm("Delete this digest?", "Delete"))) return; dgView.rules = dgView.rules.filter((x) => x.id !== dgSel); dgSel = null; $("dgEditor").style.display = "none"; await dgPersist(); };
   $("dgTest").onclick = async () => { if (!dgRead()) return; if (!(await dgPersist())) return; try { uiToast(await invoke("digest_test", { id: dgSel })); setTimeout(dgLogRefresh, 3000); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
   dgRefresh(); dgLogRefresh();
+
+  /* ---------- analyzers: custom prompts that extract structured data ---------- */
+  let azView = null, azSel = null, azFieldsBuf = [], azCondsBuf = [];
+  const AZ_OPS = ["==", "!=", ">", ">=", "<", "<=", "contains"];
+  const AZ_KINDS = ["string", "number", "bool"];
+  const azKw = (v) => v.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
+  function azRenderList() {
+    const rules = azView ? azView.rules : [];
+    $("azEmpty").style.display = rules.length ? "none" : "";
+    $("azMeta").textContent = rules.length ? `${rules.filter((r) => r.enabled).length} of ${rules.length} enabled` : "";
+    $("azList").innerHTML = rules.map((r) => `<div class="row ${azSel === r.id ? "on" : ""}" data-az="${esc(r.id)}"><span class="grow"><b>${esc(r.name)}</b> ${r.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>TG ${r.tgs.join(",") || "any"} · ${r.fields.length} field${r.fields.length === 1 ? "" : "s"} · ${r.conditions.length ? (r.match_mode === "any" ? "any of " : "all of ") + r.conditions.length + " cond" : "always sends"}</small></span><label class="check" style="margin:0"><input type="checkbox" data-azen="${esc(r.id)}" ${r.enabled ? "checked" : ""}></label></div>`).join("");
+    $("azList").querySelectorAll(".row[data-az]").forEach((row) => row.onclick = (e) => { if (e.target.closest("input")) return; azEdit(row.dataset.az); });
+    $("azList").querySelectorAll("input[data-azen]").forEach((c) => c.onchange = async () => { const r = azView.rules.find((x) => x.id === c.dataset.azen); r.enabled = c.checked; await azPersist(); });
+  }
+  function azSyncBuffers() {
+    azFieldsBuf = [...$("azFields").querySelectorAll(".azf")].map((r) => ({ key: r.querySelector("[data-fk]").value.trim(), kind: r.querySelector("[data-fkind]").value, desc: r.querySelector("[data-fd]").value.trim() }));
+    azCondsBuf = [...$("azConds").querySelectorAll(".azc")].map((r) => ({ field: r.querySelector("[data-cf]").value.trim(), op: r.querySelector("[data-cop]").value, value: r.querySelector("[data-cv]").value.trim() }));
+  }
+  function azRenderFields() {
+    $("azFields").innerHTML = azFieldsBuf.map((f, i) => `<div class="row azf" data-i="${i}"><span class="grow inline" style="gap:6px"><input data-fk placeholder="key" style="width:130px" value="${esc(f.key)}"><select data-fkind>${AZ_KINDS.map((k) => `<option ${k === f.kind ? "selected" : ""}>${k}</option>`).join("")}</select><input data-fd placeholder="how the model should fill it" class="grow" value="${esc(f.desc)}"></span><button class="btn ghost sm" data-fdel="${i}" title="remove">✕</button></div>`).join("");
+    $("azFields").querySelectorAll("[data-fdel]").forEach((b) => b.onclick = () => { azSyncBuffers(); azFieldsBuf.splice(+b.dataset.fdel, 1); azRenderFields(); });
+  }
+  function azRenderConds() {
+    $("azConds").innerHTML = azCondsBuf.map((c, i) => `<div class="row azc" data-i="${i}"><span class="grow inline" style="gap:6px"><input data-cf placeholder="field" style="width:130px" value="${esc(c.field)}"><select data-cop>${AZ_OPS.map((o) => `<option ${o === c.op ? "selected" : ""}>${o}</option>`).join("")}</select><input data-cv placeholder="value" class="grow" value="${esc(c.value)}"></span><button class="btn ghost sm" data-cdel="${i}" title="remove">✕</button></div>`).join("");
+    $("azConds").querySelectorAll("[data-cdel]").forEach((b) => b.onclick = () => { azSyncBuffers(); azCondsBuf.splice(+b.dataset.cdel, 1); azRenderConds(); });
+  }
+  function azEdit(id) {
+    const r = azView.rules.find((x) => x.id === id); if (!r) return;
+    azSel = id; azRenderList(); $("azEditor").style.display = "";
+    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); $("azEnabled").checked = r.enabled;
+    $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
+    $("azEngine").value = r.engine || "ollama"; $("azTelegram").checked = r.telegram !== false; $("azBluesky").checked = !!r.bluesky;
+    $("azMatch").value = r.conditions.length ? r.match_mode : "";
+    $("azMessage").value = r.message; $("azChat").value = r.chat_id; $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
+    azFieldsBuf = r.fields.map((f) => ({ ...f })); azCondsBuf = r.conditions.map((c) => ({ ...c }));
+    azRenderFields(); azRenderConds();
+    $("azEdMeta").textContent = `${r.fields.length} fields · ${r.conditions.length} conditions`;
+  }
+  function azRead() {
+    const r = azView.rules.find((x) => x.id === azSel); if (!r) return null;
+    azSyncBuffers();
+    r.name = $("azName").value.trim(); r.tgs = nums($("azTgs").value); r.enabled = $("azEnabled").checked;
+    r.keywords = azKw($("azKeywords").value); r.instructions = $("azInstructions").value;
+    r.engine = $("azEngine").value; r.telegram = $("azTelegram").checked; r.bluesky = $("azBluesky").checked;
+    r.fields = azFieldsBuf.filter((f) => f.key);
+    const mm = $("azMatch").value;
+    r.conditions = mm ? azCondsBuf.filter((c) => c.field) : [];
+    r.match_mode = mm || "all";
+    r.message = $("azMessage").value; r.chat_id = $("azChat").value.trim();
+    r.cooldown_secs = Math.max(0, parseInt($("azCooldown").value, 10) || 0); r.attach_audio = $("azAudio").checked;
+    return r;
+  }
+  async function azPersist() {
+    if (!azView) { uiToast("Analyzers did not load — reopen the Analyzers tab", "err"); return false; }
+    try { await invoke("analyzers_set", { rules: azView.rules }); }
+    catch (e) { log(`analyzers_set failed: ${e}`); uiToast(`Could not save the analyzer: ${e}`, "err"); return false; }
+    try { azView = await invoke("analyzers_get"); } catch (e) { log(`analyzers_get failed: ${e}`); }
+    azRenderList(); return true;
+  }
+  async function azRefresh() { try { azView = await invoke("analyzers_get"); azRenderList(); } catch (e) { log(`analyzers_get: ${e}`); } }
+  async function azLogRefresh() {
+    try {
+      const rows = await invoke("analyzers_log");
+      $("azLogMeta").textContent = rows.length ? `${rows.length} recent` : "";
+      $("azLog").innerHTML = rows.map((l) => { const badge = !l.matched ? '<span class="badge">quiet</span>' : (l.ok ? '<span class="badge clear">sent</span>' : '<span class="badge enc">failed</span>'); return `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)}</td><td><small>${esc(l.tg_name)} <span class="mono">${l.tg}</span></small></td><td>${badge} <small title="${esc(l.extracted)}">${esc(l.detail)}</small></td></tr>`; }).join("");
+    } catch (e) { log(`analyzers_log: ${e}`); }
+  }
+  $("azFieldAdd").onclick = () => { azSyncBuffers(); azFieldsBuf.push({ key: "", kind: "string", desc: "" }); azRenderFields(); };
+  $("azCondAdd").onclick = () => { if (!$("azMatch").value) $("azMatch").value = "all"; azSyncBuffers(); azCondsBuf.push({ field: "", op: "==", value: "" }); azRenderConds(); };
+  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, bluesky: false, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
+  $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
+  $("azDelete").onclick = async () => { if (!(await uiConfirm("Delete this analyzer?", "Delete"))) return; azView.rules = azView.rules.filter((x) => x.id !== azSel); azSel = null; $("azEditor").style.display = "none"; await azPersist(); };
+  $("azTest").onclick = async () => { if (!azRead()) return; if (!(await azPersist())) return; uiToast("Running the analyzer on a recent call…"); try { const out = await invoke("analyzer_test", { id: azSel }); await uiConfirm(out, "OK"); setTimeout(azLogRefresh, 500); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
+  $("azLogRefresh").onclick = azLogRefresh;
+  $("azTemplates").onclick = async () => {
+    if (!azView) return;
+    try {
+      const tpls = await invoke("analyzer_templates");
+      const names = tpls.map((t) => t.name).join(", ");
+      if (!(await uiConfirm(`Add starter analyzers: ${names}? They arrive disabled — review each, pick talkgroups, then enable.`, "Add"))) return;
+      for (const t of tpls) { t.id = `z${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; t.enabled = false; azView.rules.push(t); }
+      if (await azPersist()) { uiToast("Templates added — review and enable them"); azEdit(azView.rules[azView.rules.length - tpls.length].id); }
+    } catch (e) { uiToast(`Could not load templates: ${e}`, "err"); }
+  };
+  /* cloud model settings (shared by analyzers set to "Cloud") */
+  async function azcLoad() {
+    try {
+      const [cloud, hasKey] = await invoke("analyzer_cloud_get");
+      $("azcProvider").value = cloud.provider || "openrouter"; $("azcModel").value = cloud.model || "";
+      $("azcBase").value = cloud.base_url || ""; $("azcTimeout").value = cloud.timeout_secs || 60;
+      $("azcKeyState").textContent = hasKey ? "key saved" : "no key saved";
+      $("azcMeta").textContent = cloud.model ? `${cloud.provider} · ${cloud.model}` : "";
+    } catch (e) { log(`analyzer_cloud_get: ${e}`); }
+  }
+  $("azcSave").onclick = async () => {
+    const cloud = { provider: $("azcProvider").value, model: $("azcModel").value.trim(), base_url: $("azcBase").value.trim(), timeout_secs: Math.max(5, parseInt($("azcTimeout").value, 10) || 60) };
+    const key = $("azcKey").value;
+    try { await invoke("analyzer_cloud_save", { cloud, key: key || null }); $("azcKey").value = ""; uiToast("Cloud model saved"); azcLoad(); }
+    catch (e) { uiToast(`Could not save: ${e}`, "err"); }
+  };
+  $("azcClear").onclick = async () => { if (!(await uiConfirm("Forget the saved cloud API key?", "Forget"))) return; try { await invoke("analyzer_cloud_clear_key"); $("azcKey").value = ""; uiToast("Key forgotten"); azcLoad(); } catch (e) { uiToast(`${e}`, "err"); } };
+  listen("analyzers", () => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); });
+  listen("analyzer", (e) => { const p = e.payload; logEvent(`ANALYZER ${p.name}: ${String(p.message).split("\n")[0]}`, "alarm"); });
+  setInterval(() => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); }, 15000);
+  window.analyzersOnShow = () => { if (!azView) { azRefresh(); azcLoad(); } else azLogRefresh(); };
+  azRefresh(); azLogRefresh(); azcLoad();
 
   /* ---------- file name template ---------- */
   async function fnRefresh() {

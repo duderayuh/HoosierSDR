@@ -16,6 +16,7 @@ use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod alerts;
+mod analyzers;
 mod conversations;
 mod devices;
 mod digest;
@@ -91,6 +92,9 @@ struct AppState {
     conversations: conversations::Shared,
     /// Periodic channel digests ("what's happening" roll-ups).
     digests: digest::Shared,
+    /// Custom prompt analyzers: extract structured fields from a transcript
+    /// and send a message when a condition holds (e.g. ECPR candidacy).
+    analyzers: analyzers::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -1915,6 +1919,7 @@ fn main() {
             conversations::spawn_ticker(app.handle().clone());
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
+            *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -2000,6 +2005,14 @@ fn main() {
             digest::digests_set,
             digest::digests_log,
             digest::digest_test,
+            analyzers::analyzers_get,
+            analyzers::analyzers_set,
+            analyzers::analyzers_log,
+            analyzers::analyzer_templates,
+            analyzers::analyzer_test,
+            analyzers::analyzer_cloud_get,
+            analyzers::analyzer_cloud_save,
+            analyzers::analyzer_cloud_clear_key,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,
