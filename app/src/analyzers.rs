@@ -56,6 +56,10 @@ pub struct AnalyzerRule {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    /// Which model runs the extraction: `ollama` (local, default) or `cloud`
+    /// (the shared cloud provider configured below).
+    #[serde(default = "default_engine")]
+    pub engine: String,
     /// Talkgroups to watch; empty = any.
     #[serde(default)]
     pub tgs: Vec<u16>,
@@ -81,6 +85,12 @@ pub struct AnalyzerRule {
     /// Telegram chat; blank = the alerts' chat.
     #[serde(default)]
     pub chat_id: String,
+    /// Send the message to Telegram.
+    #[serde(default = "default_true")]
+    pub telegram: bool,
+    /// Also post the message to the alerts' Bluesky account.
+    #[serde(default)]
+    pub bluesky: bool,
     #[serde(default)]
     pub attach_audio: bool,
     /// Seconds before the same analyzer may fire again for the same talkgroup.
@@ -94,6 +104,38 @@ fn default_match() -> String {
 fn default_cooldown() -> u32 {
     120
 }
+fn default_engine() -> String {
+    "ollama".into()
+}
+fn default_true() -> bool {
+    true
+}
+
+/// Shared cloud-model settings for analyzers that use `engine = "cloud"`.
+/// The API key is not stored here — it lives in the OS secret store under
+/// `analyzer-cloud-key`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Cloud {
+    /// `openrouter` | `openai` | `anthropic`.
+    pub provider: String,
+    /// Model id, e.g. `anthropic/claude-opus-4.1`, `gpt-4o`, `claude-opus-4-8`.
+    pub model: String,
+    /// Optional base-URL override; blank = the provider default.
+    #[serde(default)]
+    pub base_url: String,
+    pub timeout_secs: u32,
+}
+
+impl Default for Cloud {
+    fn default() -> Self {
+        Self {
+            provider: "openrouter".into(),
+            model: String::new(),
+            base_url: String::new(),
+            timeout_secs: 60,
+        }
+    }
+}
 
 impl Default for AnalyzerRule {
     fn default() -> Self {
@@ -101,6 +143,7 @@ impl Default for AnalyzerRule {
             id: String::new(),
             name: String::new(),
             enabled: true,
+            engine: "ollama".into(),
             tgs: Vec::new(),
             keywords: Vec::new(),
             instructions: String::new(),
@@ -109,6 +152,8 @@ impl Default for AnalyzerRule {
             conditions: Vec::new(),
             message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}".into(),
             chat_id: String::new(),
+            telegram: true,
+            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         }
@@ -118,6 +163,8 @@ impl Default for AnalyzerRule {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Settings {
     pub rules: Vec<AnalyzerRule>,
+    #[serde(default)]
+    pub cloud: Cloud,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -251,9 +298,9 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
             }
         }
     }
-    let (tg_settings, ollama) = crate::alerts::shared_settings(&state);
+    let tg_settings = crate::alerts::shared_settings(&state).0;
 
-    let obj = match extract(&ollama, &r, &f) {
+    let obj = match run_extract(&state, &r, &f) {
         Ok(v) => v,
         Err(e) => {
             log_it(&app, &r, &f, false, false, format!("extraction failed: {e}"), String::new());
@@ -277,16 +324,65 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
     } else {
         r.chat_id.clone()
     };
-    let sent = send(&chat, &r, &f, &message);
-    let ok = sent.is_ok();
-    let detail = sent.unwrap_or_else(|e| e);
+    let (ok, detail) = deliver(&state, &chat, &r, &f, &message);
     if ok {
         state.analyzers.lock().unwrap().last_fired.insert(key, now);
     }
     log_it(&app, &r, &f, true, ok, detail, extracted);
 }
 
-fn send(chat: &str, r: &AnalyzerRule, f: &CallFacts, message: &str) -> Result<String, String> {
+/// Pick the extraction engine (local Ollama or the shared cloud model) and run it.
+fn run_extract(
+    state: &AppState,
+    r: &AnalyzerRule,
+    f: &CallFacts,
+) -> Result<serde_json::Value, String> {
+    if r.engine == "cloud" {
+        let cloud = state.analyzers.lock().unwrap().settings.cloud.clone();
+        let key = crate::secrets::get("analyzer-cloud-key").unwrap_or_default();
+        cloud_extract(&cloud, &key, r, f)
+    } else {
+        let ollama = crate::alerts::shared_settings(state).1;
+        ollama_extract(&ollama, r, f)
+    }
+}
+
+/// Send the rendered message to the analyzer's chosen destinations. Returns
+/// (all-ok, joined detail).
+fn deliver(
+    state: &AppState,
+    chat: &str,
+    r: &AnalyzerRule,
+    f: &CallFacts,
+    message: &str,
+) -> (bool, String) {
+    let mut ok = true;
+    let mut parts: Vec<String> = Vec::new();
+    if r.telegram {
+        match send_telegram(chat, r, f, message) {
+            Ok(d) => parts.push(d),
+            Err(e) => {
+                ok = false;
+                parts.push(format!("telegram: {e}"));
+            }
+        }
+    }
+    if r.bluesky {
+        match crate::alerts::bluesky_post(state, message) {
+            Ok(_) => parts.push("bluesky ok".into()),
+            Err(e) => {
+                ok = false;
+                parts.push(format!("bluesky: {e}"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        parts.push("no destination selected".into());
+    }
+    (ok, parts.join("; "))
+}
+
+fn send_telegram(chat: &str, r: &AnalyzerRule, f: &CallFacts, message: &str) -> Result<String, String> {
     let clip = if r.attach_audio {
         f.audio.as_deref().filter(|p| !p.is_empty())
     } else {
@@ -335,16 +431,9 @@ fn log_it(
 // extraction
 // ---------------------------------------------------------------------------
 
-/// Build the JSON-mode prompt and return the model's object. Mirrors the
-/// alerts gate's `think: false` handling for thinking models.
-fn extract(
-    o: &crate::alerts::Ollama,
-    r: &AnalyzerRule,
-    f: &CallFacts,
-) -> Result<serde_json::Value, String> {
-    if o.model.trim().is_empty() {
-        return Err("no Ollama model chosen".into());
-    }
+/// The extraction prompt shared by every engine: the rule's instructions, the
+/// call facts, and the exact JSON keys to return.
+fn build_prompt(r: &AnalyzerRule, f: &CallFacts) -> String {
     let mut schema = String::new();
     for field in &r.fields {
         let kind = match field.kind.as_str() {
@@ -361,7 +450,7 @@ fn extract(
     if schema.is_empty() {
         schema.push_str("- \"summary\" (string): one-sentence summary\n");
     }
-    let full = format!(
+    format!(
         "You extract structured data from a public-safety radio transcript. \
          The transcript is machine-generated and may contain recognition errors.\n\n\
          Talkgroup: {} (TG {})\nRadio: {}\nTranscript: \"{}\"\n\n\
@@ -374,7 +463,20 @@ fn extract(
         f.transcript.as_deref().unwrap_or(""),
         r.instructions.trim(),
         schema.trim_end(),
-    );
+    )
+}
+
+/// Local-Ollama extraction. Mirrors the alerts gate's `think: false` handling
+/// for thinking models.
+fn ollama_extract(
+    o: &crate::alerts::Ollama,
+    r: &AnalyzerRule,
+    f: &CallFacts,
+) -> Result<serde_json::Value, String> {
+    if o.model.trim().is_empty() {
+        return Err("no Ollama model chosen".into());
+    }
+    let full = build_prompt(r, f);
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(
@@ -415,6 +517,117 @@ fn extract(
     let answer = v["response"].as_str().unwrap_or("");
     parse_object(answer)
         .ok_or_else(|| format!("model did not answer in JSON: {}", answer.chars().take(200).collect::<String>()))
+}
+
+/// The provider's chat/messages endpoint and which request shape it speaks.
+/// `kind` is `openai` (OpenAI-compatible chat/completions — OpenRouter and
+/// OpenAI) or `anthropic` (the native Messages API).
+fn cloud_endpoint(c: &Cloud) -> Result<(String, &'static str), String> {
+    let base = c.base_url.trim().trim_end_matches('/');
+    match c.provider.as_str() {
+        "openrouter" => {
+            let b = if base.is_empty() { "https://openrouter.ai/api/v1" } else { base };
+            Ok((format!("{b}/chat/completions"), "openai"))
+        }
+        "openai" => {
+            let b = if base.is_empty() { "https://api.openai.com/v1" } else { base };
+            Ok((format!("{b}/chat/completions"), "openai"))
+        }
+        "anthropic" => {
+            let b = if base.is_empty() { "https://api.anthropic.com" } else { base };
+            Ok((format!("{b}/v1/messages"), "anthropic"))
+        }
+        other => Err(format!("unknown cloud provider '{other}'")),
+    }
+}
+
+/// Cloud-model extraction. One request, JSON out, no streaming.
+fn cloud_extract(
+    c: &Cloud,
+    key: &str,
+    r: &AnalyzerRule,
+    f: &CallFacts,
+) -> Result<serde_json::Value, String> {
+    if key.trim().is_empty() {
+        return Err("no cloud API key saved".into());
+    }
+    if c.model.trim().is_empty() {
+        return Err("no cloud model set".into());
+    }
+    let (url, kind) = cloud_endpoint(c)?;
+    let full = build_prompt(r, f);
+    let system = "You output only a single JSON object. No prose, no code fences.";
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(
+            c.timeout_secs.max(5) as u64
+        )))
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let (status, text) = if kind == "anthropic" {
+        let body = serde_json::json!({
+            "model": c.model,
+            "max_tokens": 1024,
+            "system": system,
+            "messages": [{ "role": "user", "content": full }],
+        });
+        let mut resp = agent
+            .post(&url)
+            .header("x-api-key", key.trim())
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes())
+            .map_err(|e| format!("anthropic: {e}"))?;
+        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap_or_default())
+    } else {
+        let body = serde_json::json!({
+            "model": c.model,
+            "temperature": 0,
+            "response_format": { "type": "json_object" },
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": full },
+            ],
+        });
+        let mut req = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", key.trim()))
+            .header("Content-Type", "application/json");
+        if c.provider == "openrouter" {
+            // Attribution headers OpenRouter surfaces in its dashboard.
+            req = req
+                .header("HTTP-Referer", "https://github.com/duderayuh/HoosierSDR")
+                .header("X-Title", "HoosierSDR Analyzers");
+        }
+        let mut resp = req
+            .send(body.to_string().as_bytes())
+            .map_err(|e| format!("{}: {e}", c.provider))?;
+        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap_or_default())
+    };
+
+    if status != 200 {
+        return Err(format!(
+            "{} HTTP {status}: {}",
+            c.provider,
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{} reply: {e}", c.provider))?;
+    let answer = if kind == "anthropic" {
+        // content is a list of blocks; take the first text block.
+        v["content"]
+            .as_array()
+            .and_then(|blocks| blocks.iter().find_map(|b| b["text"].as_str()))
+            .unwrap_or("")
+    } else {
+        v["choices"][0]["message"]["content"].as_str().unwrap_or("")
+    };
+    parse_object(answer).ok_or_else(|| {
+        format!("model did not answer in JSON: {}", answer.chars().take(200).collect::<String>())
+    })
 }
 
 /// The first `{ … }` object in the model's text, tolerating stray prose.
@@ -557,6 +770,44 @@ pub fn analyzers_log(state: State<AppState>) -> Vec<LogEntry> {
     state.analyzers.lock().unwrap().log.iter().cloned().collect()
 }
 
+/// The cloud settings plus whether an API key is currently stored (the key
+/// itself never leaves the secret store).
+#[tauri::command]
+pub fn analyzer_cloud_get(state: State<AppState>) -> (Cloud, bool) {
+    let cloud = state.analyzers.lock().unwrap().settings.cloud.clone();
+    let has_key = crate::secrets::get("analyzer-cloud-key")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    (cloud, has_key)
+}
+
+/// Save the cloud provider/model/timeout, and the API key when a non-empty one
+/// is supplied (blank leaves the stored key untouched).
+#[tauri::command]
+pub fn analyzer_cloud_save(
+    app: AppHandle,
+    state: State<AppState>,
+    cloud: Cloud,
+    key: Option<String>,
+) -> Result<(), String> {
+    if let Some(k) = key {
+        let k = k.trim();
+        if !k.is_empty() {
+            crate::secrets::set("analyzer-cloud-key", k)?;
+        }
+    }
+    let mut st = state.analyzers.lock().unwrap();
+    st.settings.cloud = cloud;
+    st.settings.cloud.timeout_secs = st.settings.cloud.timeout_secs.clamp(5, 300);
+    store(&app, &st.settings)
+}
+
+/// Forget the stored cloud API key.
+#[tauri::command]
+pub fn analyzer_cloud_clear_key() -> Result<(), String> {
+    crate::secrets::remove("analyzer-cloud-key")
+}
+
 /// Built-in starter templates (ECPR candidate screen, SOR survey, stroke).
 #[tauri::command]
 pub fn analyzer_templates() -> Vec<AnalyzerRule> {
@@ -634,9 +885,18 @@ pub async fn analyzer_test(
         return Ok("no recent call matched the pre-filter (talkgroups / keywords)".into());
     };
     let ollama = crate::alerts::shared_settings(&state).1;
-    let obj = tauri::async_runtime::spawn_blocking(move || extract(&ollama, &r, &f).map(|o| (r, f, o)))
-        .await
-        .map_err(|e| e.to_string())??;
+    let cloud = state.analyzers.lock().unwrap().settings.cloud.clone();
+    let key = crate::secrets::get("analyzer-cloud-key").unwrap_or_default();
+    let obj = tauri::async_runtime::spawn_blocking(move || {
+        let res = if r.engine == "cloud" {
+            cloud_extract(&cloud, &key, &r, &f)
+        } else {
+            ollama_extract(&ollama, &r, &f)
+        };
+        res.map(|o| (r, f, o))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let (r, f, obj) = obj;
     let matched = evaluate(&r, &obj);
     let extracted = serde_json::to_string_pretty(&obj).unwrap_or_default();
@@ -659,6 +919,7 @@ fn templates() -> Vec<AnalyzerRule> {
             id: String::new(),
             name: "ECPR candidate".into(),
             enabled: false,
+            engine: "ollama".into(),
             tgs: Vec::new(),
             keywords: vec![
                 "cardiac arrest".into(),
@@ -682,6 +943,8 @@ fn templates() -> Vec<AnalyzerRule> {
             ],
             message: "🫀 Possible ECPR candidate — {candidate}\n{tgname} (TG {tg}) · {time}\nCriteria met {field.criteriaMet}/4 · likelihood {field.likelihoodPct}%\n{field.reason}\n\n{transcript}".into(),
             chat_id: String::new(),
+            telegram: true,
+            bluesky: false,
             attach_audio: true,
             cooldown_secs: 120,
         },
@@ -689,6 +952,7 @@ fn templates() -> Vec<AnalyzerRule> {
             id: String::new(),
             name: "SOR (stroke) survey".into(),
             enabled: false,
+            engine: "ollama".into(),
             tgs: Vec::new(),
             keywords: vec!["stroke".into(), "cva".into(), "facial droop".into(), "slurred".into()],
             instructions: "From this EMS hospital pre-arrival summary, extract the stroke (SOR — Stroke On Radio) screen: is a stroke alert or suspected stroke being called, last-known-well time if stated, and the deficits mentioned. Do not infer beyond what is said.".into(),
@@ -701,6 +965,8 @@ fn templates() -> Vec<AnalyzerRule> {
             conditions: vec![Clause { field: "strokeAlert".into(), op: "==".into(), value: "true".into() }],
             message: "🧠 Stroke alert\n{tgname} (TG {tg}) · {time}\nLKW: {field.lastKnownWell}\nDeficits: {field.deficits}\n\n{transcript}".into(),
             chat_id: String::new(),
+            telegram: true,
+            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         },

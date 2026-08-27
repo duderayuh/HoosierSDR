@@ -1410,6 +1410,7 @@ if (TAURI) {
     azSel = id; azRenderList(); $("azEditor").style.display = "";
     $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); $("azEnabled").checked = r.enabled;
     $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
+    $("azEngine").value = r.engine || "ollama"; $("azTelegram").checked = r.telegram !== false; $("azBluesky").checked = !!r.bluesky;
     $("azMatch").value = r.conditions.length ? r.match_mode : "";
     $("azMessage").value = r.message; $("azChat").value = r.chat_id; $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
     azFieldsBuf = r.fields.map((f) => ({ ...f })); azCondsBuf = r.conditions.map((c) => ({ ...c }));
@@ -1421,6 +1422,7 @@ if (TAURI) {
     azSyncBuffers();
     r.name = $("azName").value.trim(); r.tgs = nums($("azTgs").value); r.enabled = $("azEnabled").checked;
     r.keywords = azKw($("azKeywords").value); r.instructions = $("azInstructions").value;
+    r.engine = $("azEngine").value; r.telegram = $("azTelegram").checked; r.bluesky = $("azBluesky").checked;
     r.fields = azFieldsBuf.filter((f) => f.key);
     const mm = $("azMatch").value;
     r.conditions = mm ? azCondsBuf.filter((c) => c.field) : [];
@@ -1446,7 +1448,7 @@ if (TAURI) {
   }
   $("azFieldAdd").onclick = () => { azSyncBuffers(); azFieldsBuf.push({ key: "", kind: "string", desc: "" }); azRenderFields(); };
   $("azCondAdd").onclick = () => { if (!$("azMatch").value) $("azMatch").value = "all"; azSyncBuffers(); azCondsBuf.push({ field: "", op: "==", value: "" }); azRenderConds(); };
-  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
+  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, bluesky: false, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
   $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
   $("azDelete").onclick = async () => { if (!(await uiConfirm("Delete this analyzer?", "Delete"))) return; azView.rules = azView.rules.filter((x) => x.id !== azSel); azSel = null; $("azEditor").style.display = "none"; await azPersist(); };
   $("azTest").onclick = async () => { if (!azRead()) return; if (!(await azPersist())) return; uiToast("Running the analyzer on a recent call…"); try { const out = await invoke("analyzer_test", { id: azSel }); await uiConfirm(out, "OK"); setTimeout(azLogRefresh, 500); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
@@ -1461,11 +1463,28 @@ if (TAURI) {
       if (await azPersist()) { uiToast("Templates added — review and enable them"); azEdit(azView.rules[azView.rules.length - tpls.length].id); }
     } catch (e) { uiToast(`Could not load templates: ${e}`, "err"); }
   };
+  /* cloud model settings (shared by analyzers set to "Cloud") */
+  async function azcLoad() {
+    try {
+      const [cloud, hasKey] = await invoke("analyzer_cloud_get");
+      $("azcProvider").value = cloud.provider || "openrouter"; $("azcModel").value = cloud.model || "";
+      $("azcBase").value = cloud.base_url || ""; $("azcTimeout").value = cloud.timeout_secs || 60;
+      $("azcKeyState").textContent = hasKey ? "key saved" : "no key saved";
+      $("azcMeta").textContent = cloud.model ? `${cloud.provider} · ${cloud.model}` : "";
+    } catch (e) { log(`analyzer_cloud_get: ${e}`); }
+  }
+  $("azcSave").onclick = async () => {
+    const cloud = { provider: $("azcProvider").value, model: $("azcModel").value.trim(), base_url: $("azcBase").value.trim(), timeout_secs: Math.max(5, parseInt($("azcTimeout").value, 10) || 60) };
+    const key = $("azcKey").value;
+    try { await invoke("analyzer_cloud_save", { cloud, key: key || null }); $("azcKey").value = ""; uiToast("Cloud model saved"); azcLoad(); }
+    catch (e) { uiToast(`Could not save: ${e}`, "err"); }
+  };
+  $("azcClear").onclick = async () => { if (!(await uiConfirm("Forget the saved cloud API key?", "Forget"))) return; try { await invoke("analyzer_cloud_clear_key"); $("azcKey").value = ""; uiToast("Key forgotten"); azcLoad(); } catch (e) { uiToast(`${e}`, "err"); } };
   listen("analyzers", () => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); });
   listen("analyzer", (e) => { const p = e.payload; logEvent(`ANALYZER ${p.name}: ${String(p.message).split("\n")[0]}`, "alarm"); });
   setInterval(() => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); }, 15000);
-  window.analyzersOnShow = () => { if (!azView) azRefresh(); else azLogRefresh(); };
-  azRefresh(); azLogRefresh();
+  window.analyzersOnShow = () => { if (!azView) { azRefresh(); azcLoad(); } else azLogRefresh(); };
+  azRefresh(); azLogRefresh(); azcLoad();
 
   /* ---------- file name template ---------- */
   async function fnRefresh() {

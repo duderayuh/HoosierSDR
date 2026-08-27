@@ -900,6 +900,14 @@ fn bluesky_password() -> Option<String> {
     crate::secrets::get("bluesky-password")
 }
 
+/// Post `text` to the configured Bluesky account — handle from the alerts
+/// settings, app password from the secret store. Shared with analyzers.
+pub(crate) fn bluesky_post(state: &AppState, text: &str) -> Result<String, String> {
+    let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
+    let pw = bluesky_password().ok_or_else(|| "no Bluesky app password".to_string())?;
+    post_to_bluesky(&handle, &pw, text)
+}
+
 /// Post text to Bluesky. Returns the created post's at-URI on success.
 fn post_to_bluesky(handle: &str, password: &str, text: &str) -> Result<String, String> {
     if handle.trim().is_empty() {

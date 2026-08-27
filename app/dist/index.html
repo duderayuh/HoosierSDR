@@ -586,19 +586,40 @@
               <div id="azConds" class="list" style="max-height:18vh"></div>
               <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
               <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
+                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select></label>
+                <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
               </div>
-              <p class="help">The extraction uses the same local Ollama model as the alerts AI gate — set the server and model in <b>Alerts → AI gate · Ollama</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
+              <div class="row3">
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
+                <label class="field"><span class="lab">&nbsp;</span></label>
+              </div>
+              <p class="help">Local Ollama uses the server/model set in <b>Alerts → AI gate · Ollama</b>. Cloud uses the provider configured in the panel on the right. Bluesky posts to the account set in <b>Settings → Bluesky</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
             </div>
           </div>
         </div>
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Cloud model · for analyzers set to "Cloud"</span><span class="meta" id="azcMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
+                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
+              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
+              <p class="help">OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">How it works</span></div>
             <div class="body">
-              <p class="help">Each finished call is transcribed, then every enabled analyzer whose talkgroups (and keywords, if set) match runs its prompt against the transcript. The model returns the fields you defined as JSON; if your condition over those fields holds, the message is sent to Telegram with the extracted values filled in. This is the app-native version of the n8n "cardiac arrest? → ECPR candidate? → alert" flow — no webhook, no cloud.</p>
+              <p class="help">Each finished call is transcribed, then every enabled analyzer whose talkgroups (and keywords, if set) match runs its prompt against the transcript. The model returns the fields you defined as JSON; if your condition over those fields holds, the message is sent to your chosen destinations (Telegram and/or Bluesky) with the extracted values filled in. This is the app-native version of the n8n "cardiac arrest? → ECPR candidate? → alert" flow.</p>
               <p class="help"><b>Test on recent call</b> runs the prompt against the newest stored call that passes the pre-filter and shows you the extracted JSON and the message it would send, without waiting for live traffic.</p>
             </div>
           </div>
