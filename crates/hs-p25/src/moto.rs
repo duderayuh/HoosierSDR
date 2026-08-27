@@ -6,69 +6,64 @@
 //! standard voice grants — so ignoring them means ignoring most of what the
 //! system is saying.
 //!
-//! The messages decoded here are **Group Regroup**: dynamic talkgroup
-//! patching, where dispatch merges several talkgroups so they share audio. A
-//! scanner that does not track patches mis-attributes calls, because traffic
-//! for one talkgroup appears under another.
+//! The messages decoded here are **Group Regroup (GRG)**: dynamic talkgroup
+//! patching, where dispatch merges several talkgroups into a *supergroup*
+//! that shares audio. The part that matters to a scanner is that **a patch
+//! call's voice channel assignment is announced only here** — the standard
+//! Group Voice Channel Grant never names the supergroup. A receiver that
+//! files these messages away as bookkeeping plays none of the patch's calls,
+//! while consumer scanners (which implement GRG natively) play them all. On
+//! Marion County (MESA), the 49F-NORTH / 49F-SOUTH dispatch supergroups are
+//! granted exclusively through these opcodes.
 //!
 //! ## Cross-checked against public reporting
 //!
-//! Enthusiast documentation names this opcode family **Group Regroup (GRG)**:
-//! 0x00 an add command, 0x01 a delete, 0x02 and 0x03 grant and update. That
-//! matches what the traffic shows and the names below follow it.
+//! Enthusiast documentation names the family: 0x00 Group Regroup Add Command,
+//! 0x01 Delete, **0x02 GRG Channel Grant — "assign supergroup to channel"**,
+//! **0x03 GRG Channel Grant Update**. The grant messages mirror their
+//! standard-opcode counterparts field for field:
 //!
-//! One published description does not survive contact with the bits, and the
-//! disagreement is worth recording. 0x02 is often summarised as assigning a
-//! supergroup *to a channel*, which would make its middle field a channel
-//! number rather than a talkgroup. On the observed system that field decodes
-//! as channel iden 2 — an iden the system never announces; its IDEN_UP
-//! messages define only iden 0 (851.00625 MHz) and iden 1 (762.00625 MHz).
-//! Read as a talkgroup the same bits give a value inside the system's own
-//! talkgroup block, and the same value appears in the 0x00 talkgroup lists.
-//! So the field is treated as a talkgroup here.
-//!
-//! Two further opcodes are named by [`describe`] but not parsed, because their
-//! *purpose* is publicly reported while their field layouts are not: 0x05 is a
-//! Motorola System Broadcast of system parameters, and 0x09 a Scan Marker
-//! broadcast.
-//!
-//! Both were cross-checked against a raw capture of a different network (Ohio
-//! MARCS, NAC 0x341, posted publicly) and the agreement is close enough to
-//! confirm this decoder's byte alignment independently:
-//!
-//! * on 0x05, six of the eight argument bytes are **identical** across the two
-//!   systems, with only the leading two differing — exactly what a broadcast of
-//!   mostly network-wide default parameters should look like;
-//! * on 0x09, the other network's value occupies the same 9-bit field this one
-//!   uses, and is likewise an exact multiple of five, which no accident of
-//!   framing would reproduce.
-//!
-//! Opcodes 0x0B and 0x16 remain unidentified here and, as far as public
-//! discussion goes, everywhere.
+//! * **0x02** = `opts(8) | channel(16) | supergroup(16) | source unit(24)` —
+//!   the exact shape of the standard 0x00 Group Voice Channel Grant.
+//! * **0x03** = two `(channel, supergroup)` pairs — the exact shape of the
+//!   standard 0x02 Group Voice Channel Grant Update.
 //!
 //! ## Provenance and confidence
 //!
-//! There is no public specification for these opcodes. The field layouts below
-//! were derived from observed traffic, and the reasoning is recorded here so a
-//! future reader can judge it rather than trust it:
+//! There is no public specification for these opcodes, and an earlier
+//! revision of this decoder read them the other way around — 0x02 as
+//! `supergroup | member-talkgroup | unit` and 0x03 as `(supergroup, member)`
+//! pairs — on the reasoning that the second field of 0x02, read as a channel,
+//! named iden 2, which the observed system never announced. That reasoning
+//! tested the wrong field: it is the *first* field that carries the channel.
+//! The evidence that settled it:
 //!
-//! * **0x02** splits as `reserved(8) | supergroup(16) | talkgroup(16) |
-//!   unit(24)`. The trailing 24 bits held values in the same two unit-ID
-//!   ranges that this system's *standard* grants independently reported, and
-//!   the 16-bit talkgroup field matched its known talkgroup block. Two
-//!   independent field types landing in the right ranges at the right offsets
-//!   is not a coincidence a wrong split would produce.
-//! * **0x03** splits as two `(supergroup, talkgroup)` pairs. The supergroup
-//!   values observed — a small set in the hundreds — were exactly the values
-//!   seen in the supergroup position of 0x02, tying the two messages together.
-//! * **0x00** carries four 16-bit talkgroup IDs, all within the system's
-//!   talkgroup block and clustered on adjacent values.
+//! * The values observed in the **first** field (a small set in the
+//!   hundreds, e.g. 949 and 957) resolve through the site's announced iden 0
+//!   plan (base 851.00625 MHz, 6.25 kHz spacing) to **856.9375 and
+//!   856.9875 MHz — both active voice channels of the same site**, granted
+//!   to ordinary talkgroups by standard messages in the same captures. Two
+//!   exact integer hits on the site's own channel plan are not a coincidence
+//!   a wrong split would produce.
+//! * The **second** field's values sit inside the system's talkgroup block —
+//!   because it is the supergroup ID, which lives in the same numbering
+//!   space as ordinary talkgroups (dispatch patches are commonly named by a
+//!   dispatch talkgroup). This is also why those values appear in the 0x00
+//!   talkgroup lists.
+//! * The trailing 24 bits of 0x02 held values in the unit-ID ranges this
+//!   system's standard grants independently reported — the source radio,
+//!   exactly where the standard grant puts it.
+//! * Six days of continuous monitoring produced **zero** standard voice
+//!   grants for the known supergroups, while a consumer scanner on the same
+//!   air played their calls — so the channel assignment must arrive in the
+//!   messages the scanner implements and this decoder previously shelved.
 //!
-//! What is *inferred* rather than known is the semantics: which field is the
-//! patch and which the member, and what 0x00 asks the radios to do. The names
-//! below reflect that, and the parsers reject implausible values rather than
-//! reporting a confident guess. Everything else stays
-//! [`Tsbk::VendorSpecific`](crate::tsbk::Tsbk::VendorSpecific) with raw
+//! What 0x00 asks the radios to do remains inferred: it carries four
+//! talkgroup-block IDs and no obvious channel, and public reporting calls it
+//! an "add command". Whether one of its IDs is the supergroup and the rest
+//! members (which would recover true patch membership) is not yet confirmed
+//! against captured traffic, so it records no association. Everything else
+//! stays [`Tsbk::VendorSpecific`](crate::tsbk::Tsbk::VendorSpecific) with raw
 //! arguments, ready to be identified from a shared diagnostics log.
 
 /// Motorola's manufacturer ID.
@@ -77,23 +72,28 @@ pub const MFID_MOTOROLA: u8 = 0x90;
 /// A Motorola Group Regroup (talkgroup patch) message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MotoRegroup {
-    /// 0x03 — Group Regroup update: associates talkgroups with a supergroup.
-    /// Two pairs per block; a block often repeats the same pair twice.
-    RegroupUpdate {
-        /// (supergroup, member talkgroup) pairs.
+    /// 0x03 — GRG Channel Grant Update: patch calls in progress, as
+    /// `(channel, supergroup)` pairs. A block often repeats one pair twice;
+    /// an implausible pair is normalized to `(0, 0)` so the caller can skip
+    /// it without re-deriving plausibility.
+    GrgChannelUpdate {
+        /// (channel, supergroup) pairs.
         pairs: [(u16, u16); 2],
     },
-    /// 0x02 — Group Regroup grant: a unit operating on a regrouped talkgroup.
-    RegroupGrant {
+    /// 0x02 — GRG Channel Grant: a supergroup (patch) call assigned to a
+    /// voice channel, with the granting radio. Mirrors the standard Group
+    /// Voice Channel Grant.
+    GrgChannelGrant {
+        /// Service options, as in the standard grant (0x40 is the E bit).
+        opts: u8,
+        channel: u16,
         supergroup: u16,
-        talkgroup: u16,
-        unit: u32,
+        source_unit: u32,
     },
     /// 0x00 — Group Regroup add command: four talkgroup IDs being regrouped.
     ///
-    /// No supergroup appears in the block, so this names the members without
-    /// saying which patch they join. It therefore records no association on
-    /// its own; 0x02 and 0x03 supply that.
+    /// No channel appears in the block, and which ID (if any) is the
+    /// supergroup is unconfirmed, so this records no association on its own.
     RegroupAdd { talkgroups: [u16; 4] },
 }
 
@@ -118,28 +118,40 @@ pub fn parse(opcode: u8, args: u64) -> Option<MotoRegroup> {
                 .then_some(MotoRegroup::RegroupAdd { talkgroups })
         }
         0x02 => {
-            let supergroup = ((args >> 40) & 0xFFFF) as u16;
-            let talkgroup = ((args >> 24) & 0xFFFF) as u16;
-            let unit = (args & 0xFF_FFFF) as u32;
-            (plausible_talkgroup(supergroup) && plausible_talkgroup(talkgroup) && unit != 0)
-                .then_some(MotoRegroup::RegroupGrant {
+            let opts = (args >> 56) as u8;
+            let channel = ((args >> 40) & 0xFFFF) as u16;
+            let supergroup = ((args >> 24) & 0xFFFF) as u16;
+            let source_unit = (args & 0xFF_FFFF) as u32;
+            (channel != 0 && plausible_talkgroup(supergroup) && source_unit != 0).then_some(
+                MotoRegroup::GrgChannelGrant {
+                    opts,
+                    channel,
                     supergroup,
-                    talkgroup,
-                    unit,
-                })
+                    source_unit,
+                },
+            )
         }
         0x03 => {
-            let pairs = [
+            let raw = [
                 (
                     ((args >> 48) & 0xFFFF) as u16,
                     ((args >> 32) & 0xFFFF) as u16,
                 ),
                 (((args >> 16) & 0xFFFF) as u16, (args & 0xFFFF) as u16),
             ];
+            let pairs = raw.map(|(ch, sg)| {
+                if ch != 0 && plausible_talkgroup(sg) {
+                    (ch, sg)
+                } else {
+                    (0, 0)
+                }
+            });
+            // At least one pair must be a real assignment; an all-padding
+            // block is a different message wearing this opcode.
             pairs
                 .iter()
-                .all(|&(sg, tg)| plausible_talkgroup(sg) && plausible_talkgroup(tg))
-                .then_some(MotoRegroup::RegroupUpdate { pairs })
+                .any(|&(ch, _)| ch != 0)
+                .then_some(MotoRegroup::GrgChannelUpdate { pairs })
         }
         _ => None,
     }
@@ -152,8 +164,8 @@ pub fn describe(opcode: u8) -> Option<&'static str> {
     match opcode {
         0x00 => Some("Group Regroup Add"),
         0x01 => Some("Group Regroup Delete"),
-        0x02 => Some("Group Regroup Grant"),
-        0x03 => Some("Group Regroup Update"),
+        0x02 => Some("Group Regroup Channel Grant"),
+        0x03 => Some("Group Regroup Channel Grant Update"),
         0x05 => Some("System Broadcast"),
         0x09 => Some("Scan Marker"),
         0x0A => Some("Emergency Alarm"),
@@ -163,7 +175,7 @@ pub fn describe(opcode: u8) -> Option<&'static str> {
 }
 
 /// A talkgroup or supergroup ID that could be real. Zero is the null group and
-/// 0xFFFF is the all-call/broadcast value; neither names a patch member.
+/// 0xFFFF is the all-call/broadcast value; neither names a patch.
 fn plausible_talkgroup(id: u16) -> bool {
     id != 0 && id != 0xFFFF
 }
@@ -174,55 +186,81 @@ mod tests {
 
     // Synthetic values throughout: no observed talkgroup or unit ID from any
     // real system is committed to this repository.
-    const SG: u16 = 0x0301;
-    const TG: u16 = 0x2001;
+    const CH: u16 = 0x03BD;
+    const SG: u16 = 0x2001;
     const UNIT: u32 = 0x4A_0001;
 
     #[test]
-    fn parses_a_patch_add() {
-        let args = ((SG as u64) << 48) | ((TG as u64) << 32) | ((SG as u64) << 16) | TG as u64;
+    fn parses_a_channel_grant_update() {
+        let args = ((CH as u64) << 48) | ((SG as u64) << 32) | ((CH as u64) << 16) | SG as u64;
         assert_eq!(
             parse(0x03, args),
-            Some(MotoRegroup::RegroupUpdate {
-                pairs: [(SG, TG), (SG, TG)]
+            Some(MotoRegroup::GrgChannelUpdate {
+                pairs: [(CH, SG), (CH, SG)]
             })
         );
     }
 
     #[test]
-    fn parses_a_patch_user_with_its_unit() {
-        let args = ((SG as u64) << 40) | ((TG as u64) << 24) | UNIT as u64;
+    fn update_keeps_the_real_pair_and_blanks_padding() {
+        // One live assignment plus a padded slot: the block parses and the
+        // padding comes back as (0, 0) rather than a confident pair.
+        let args = ((CH as u64) << 48) | ((SG as u64) << 32);
         assert_eq!(
-            parse(0x02, args),
-            Some(MotoRegroup::RegroupGrant {
-                supergroup: SG,
-                talkgroup: TG,
-                unit: UNIT
+            parse(0x03, args),
+            Some(MotoRegroup::GrgChannelUpdate {
+                pairs: [(CH, SG), (0, 0)]
             })
         );
+    }
+
+    #[test]
+    fn parses_a_channel_grant_with_its_unit() {
+        let args = ((CH as u64) << 40) | ((SG as u64) << 24) | UNIT as u64;
+        assert_eq!(
+            parse(0x02, args),
+            Some(MotoRegroup::GrgChannelGrant {
+                opts: 0,
+                channel: CH,
+                supergroup: SG,
+                source_unit: UNIT
+            })
+        );
+    }
+
+    #[test]
+    fn grant_carries_the_encryption_bit() {
+        let args = (0x40u64 << 56) | ((CH as u64) << 40) | ((SG as u64) << 24) | UNIT as u64;
+        match parse(0x02, args) {
+            Some(MotoRegroup::GrgChannelGrant { opts, .. }) => assert_eq!(opts & 0x40, 0x40),
+            other => panic!("expected a channel grant, got {other:?}"),
+        }
     }
 
     #[test]
     fn parses_a_patch_status_list() {
         let args =
-            ((TG as u64) << 48) | (((TG + 1) as u64) << 32) | (((TG + 1) as u64) << 16) | TG as u64;
+            ((SG as u64) << 48) | (((SG + 1) as u64) << 32) | (((SG + 1) as u64) << 16) | SG as u64;
         assert_eq!(
             parse(0x00, args),
             Some(MotoRegroup::RegroupAdd {
-                talkgroups: [TG, TG + 1, TG + 1, TG]
+                talkgroups: [SG, SG + 1, SG + 1, SG]
             })
         );
     }
 
     #[test]
     fn rejects_null_and_broadcast_group_ids() {
-        // Padding and all-call values must not become patch members; without
-        // this an idle or unrelated block decodes as a confident patch.
+        // Padding and all-call values must not become grants; without this an
+        // idle or unrelated block decodes as a confident patch call.
         assert_eq!(parse(0x00, 0), None);
         assert_eq!(parse(0x00, u64::MAX), None);
         assert_eq!(parse(0x03, 0), None);
-        // A user message with no unit is not a user message.
-        let args = ((SG as u64) << 40) | ((TG as u64) << 24);
+        // A grant with no source radio is not a grant.
+        let args = ((CH as u64) << 40) | ((SG as u64) << 24);
+        assert_eq!(parse(0x02, args), None);
+        // A grant to channel 0 is padding, not an assignment.
+        let args = ((SG as u64) << 24) | UNIT as u64;
         assert_eq!(parse(0x02, args), None);
     }
 

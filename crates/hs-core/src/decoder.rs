@@ -519,32 +519,57 @@ impl ChannelDecoder {
 
     fn on_tsbk(&mut self, tsbk: Tsbk, out: &mut DecodeOutput) {
         match tsbk {
-            Tsbk::MotoRegroup(r) => {
-                match r {
-                    // A patch definition names a supergroup and its members.
-                    MotoRegroup::RegroupUpdate { pairs } => {
-                        for (sg, tg) in pairs {
-                            self.patches.add(sg, tg);
+            // Motorola Group Regroup: a patch (supergroup) call's voice
+            // channel is announced *only* here — the standard grant never
+            // names a supergroup. These must start calls exactly like the
+            // standard messages they mirror, or every patch call on the
+            // system is silently skipped (Marion County's 49F-NORTH/SOUTH
+            // dispatch supergroups are granted exclusively this way).
+            Tsbk::MotoRegroup(r) => match r {
+                MotoRegroup::GrgChannelGrant {
+                    opts,
+                    channel,
+                    supergroup,
+                    source_unit,
+                } => {
+                    let encrypted = opts & 0x40 != 0; // 'E' bit, as standard
+                    if let Some(g) =
+                        self.site
+                            .resolve_grant(supergroup, source_unit, channel, encrypted)
+                    {
+                        self.active_tg = Some(supergroup);
+                        self.active_enc = encrypted;
+                        if encrypted {
+                            out.encrypted_skips.push(supergroup);
+                        }
+                        self.diag.grants.push(crate::diag::GrantStat {
+                            talkgroup: g.talkgroup,
+                            source_unit: g.source_unit,
+                            freq_hz: g.freq_hz,
+                            encrypted: g.encrypted,
+                        });
+                        out.grants.push(g);
+                    }
+                }
+                MotoRegroup::GrgChannelUpdate { pairs } => {
+                    // A padded slot is normalized to (0, 0) by the parser.
+                    for (channel, supergroup) in pairs.into_iter().filter(|&(ch, _)| ch != 0) {
+                        if let Some(g) = self.site.resolve_grant(supergroup, 0, channel, false) {
+                            self.diag.grants.push(crate::diag::GrantStat {
+                                talkgroup: g.talkgroup,
+                                source_unit: g.source_unit,
+                                freq_hz: g.freq_hz,
+                                encrypted: g.encrypted,
+                            });
+                            out.grants.push(g);
                         }
                     }
-                    // A unit operating on a patched talkgroup confirms the
-                    // same association from the traffic side.
-                    MotoRegroup::RegroupGrant {
-                        supergroup,
-                        talkgroup,
-                        ..
-                    } => self.patches.add(supergroup, talkgroup),
-                    // The status list says which talkgroups are regrouped but
-                    // not under which supergroup, so it adds no association.
-                    MotoRegroup::RegroupAdd { .. } => {}
                 }
-                self.diag.patches = self
-                    .patches
-                    .patches()
-                    .iter()
-                    .map(|(s, m)| (*s, m.clone()))
-                    .collect();
-            }
+                // Four talkgroup IDs with no channel and no confirmed
+                // supergroup position: records no association (see hs-p25
+                // moto.rs provenance notes).
+                MotoRegroup::RegroupAdd { .. } => {}
+            },
             Tsbk::VendorSpecific { mfid, opcode, args } => {
                 // A few raw examples per vendor opcode are enough to work out
                 // its structure offline; the counts above carry the rest.
@@ -673,16 +698,28 @@ impl ChannelDecoder {
                     .push(MobilityEvent::Deregistered { unit: source_id });
             }
             Tsbk::GroupVoiceGrantUpdate {
-                channel_a, group_a, ..
+                channel_a,
+                group_a,
+                channel_b,
+                group_b,
             } => {
-                if let Some(g) = self.site.resolve_grant(group_a, 0, channel_a, false) {
-                    self.diag.grants.push(crate::diag::GrantStat {
-                        talkgroup: g.talkgroup,
-                        source_unit: g.source_unit,
-                        freq_hz: g.freq_hz,
-                        encrypted: g.encrypted,
-                    });
-                    out.grants.push(g);
+                // Both slots are grants; an unused B slot is zeros (or a
+                // repeat of A, which the follower already treats as the same
+                // call). Dropping B silently skipped every second announced
+                // call.
+                for (channel, group) in [(channel_a, group_a), (channel_b, group_b)] {
+                    if channel == 0 || group == 0 || group == 0xFFFF {
+                        continue;
+                    }
+                    if let Some(g) = self.site.resolve_grant(group, 0, channel, false) {
+                        self.diag.grants.push(crate::diag::GrantStat {
+                            talkgroup: g.talkgroup,
+                            source_unit: g.source_unit,
+                            freq_hz: g.freq_hz,
+                            encrypted: g.encrypted,
+                        });
+                        out.grants.push(g);
+                    }
                 }
             }
             _ => {}
