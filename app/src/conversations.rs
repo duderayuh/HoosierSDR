@@ -5,9 +5,12 @@
 //! that belong together. A rule names the talkgroups this applies to and the
 //! **fixed** radio IDs (the hospital's consoles); every other radio is a
 //! mobile unit, and a conversation is keyed by (talkgroup, mobile unit). A
-//! transmission from a fixed ID is attributed to the conversation that was
-//! most recently active on that talkgroup. A different mobile unit keying up
-//! starts a different incident, even mid-way through another.
+//! transmission from a fixed ID is attributed to the incident it is part of:
+//! the most recently active conversation on that talkgroup, preferring one
+//! that has not been summarised yet so the hospital's side lands on the live
+//! incident (and its summary carries both sides) rather than reopening an
+//! already-sent one and spamming a duplicate revision. A different mobile
+//! unit keying up starts a different incident, even mid-way through another.
 //!
 //! The conversation ends after `end_gap_secs` of silence. Then the
 //! transcripts are stitched with speaker labels, the local model writes a
@@ -218,6 +221,65 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
     n >= 3 && total > 0 && n * 10 >= total * 6
 }
 
+/// Which open conversation a transmission belongs to (index into `open`), or
+/// `None` to start a new one.
+///
+/// Incidents stay separate per mobile unit: a mobile unit keys its own
+/// conversation (or, if it hasn't spoken yet, joins a hospital-initiated one
+/// that has no mobile unit). The fixed party (a hospital console) is not an
+/// incident of its own — its transmission attaches to the incident it is part
+/// of, so both sides of the exchange end up in one conversation and one
+/// summary. That is the most recently active conversation on the talkgroup,
+/// but a conversation still awaiting its summary is preferred over one already
+/// sent: hospital traffic for a live incident then lands on that incident
+/// instead of reopening a closed one and triggering a duplicate, still
+/// one-sided, revision. A sent conversation is only reopened (within its late
+/// window) when no live one is open — a genuine late follow-up.
+fn attach_index(
+    open: &[Conversation],
+    rule_id: &str,
+    tg: u16,
+    unit: u32,
+    fixed: bool,
+    now: i64,
+    gap: i64,
+    late: i64,
+) -> Option<usize> {
+    if !fixed {
+        return open
+            .iter()
+            .position(|c| {
+                c.rule_id == rule_id
+                    && c.tg == tg
+                    && c.mobile_unit == Some(unit)
+                    && now - c.last_at <= gap + late
+            })
+            .or_else(|| {
+                // A hospital-initiated conversation with no mobile unit yet.
+                open.iter().position(|c| {
+                    c.rule_id == rule_id
+                        && c.tg == tg
+                        && c.mobile_unit.is_none()
+                        && now - c.last_at <= gap
+                })
+            });
+    }
+    // The fixed party: the most recently active conversation here, live first.
+    let most_recent = |sent: bool| {
+        open.iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.rule_id == rule_id
+                    && c.tg == tg
+                    && c.sent_at.is_some() == sent
+                    && now - c.last_at <= gap + late
+            })
+            .max_by_key(|(_, c)| c.last_at)
+            .map(|(i, _)| i)
+    };
+    most_recent(false).or_else(|| most_recent(true))
+}
+
 /// A completed transmission: attach it to a conversation, or open one.
 pub fn on_call(app: &AppHandle, f: &CallFacts) {
     let state = app.state::<AppState>();
@@ -248,33 +310,7 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
         let late = r.late_window_secs as i64;
         let gap = r.end_gap_secs as i64;
         // Which open conversation does this belong to?
-        let idx = if !fixed {
-            st.open
-                .iter()
-                .position(|c| {
-                    c.rule_id == r.id
-                        && c.tg == f.tg
-                        && c.mobile_unit == Some(f.unit)
-                        && now - c.last_at <= gap + late
-                })
-                .or_else(|| {
-                    // A hospital-initiated conversation with no mobile unit yet.
-                    st.open.iter().position(|c| {
-                        c.rule_id == r.id
-                            && c.tg == f.tg
-                            && c.mobile_unit.is_none()
-                            && now - c.last_at <= gap
-                    })
-                })
-        } else {
-            // The fixed party: the most recently active conversation here.
-            st.open
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.rule_id == r.id && c.tg == f.tg && now - c.last_at <= gap + late)
-                .max_by_key(|(_, c)| c.last_at)
-                .map(|(i, _)| i)
-        };
+        let idx = attach_index(&st.open, &r.id, f.tg, f.unit, fixed, now, gap, late);
         match idx {
             Some(i) => {
                 let c = &mut st.open[i];
@@ -372,9 +408,13 @@ pub fn spawn_ticker(app: AppHandle) {
                         keep.push(c);
                         continue;
                     }
-                    if (c.pieces.len() as u32) < r.min_calls.max(1) {
+                    let has_mobile = c.pieces.iter().any(|p| !p.fixed);
+                    if !has_mobile || (c.pieces.len() as u32) < r.min_calls.max(1) {
+                        // Too small, or only the fixed party spoke (a one-sided
+                        // hospital-only exchange with no unit) — not worth a
+                        // summary. Dropped, but still counts toward learning.
                         learn(&mut st.settings, r, &c);
-                        continue; // too small to bother; dropped (still counts toward learning)
+                        continue;
                     }
                     c.busy = true;
                     due.push(c.clone());
@@ -957,6 +997,105 @@ mod tests {
         let mut off = r.clone();
         off.learn_fixed = false;
         assert!(!is_fixed(&s, &off, 10202, 790065));
+    }
+
+    /// A bare open conversation for attribution tests.
+    fn conv(key: u64, tg: u16, mobile: Option<u32>, last_at: i64, sent: bool) -> Conversation {
+        Conversation {
+            key,
+            rule_id: "r".into(),
+            rule_name: "Hospitals".into(),
+            tg,
+            tg_name: "TG".into(),
+            mobile_unit: mobile,
+            pieces: Vec::new(),
+            first_at: last_at,
+            last_at,
+            sent_ids: Vec::new(),
+            sent_chat: String::new(),
+            sent_at: sent.then_some(last_at),
+            dirty: false,
+            revision: 0,
+            busy: false,
+            attempts: 0,
+            retry_after: 0,
+            last_summary: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_mobile_unit_stays_in_its_own_incident() {
+        // Two units talking on one talkgroup keep separate conversations.
+        let open = vec![
+            conv(1, 10202, Some(790065), 100, false),
+            conv(2, 10202, Some(790066), 110, false),
+        ];
+        // 790065 keys up again → its own conversation, not the newer one.
+        assert_eq!(
+            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180),
+            Some(0)
+        );
+        // A brand-new unit → no match, opens a fresh incident.
+        assert_eq!(
+            attach_index(&open, "r", 10202, 790099, false, 120, 90, 180),
+            None
+        );
+    }
+
+    #[test]
+    fn a_mobile_unit_joins_a_hospital_initiated_conversation() {
+        let open = vec![conv(1, 10202, None, 100, false)];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_fixed_party_prefers_the_live_incident_over_a_sent_one() {
+        // A conversation was already summarised at t=100; a new incident is
+        // live at t=110. The hospital keys up at t=120 — it must land on the
+        // live incident (index 1), not reopen the sent one, so the live
+        // incident's summary carries the hospital side and the sent one is not
+        // spammed with a duplicate revision.
+        let open = vec![
+            conv(1, 10202, Some(790065), 100, true),
+            conv(2, 10202, Some(790066), 110, false),
+        ];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 900001, true, 120, 90, 180),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_fixed_party_reopens_a_sent_incident_only_when_nothing_is_live() {
+        // No live conversation: a genuine late hospital follow-up reopens the
+        // sent one (within its late window) to revise it.
+        let open = vec![conv(1, 10202, Some(790065), 100, true)];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 900001, true, 150, 90, 180),
+            Some(0)
+        );
+        // Past the late window: nothing to attach to → a fresh conversation.
+        assert_eq!(
+            attach_index(&open, "r", 10202, 900001, true, 400, 90, 180),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fixed_party_picks_the_most_recent_live_incident() {
+        let open = vec![
+            conv(1, 10202, Some(790065), 100, false),
+            conv(2, 10202, Some(790066), 130, false),
+            conv(3, 10202, Some(790067), 115, false),
+        ];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 900001, true, 140, 90, 180),
+            Some(1)
+        );
     }
 
     #[test]
