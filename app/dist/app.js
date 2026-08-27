@@ -78,7 +78,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases", "#discovery", "#alerts", "#devices"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
 
 /* ---------- tuning state ---------- */
-let modeSel = "follow", modSel = "cqpsk", eqSel = "cma";
+let modeSel = "follow", modSel = "cqpsk", eqSel = "cma", decoderSel = "p25", squelchVal = 0.3;
 let measuredPpm = null;
 const ppmVal = () => { const v = parseFloat($("ppm").value); return Number.isFinite(v) ? v : null; };
 function applyMode() {
@@ -95,10 +95,28 @@ function applyMode() {
   if (dual) { $("centerField").style.display = "none"; $("tmodField").style.display = "none"; $("modField").style.display = ""; $("eqField").style.display = "none"; }
   $("voiceSrcField").style.display = dual ? "" : "none";
   $("emptyHint").textContent = follow ? "Pick a playlist or set a control channel, then press Start." : "Set a channel and press Start. One-channel mode decodes one channel and counts voice but does not play it; on a control channel it only announces grants (Discovery, Events) — use Follow site to listen.";
+  applyDecoder();
+}
+// The Decoder picker only applies to one-channel mode. Choosing a non-P25
+// analog decoder hides the P25-only modulation/equalizer selectors and, for the
+// FM decoders, reveals the squelch slider.
+function applyDecoder() {
+  const channel = modeSel === "channel";
+  const analog = decoderSel !== "p25";
+  $("decoderField").style.display = channel ? "" : "none";
+  if (channel && analog) {
+    $("modField").style.display = "none";
+    $("eqField").style.display = "none";
+  }
+  // Squelch applies to the FM-based analog decoders (nbfm, dcs).
+  const fm = analog && decoderSel !== "am";
+  $("squelchField").style.display = channel && fm ? "" : "none";
 }
 wireSeg($("modeSeg"), (v) => { modeSel = v; applyMode(); });
 wireSeg($("modSeg"), (v) => { modSel = v; });
 wireSeg($("eqSeg"), (v) => { eqSel = v; $("r-eq").textContent = v === "bypass" ? "BARE" : v.toUpperCase(); });
+$("decoder").onchange = () => { decoderSel = $("decoder").value; applyDecoder(); };
+$("squelch").oninput = () => { squelchVal = parseFloat($("squelch").value); $("squelchMeta").textContent = `${Math.round(squelchVal * 100)}%`; };
 function syncRate() {
   const r = parseFloat($("rate").value);
   $("rateMeta").textContent = r >= 1e6 ? (r / 1e6).toFixed(1) + " MSPS" : (r / 1e3) + " kSPS";
@@ -978,6 +996,12 @@ if (TAURI) {
   });
   listen("status", (e) => setStatus(e.payload));
   listen("spectrum", (e) => pushSpectrum(e.payload.bins_db));
+  listen("decoderevent", (e) => { const d = e.payload; logEvent(`${d.kind}: ${d.text}`); });
+  listen("decoderdone", (e) => {
+    const d = e.payload;
+    logEvent(`${d.decoder}: ${d.audio_secs.toFixed(1)} s audio, ${d.events} event(s)${d.audio ? " — playing" : ""}`);
+    if (d.audio) replay(d.audio);
+  });
   listen("stopped", () => { setState("standby"); holdTg = null; updateHoldBtn(); invoke("set_hold", { tg: null }).catch(() => {}); });
   listen("error", (e) => { log(`backend error: ${e.payload}`); setState("standby"); alert("Capture error:\n" + e.payload); });
   listen("follow", (e) => handleFollow(e.payload));
@@ -993,6 +1017,7 @@ if (TAURI) {
   $("start").onclick = async () => {
     try {
       if (!Number.isFinite(parseFreq($("freq").value))) { alert("Enter a frequency like 851.5375M"); return; }
+      if (modeSel === "channel" && decoderSel !== "p25") { alert("Live capture with the non-P25 decoders isn't wired up yet — record IQ, then use “Decode a recording” below with the decoder selected."); return; }
       if (modeSel === "follow" && !Number.isFinite(parseFreq($("center").value))) { alert("Enter a band centre like 855M"); return; }
       if (+$("rate").value < 1e6) { alert("The 48 kHz rate is for decoding files; pick 2.4 M (RTL-SDR) or 2.5 / 10 M (Airspy)."); return; }
       setState(modeSel === "follow" ? "measuring" : "capturing");
@@ -1033,7 +1058,16 @@ if (TAURI) {
   };
   $("decode").onclick = async () => {
     const path = $("decfile").value.trim(); if (!path) return;
-    try { setState("decoding"); await invoke("decode_file", { path, rate: parseFloat($("rate").value), cqpsk: modSel === "cqpsk", eq: eqSel }); }
+    const rate = parseFloat($("rate").value);
+    try {
+      setState("decoding");
+      if (decoderSel !== "p25") {
+        logEvent(`decoding ${path.split("/").pop()} with ${$("decoder").selectedOptions[0].textContent.replace(/ \(default\)/, "")}…`);
+        await invoke("decode_file_analog", { path, rate, decoder: decoderSel, squelch: squelchVal });
+      } else {
+        await invoke("decode_file", { path, rate, cqpsk: modSel === "cqpsk", eq: eqSel });
+      }
+    }
     catch (err) { alert(err); } finally { setState("standby"); }
   };
   pushLockout(); pushPriorities(); pushRanges(); pushPolicies();

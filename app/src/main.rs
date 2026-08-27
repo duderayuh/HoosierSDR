@@ -1677,6 +1677,107 @@ async fn decode_file(
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize, Clone)]
+struct DecoderEventMsg {
+    /// Short machine tag: "squelch", "dcs", "ani", "status", "gps", "grant".
+    kind: String,
+    /// Human-readable line for the event feed.
+    text: String,
+}
+
+#[derive(Serialize, Clone)]
+struct DecoderDoneMsg {
+    decoder: String,
+    /// Path to the WAV of recovered audio, if any was decoded.
+    audio: Option<String>,
+    audio_secs: f64,
+    events: usize,
+}
+
+/// Render a decoder event for the app's event feed.
+fn describe_event(ev: &hs_decoders::DecoderEvent) -> (String, String) {
+    use hs_decoders::DecoderEvent as E;
+    match ev {
+        E::SquelchOpen => ("squelch".into(), "squelch open".into()),
+        E::SquelchClose => ("squelch".into(), "squelch close".into()),
+        E::Dcs { code, inverted } => (
+            "dcs".into(),
+            format!("DCS code {code:03o}{}", if *inverted { " (inverted)" } else { "" }),
+        ),
+        E::Ani { id, op } => (
+            "ani".into(),
+            match op {
+                Some(o) => format!("ANI {id} ({o})"),
+                None => format!("ANI {id}"),
+            },
+        ),
+        E::Status { id, status } => ("status".into(), format!("status from {id}: {status}")),
+        E::Gps { id, lat, lon } => ("gps".into(), format!("GPS {id}: {lat:.5}, {lon:.5}")),
+        E::Grant {
+            talkgroup, freq_hz, ..
+        } => (
+            "grant".into(),
+            match freq_hz {
+                Some(f) => format!("grant TG {talkgroup} → {:.4} MHz", f / 1e6),
+                None => format!("grant TG {talkgroup}"),
+            },
+        ),
+        E::Message(m) => ("message".into(), m.clone()),
+        other => ("event".into(), format!("{other:?}")),
+    }
+}
+
+/// Decode an on-disk `.cf32` recording with a non-P25 analog decoder (AM,
+/// NBFM, DCS, …). Emits typed `decoderevent`s, writes the recovered audio to a
+/// WAV beside the input, and finishes with a `decoderdone`.
+#[tauri::command]
+async fn decode_file_analog(
+    app: AppHandle,
+    path: String,
+    rate: f64,
+    decoder: String,
+    squelch: f32,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let kind = hs_decoders::DecoderKind::from_name(&decoder)
+            .ok_or_else(|| format!("unknown decoder '{decoder}'"))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+        let iq: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut dec = hs_core::decoders::build(kind, rate, 0.0, squelch.clamp(0.0, 1.0))?;
+        let out = dec.process(&iq);
+
+        for ev in &out.events {
+            let (kind, text) = describe_event(ev);
+            let _ = app.emit("decoderevent", DecoderEventMsg { kind, text });
+        }
+
+        let audio_rate = dec.audio_rate();
+        let audio_path = if out.audio.is_empty() {
+            None
+        } else {
+            let p = format!("{path}.{}.wav", kind.name());
+            hs_core::wav::write_wav(&p, audio_rate, &out.audio)
+                .map_err(|e| format!("write {p}: {e}"))?;
+            Some(p)
+        };
+        let _ = app.emit(
+            "decoderdone",
+            DecoderDoneMsg {
+                decoder: kind.label().into(),
+                audio: audio_path,
+                audio_secs: out.audio.len() as f64 / audio_rate as f64,
+                events: out.events.len(),
+            },
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Map the UI's equalizer selector to an `EqMode`. `cma` is the shipping
 /// CQPSK default (the thesis); `dfe` adds decision feedback for the deep-null
 /// simulcast burst; `bypass` is the conventional detect-first receiver.
@@ -1855,6 +1956,7 @@ fn main() {
             survey_capture,
             survey_delete,
             decode_file,
+            decode_file_analog,
             start_follow,
             dual::dual_start,
             set_lockout,

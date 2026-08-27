@@ -59,6 +59,8 @@ struct Args {
     scan: bool,
     scan_secs: f64,
     uv_quality: Option<i32>,
+    decoder: Option<String>,
+    squelch: f32,
 }
 
 fn parse_args() -> Args {
@@ -97,6 +99,8 @@ fn parse_args() -> Args {
         scan: false,
         scan_secs: 4.0,
         uv_quality: None,
+        decoder: None,
+        squelch: 0.3,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -141,6 +145,14 @@ fn parse_args() -> Args {
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
             "--cqpsk" => a.cqpsk = true,
+            "--decoder" => a.decoder = it.next(),
+            "--squelch" => {
+                a.squelch = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.3f32)
+                    .clamp(0.0, 1.0)
+            }
             "--offset" => a.offset = it.next().and_then(|s| parse_freq(&s)).unwrap_or(0.0),
             "--play" => a.play = true,
             "--demo" => a.demo = true,
@@ -198,6 +210,12 @@ fn print_help() {
              \x20              channels; this picks one without re-recording.\n\
              --cqpsk        Decode CQPSK/LSM (simulcast) instead of C4FM: carrier +\n\
                             timing recovery + CMA equalizer before differential detection\n\
+             --decoder <K>  Use a non-P25 decoder: am, nbfm, dcs (default: P25).\n\
+             \x20              Writes recovered audio to the WAV output and prints\n\
+             \x20              typed events (squelch, DCS codes). Combine with --offset\n\
+             \x20              to pick a channel out of a wideband capture.\n\
+             --squelch <L>  Squelch tightness 0..1 for the FM analog decoders\n\
+             \x20              (default 0.3; 0 opens easily, 1 demands a clean signal).\n\
              --sdr          Capture live from a radio (build --features rtlsdr,airspy,soapy)
 --source <S>   Which radio: rtlsdr, airspy, or soapy (default: whichever
                this build has; rtlsdr when it has it). soapy drives RTL-SDRs
@@ -536,6 +554,79 @@ fn build_decoder(args: &Args) -> ChannelDecoder {
     ChannelDecoder::with_offset(args.rate, modulation, mode, args.offset)
 }
 
+/// Decode a recording with a non-P25 analog decoder (AM, NBFM, DCS, …),
+/// writing the recovered audio to the WAV output and printing typed events.
+fn run_analog(iq: &[f32], args: &Args, kind: hs_decoders::DecoderKind) {
+    use hs_decoders::DecoderEvent;
+
+    let mut dec = match hs_core::decoders::build(kind, args.rate, args.offset, args.squelch) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    println!(
+        "Decoding with the {} decoder (squelch {:.0}%)…\n",
+        kind.label(),
+        args.squelch * 100.0
+    );
+
+    // Feed the whole recording; the decoder is stateful across the slice.
+    let out = dec.process(iq);
+
+    let audio_rate = dec.audio_rate();
+    let mut n_events = 0usize;
+    for ev in &out.events {
+        let line = match ev {
+            DecoderEvent::SquelchOpen => "squelch open".to_string(),
+            DecoderEvent::SquelchClose => "squelch close".to_string(),
+            DecoderEvent::Dcs { code, inverted } => {
+                format!("DCS code {code:03o}{}", if *inverted { " (inverted)" } else { "" })
+            }
+            DecoderEvent::Ani { id, op } => match op {
+                Some(o) => format!("ANI {id} ({o})"),
+                None => format!("ANI {id}"),
+            },
+            DecoderEvent::Status { id, status } => format!("status from {id}: {status}"),
+            DecoderEvent::Gps { id, lat, lon } => format!("GPS {id}: {lat:.5}, {lon:.5}"),
+            DecoderEvent::Grant {
+                talkgroup,
+                freq_hz,
+                ..
+            } => match freq_hz {
+                Some(f) => format!("grant TG {talkgroup} → {:.4} MHz", f / 1e6),
+                None => format!("grant TG {talkgroup}"),
+            },
+            DecoderEvent::Message(m) => m.clone(),
+            _ => format!("{ev:?}"),
+        };
+        println!("  • {line}");
+        n_events += 1;
+    }
+
+    let secs = out.audio.len() as f64 / audio_rate as f64;
+    println!(
+        "\n{} audio: {:.1} s ({} samples @ {} Hz), {} event(s).",
+        kind.label(),
+        secs,
+        out.audio.len(),
+        audio_rate,
+        n_events
+    );
+
+    if let Some(path) = &args.wav_out {
+        if out.audio.is_empty() {
+            println!("(no audio to write — channel stayed squelched)");
+        } else {
+            match wav::write_wav(path, audio_rate, &out.audio) {
+                Ok(()) => println!("wrote {path}"),
+                Err(e) => eprintln!("could not write {path}: {e}"),
+            }
+        }
+    }
+}
+
 /// Load a RadioReference talkgroup CSV, or warn and continue without it.
 fn load_catalog(path: &str) -> Option<hs_core::catalog::CsvCatalog> {
     match std::fs::read_to_string(path) {
@@ -648,6 +739,22 @@ fn main() {
             );
             iq = hs_dsp::resample::resample_iq(&iq, up, down, args.rate);
             args.rate = out_rate;
+        }
+    }
+
+    // An explicit non-P25 decoder (AM, NBFM, DCS, …) takes its own path: it
+    // produces audio and typed events rather than the P25 trunking report.
+    if let Some(name) = args.decoder.clone() {
+        match hs_decoders::DecoderKind::from_name(&name) {
+            Some(hs_decoders::DecoderKind::P25) => {} // fall through to the P25 path
+            Some(kind) => {
+                run_analog(&iq, &args, kind);
+                return;
+            }
+            None => {
+                eprintln!("unknown --decoder '{name}'. Try: am, nbfm, dcs (P25 is the default).");
+                std::process::exit(2);
+            }
         }
     }
 

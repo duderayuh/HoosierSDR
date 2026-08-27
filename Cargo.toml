@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/hs-source",
     "crates/hs-dsp",
+    "crates/hs-decoders",
     "crates/hs-p25",
     "crates/hs-vocoder",
     "crates/hs-trunk",
