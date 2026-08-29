@@ -231,6 +231,14 @@ impl ChannelDecoder {
         })
     }
 
+    /// The echo structure the CQPSK equalizer has learned — a live simulcast-
+    /// distortion severity readout (see [`hs_dsp::cqpsk::EchoProfile`]).
+    /// `None` on the C4FM path, with the equalizer bypassed, or before the
+    /// receiver acquires.
+    pub fn cqpsk_echo(&self) -> Option<hs_dsp::cqpsk::EchoProfile> {
+        self.cqpsk.as_ref().and_then(|r| r.echo_profile())
+    }
+
     /// Current signal power estimated by the AGC (dBFS).
     pub fn power_dbfs(&self) -> Option<f32> {
         // We use the baseband signal power from the CQPSK path if it's there.

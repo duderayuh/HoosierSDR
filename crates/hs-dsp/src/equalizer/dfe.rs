@@ -105,6 +105,17 @@ impl CmaDfe {
         }
     }
 
+    /// The current feedforward taps (symbol-spaced), for echo diagnostics.
+    pub fn ff_taps(&self) -> &[C32] {
+        &self.ff
+    }
+
+    /// The current feedback taps; `fb[j]` cancels the echo `j + 1` symbols
+    /// behind the cursor, so its magnitude is a direct echo-strength readout.
+    pub fn fb_taps(&self) -> &[C32] {
+        &self.fb
+    }
+
     /// Set the feedforward and feedback step sizes. Used to gear-shift the
     /// feedforward from the fast acquisition step to the slow tracking step
     /// once the eye is open (the feedback step is effectively constant).

@@ -223,6 +223,10 @@ input.big { font-size: 20px; font-weight: 600; color: var(--signal); letter-spac
 .kv .v { font-size: 16px; font-weight: 600; }
 .kv .v small { font-size: 11px; color: var(--ink-dim); }
 .kv .v.sig { color: var(--signal); }
+/* ADC overload: samples at the rails — decode garble that mimics simulcast
+   distortion but is cured by turning the gain down. */
+.kv .v.clip { color: var(--enc); }
+.kv .v.clip::after { content: " ⚠ clip"; font-size: 10px; letter-spacing: .06em; }
 .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 3px; }
 .bar > i { display: block; height: 100%; background: var(--signal); width: 0; transition: width .25s; }
 .notice { font-size: 11px; color: var(--amber); min-height: 16px; }

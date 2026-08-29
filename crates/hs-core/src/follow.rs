@@ -481,6 +481,20 @@ impl TrunkFollower {
         self.control.power_dbfs()
     }
 
+    /// CQPSK carrier-lock quality of the control channel, 0..1 — see
+    /// [`ChannelDecoder::cqpsk_lock`]. `None` on a C4FM control channel.
+    pub fn control_lock(&self) -> Option<f32> {
+        self.control.cqpsk_lock()
+    }
+
+    /// Echo profile the control-channel equalizer has learned — the live
+    /// simulcast-distortion readout. The control channel transmits
+    /// continuously, so on a simulcast site this tracks the multipath the
+    /// antenna currently hears (see [`ChannelDecoder::cqpsk_echo`]).
+    pub fn control_echo(&self) -> Option<hs_dsp::cqpsk::EchoProfile> {
+        self.control.cqpsk_echo()
+    }
+
     pub fn priority_of(&self, tg: u16) -> u8 {
         self.priority.get(&tg).copied().unwrap_or_else(|| {
             self.priority_ranges

@@ -653,6 +653,15 @@ struct StatusMsg {
     modulation: String,
     /// CQPSK carrier-lock quality 0..1, or -1 on the C4FM path (no metric).
     lock: f32,
+    /// Fraction of equalizer tap energy off the cursor — live simulcast-
+    /// distortion severity; -1 when unavailable (C4FM, bypass, unacquired).
+    echo_frac: f32,
+    /// Energy-weighted RMS spread of the learned echo delays, µs; -1 when
+    /// unavailable.
+    echo_spread_us: f32,
+    /// Percentage of samples at the ADC rails since the last status —
+    /// front-end overload; the cure is less gain.
+    clip_pct: f32,
     /// Mean frame-sync bit errors (of 48) — the receiver's own decode quality.
     sync_err: f64,
     /// Samples/blocks lost between the radio and the decoder so far.
@@ -1335,6 +1344,11 @@ fn capture_loop(
     let mut buf = vec![0f32; 65536 * 2];
     let mut blocks = 0u64;
     let mut total_pcm = 0usize;
+    // ADC-overload watch, per status window: both front ends deliver full
+    // scale as ±1.0, so samples pinned near the rails mean too much gain
+    // (see the same counter in `follow::run_with_extras`).
+    let mut clip_win = 0u64;
+    let mut clip_total = 0u64;
 
     let mut last_status = std::time::Instant::now();
     let mut last_spectrum = std::time::Instant::now();
@@ -1346,6 +1360,8 @@ fn capture_loop(
             Err(e) => return Err(format!("radio stopped: {e:?}")),
         };
         let block = &buf[..n];
+        clip_win += block.iter().filter(|s| s.abs() >= 0.98).count() as u64;
+        clip_total += n as u64;
 
         if let Some(f) = iq_file.as_mut() {
             let _ = write_iq_block(f, block, iq_fmt.unwrap_or(IqFmt::Cf32));
@@ -1390,6 +1406,14 @@ fn capture_loop(
         }
         if last_status.elapsed().as_millis() >= 250 {
             last_status = std::time::Instant::now();
+            let echo = dec.cqpsk_echo();
+            let clip_pct = if clip_total > 0 {
+                100.0 * clip_win as f32 / clip_total as f32
+            } else {
+                0.0
+            };
+            clip_win = 0;
+            clip_total = 0;
             let _ = app.emit(
                 "status",
                 StatusMsg {
@@ -1399,6 +1423,9 @@ fn capture_loop(
                     blocks,
                     modulation: format!("{:?}", dec.modulation()),
                     lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                    echo_frac: echo.map(|e| e.echo_frac).unwrap_or(-1.0),
+                    echo_spread_us: echo.map(|e| e.rms_spread_us()).unwrap_or(-1.0),
+                    clip_pct,
                     sync_err: dec.diagnostics().mean_sync_errors(),
                     dropped: src.dropped(),
                 },
@@ -1671,6 +1698,11 @@ async fn decode_file(
                 blocks: 1,
                 modulation: format!("{:?}", dec.modulation()),
                 lock: dec.cqpsk_lock().unwrap_or(-1.0),
+                echo_frac: dec.cqpsk_echo().map(|e| e.echo_frac).unwrap_or(-1.0),
+                echo_spread_us: dec.cqpsk_echo().map(|e| e.rms_spread_us()).unwrap_or(-1.0),
+                // File replay: the recording's scale is unknown, so rail
+                // detection would be meaningless.
+                clip_pct: 0.0,
                 sync_err: dec.diagnostics().mean_sync_errors(),
                 dropped: 0,
             },

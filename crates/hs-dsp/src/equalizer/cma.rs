@@ -42,6 +42,11 @@ impl CmaEqualizer {
         }
     }
 
+    /// The current tap vector (symbol-spaced), for echo-profile diagnostics.
+    pub fn taps(&self) -> &[C32] {
+        &self.taps
+    }
+
     /// Reset to the center-spike identity, discarding any diverged taps.
     pub fn reset(&mut self) {
         for t in self.taps.iter_mut() {

@@ -43,6 +43,15 @@ impl FrontEq {
         }
     }
 
+    /// Echo profile read off the current taps; `None` when no equalizer runs.
+    fn profile(&self) -> Option<EchoProfile> {
+        match self {
+            FrontEq::None => None,
+            FrontEq::Cma(eq) => Some(echo_profile_from_taps(eq.taps(), &[])),
+            FrontEq::Dfe(eq) => Some(echo_profile_from_taps(eq.ff_taps(), eq.fb_taps())),
+        }
+    }
+
     /// Reset the taps to the centre-spike identity, discarding any solution
     /// walked onto noise. Called on re-acquisition so a fresh transmission
     /// never inherits taps converged on an idle channel.
@@ -63,6 +72,83 @@ impl FrontEq {
             FrontEq::Cma(_) => {}
             FrontEq::Dfe(eq) => eq.set_step(mu_ff, mu_fb),
         }
+    }
+}
+
+/// The echo structure a converged equalizer has learned, read from its taps.
+///
+/// This is the receiver's own live measure of simulcast distortion: on a
+/// simulcast site the copies from multiple towers arrive at different delays,
+/// and the equalizer's off-cursor tap energy is what it took to undo them. A
+/// linear equalizer's taps approximate the *inverse* channel rather than the
+/// channel itself, so treat these as a severity proxy, not a channel sounding
+/// — clean air reads near zero, and it grows monotonically with echo strength
+/// and delay, which is exactly what a "move / aim the antenna" feedback meter
+/// needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EchoProfile {
+    /// Fraction (0..1) of total tap energy away from the cursor tap. ~0 on a
+    /// clean single-tower channel; grows with the echo the equalizer had to
+    /// cancel.
+    pub echo_frac: f32,
+    /// Energy-weighted RMS spread of the tap delays around their mean, in
+    /// symbols (1 symbol = 208.3 µs at 4800 baud).
+    pub rms_spread_syms: f32,
+}
+
+impl EchoProfile {
+    /// The RMS spread converted to microseconds at the P25 4800-baud rate.
+    pub fn rms_spread_us(&self) -> f32 {
+        self.rms_spread_syms * (1.0e6 / 4800.0)
+    }
+}
+
+/// Compute an [`EchoProfile`] from equalizer taps: symbol-spaced feedforward
+/// taps `ff` (the cursor is the strongest tap) plus optional decision-feedback
+/// taps `fb`, where `fb[j]` cancels the echo `j + 1` symbols after the cursor.
+pub fn echo_profile_from_taps(ff: &[C32], fb: &[C32]) -> EchoProfile {
+    // Cursor = strongest feedforward tap. CMA can walk the peak off the
+    // centre-spike start, so find it rather than assume the middle.
+    let cursor = ff
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.norm_sq().total_cmp(&b.1.norm_sq()))
+        .map(|(i, _)| i as f32)
+        .unwrap_or(0.0);
+    // (delay in symbols relative to the cursor, tap energy) for every tap.
+    let terms = ff
+        .iter()
+        .enumerate()
+        .map(|(k, t)| (k as f32 - cursor, t.norm_sq()))
+        .chain(
+            fb.iter()
+                .enumerate()
+                .map(|(j, t)| (j as f32 + 1.0, t.norm_sq())),
+        );
+    let mut total = 0.0f32;
+    let mut cursor_e = 0.0f32;
+    let mut m1 = 0.0f32;
+    let mut m2 = 0.0f32;
+    for (d, e) in terms {
+        total += e;
+        if d == 0.0 {
+            cursor_e += e;
+        }
+        m1 += e * d;
+        m2 += e * d * d;
+    }
+    // NaN-poisoned taps also land here (comparisons with NaN are false), so
+    // a diverged equalizer reads as "no echo" rather than propagating NaN.
+    if !total.is_finite() || total <= 1e-12 {
+        return EchoProfile {
+            echo_frac: 0.0,
+            rms_spread_syms: 0.0,
+        };
+    }
+    let mean = m1 / total;
+    EchoProfile {
+        echo_frac: (1.0 - cursor_e / total).clamp(0.0, 1.0),
+        rms_spread_syms: (m2 / total - mean * mean).max(0.0).sqrt(),
     }
 }
 
@@ -551,6 +637,16 @@ impl CqpskReceiver {
         self.err_ewma
     }
 
+    /// The echo structure the equalizer has learned — the live simulcast-
+    /// distortion readout. `None` when no equalizer runs or before blind
+    /// acquisition completes (taps adapted on idle noise mean nothing).
+    pub fn echo_profile(&self) -> Option<EchoProfile> {
+        if !self.acquired {
+            return None;
+        }
+        self.eq.profile()
+    }
+
     /// Current carrier-frequency estimate as a per-symbol differential-phase
     /// bias (radians).
     pub fn freq_bias(&self) -> f32 {
@@ -573,6 +669,78 @@ pub fn wrap_pi(mut p: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn echo_profile_identity_taps_read_clean() {
+        let ff = [C32::ZERO, C32::new(1.0, 0.0), C32::ZERO];
+        let p = echo_profile_from_taps(&ff, &[]);
+        assert!(p.echo_frac < 1e-6, "echo_frac {}", p.echo_frac);
+        assert!(p.rms_spread_syms < 1e-6, "spread {}", p.rms_spread_syms);
+    }
+
+    #[test]
+    fn echo_profile_known_taps_compute_exactly() {
+        // Cursor of unit energy at delay 0, one feedback tap of amplitude 0.5
+        // at delay +1: energies 1.0 and 0.25. echo_frac = 0.25/1.25 = 0.2;
+        // mean delay 0.2, E[d²] = 0.2, spread = √(0.2 − 0.04) = 0.4.
+        let ff = [C32::ZERO, C32::new(1.0, 0.0), C32::ZERO];
+        let fb = [C32::new(0.0, 0.5)];
+        let p = echo_profile_from_taps(&ff, &fb);
+        assert!(
+            (p.echo_frac - 0.2).abs() < 1e-6,
+            "echo_frac {}",
+            p.echo_frac
+        );
+        assert!(
+            (p.rms_spread_syms - 0.4).abs() < 1e-6,
+            "spread {}",
+            p.rms_spread_syms
+        );
+        // At 4800 baud, 0.4 symbols is 83.3 µs.
+        assert!((p.rms_spread_us() - 83.33).abs() < 0.1);
+    }
+
+    #[test]
+    fn echo_profile_separates_clean_from_two_ray() {
+        // Converge the CMA on a clean channel and on a two-ray channel; the
+        // echo fraction read off the taps must clearly separate the two.
+        let dibits: Vec<u8> = (0..20000).map(|i| ((i * 7 + i / 3) % 4) as u8).collect();
+        let syms = modulate_symbols(&dibits);
+        // The production receiver's CMA parameters (see `CqpskReceiver::new`).
+        let run = |echo: Option<C32>| {
+            let mut eq = crate::equalizer::CmaEqualizer::new(9, 0.05);
+            let mut prev = C32::ZERO;
+            for &s in &syms {
+                let rx = match echo {
+                    Some(e) => s + e * prev,
+                    None => s,
+                };
+                prev = s;
+                eq.push(rx, true);
+            }
+            echo_profile_from_taps(eq.taps(), &[])
+        };
+        // Measured steady states (CMA 9 taps, µ 0.05): clean 0.000, echo 0.20
+        // → 0.009, echo 0.45 → 0.033, echo 0.70 → 0.064 — small in absolute
+        // terms (the CMA's converged solution under-inverts the channel) but
+        // cleanly monotonic in echo strength, which is what a meter needs.
+        let clean = run(None);
+        let mild = run(Some(C32::new(0.2 * 0.7, 0.2 * 0.7)));
+        let strong = run(Some(C32::new(0.45 * 0.7, 0.45 * 0.7)));
+        assert!(clean.echo_frac < 0.005, "clean read {}", clean.echo_frac);
+        assert!(
+            strong.echo_frac > mild.echo_frac && mild.echo_frac > 0.005,
+            "strong {} mild {} clean {}",
+            strong.echo_frac,
+            mild.echo_frac,
+            clean.echo_frac
+        );
+        assert!(
+            strong.rms_spread_syms > 0.3,
+            "spread {}",
+            strong.rms_spread_syms
+        );
+    }
 
     #[test]
     fn diff_modulation_roundtrips_clean() {
