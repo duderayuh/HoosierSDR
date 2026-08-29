@@ -134,6 +134,8 @@ cargo tauri --version >/dev/null 2>&1 || die "tauri-cli still missing after inst
 # interpreter produces an architecture mismatch at import time. Install a
 # Homebrew Python and put faster-whisper there; the app probes
 # /opt/homebrew/bin/python3.12 (and 3.13/3.11) automatically.
+# Homebrew Python is PEP 668 "externally managed", so pip needs the
+# --break-system-packages override (or a venv).
 say "App transcription (faster-whisper, optional)"
 TRANSCRIBE_PY="/opt/homebrew/bin/python3.12"
 [ -x "$TRANSCRIBE_PY" ] || [ ! -x "/usr/local/bin/python3.12" ] || TRANSCRIBE_PY="/usr/local/bin/python3.12"
@@ -146,7 +148,7 @@ if [ -x "$TRANSCRIBE_PY" ]; then
     ok "faster-whisper already available ($TRANSCRIBE_PY)"
   else
     warn "installing faster-whisper into $TRANSCRIBE_PY"
-    "$TRANSCRIBE_PY" -m pip install faster-whisper \
+    "$TRANSCRIBE_PY" -m pip install --break-system-packages faster-whisper \
       || warn "faster-whisper install failed — see app/README.md"
   fi
 else
