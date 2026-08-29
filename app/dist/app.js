@@ -275,6 +275,19 @@ function applyTheme(name) { document.documentElement.setAttribute("data-theme", 
   chips.innerHTML = THEMES.map(([v, label]) => `<span class="chip ${saved === v ? "on" : ""}" data-th="${v}">${label}</span>`).join("");
   chips.querySelectorAll("[data-th]").forEach((c) => c.onclick = () => { applyTheme(c.dataset.th); chips.querySelectorAll("[data-th]").forEach((x) => x.classList.toggle("on", x.dataset.th === c.dataset.th)); });
 })();
+
+/* ---------- text size (UI scale) ---------- */
+const FS_STEPS = [["s", "S"], ["m", "M"], ["l", "L"], ["xl", "XL"]];
+const FS_ZOOM = { s: 0.9, m: 1.0, l: 1.15, xl: 1.3 };
+function applyFs(k) { document.documentElement.style.zoom = FS_ZOOM[k] ?? 1; save("hs.fs", k); }
+(function initFs() {
+  const saved = store("hs.fs", "m");
+  applyFs(saved);
+  const chips = $("fsChips");
+  if (!chips) return;
+  chips.innerHTML = FS_STEPS.map(([v, label]) => `<span class="chip ${saved === v ? "on" : ""}" data-fs="${v}">${label}</span>`).join("");
+  chips.querySelectorAll("[data-fs]").forEach((c) => c.onclick = () => { applyFs(c.dataset.fs); chips.querySelectorAll("[data-fs]").forEach((x) => x.classList.toggle("on", x.dataset.fs === c.dataset.fs)); });
+})();
 const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
 const bells = new Set(store("hs.bells", []));
 const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
@@ -316,11 +329,30 @@ function saveRules() { save("hs.tgrules", tgRules); pushRanges(); if (typeof ren
 
 /* ---------- accordions: the left column's panels collapse into each other ---------- */
 const accOpen = store("hs.acc", { tuning: true, groups: true, control: true, playing: true, events: true });
+/* Make every panel collapsible. Panels that already carry an explicit data-acc
+   key (the Monitor column) are left as-is; every other panel with a head+body
+   gets a key from its eyebrow label, a caret, and defaults to open. On-demand
+   editor panels (inline display:none) are skipped — they appear when summoned. */
+(function panelify() {
+  const seen = {};
+  document.querySelectorAll(".panel").forEach((p) => {
+    if (p.classList.contains("acc") || p.style.display === "none") return;
+    const head = Array.from(p.children).find((c) => c.classList.contains("head"));
+    if (!head) return;
+    const eb = head.querySelector(".eyebrow");
+    let key = (eb ? eb.textContent : "").trim().replace(/\s+/g, " ").toLowerCase() || "panel";
+    if (seen[key]) key = `${key}-${++seen[key]}`; else seen[key] = 1;
+    p.dataset.acc = key;
+    p.classList.add("acc");
+    if (!head.querySelector(".caret")) { const c = document.createElement("span"); c.className = "caret"; c.textContent = "▾"; head.appendChild(c); }
+    if (accOpen[key] === undefined) accOpen[key] = true;
+  });
+})();
 function accApply() {
   document.querySelectorAll(".panel.acc").forEach((p) => { const k = p.dataset.acc, open = accOpen[k] !== false; p.classList.toggle("closed", !open); });
 }
 document.querySelectorAll(".panel.acc > .head").forEach((h) => h.onclick = (e) => {
-  if (e.target.closest("button,input,select")) return;
+  if (e.target.closest("button,input,select,textarea,label,a,summary")) return;
   const k = h.parentElement.dataset.acc; accOpen[k] = accOpen[k] === false; save("hs.acc", accOpen); accApply();
 });
 accApply();
@@ -604,6 +636,42 @@ document.addEventListener("mousemove", (e) => {
 });
 document.addEventListener("mouseout", (e) => {
   if (e.target.closest && e.target.closest("td.tr") && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("td.tr"))) hideTip();
+});
+
+/* ---------- collapse always-visible help paragraphs into ⓘ info buttons ---------- */
+function showTipHtml(html, x, y) { tip.innerHTML = html; tip.style.display = "block"; positionTip(x, y); }
+(function helpify() {
+  document.querySelectorAll("p.help").forEach((p) => {
+    const label = (p.textContent || "").trim();
+    const html = p.innerHTML.trim();
+    if (!html) { p.remove(); return; }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "info";
+    btn.setAttribute("aria-label", label);
+    btn.dataset.help = html;
+    p.replaceWith(btn);
+  });
+})();
+document.addEventListener("mouseover", (e) => {
+  const b = e.target.closest && e.target.closest("button.info");
+  if (b) showTipHtml(b.dataset.help, e.clientX, e.clientY);
+});
+document.addEventListener("mousemove", (e) => {
+  if (tip.style.display !== "block") return;
+  const b = e.target.closest && e.target.closest("button.info");
+  if (b) positionTip(e.clientX, e.clientY);
+});
+document.addEventListener("mouseout", (e) => {
+  const b = e.target.closest && e.target.closest("button.info");
+  if (b && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("button.info"))) hideTip();
+});
+document.addEventListener("focusin", (e) => {
+  const b = e.target.closest && e.target.closest("button.info");
+  if (b) { const r = b.getBoundingClientRect(); showTipHtml(b.dataset.help, r.left, r.bottom); }
+});
+document.addEventListener("focusout", (e) => {
+  if (e.target.closest && e.target.closest("button.info")) hideTip();
 });
 
 /* ---------- readouts shared by both modes ---------- */
@@ -1794,7 +1862,7 @@ if (TAURI) {
   function alRowHtml(r) {
     const p = prio.get(r.id) || 50, c = colorOf(r.id), rule = ruleFor(r.id);
     const pol = (k, glyph, title) => `<button data-pol="${k}:${r.id}" class="${polAllows(k, r.id) ? "on-ok" : "off"}" title="${title}: ${polAllows(k, r.id) ? "yes" : "no"} — click to toggle">${glyph}</button>`;
-    return `<tr class="${r.encrypted ? "enc" : ""}" data-tg="${r.id}" ${c ? `data-color="${c}" style="--tgc:${c}"` : ""}><td><input type="checkbox" data-tick="${r.id}" ${alTicked.has(r.id) ? "checked" : ""}></td><td class="mono">${r.id}</td><td>${esc(r.alias)}</td><td>${esc(r.description)}${rule ? ` <small class="faint" title="range rule">▸ ${esc(rule.name || rule.lo + "–" + rule.hi)}</small>` : ""}</td><td><small>${esc(r.category)}</small></td><td><small class="mono">${esc(srcLabel(r.source))}</small></td>` +
+    return `<tr class="${r.encrypted ? "enc" : ""}" data-tg="${r.id}" ${c ? `data-color="${c}" style="--tgc:${c}"` : ""}><td><input type="checkbox" data-tick="${r.id}" ${alTicked.has(r.id) ? "checked" : ""}></td><td class="mono">${r.id}</td><td>${esc(r.alias)}</td><td>${esc(r.description)}${rule ? ` <small class="faint" title="range rule">▸ ${esc(rule.name || rule.lo + "–" + rule.hi)}</small>` : ""}</td><td><small>${esc(r.tag)}</small></td><td><small>${esc(r.category)}</small></td><td><small class="mono">${esc(srcLabel(r.source))}</small></td>` +
       `<td class="act">${pol("record", "●", "Record audio")}${pol("stream", "▶", "Stream live")}${pol("upload", "↑", "Upload to sharing services")}</td>` +
       `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><input type="number" class="priin" data-pri="${r.id}" min="1" max="99" value="${p}" title="Priority 1–99 (1 = highest)">` +
       `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" class="${avoidUntil.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" class="${lockout.has(r.id) || (rule && rule.lock) ? "on" : ""}">⊘</button></td></tr>`;
@@ -1819,7 +1887,7 @@ if (TAURI) {
     tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid); alRender(); });
     tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); alRender(); });
     tb.querySelectorAll("button[data-color]").forEach((b) => b.onclick = () => { cycleColor(+b.dataset.color); alRender(); });
-    renderCategoryChips();
+    renderTagChips();
   }
   $("alFilter").oninput = alRender;
   $("alSource").onchange = alRender;
@@ -1847,28 +1915,28 @@ if (TAURI) {
     $("alSource").value = srcs.includes(cur) ? cur : "";
   }
 
-  /* ---------- service-type (category) filter for the live follow ---------- */
-  const catSel = new Set(store("hs.cats", []));
-  function renderCategoryChips() {
-    const cats = [...new Set(alRows.map((r) => r.category).filter(Boolean))].sort();
-    [...catSel].forEach((c) => { if (!cats.includes(c)) catSel.delete(c); });
-    $("catChips").innerHTML = cats.length ? cats.map((c) => `<span class="chip ${catSel.has(c) ? "on" : ""}" data-cat="${esc(c)}">${esc(c)}</span>`).join("") : '<span class="faint">load a catalog to filter by service type</span>';
-    $("catChips").querySelectorAll(".chip").forEach((ch) => ch.onclick = () => { const c = ch.dataset.cat; catSel.has(c) ? catSel.delete(c) : catSel.add(c); save("hs.cats", [...catSel]); renderCategoryChips(); pushCategoryAllowlist(); });
-    $("catSummary").textContent = catSel.size ? `${catSel.size} of ${cats.length}` : "all";
+  /* ---------- tag (service-type) filter for the live follow ---------- */
+  const tagSel = new Set(store("hs.tags", []));
+  function renderTagChips() {
+    const tags = [...new Set(alRows.map((r) => r.tag).filter(Boolean))].sort();
+    [...tagSel].forEach((t) => { if (!tags.includes(t)) tagSel.delete(t); });
+    $("tagChips").innerHTML = tags.length ? tags.map((t) => `<span class="chip ${tagSel.has(t) ? "on" : ""}" data-tag="${esc(t)}">${esc(t)}</span>`).join("") : '<span class="faint">load a catalog to filter by tag</span>';
+    $("tagChips").querySelectorAll(".chip").forEach((ch) => ch.onclick = () => { const t = ch.dataset.tag; tagSel.has(t) ? tagSel.delete(t) : tagSel.add(t); save("hs.tags", [...tagSel]); renderTagChips(); pushTagAllowlist(); });
+    $("tagSummary").textContent = tagSel.size ? `${tagSel.size} of ${tags.length}` : "all";
   }
   // The effective allowlist is the playlist's talkgroups (if any) intersected
-  // with the chosen categories. Re-pushed after every playlist activation,
+  // with the chosen tags. Re-pushed after every playlist activation,
   // since activation sets the backend allowlist to the playlist alone.
-  async function pushCategoryAllowlist() {
+  async function pushTagAllowlist() {
     const pl = playlists.find((p) => p.id === $("playlist").value);
     const plSet = pl && pl.tgs.length ? new Set(pl.tgs) : null;
-    if (!catSel.size) { await invoke("set_allowlist", { tgs: plSet ? [...plSet] : null }).catch((e) => log(`allowlist: ${e}`)); return; }
-    const inCats = new Set(alRows.filter((r) => catSel.has(r.category)).map((r) => r.id));
-    const tgs = plSet ? [...plSet].filter((t) => inCats.has(t)) : [...inCats];
+    if (!tagSel.size) { await invoke("set_allowlist", { tgs: plSet ? [...plSet] : null }).catch((e) => log(`allowlist: ${e}`)); return; }
+    const inTags = new Set(alRows.filter((r) => tagSel.has(r.tag)).map((r) => r.id));
+    const tgs = plSet ? [...plSet].filter((t) => inTags.has(t)) : [...inTags];
     await invoke("set_allowlist", { tgs }).catch((e) => log(`allowlist: ${e}`));
-    $("followMeta").textContent = `service types: ${[...catSel].join(", ")} → ${tgs.length} talkgroups`;
+    $("followMeta").textContent = `tags: ${[...tagSel].join(", ")} → ${tgs.length} talkgroups`;
   }
-  window.pushCategoryAllowlist = pushCategoryAllowlist;
+  window.pushTagAllowlist = pushTagAllowlist;
 
   /* ---------- talkgroup range rules ---------- */
   $("rgColor").innerHTML = '<option value="">none</option>' + PALETTE.map((c) => `<option value="${c}" style="color:${c}">${c}</option>`).join("");
@@ -2183,7 +2251,7 @@ if (TAURI) {
     try {
       const p = await invoke("playlist_activate", { id: id || null });
       $("playlist").value = p ? p.id : "";
-      if (typeof pushCategoryAllowlist === "function") pushCategoryAllowlist();
+      if (typeof pushTagAllowlist === "function") pushTagAllowlist();
       if (p) {
         modeSel = "follow"; setSeg($("modeSeg"), "follow"); applyMode();
         $("freq").value = p.control_mhz.toFixed(4) + "M"; $("center").value = p.center_mhz.toFixed(4) + "M";
