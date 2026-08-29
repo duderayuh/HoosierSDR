@@ -818,7 +818,7 @@ pub fn analyzer_templates() -> Vec<AnalyzerRule> {
 /// pre-filter, so the rule can be seen working without waiting for traffic.
 #[tauri::command]
 pub async fn analyzer_test(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<String, String> {
