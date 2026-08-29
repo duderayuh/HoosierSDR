@@ -43,7 +43,7 @@ mismatches the arm64 `av` wheel.
 
 ```sh
 brew install python@3.12
-/opt/homebrew/bin/python3.12 -m pip install faster-whisper
+/opt/homebrew/bin/python3.12 -m pip install --break-system-packages faster-whisper
 ```
 
 The app probes `python3.13` / `3.12` / `3.11` in both Homebrew prefixes
