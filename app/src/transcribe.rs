@@ -84,7 +84,13 @@ fn find_python(engine: &str) -> String {
     }
     let candidates = [
         "/usr/local/bin/python3",
+        "/usr/local/bin/python3.13",
+        "/usr/local/bin/python3.12",
+        "/usr/local/bin/python3.11",
         "/opt/homebrew/bin/python3",
+        "/opt/homebrew/bin/python3.13",
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/bin/python3.11",
         "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
         "python3",
     ];
