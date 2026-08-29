@@ -35,6 +35,7 @@ mod sysstat;
 mod transcribe;
 mod units;
 mod upload;
+mod web;
 
 #[derive(Default)]
 struct AppState {
@@ -1916,6 +1917,7 @@ fn main() {
         .manage(AppState::default())
         .setup(|app| {
             crate::secrets::init(app.handle());
+            crate::web::spawn(app.handle().clone());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
             if let Some(cat) = rr::saved_catalog(app.handle()) {
