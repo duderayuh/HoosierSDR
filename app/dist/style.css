@@ -6,8 +6,8 @@
   --line:      #d3dddb;
   --line-soft: #e2eae8;
   --ink:       #0f1c1a;
-  --ink-dim:   #4c5d5a;
-  --ink-faint: #7d8f8c;
+  --ink-dim:   #3a4a47;
+  --ink-faint: #53635f;
   --signal:    #0b988c;
   --signal-2:  #0c766d;
   --amber:     #a96a06;
@@ -29,8 +29,8 @@
     --line:      #1e2a2b;
     --line-soft: #172121;
     --ink:       #d9e8e5;
-    --ink-dim:   #839491;
-    --ink-faint: #536361;
+    --ink-dim:   #98a9a6;
+    --ink-faint: #7d8f8c;
     --signal:    #34e0cf;
     --signal-2:  #1fb7a8;
     --amber:     #f5b544;
@@ -49,8 +49,8 @@
   --line:      #1e2a2b;
   --line-soft: #172121;
   --ink:       #d9e8e5;
-  --ink-dim:   #839491;
-  --ink-faint: #536361;
+  --ink-dim:   #98a9a6;
+  --ink-faint: #7d8f8c;
   --signal:    #34e0cf;
   --signal-2:  #1fb7a8;
   --amber:     #f5b544;
@@ -68,8 +68,8 @@
   --line:      #3a2d12;
   --line-soft: #261d0b;
   --ink:       #ffd78f;
-  --ink-dim:   #cba762;
-  --ink-faint: #7d6436;
+  --ink-dim:   #e0bd78;
+  --ink-faint: #b08a4d;
   --signal:    #ffb347;
   --signal-2:  #e0911f;
   --amber:     #ffb347;
@@ -89,8 +89,8 @@
   --line:      #0f3a22;
   --line-soft: #0a2416;
   --ink:       #9ef0b0;
-  --ink-dim:   #5fae78;
-  --ink-faint: #3a704d;
+  --ink-dim:   #7cc493;
+  --ink-faint: #5fa878;
   --signal:    #4dff88;
   --signal-2:  #2fd06a;
   --amber:     #c8ff4d;
@@ -110,8 +110,8 @@
   --line:      #232a4a;
   --line-soft: #181d38;
   --ink:       #d4dbf5;
-  --ink-dim:   #8b96c9;
-  --ink-faint: #55618f;
+  --ink-dim:   #a2add9;
+  --ink-faint: #7787bd;
   --signal:    #7c9bff;
   --signal-2:  #5d7ce0;
   --amber:     #f0c060;
@@ -129,8 +129,8 @@
   --line:      #586e75;
   --line-soft: #174652;
   --ink:       #eee8d5;
-  --ink-dim:   #93a1a1;
-  --ink-faint: #586e75;
+  --ink-dim:   #aab7b7;
+  --ink-faint: #7c9193;
   --signal:    #2aa198;
   --signal-2:  #1d8078;
   --amber:     #b58900;
@@ -472,7 +472,7 @@ td.act button.off { opacity: .35; text-decoration: line-through; }
 .panel.acc > .head { cursor: pointer; user-select: none; }
 .panel.acc > .head .caret { color: var(--ink-faint); font-size: 11px; margin-left: 4px; transition: transform .15s; }
 .panel.acc.closed > .head .caret { transform: rotate(-90deg); }
-.panel.acc.closed > .body { display: none !important; }
+.panel.acc.closed > *:not(.head) { display: none !important; }
 .panel.acc.closed { flex: none !important; min-height: 0 !important; }
 .active { overflow: auto; max-height: 100%; }
 .active .call { padding: 3px 7px; gap: 0 6px; border-radius: 5px; }
@@ -495,3 +495,22 @@ td.tg .desc { display: block; font-size: 11px; font-weight: 500; color: var(--si
 
 /* ---------- transcript tooltip ---------- */
 .tip { position: fixed; z-index: 120; max-width: 520px; max-height: 60vh; overflow: auto; padding: 10px 13px; font-size: 12.5px; line-height: 1.45; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere; display: none; }
+.tip code { font-family: var(--mono); font-size: 11.5px; }
+.tip b, .tip i, .tip em { color: inherit; }
+
+/* help → ⓘ info button (replaces always-visible <p class="help"> paragraphs) */
+button.info { background: none; border: 1px solid var(--line); color: var(--ink-faint); border-radius: 999px; min-width: 18px; height: 18px; padding: 0 4px; font-size: 11px; line-height: 1; cursor: help; flex: none; vertical-align: middle; }
+button.info:hover, button.info:focus-visible { color: var(--signal); border-color: var(--signal); }
+
+/* ---------- narrow windows: stack the top bar instead of overflowing ---------- */
+@media (max-width: 940px) {
+  .topbar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
+  .brand { order: 1; font-size: 15px; }
+  .themebtn { order: 1; margin-left: auto; }
+  .seg.nav { order: 2; flex-basis: 100%; overflow-x: auto; margin: 0; white-space: nowrap; }
+  .spacer { display: none; }
+  .topbar > .tb, #start, #stop, .pill { order: 3; }
+  .tb span { display: none; }
+  .tb select { min-width: 0; }
+  #playlist { min-width: 150px; max-width: 200px; }
+}

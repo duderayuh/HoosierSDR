@@ -85,10 +85,10 @@
                 </select></label>
               <label class="field" id="squelchField"><span class="lab">Squelch <span class="mono faint" id="squelchMeta">30%</span></span>
                 <input id="squelch" type="range" min="0" max="1" step="0.05" value="0.3" /></label>
-              <details class="site" id="catFilter">
-                <summary class="lab">Service types <span class="mono faint" id="catSummary">all</span></summary>
-                <div id="catChips" class="chips"></div>
-                <p class="help">Follow only these categories of talkgroup (from the loaded catalogs), on top of the playlist. Takes effect immediately.</p>
+              <details class="site" id="tagFilter">
+                <summary class="lab">Tags <span class="mono faint" id="tagSummary">all</span></summary>
+                <div id="tagChips" class="chips"></div>
+                <p class="help">Follow only these service tags (Law Dispatch, Fire-Tac, Public Works…) from the loaded catalogs, on top of the playlist. Takes effect immediately.</p>
               </details>
             </div>
           </div>
@@ -272,7 +272,7 @@
                 <span class="mono small" id="alCheckResult" style="flex:2"></span>
               </div>
               <div class="tablewrap tgs" style="max-height:64vh">
-                <table><thead><tr><th><input type="checkbox" id="alTickAll" title="tick shown" /></th><th data-sort="id" class="sortable">TG</th><th data-sort="alias" class="sortable">Alpha tag</th><th data-sort="description" class="sortable">Description</th><th data-sort="category" class="sortable">Category</th><th data-sort="source" class="sortable">Source</th><th class="actions-h" title="Record · Stream · Upload">Rec · Str · Up</th><th class="actions-h">Colour · Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
+                <table><thead><tr><th><input type="checkbox" id="alTickAll" title="tick shown" /></th><th data-sort="id" class="sortable">TG</th><th data-sort="alias" class="sortable">Alpha tag</th><th data-sort="description" class="sortable">Description</th><th data-sort="tag" class="sortable">Tag</th><th data-sort="category" class="sortable">Category</th><th data-sort="source" class="sortable">Source</th><th class="actions-h" title="Record · Stream · Upload">Rec · Str · Up</th><th class="actions-h">Colour · Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
               </div>
               <div class="xport" style="margin:6px 0 0">
                 <span class="faint">Ticked →</span>
@@ -795,6 +795,8 @@
               <div class="lab">Theme</div>
               <div class="chips" id="themeChips"></div>
               <p class="help" style="margin-top:8px">Six colour schemes; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+              <div class="lab" style="margin-top:12px">Text size <span class="mono faint">scales the whole interface</span></div>
+              <div class="chips" id="fsChips"></div>
             </div>
           </div>
           <div class="panel">

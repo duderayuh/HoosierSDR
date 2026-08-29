@@ -13,8 +13,8 @@
         "title": "HoosierSDR",
         "width": 1180,
         "height": 780,
-        "minWidth": 900,
-        "minHeight": 600
+        "minWidth": 680,
+        "minHeight": 520
       }
     ],
     "security": {
