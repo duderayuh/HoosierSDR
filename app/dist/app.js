@@ -2362,3 +2362,147 @@ if (TAURI) {
     if (location.hash === "#discovery") renderDiscovery();
   }
 }
+
+/* ================= onboarding / setup wizard ================= */
+/* A short guided setup: radio → RadioReference → find system → start.
+   Auto-opens on first run (unless skipped); re-open anytime via the "?" button. */
+let obStep = 0, obWrap = null, obDevices = [], obCreds = false, obCatalog = 0, obPlaylists = 0, obZipMsg = "";
+
+async function obGather() {
+  obDevices = []; obCreds = false; obCatalog = 0; obPlaylists = 0;
+  if (!invoke) return;
+  try { obDevices = (await invoke("devices_list")).devices || []; } catch (_) {}
+  try { const st = await invoke("rr_settings"); obCreds = !!(st && st.has_password); obCatalog = (st && st.catalog_len) || 0; } catch (_) {}
+  try { const pl = await invoke("playlists_list"); obPlaylists = Array.isArray(pl) ? pl.length : 0; } catch (_) {}
+}
+
+const obTick = (ok) => `<span class="obchk${ok ? " ok" : ""}">${ok ? "✓" : "○"}</span>`;
+const obBtn = (id, label, cls) => `<button class="btn ${cls || ""}" data-ob="${id}">${label}</button>`;
+
+function obOpen() {
+  obStep = 0; obZipMsg = "";
+  if (!obWrap) {
+    obWrap = document.createElement("div");
+    obWrap.className = "modal-wrap";
+    obWrap.innerHTML = `<div class="modal ob"><div class="obdots" id="obDots"></div><div class="obbody" id="obBody"></div><div class="xport obfoot" id="obFoot"></div></div>`;
+    document.body.appendChild(obWrap);
+    obWrap.addEventListener("keydown", (e) => { if (e.key === "Escape") obFinish(); });
+    obWrap.onclick = (e) => { if (e.target === obWrap && obStep === 0) obFinish(); };
+  }
+  obGather().then(obRender);
+}
+
+function obClose() { if (obWrap) { obWrap.remove(); obWrap = null; } }
+function obFinish() { save("hs.onboarded", true); obClose(); }
+function obGo(n) { obStep = Math.max(0, Math.min(4, n)); obZipMsg = ""; obRender(); }
+
+function obWire() {
+  obWrap.querySelectorAll("[data-ob]").forEach((b) => {
+    b.onclick = () => {
+      const a = b.dataset.ob;
+      if (a === "next") return obGo(obStep + 1);
+      if (a === "back") return obGo(obStep - 1);
+      if (a === "skip") return obFinish();
+      if (a === "finish") return obFinish();
+      if (a === "rescan") return obGather().then(obRender);
+      if (a === "savecreds") return obSaveCreds();
+      if (a === "ziplookup") return obZipLookup();
+      if (a === "goplaylists") return obGoPlaylists();
+      if (a === "gomonitor") { obFinish(); showView("monitor"); }
+      if (a === "close") return obFinish();
+    };
+  });
+}
+
+async function obSaveCreds() {
+  const u = obWrap.querySelector("#obUser").value.trim();
+  const p = obWrap.querySelector("#obPass").value;
+  if (!u) { uiToast("Enter your RadioReference username.", "err"); return; }
+  if (!invoke) { uiToast("No backend — enter your account in the Playlists tab.", "err"); return; }
+  try { await invoke("rr_save", { username: u, password: p, sid: null }); obCreds = true; uiToast("RadioReference account saved."); obRender(); }
+  catch (e) { uiToast(`Could not save: ${e}`, "err"); }
+}
+
+async function obZipLookup() {
+  const zip = parseInt(obWrap.querySelector("#obZip").value, 10);
+  if (!Number.isFinite(zip)) { obZipMsg = ""; obRender(); return; }
+  obZipMsg = "Looking up…"; obRender();
+  if (!invoke) { obZipMsg = "No backend — find your system in the Playlists tab."; obRender(); return; }
+  try { const z = await invoke("rr_zip", { zip }); obZipMsg = `Found systems near ${z.city || "ZIP " + zip} — open the browser to pick one.`; }
+  catch (e) { obZipMsg = `ZIP lookup failed: ${e}`; }
+  obRender();
+}
+
+function obGoPlaylists() {
+  const zip = parseInt((obWrap.querySelector("#obZip") || {}).value, 10);
+  obFinish();
+  showView("playlists");
+  if (Number.isFinite(zip) && $("bZip")) { $("bZip").value = String(zip); const g = $("bZipGo"); if (g && g.onclick) g.onclick(); }
+}
+
+function obDots() {
+  return [0, 1, 2, 3, 4].map((i) => `<i class="${i === obStep ? "on" : i < obStep ? "done" : ""}"></i>`).join("");
+}
+
+function obBody() {
+  const devs = obDevices.map((d) => `<div class="obdev"><span>${esc(d.label || d.id || "radio")}</span><span class="mono">${esc(d.kind || "")}</span></div>`).join("") || `<div class="obdev"><span style="color:var(--ink-faint)">No radio detected yet.</span></div>`;
+  switch (obStep) {
+    case 0:
+      return `<h2>Welcome to HoosierSDR</h2>
+        <p>Decode your city's P25 trunked radio — police, fire, EMS — with a software-defined radio. Four quick steps and you're listening.</p>
+        <ul class="obchecks">
+          <li>${obTick(obDevices.length > 0)} <span><b>Plug in a radio</b> — an Airspy R2 or RTL-SDR dongle.</span></li>
+          <li>${obTick(obCreds)} <span><b>RadioReference account</b> — names the talkgroups.</span></li>
+          <li>${obTick(obCatalog > 0)} <span><b>Find your system</b> — ${obCatalog ? `${obCatalog} talkgroups loaded` : "the trunked system near you"}.</span></li>
+          <li>${obTick(obPlaylists > 0)} <span><b>Press Start</b> — ${obPlaylists ? `${obPlaylists} playlist${obPlaylists === 1 ? "" : "s"} saved` : "begin decoding"}.</span></li>
+        </ul>`;
+    case 1:
+      return `<h2>1 · Plug in a radio</h2>
+        <p>HoosierSDR reads an Airspy R2 or an RTL-SDR USB dongle. Plug one in and it appears below.</p>
+        ${devs}
+        <p style="font-size:12px">If nothing shows up, check the cable and press <b>Rescan</b>.</p>`;
+    case 2:
+      return `<h2>2 · Name your talkgroups</h2>
+        <p>A RadioReference account turns raw talkgroup numbers into names ("IFD Fire Dispatch"). Free accounts work; a Premium account lets us auto-download the full system. Your password stays on this Mac.</p>
+        <label class="field" style="margin:0"><span class="lab">Username</span><input id="obUser" type="text" autocomplete="username" spellcheck="false" placeholder="yourname" /></label>
+        <label class="field" style="margin:0"><span class="lab">Password</span><input id="obPass" type="password" autocomplete="current-password" placeholder="${obCreds ? "saved on this Mac" : ""}" /></label>
+        <div class="obresult">${obCreds ? "✓ Account saved" : ""}</div>`;
+    case 3:
+      return `<h2>3 · Find your system</h2>
+        <p>Pick the trunked system in your area. Easiest: enter your ZIP code, then browse the matching systems and choose a site.</p>
+        <label class="field" style="margin:0"><span class="lab">ZIP code</span><span class="inline"><input id="obZip" type="text" inputmode="numeric" placeholder="46204" spellcheck="false" /><button class="btn ghost" data-ob="ziplookup">Look up</button></span></label>
+        <div class="obresult">${esc(obZipMsg)}</div>
+        <p style="font-size:12px">This opens the <b>Playlists</b> tab where you pick a site and save a playlist.</p>`;
+    default:
+      return `<h2>4 · Start listening</h2>
+        <p>You're set. Go to the <b>Monitor</b> tab, pick your playlist in the top bar (if you saved one), and press <b>▶ Start</b> — the app tunes the control channel and begins decoding.</p>
+        <ul class="obchecks">
+          <li>${obTick(obDevices.length > 0)} Radio ready</li>
+          <li>${obTick(obCreds)} Account saved</li>
+          <li>${obTick(obCatalog > 0)} ${obCatalog ? `${obCatalog} talkgroups` : "Talkgroups loaded"}</li>
+        </ul>`;
+  }
+}
+
+function obFoot() {
+  const back = obBtn("back", "← Back", "ghost");
+  switch (obStep) {
+    case 0: return `<div class="grp">${obBtn("skip", "Skip for now", "ghost")}</div><div class="grp">${obBtn("next", "Start setup →", "primary")}</div>`;
+    case 1: return `<div class="grp">${back}</div><div class="grp">${obBtn("rescan", "Rescan", "ghost")}${obBtn("next", "Next →", "primary")}</div>`;
+    case 2: return `<div class="grp">${back}</div><div class="grp">${obBtn("savecreds", "Save account", "ghost")}${obBtn("next", "Next →", "primary")}</div>`;
+    case 3: return `<div class="grp">${back}</div><div class="grp">${obBtn("next", "Next →", "ghost")}${obBtn("goplaylists", "Open system browser →", "primary")}</div>`;
+    default: return `<div class="grp">${back}</div><div class="grp">${obBtn("gomonitor", "Go to Monitor", "primary")}${obBtn("finish", "Done", "ghost")}</div>`;
+  }
+}
+
+function obRender() {
+  if (!obWrap) return;
+  obWrap.querySelector("#obDots").innerHTML = obDots();
+  obWrap.querySelector("#obBody").innerHTML = obBody();
+  obWrap.querySelector("#obFoot").innerHTML = obFoot();
+  obWire();
+}
+
+$("help").onclick = obOpen;
+/* first run: open the guide once */
+setTimeout(() => { if (!store("hs.onboarded", false)) obOpen(); }, 700);
