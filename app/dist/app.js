@@ -624,7 +624,11 @@ function setStatus(s) {
 const evCounts = {};
 function handleFollow(ev) {
   evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
-  if (ev.kind !== "spectrum" && ev.kind !== "status") log(`follow ${ev.kind}: ${JSON.stringify(ev).slice(0, 160)}`);
+  // Spectrum, status and constellation stream continuously — a counter line
+  // once in 20 proves they flow without drowning the terminal (each log() is
+  // also an IPC round-trip). Everything else is rare enough to dump.
+  const chatty = ev.kind === "spectrum" || ev.kind === "status" || ev.kind === "constellation";
+  if (!chatty) log(`follow ${ev.kind}: ${JSON.stringify(ev).slice(0, 160)}`);
   else if (evCounts[ev.kind] % 20 === 1) log(`follow ${ev.kind} #${evCounts[ev.kind]}`);
   switch (ev.kind) {
     case "measured":
