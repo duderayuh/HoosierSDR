@@ -215,6 +215,87 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             Ok(Value::Null)
         }
 
+        // ---- settings: names / format / policies ----
+        "names_get" => jv(crate::names_get(state)),
+        "names_set" => jv(crate::names_set(
+            app.clone(),
+            state,
+            arg(args, "template")?,
+        )?),
+        "names_preview" => jv(crate::names_preview(arg(args, "template")?)),
+        "format_get" => jv(crate::format_get(state)),
+        "format_set" => {
+            let format: crate::encode::Format = arg(args, "format")?;
+            crate::format_set(app.clone(), state, format)?;
+            Ok(Value::Null)
+        }
+        "set_policies" => {
+            let record = arg::<crate::Policy>(args, "record")?;
+            let stream = arg::<crate::Policy>(args, "stream")?;
+            let upload = arg::<crate::Policy>(args, "upload")?;
+            crate::set_policies(state, record, stream, upload);
+            Ok(Value::Null)
+        }
+        "set_learn_aliases" => {
+            crate::set_learn_aliases(arg(args, "on")?, state);
+            Ok(Value::Null)
+        }
+        "library_prune" => jv(crate::library_prune(state, arg(args, "days")?)?),
+
+        // ---- settings: transcription ----
+        "transcribe_probe" => jv(crate::transcribe::transcribe_probe(app.clone()).await),
+        "transcribe_configure" => {
+            let settings: crate::transcribe::Settings = arg(args, "settings")?;
+            crate::transcribe::transcribe_configure(app.clone(), state, settings)?;
+            Ok(Value::Null)
+        }
+        "transcribe_models" => jv(crate::transcribe::transcribe_models()),
+
+        // ---- settings: hook / stream / uploads ----
+        "hook_get" => jv(crate::hook::hook_get(app.clone(), state)),
+        "hook_configure" => {
+            let settings: crate::hook::Settings = arg(args, "settings")?;
+            crate::hook::hook_configure(app.clone(), state, settings)?;
+            Ok(Value::Null)
+        }
+        "stream_get" => jv(crate::stream::stream_get(app.clone(), state)),
+        "stream_configure" => {
+            let settings: crate::stream::Settings = arg(args, "settings")?;
+            crate::stream::stream_configure(app.clone(), state, settings)?;
+            Ok(Value::Null)
+        }
+        "uploads_get" => jv(crate::upload::uploads_get(app.clone(), state)),
+        "uploads_configure" => {
+            let settings: crate::upload::Settings = arg(args, "settings")?;
+            crate::upload::uploads_configure(app.clone(), state, settings)?;
+            Ok(Value::Null)
+        }
+
+        // ---- settings: alerts + rules (get/set full objects) ----
+        "alerts_set" => {
+            let settings: crate::alerts::Settings = arg(args, "settings")?;
+            crate::alerts::alerts_set(app.clone(), state, settings)?;
+            Ok(Value::Null)
+        }
+        "conversations_get" => jv(crate::conversations::conversations_get(state)),
+        "conversations_set" => {
+            let rules: Vec<crate::conversations::Rule> = arg(args, "rules")?;
+            crate::conversations::conversations_set(app.clone(), state, rules)?;
+            Ok(Value::Null)
+        }
+        "digests_get" => jv(crate::digest::digests_get(state)),
+        "digests_set" => {
+            let rules: Vec<crate::digest::DigestRule> = arg(args, "rules")?;
+            crate::digest::digests_set(app.clone(), state, rules)?;
+            Ok(Value::Null)
+        }
+        "analyzers_get" => jv(crate::analyzers::analyzers_get(state)),
+        "analyzers_set" => {
+            let rules: Vec<crate::analyzers::AnalyzerRule> = arg(args, "rules")?;
+            crate::analyzers::analyzers_set(app.clone(), state, rules)?;
+            Ok(Value::Null)
+        }
+
         other => Err(format!("unknown command: {other}")),
     }
 }

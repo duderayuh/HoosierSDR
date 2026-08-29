@@ -80,6 +80,16 @@
   .call .star { color:var(--amber); cursor:pointer; font-size:15px; padding-left:8px; }
   .slider { width:100%; accent-color:var(--signal); }
   .hint { color:var(--faint); font-size:12px; margin-top:6px; }
+  /* settings sections */
+  details.card { padding:14px 16px; }
+  summary.h1 { cursor:pointer; list-style:none; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; margin-bottom:6px; }
+  summary.h1::-webkit-details-marker { display:none; }
+  .check { display:flex; align-items:center; gap:8px; font-size:14px; text-transform:none; letter-spacing:0; color:var(--ink); margin:10px 0; }
+  .check input { width:auto; margin:0; }
+  .rule { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); }
+  .rule:last-child { border-bottom:0; }
+  .rule .nm { font-weight:600; }
+  .rule .en { color:var(--dim); font-size:12px; }
 </style>
 </head>
 <body>
@@ -101,6 +111,7 @@
       <div class="tabs">
         <button id="tabMonitor" class="on">Monitor</button>
         <button id="tabLibrary">Library</button>
+        <button id="tabSettings">Settings</button>
       </div>
 
       <!-- ============ MONITOR ============ -->
@@ -158,6 +169,97 @@
           <div id="calls"><p class="muted" id="libEmpty">Loading…</p></div>
         </div>
       </div>
+
+      <!-- ============ SETTINGS ============ -->
+      <div id="viewSettings" hidden>
+        <details class="card" open>
+          <summary class="h1">Transcription</summary>
+          <label class="check"><input id="trOn" type="checkbox" /> Transcribe calls as they complete</label>
+          <label for="trEngine">Engine</label>
+          <select id="trEngine"><option value="faster-whisper">faster-whisper</option><option value="openai-whisper">openai-whisper</option></select>
+          <label for="trModel">Model</label>
+          <select id="trModel"><option>tiny</option><option>base</option><option>small</option><option>medium</option><option>large-v3</option><option>turbo</option></select>
+          <label for="trLang">Language</label>
+          <input id="trLang" type="text" value="en" spellcheck="false" />
+          <button id="trSave">Save transcription</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Recording &amp; format</summary>
+          <label for="fmtCodec">Stored format</label>
+          <select id="fmtCodec"><option value="wav">WAV (lossless)</option><option value="mp3">MP3</option><option value="m4a">M4A (AAC)</option><option value="opus">Opus</option></select>
+          <label for="fmtKbps">Quality (kbit/s)</label>
+          <select id="fmtKbps"><option>16</option><option>24</option><option>32</option><option>48</option><option>64</option><option>96</option></select>
+          <label for="fmtMode">Mode</label>
+          <select id="fmtMode"><option value="vbr">VBR</option><option value="cbr">CBR</option></select>
+          <label for="fnTemplate">File name template</label>
+          <input id="fnTemplate" type="text" placeholder="{date}-{time}_tg{tg}" spellcheck="false" />
+          <div class="hint" id="fnExample"></div>
+          <button id="fmtSave">Save format</button>
+          <button class="ghost" id="fnSave" style="margin-top:8px">Save template</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Notifications</summary>
+          <label for="tgChat">Telegram chat ID</label>
+          <input id="tgChat" type="text" placeholder="123456789" spellcheck="false" />
+          <label for="olUrl">Ollama server</label>
+          <input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" />
+          <label for="olModel">Ollama model</label>
+          <input id="olModel" type="text" placeholder="qwen3.6" spellcheck="false" />
+          <button id="ntSave">Save notifications</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Live stream · Icecast</summary>
+          <label class="check"><input id="stOn" type="checkbox" /> Stream calls live</label>
+          <label for="stHost">Host</label>
+          <input id="stHost" type="text" placeholder="audio1.broadcastify.com" spellcheck="false" />
+          <label for="stPort">Port</label>
+          <input id="stPort" type="number" value="80" />
+          <label for="stMount">Mount</label>
+          <input id="stMount" type="text" placeholder="/mount" spellcheck="false" />
+          <label for="stPass">Password</label>
+          <input id="stPass" type="password" spellcheck="false" />
+          <button id="stSave">Save stream</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Share calls</summary>
+          <label class="check"><input id="upRdio" type="checkbox" /> rdio-scanner</label>
+          <input id="upRdioUrl" type="text" placeholder="http://192.168.1.10:3000" spellcheck="false" />
+          <label class="check"><input id="upOmhz" type="checkbox" /> OpenMHz</label>
+          <input id="upOmhzName" type="text" placeholder="hoosiersafet" spellcheck="false" />
+          <label class="check"><input id="upBcfy" type="checkbox" /> Broadcastify Calls</label>
+          <input id="upBcfyKey" type="password" placeholder="API key" spellcheck="false" />
+          <button id="upSave">Save sharing</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Script hook</summary>
+          <label class="check"><input id="hkOn" type="checkbox" /> Run a command after each call</label>
+          <label for="hkCmd">Command</label>
+          <input id="hkCmd" type="text" placeholder="~/bin/notify-call.sh" spellcheck="false" />
+          <button id="hkSave">Save hook</button>
+        </details>
+
+        <details class="card">
+          <summary class="h1">Alert rules</summary>
+          <div id="alertsList"><p class="muted">Loading…</p></div>
+        </details>
+        <details class="card">
+          <summary class="h1">Conversation rules</summary>
+          <div id="convList"><p class="muted">Loading…</p></div>
+        </details>
+        <details class="card">
+          <summary class="h1">Digests</summary>
+          <div id="digList"><p class="muted">Loading…</p></div>
+        </details>
+        <details class="card">
+          <summary class="h1">Analyzers</summary>
+          <div id="azList"><p class="muted">Loading…</p></div>
+        </details>
+      </div>
     </div>
   </div>
 
@@ -189,15 +291,18 @@
   function showDash()  { $("login").hidden = true;  $("dash").hidden = false; }
 
   /* ---- tabs ---- */
+  const cap = (n) => n[0].toUpperCase() + n.slice(1);
   function setTab(t) {
-    $("tabMonitor").className = t === "monitor" ? "on" : "";
-    $("tabLibrary").className = t === "library" ? "on" : "";
-    $("viewMonitor").hidden = t !== "monitor";
-    $("viewLibrary").hidden = t !== "library";
+    ["monitor", "library", "settings"].forEach(n => {
+      $("tab" + cap(n)).className = t === n ? "on" : "";
+      $("view" + cap(n)).hidden = t !== n;
+    });
     if (t === "library") loadLibrary();
+    if (t === "settings") loadSettings();
   }
   $("tabMonitor").onclick = () => setTab("monitor");
   $("tabLibrary").onclick = () => setTab("library");
+  $("tabSettings").onclick = () => setTab("settings");
 
   /* ---- login ---- */
   $("go").onclick = async () => {
@@ -365,6 +470,107 @@
   $("libSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderCalls, 300); };
 
   function toast(msg, isErr) { feed.insertAdjacentHTML("afterbegin", `<div class="entry ${isErr ? "notice" : ""}"><div class="t">${now()}</div><div class="body">${esc(msg)}</div></div>`); }
+
+  /* ---- settings ---- */
+  let alertsSettings = null; // cached full alerts Settings for partial saves
+
+  async function loadSettings() {
+    // transcription
+    try { const p = await command("transcribe_probe"); const s = p.settings || {};
+      $("trOn").checked = !!s.enabled; $("trEngine").value = s.engine || "faster-whisper";
+      $("trModel").value = s.model || "base"; $("trLang").value = s.language || "en"; } catch {}
+    // format + names
+    try { const f = await command("format_get"); $("fmtCodec").value = f.format.codec; $("fmtKbps").value = String(f.format.bitrate_kbps); $("fmtMode").value = f.format.mode; } catch {}
+    try { const n = await command("names_get"); $("fnTemplate").value = n.settings.template; $("fnExample").textContent = n.example; } catch {}
+    // notifications
+    try { const v = await command("alerts_get"); alertsSettings = v.settings;
+      $("tgChat").value = v.settings.telegram.chat_id || ""; $("olUrl").value = v.settings.ollama.url || ""; $("olModel").value = v.settings.ollama.model || ""; } catch {}
+    // stream
+    try { const v = await command("stream_get"); const s = v.settings;
+      $("stOn").checked = s.enabled; $("stHost").value = s.host; $("stPort").value = s.port; $("stMount").value = s.mount; } catch {}
+    // uploads
+    try { const v = await command("uploads_get"); const s = v.settings;
+      $("upRdio").checked = s.rdio.enabled; $("upRdioUrl").value = s.rdio.url;
+      $("upOmhz").checked = s.openmhz.enabled; $("upOmhzName").value = s.openmhz.short_name;
+      $("upBcfy").checked = s.broadcastify.enabled; } catch {}
+    // hook
+    try { const v = await command("hook_get"); const s = v.settings;
+      $("hkOn").checked = s.enabled; $("hkCmd").value = s.command; } catch {}
+    renderRules();
+  }
+
+  function ruleList(el, rules, key, cb) {
+    el.innerHTML = rules.length ? rules.map(r => `<div class="rule"><span class="nm">${esc(r.name)}</span><label class="check" style="margin:0"><input type="checkbox" data-id="${esc(r[key])}" ${r.enabled ? "checked" : ""}></label></div>`).join("") : '<p class="muted">none</p>';
+    el.querySelectorAll("[data-id]").forEach(c => c.onchange = () => cb(c.dataset.id, c.checked));
+  }
+  async function renderRules() {
+    try { const v = await command("alerts_get"); alertsSettings = v.settings;
+      ruleList($("alertsList"), v.settings.alerts || [], "id", (id, on) => toggleAlert(id, on)); } catch {}
+    try { const v = await command("conversations_get");
+      ruleList($("convList"), v.settings.rules || [], "id", (id, on) => toggleConv(id, on)); } catch {}
+    try { const v = await command("digests_get");
+      ruleList($("digList"), v.rules || [], "id", (id, on) => toggleDig(id, on)); } catch {}
+    try { const v = await command("analyzers_get");
+      ruleList($("azList"), v.rules || [], "id", (id, on) => toggleAz(id, on)); } catch {}
+  }
+  async function toggleAlert(id, on) {
+    if (!alertsSettings) return;
+    const a = alertsSettings.alerts.find(x => x.id === id); if (a) a.enabled = on;
+    try { await command("alerts_set", { settings: alertsSettings }); } catch (e) { toast(e, true); }
+  }
+  async function toggleConv(id, on) {
+    try { const v = await command("conversations_get"); const r = v.settings.rules.find(x => x.id === id); if (r) r.enabled = on;
+      await command("conversations_set", { rules: v.settings.rules }); } catch (e) { toast(e, true); }
+  }
+  async function toggleDig(id, on) {
+    try { const v = await command("digests_get"); const r = v.rules.find(x => x.id === id); if (r) r.enabled = on;
+      await command("digests_set", { rules: v.rules }); } catch (e) { toast(e, true); }
+  }
+  async function toggleAz(id, on) {
+    try { const v = await command("analyzers_get"); const r = v.rules.find(x => x.id === id); if (r) r.enabled = on;
+      await command("analyzers_set", { rules: v.rules }); } catch (e) { toast(e, true); }
+  }
+
+  // save handlers
+  $("trSave").onclick = async () => {
+    try { await command("transcribe_configure", { settings: { enabled: $("trOn").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim(), device: "auto" } }); toast("Transcription saved"); }
+    catch (e) { toast(e, true); }
+  };
+  $("fmtSave").onclick = async () => {
+    try { await command("format_set", { format: { codec: $("fmtCodec").value, bitrate_kbps: +$("fmtKbps").value, mode: $("fmtMode").value } }); toast("Format saved"); }
+    catch (e) { toast(e, true); }
+  };
+  $("fnTemplate").oninput = async () => { try { $("fnExample").textContent = await command("names_preview", { template: $("fnTemplate").value }); } catch {} };
+  $("fnSave").onclick = async () => {
+    try { await command("names_set", { template: $("fnTemplate").value }); toast("Template saved"); } catch (e) { toast(e, true); }
+  };
+  $("ntSave").onclick = async () => {
+    try { if (!alertsSettings) { const v = await command("alerts_get"); alertsSettings = v.settings; }
+      alertsSettings.telegram.chat_id = $("tgChat").value.trim();
+      alertsSettings.ollama.url = $("olUrl").value.trim(); alertsSettings.ollama.model = $("olModel").value.trim();
+      await command("alerts_set", { settings: alertsSettings }); toast("Notifications saved"); }
+    catch (e) { toast(e, true); }
+  };
+  $("stSave").onclick = async () => {
+    try { const v = await command("stream_get"); const s = v.settings;
+      s.enabled = $("stOn").checked; s.host = $("stHost").value.trim(); s.port = +$("stPort").value || 80; s.mount = $("stMount").value.trim();
+      if ($("stPass").value) s.password = $("stPass").value;
+      await command("stream_configure", { settings: s }); $("stPass").value = ""; toast("Stream saved"); }
+    catch (e) { toast(e, true); }
+  };
+  $("upSave").onclick = async () => {
+    try { const v = await command("uploads_get"); const s = v.settings;
+      s.rdio.enabled = $("upRdio").checked; s.rdio.url = $("upRdioUrl").value.trim();
+      s.openmhz.enabled = $("upOmhz").checked; s.openmhz.short_name = $("upOmhzName").value.trim();
+      s.broadcastify.enabled = $("upBcfy").checked;
+      if ($("upBcfyKey").value) s.broadcastify.api_key = $("upBcfyKey").value;
+      await command("uploads_configure", { settings: s }); $("upBcfyKey").value = ""; toast("Sharing saved"); }
+    catch (e) { toast(e, true); }
+  };
+  $("hkSave").onclick = async () => {
+    try { await command("hook_configure", { settings: { enabled: $("hkOn").checked, command: $("hkCmd").value.trim(), timeout_secs: 20, min_secs: 0, emergency_only: false } }); toast("Hook saved"); }
+    catch (e) { toast(e, true); }
+  };
 
   // already have a token? go straight to the dashboard.
   (async () => {
