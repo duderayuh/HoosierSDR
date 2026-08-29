@@ -31,6 +31,9 @@ w.__exercise = async () => {
   follow({ kind: "talker_alias", tg: 10147, name: "IFD", alias: "ENG 21" });
   follow({ kind: "notice", text: "control channel moved" });
   follow({ kind: "status", control_syncs: 1, calls: 2, out_of_band: 0, encrypted: 0, locked: 0, busy: 0, msps: 9.6, want_msps: 9.6, dropped: 0, elapsed_secs: 1 });
+  // With the receiver-health fields present (lock, multipath meter, clip flag) and again with them absent/null.
+  follow({ kind: "status", control_syncs: 2, calls: 2, out_of_band: 0, encrypted: 0, locked: 0, busy: 0, msps: 9.6, want_msps: 9.6, dropped: 0, elapsed_secs: 2, signal_dbfs: -31.2, lock: 0.91, echo_frac: 0.033, echo_spread_us: 101.0, clip_pct: 1.4 });
+  follow({ kind: "status", control_syncs: 3, calls: 2, out_of_band: 0, encrypted: 0, locked: 0, busy: 0, msps: 9.6, want_msps: 9.6, dropped: 0, elapsed_secs: 3, signal_dbfs: null, lock: null, echo_frac: null, echo_spread_us: null, clip_pct: 0.0 });
   fire("transcript", { id: 7, text: "working fire", model: "base" });
   fire("alert", { name: "Arrest", tg: 10147, message: "hi\nthere", tone: true });
   fire("alert_error", "x"); fire("hook_error", "y"); fire("transcribe_error", "z"); fire("transcribe_ready", "m");

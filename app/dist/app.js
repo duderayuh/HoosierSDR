@@ -608,15 +608,37 @@ document.addEventListener("mouseout", (e) => {
 
 /* ---------- readouts shared by both modes ---------- */
 let followVoice = 0;
+// Receiver DSP health: carrier lock, the simulcast-multipath meter (echo
+// fraction + delay spread read off the equalizer taps), and the ADC-overload
+// flag. null / negative = no reading (C4FM, equalizer bypassed, unacquired).
+function setDspHealth(lock, echoFrac, spreadUs, clipPct) {
+  if (lock != null) {
+    if (lock >= 0) { $("r-lock").textContent = lock.toFixed(2); $("r-lockbar").style.width = Math.max(0, Math.min(100, lock * 100)) + "%"; }
+    else { $("r-lock").textContent = "—"; $("r-lockbar").style.width = "0%"; }
+  }
+  if (echoFrac != null && echoFrac >= 0) {
+    $("r-echo").textContent = `${(echoFrac * 100).toFixed(1)}%` + (spreadUs != null && spreadUs >= 0 ? ` · ${spreadUs.toFixed(0)} µs` : "");
+    // The converged equalizer keeps most energy on the cursor even on heavy
+    // simulcast (measured: ~0.9% mild echo, ~6.4% heavy), so ×10 spreads the
+    // useful range over the bar.
+    $("r-echobar").style.width = Math.max(0, Math.min(100, echoFrac * 1000)) + "%";
+  } else {
+    $("r-echo").textContent = "—"; $("r-echobar").style.width = "0%";
+  }
+  const sig = $("r-signal");
+  if (clipPct != null && clipPct >= 0.1) {
+    sig.classList.add("clip");
+    sig.title = `${clipPct.toFixed(1)}% of samples at the ADC rails — front-end overload garbles decode; reduce gain`;
+  } else {
+    sig.classList.remove("clip"); sig.title = "";
+  }
+}
 function setStatus(s) {
   if (s.syncs != null) $("r-syncs").textContent = s.syncs;
   if (s.grants != null) $("r-grants").textContent = s.grants;
   if (s.voice_secs != null) $("r-voice").innerHTML = s.voice_secs.toFixed(1) + "<small>s</small>";
   if (s.modulation) $("tunedSub").textContent = s.modulation.toUpperCase();
-  if (s.lock != null) {
-    if (s.lock >= 0) { $("r-lock").textContent = s.lock.toFixed(2); $("r-lockbar").style.width = Math.max(0, Math.min(100, s.lock * 100)) + "%"; }
-    else { $("r-lock").textContent = "—"; $("r-lockbar").style.width = "0%"; }
-  }
+  setDspHealth(s.lock, s.echo_frac, s.echo_spread_us, s.clip_pct);
   if (s.dropped != null) $("r-syncerr").textContent = s.dropped ? `${s.dropped}` : "0";
 }
 
@@ -694,6 +716,7 @@ function handleFollow(ev) {
       } else {
         $("r-signal").textContent = "— dBFS";
       }
+      setDspHealth(ev.lock ?? -1, ev.echo_frac ?? -1, ev.echo_spread_us ?? -1, ev.clip_pct);
       $("r-grants").textContent = ev.calls;
       $("r-syncerr").textContent = ev.dropped ? `${ev.dropped}` : "0";
       $("r-stream").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)}M · ${ev.dropped || 0}`;

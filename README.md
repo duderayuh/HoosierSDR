@@ -63,6 +63,7 @@ The IMBE vocoder compiles vendored C (ISC mbelib), so a C compiler is required.
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design and roadmap
+- [`docs/RECEPTION.md`](docs/RECEPTION.md) — improving simulcast reception with the app's meters
 - [`results/baselines.md`](results/baselines.md) — measured decode quality
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — code provenance policy
 

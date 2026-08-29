@@ -210,6 +210,18 @@ pub enum FollowEvent {
         elapsed_secs: f64,
         /// Signal power (dBFS) off the control channel.
         signal_dbfs: Option<f32>,
+        /// Control-channel CQPSK carrier-lock quality 0..1; null on C4FM.
+        lock: Option<f32>,
+        /// Fraction of equalizer tap energy off the cursor — the live
+        /// simulcast-distortion severity read off the control channel. Null
+        /// on C4FM, with the equalizer bypassed, or before acquisition.
+        echo_frac: Option<f32>,
+        /// Energy-weighted RMS spread of the learned echo delays, µs.
+        echo_spread_us: Option<f32>,
+        /// Percentage of primary-radio samples at the ADC rails since the
+        /// last status — front-end overload, which garbles decode in a way
+        /// that mimics simulcast distortion. The cure is less gain.
+        clip_pct: f32,
     },
     Spectrum {
         bins_db: Vec<f32>,
@@ -485,6 +497,14 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     let mut last_status = std::time::Instant::now();
     let mut last_spectrum = std::time::Instant::now();
     let mut last_constellation = std::time::Instant::now();
+    // ADC-overload watch on the primary radio: both supported front ends
+    // deliver full scale as ±1.0 (Airspy int16/32768, RTL-SDR u8 via seify),
+    // so samples pinned near the rails mean the gain is too high — distortion
+    // that garbles decode while *looking* like simulcast trouble. Counted per
+    // status window. The 24/25 resampler between radio and here smears rails
+    // slightly, so the threshold sits a little inside them.
+    let mut clip_win = 0u64;
+    let mut clip_total = 0u64;
 
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
@@ -494,6 +514,8 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             Err(e) => return Err(format!("capture error: {e:?}")),
         };
         let chunk = &buf[..n];
+        clip_win += chunk.iter().filter(|s| s.abs() >= 0.98).count() as u64;
+        clip_total += n as u64;
         total_pairs += (n / 2) as u64;
         blocks += 1;
         // The UI may change lockout / hold / playlist / priorities any time.
@@ -552,12 +574,22 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             last_status = std::time::Instant::now();
             let secs = start.elapsed().as_secs_f64().max(1e-3);
             let extra_drops: u64 = extra.iter().map(|(_, _, _, e)| e.dropped()).sum();
+            let clip_pct = if clip_total > 0 {
+                100.0 * clip_win as f32 / clip_total as f32
+            } else {
+                0.0
+            };
+            clip_win = 0;
+            clip_total = 0;
             emit(rep.status(
                 total_pairs,
                 secs,
                 rate,
                 src.dropped().saturating_sub(drop_base) + extra_drops,
                 f.control_power_dbfs(),
+                f.control_lock(),
+                f.control_echo(),
+                clip_pct,
             ));
         }
     }
@@ -574,6 +606,9 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         rate,
         src.dropped().saturating_sub(drop_base),
         None,
+        None,
+        None,
+        0.0,
     ));
     Ok(())
 }
@@ -861,6 +896,7 @@ impl Reporter<'_> {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn status(
         &self,
         total_pairs: u64,
@@ -868,6 +904,9 @@ impl Reporter<'_> {
         rate: f64,
         dropped: u64,
         signal_dbfs: Option<f32>,
+        lock: Option<f32>,
+        echo: Option<hs_core::dsp::cqpsk::EchoProfile>,
+        clip_pct: f32,
     ) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
@@ -881,6 +920,10 @@ impl Reporter<'_> {
             dropped,
             elapsed_secs: secs,
             signal_dbfs,
+            lock,
+            echo_frac: echo.map(|e| e.echo_frac),
+            echo_spread_us: echo.map(|e| e.rms_spread_us()),
+            clip_pct,
         }
     }
 
