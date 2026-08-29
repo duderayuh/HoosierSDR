@@ -483,6 +483,8 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     let mut total_pairs = 0u64;
     let mut blocks = 0u64;
     let mut last_status = std::time::Instant::now();
+    let mut last_spectrum = std::time::Instant::now();
+    let mut last_constellation = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
@@ -525,7 +527,12 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 emit(site_event(&last_site));
             }
         }
-        if blocks.is_multiple_of(4) {
+        // Wall-clock paced like the capture loop: ~12 waterfall rows and 4
+        // constellation frames a second whatever the sample rate. Counting
+        // blocks tied the rate to the block size, so a 10 MSPS Airspy sent
+        // several times the events (and JSON serialization) of an RTL-SDR.
+        if last_spectrum.elapsed().as_millis() >= 80 {
+            last_spectrum = std::time::Instant::now();
             let (n, avg) = live
                 .spectrum
                 .map(|m| *m.lock().unwrap())
@@ -534,7 +541,8 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 bins_db: super::power_spectrum_avg(chunk, n, avg),
             });
         }
-        if blocks.is_multiple_of(12) {
+        if last_constellation.elapsed().as_millis() >= 250 {
+            last_constellation = std::time::Instant::now();
             emit(FollowEvent::Constellation {
                 modulation: mod_name(Some(modulation)),
                 points: f.control_symbols(),

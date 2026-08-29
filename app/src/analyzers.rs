@@ -303,14 +303,30 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
     let obj = match run_extract(&state, &r, &f) {
         Ok(v) => v,
         Err(e) => {
-            log_it(&app, &r, &f, false, false, format!("extraction failed: {e}"), String::new());
+            log_it(
+                &app,
+                &r,
+                &f,
+                false,
+                false,
+                format!("extraction failed: {e}"),
+                String::new(),
+            );
             return;
         }
     };
     let extracted = serde_json::to_string_pretty(&obj).unwrap_or_default();
     let matched = evaluate(&r, &obj);
     if !matched {
-        log_it(&app, &r, &f, false, true, "condition not met".into(), extracted);
+        log_it(
+            &app,
+            &r,
+            &f,
+            false,
+            true,
+            "condition not met".into(),
+            extracted,
+        );
         return;
     }
 
@@ -382,7 +398,12 @@ fn deliver(
     (ok, parts.join("; "))
 }
 
-fn send_telegram(chat: &str, r: &AnalyzerRule, f: &CallFacts, message: &str) -> Result<String, String> {
+fn send_telegram(
+    chat: &str,
+    r: &AnalyzerRule,
+    f: &CallFacts,
+    message: &str,
+) -> Result<String, String> {
     let clip = if r.attach_audio {
         f.audio.as_deref().filter(|p| !p.is_empty())
     } else {
@@ -515,8 +536,12 @@ fn ollama_extract(
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
     let answer = v["response"].as_str().unwrap_or("");
-    parse_object(answer)
-        .ok_or_else(|| format!("model did not answer in JSON: {}", answer.chars().take(200).collect::<String>()))
+    parse_object(answer).ok_or_else(|| {
+        format!(
+            "model did not answer in JSON: {}",
+            answer.chars().take(200).collect::<String>()
+        )
+    })
 }
 
 /// The provider's chat/messages endpoint and which request shape it speaks.
@@ -526,15 +551,27 @@ fn cloud_endpoint(c: &Cloud) -> Result<(String, &'static str), String> {
     let base = c.base_url.trim().trim_end_matches('/');
     match c.provider.as_str() {
         "openrouter" => {
-            let b = if base.is_empty() { "https://openrouter.ai/api/v1" } else { base };
+            let b = if base.is_empty() {
+                "https://openrouter.ai/api/v1"
+            } else {
+                base
+            };
             Ok((format!("{b}/chat/completions"), "openai"))
         }
         "openai" => {
-            let b = if base.is_empty() { "https://api.openai.com/v1" } else { base };
+            let b = if base.is_empty() {
+                "https://api.openai.com/v1"
+            } else {
+                base
+            };
             Ok((format!("{b}/chat/completions"), "openai"))
         }
         "anthropic" => {
-            let b = if base.is_empty() { "https://api.anthropic.com" } else { base };
+            let b = if base.is_empty() {
+                "https://api.anthropic.com"
+            } else {
+                base
+            };
             Ok((format!("{b}/v1/messages"), "anthropic"))
         }
         other => Err(format!("unknown cloud provider '{other}'")),
@@ -580,7 +617,10 @@ fn cloud_extract(
             .header("Content-Type", "application/json")
             .send(body.to_string().as_bytes())
             .map_err(|e| format!("anthropic: {e}"))?;
-        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap_or_default())
+        (
+            resp.status().as_u16(),
+            resp.body_mut().read_to_string().unwrap_or_default(),
+        )
     } else {
         let body = serde_json::json!({
             "model": c.model,
@@ -604,7 +644,10 @@ fn cloud_extract(
         let mut resp = req
             .send(body.to_string().as_bytes())
             .map_err(|e| format!("{}: {e}", c.provider))?;
-        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap_or_default())
+        (
+            resp.status().as_u16(),
+            resp.body_mut().read_to_string().unwrap_or_default(),
+        )
     };
 
     if status != 200 {
@@ -626,7 +669,10 @@ fn cloud_extract(
         v["choices"][0]["message"]["content"].as_str().unwrap_or("")
     };
     parse_object(answer).ok_or_else(|| {
-        format!("model did not answer in JSON: {}", answer.chars().take(200).collect::<String>())
+        format!(
+            "model did not answer in JSON: {}",
+            answer.chars().take(200).collect::<String>()
+        )
     })
 }
 
@@ -668,7 +714,9 @@ fn test_clause(c: &Clause, obj: &serde_json::Value) -> bool {
     match c.op.as_str() {
         "==" => lhs_str.eq_ignore_ascii_case(rhs),
         "!=" => !lhs_str.eq_ignore_ascii_case(rhs),
-        "contains" => lhs_str.to_ascii_lowercase().contains(&rhs.to_ascii_lowercase()),
+        "contains" => lhs_str
+            .to_ascii_lowercase()
+            .contains(&rhs.to_ascii_lowercase()),
         ">" | ">=" | "<" | "<=" => match (as_number(lhs), rhs.parse::<f64>()) {
             (Some(l), Ok(r)) => match c.op.as_str() {
                 ">" => l > r,
@@ -719,7 +767,10 @@ fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Val
         .replace("{time}", &time)
         .replace("{secs}", &format!("{:.0}", f.secs))
         .replace("{transcript}", f.transcript.as_deref().unwrap_or(""))
-        .replace("{json}", &serde_json::to_string_pretty(obj).unwrap_or_default());
+        .replace(
+            "{json}",
+            &serde_json::to_string_pretty(obj).unwrap_or_default(),
+        );
     if let Some(map) = obj.as_object() {
         for (k, v) in map {
             out = out.replace(&format!("{{field.{k}}}"), &value_to_string(Some(v)));
@@ -767,7 +818,14 @@ pub fn analyzers_set(
 
 #[tauri::command]
 pub fn analyzers_log(state: State<AppState>) -> Vec<LogEntry> {
-    state.analyzers.lock().unwrap().log.iter().cloned().collect()
+    state
+        .analyzers
+        .lock()
+        .unwrap()
+        .log
+        .iter()
+        .cloned()
+        .collect()
 }
 
 /// The cloud settings plus whether an API key is currently stored (the key
@@ -905,7 +963,11 @@ pub async fn analyzer_test(
         "Tested on TG {} “{}”.\nCondition {}.\n\nExtracted:\n{}\n\nMessage preview:\n{}",
         f.tg,
         f.tg_name,
-        if matched { "MET — would send" } else { "not met — would stay quiet" },
+        if matched {
+            "MET — would send"
+        } else {
+            "not met — would stay quiet"
+        },
         extracted,
         preview
     ))
