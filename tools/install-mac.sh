@@ -92,12 +92,13 @@ fi
 [ -f "$DEST/app/tauri.conf.json" ] \
   || die "checkout is missing app/tauri.conf.json — the clone is stale or incomplete; delete $DEST and re-run"
 
-# ── 5. SDR capture tools ──
+# ── 5. SDR capture + audio tools ──
 # The desktop app enables the rtlsdr + airspy + soapy backends, so it links
 # libairspy, libSoapySDR, librtlsdr and libusb. Install them all up front so
-# `cargo tauri dev` works on first try, not just the CLI.
-say "SDR capture tools (airspy, libusb, soapysdr, soapyrtlsdr, librtlsdr)"
-for pkg in airspy libusb soapysdr soapyrtlsdr librtlsdr pkg-config; do
+# `cargo tauri dev` works on first try, not just the CLI. `ffmpeg` is the
+# transcoder behind mp3/m4a/opus call storage (without it, calls stay WAV).
+say "SDR capture + audio tools (airspy, libusb, soapysdr, soapyrtlsdr, librtlsdr, ffmpeg)"
+for pkg in airspy libusb soapysdr soapyrtlsdr librtlsdr pkg-config ffmpeg; do
   if brew list --formula "$pkg" >/dev/null 2>&1; then
     ok "$pkg already installed"
   else
@@ -127,16 +128,29 @@ else
 fi
 cargo tauri --version >/dev/null 2>&1 || die "tauri-cli still missing after install attempt"
 
-# ── 7. App transcription (optional) ──
+# ── 7. App transcription (faster-whisper, optional) ──
+# faster-whisper needs a native arm64 Python ≥ 3.10. Apple's CommandLineTools
+# Python 3.9 lacks the ctranslate2 wheel, and mixing it with a Rosetta x86_64
+# interpreter produces an architecture mismatch at import time. Install a
+# Homebrew Python and put faster-whisper there; the app probes
+# /opt/homebrew/bin/python3.12 (and 3.13/3.11) automatically.
 say "App transcription (faster-whisper, optional)"
-if python3 -c "import faster_whisper" >/dev/null 2>&1; then
-  ok "faster-whisper already available"
-elif command -v python3 >/dev/null 2>&1; then
-  warn "attempting \`python3 -m pip install --user faster-whisper\`"
-  python3 -m pip install --user faster-whisper \
-    || warn "could not install faster-whisper automatically — see app/README.md"
+TRANSCRIBE_PY="/opt/homebrew/bin/python3.12"
+[ -x "$TRANSCRIBE_PY" ] || [ ! -x "/usr/local/bin/python3.12" ] || TRANSCRIBE_PY="/usr/local/bin/python3.12"
+if [ ! -x "$TRANSCRIBE_PY" ]; then
+  warn "installing python@3.12 for transcription"
+  brew install python@3.12 || true
+fi
+if [ -x "$TRANSCRIBE_PY" ]; then
+  if "$TRANSCRIBE_PY" -c "import faster_whisper" >/dev/null 2>&1; then
+    ok "faster-whisper already available ($TRANSCRIBE_PY)"
+  else
+    warn "installing faster-whisper into $TRANSCRIBE_PY"
+    "$TRANSCRIBE_PY" -m pip install faster-whisper \
+      || warn "faster-whisper install failed — see app/README.md"
+  fi
 else
-  warn "no python3 found; transcription disabled (the app still runs)"
+  warn "no native Python found; transcription disabled (the app still runs)"
 fi
 
 # ── 8. Build the release CLI ──

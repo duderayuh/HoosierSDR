@@ -9,12 +9,13 @@ Own Cargo workspace — excluded from the main workspace so `cargo build
 ## Prerequisites (macOS)
 
 ```sh
-brew install airspy soapysdr soapyrtlsdr librtlsdr libusb pkg-config
+brew install airspy soapysdr soapyrtlsdr librtlsdr libusb pkg-config ffmpeg
 cargo install tauri-cli --version '^2.0'
 ```
 
 The app links all three SDR backends (`rtlsdr`, `airspy`, `soapy`), so every
-formula above is required — a missing one fails at link time. macOS ships
+SDR formula above is required — a missing one fails at link time. `ffmpeg`
+enables mp3/m4a/opus call storage (without it, calls stay WAV). macOS ships
 WebKit; on Windows install WebView2 + MSVC.
 
 ## Run
@@ -36,12 +37,17 @@ First build compiles the whole decode stack plus Tauri; takes a few minutes.
 
 ## Transcription (optional)
 
+Needs a native arm64 Python 3.10+ with `faster-whisper`. Apple's CommandLineTools
+Python 3.9 won't work (no ctranslate2 wheel), and a Rosetta x86_64 interpreter
+mismatches the arm64 `av` wheel.
+
 ```sh
-python3 -m pip install --user faster-whisper
+brew install python@3.12
+/opt/homebrew/bin/python3.12 -m pip install faster-whisper
 ```
 
-The app probes `/usr/local/bin/python3` and `/opt/homebrew/bin/python3` first;
-set `TRANSCRIBE_PYTHON` to pin a specific interpreter.
+The app probes `python3.13` / `3.12` / `3.11` in both Homebrew prefixes
+automatically; set `TRANSCRIBE_PYTHON` to pin a specific interpreter.
 
 ## Bundle
 
