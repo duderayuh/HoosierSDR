@@ -15,11 +15,17 @@ Desktop-first (macOS and Windows). Built for Indiana's Hoosier SAFE-T system (P2
 curl -fsSL https://raw.githubusercontent.com/duderayuh/HoosierSDR/main/tools/install-mac.sh | bash
 ```
 
+Or **double-click** [`install-mac.command`](install-mac.command) from the repo
+(right-click → Open if macOS flags it as from an unidentified developer).
+
 Installs every dependency (Xcode CLT, Homebrew, Rust, the SDR capture libs
-`airspy libusb soapysdr soapyrtlsdr librtlsdr`, plus `tauri-cli`), clones to
-`~/HoosierSDR`, builds the release CLI, and verifies it with a no-hardware
-decode. Also makes the desktop app buildable on first try. Idempotent — safe to
-re-run. Linux/Windows: see [Building](#building) below.
+`airspy libusb soapysdr soapyrtlsdr librtlsdr`, plus `tauri-cli` via a prebuilt
+binary), clones to `~/HoosierSDR`, builds the release CLI, and verifies it with
+a no-hardware decode. Also makes the desktop app buildable on first try.
+**Idempotent and self-healing** — re-run it any time to repair a broken or stale
+install (e.g. a partial clone or a missing `tauri-cli`); it only does what's
+missing and never clobbers uncommitted work. Linux/Windows: see
+[Building](#building) below.
 
 ## Try it now
 
