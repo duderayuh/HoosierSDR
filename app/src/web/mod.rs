@@ -132,7 +132,10 @@ fn get_or_create_token() -> String {
 fn best_host() -> String {
     // The Tailscale CLI is usually in PATH, but the Mac App Store build tucks
     // it inside the .app bundle — try both.
-    let tailscale = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+    let tailscale = [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ];
     for bin in tailscale {
         if let Ok(out) = std::process::Command::new(bin).args(["ip", "-4"]).output() {
             if out.status.success() {
@@ -197,11 +200,7 @@ pub fn spawn(app: AppHandle) {
         });
     }
 
-    let state = Arc::new(WebState {
-        app,
-        token,
-        frames,
-    });
+    let state = Arc::new(WebState { app, token, frames });
 
     let router = Router::new()
         .route("/", get(mobile_page))
@@ -281,10 +280,14 @@ async fn events(
         match item {
             Ok(frame) => match SseEvent::default().event(frame.event).json_data(frame.data) {
                 Ok(ev) => Some(Ok::<_, std::convert::Infallible>(ev)),
-                Err(_) => Some(Ok::<_, std::convert::Infallible>(SseEvent::default().data("{}"))),
+                Err(_) => Some(Ok::<_, std::convert::Infallible>(
+                    SseEvent::default().data("{}"),
+                )),
             },
             Err(_) => Some(Ok::<_, std::convert::Infallible>(
-                SseEvent::default().event("lagged").data("client fell behind"),
+                SseEvent::default()
+                    .event("lagged")
+                    .data("client fell behind"),
             )),
         }
     });
@@ -304,7 +307,7 @@ async fn command(
     _auth: Auth,
     Json(req): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match api::dispatch(&st.app, &req.command, &req.args) {
+    match api::dispatch(&st.app, &req.command, &req.args).await {
         Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }

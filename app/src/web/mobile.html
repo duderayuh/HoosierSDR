@@ -19,35 +19,48 @@
     font-size:16px; line-height:1.45; -webkit-font-smoothing:antialiased;
   }
   .wrap { max-width:520px; margin:0 auto; padding:20px 16px 40px; }
-  .brand { font-weight:700; font-size:20px; letter-spacing:.02em; }
+  .brand { font-weight:700; font-size:20px; letter-spacing:.02em; margin-bottom:12px; }
   .brand b { color:var(--signal); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin-top:16px; }
-  .card h1 { font-size:15px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
-  .card p { color:var(--dim); margin:0 0 14px; font-size:14px; }
-  label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); margin:12px 0 4px; }
-  input {
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; }
+  .card h1 { font-size:13px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
+  .card p { color:var(--dim); margin:0 0 12px; font-size:14px; }
+  label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); margin:10px 0 4px; }
+  input, select {
     width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--ink);
-    border-radius:10px; padding:12px; font-size:16px;
+    border-radius:10px; padding:11px; font-size:16px;
   }
-  input:focus { border-color:var(--signal); outline:none; }
+  input:focus, select:focus { border-color:var(--signal); outline:none; }
   button {
-    width:100%; margin-top:16px; background:var(--signal); color:#05100e; border:0;
-    border-radius:10px; padding:13px; font-size:16px; font-weight:600; cursor:pointer;
+    width:100%; margin-top:14px; background:var(--signal); color:#05100e; border:0;
+    border-radius:10px; padding:12px; font-size:15px; font-weight:600; cursor:pointer;
   }
   button.ghost { background:var(--panel2); color:var(--dim); border:1px solid var(--line); }
+  button.danger { background:transparent; color:var(--enc); border:1px solid var(--enc); }
+  button.sm { width:auto; margin:0; padding:8px 12px; font-size:13px; }
   button:active { opacity:.85; }
   .err { color:var(--enc); font-size:14px; margin-top:10px; min-height:20px; }
-  .row { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--line); }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); }
   .row:last-child { border-bottom:0; }
   .row .k { color:var(--dim); font-size:14px; }
   .row .v { font-weight:600; font-size:15px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--faint); margin-right:6px; }
   .dot.live { background:var(--signal); box-shadow:0 0 8px var(--signal); }
-  .muted { color:var(--faint); font-size:13px; text-align:center; padding:30px 0; }
+  .muted { color:var(--faint); font-size:13px; text-align:center; padding:24px 0; }
   [hidden] { display:none !important; }
+
+  /* tabs */
+  .tabs { display:flex; gap:8px; margin-top:14px; }
+  .tabs button { flex:1; margin:0; background:var(--panel); color:var(--dim); border:1px solid var(--line); }
+  .tabs button.on { background:var(--panel2); color:var(--ink); border-color:var(--signal); }
+
+  /* control button grid */
+  .btnrow { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .btnrow button { margin:0; }
+  .btnrow button.wide { grid-column:1 / -1; }
+
   /* live feed */
-  #feed { max-height:60vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
-  .entry { padding:8px 0; border-bottom:1px solid var(--line); font-size:14px; }
+  #feed { max-height:52vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  .entry { padding:7px 0; border-bottom:1px solid var(--line); font-size:14px; }
   .entry:last-child { border-bottom:0; }
   .entry .t { color:var(--faint); font-size:11px; margin-bottom:2px; }
   .entry .body { color:var(--ink); }
@@ -55,8 +68,18 @@
   .entry.call .body b { color:var(--clear); }
   .entry.notice .body { color:var(--dim); }
   .entry.audio .body { color:var(--amber); }
-  .pill { display:inline-flex; gap:8px; }
-  .pill button { width:auto; margin:0; padding:8px 14px; font-size:13px; }
+
+  /* library list */
+  #calls { max-height:60vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  .call { padding:10px 0; border-bottom:1px solid var(--line); }
+  .call:last-child { border-bottom:0; }
+  .call .top { display:flex; justify-content:space-between; align-items:baseline; }
+  .call .name { font-weight:600; }
+  .call .when { color:var(--faint); font-size:12px; }
+  .call .sub { color:var(--dim); font-size:13px; margin-top:2px; }
+  .call .star { color:var(--amber); cursor:pointer; font-size:15px; padding-left:8px; }
+  .slider { width:100%; accent-color:var(--signal); }
+  .hint { color:var(--faint); font-size:12px; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -66,7 +89,7 @@
     <!-- login -->
     <div class="card" id="login">
       <h1>Connect to your radio</h1>
-      <p>Enter the access token shown in the app's terminal (or in its secrets file).</p>
+      <p>Enter the access token shown in the app's Settings → Remote access.</p>
       <label for="token">Access token</label>
       <input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="…" />
       <button id="go">Connect</button>
@@ -75,25 +98,72 @@
 
     <!-- dashboard -->
     <div id="dash" hidden>
-      <div class="card">
-        <h1>Status</h1>
-        <div class="row"><span class="k"><span class="dot" id="dot"></span>Receiver</span><span class="v" id="run">—</span></div>
-        <div class="row"><span class="k">Talkgroups loaded</span><span class="v" id="cat">—</span></div>
-        <div class="pill">
-          <button class="ghost" id="audioBtn">Enable audio</button>
-          <button class="ghost" id="logout">Forget token</button>
+      <div class="tabs">
+        <button id="tabMonitor" class="on">Monitor</button>
+        <button id="tabLibrary">Library</button>
+      </div>
+
+      <!-- ============ MONITOR ============ -->
+      <div id="viewMonitor">
+        <div class="card">
+          <h1>Status</h1>
+          <div class="row"><span class="k"><span class="dot" id="dot"></span>Receiver</span><span class="v" id="run">—</span></div>
+          <div class="row"><span class="k">Signal</span><span class="v" id="sig">—</span></div>
+          <div class="row"><span class="k">Talkgroups loaded</span><span class="v" id="cat">—</span></div>
+        </div>
+
+        <div class="card">
+          <h1>Control</h1>
+          <div class="btnrow">
+            <button class="danger" id="stopBtn" hidden>Stop</button>
+            <button class="ghost" id="holdBtn" hidden>Hold current</button>
+            <button class="ghost" id="skipBtn">Skip</button>
+            <button class="ghost" id="replayBtn">Replay last</button>
+          </div>
+          <label for="vol">Volume <span class="hint" id="volVal">—</span></label>
+          <input type="range" class="slider" id="vol" min="0" max="2" step="0.02" value="1" />
+          <label for="gain">Gain <span class="hint" id="gainVal">—</span></label>
+          <input type="range" class="slider" id="gain" min="0" max="50" step="0.6" value="40" disabled />
+          <div class="btnrow" style="margin-top:12px">
+            <button class="ghost" id="audioBtn">Enable audio</button>
+            <button class="ghost" id="logout">Forget token</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h1>Quick start</h1>
+          <label for="dev">Device</label>
+          <select id="dev"></select>
+          <label for="ctlFreq">Control frequency (MHz)</label>
+          <input id="ctlFreq" type="text" inputmode="decimal" placeholder="857.6625" spellcheck="false" />
+          <label for="ctrFreq">Center (MHz) <span class="hint">blank = same as control</span></label>
+          <input id="ctrFreq" type="text" inputmode="decimal" placeholder="857.4875" spellcheck="false" />
+          <label for="rate">Sample rate (MHz)</label>
+          <select id="rate"></select>
+          <label class="check"><input id="playChk" type="checkbox" checked /> Play audio as calls complete</label>
+          <button id="startBtn">Start</button>
+        </div>
+
+        <div class="card">
+          <h1>Live feed</h1>
+          <div id="feed"><p class="muted">Waiting for activity…</p></div>
         </div>
       </div>
 
-      <div class="card">
-        <h1>Live feed</h1>
-        <div id="feed"><p class="muted">Waiting for activity…</p></div>
+      <!-- ============ LIBRARY ============ -->
+      <div id="viewLibrary" hidden>
+        <div class="card">
+          <h1>Library <span class="hint" id="libStats">—</span></h1>
+          <input id="libSearch" type="text" placeholder="Search talkgroup / unit / transcript…" spellcheck="false" />
+          <div id="calls"><p class="muted" id="libEmpty">Loading…</p></div>
+        </div>
       </div>
     </div>
   </div>
 
 <script>
   const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
   const TOKEN_KEY = "hs.web.token";
   const token = () => localStorage.getItem(TOKEN_KEY) || "";
   const authHeaders = () => ({ "X-Token": token() });
@@ -108,17 +178,28 @@
     return api("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: name, args }) });
   }
 
-  // tg → alias map from the saved catalogs.
+  // tg → alias map
   let nameMap = {};
-  async function loadNames() {
-    try { nameMap = Object.fromEntries((await command("catalog_rows")).map(r => [r.id, r.alias])); }
-    catch { nameMap = {}; }
-  }
-  const nameOf = (tg, fallback) => nameMap[tg] || fallback || ("TG " + tg);
+  async function loadNames() { try { nameMap = Object.fromEntries((await command("catalog_rows")).map(r => [r.id, r.alias])); } catch { nameMap = {}; } }
+  const nameOf = (tg, fb) => nameMap[tg] || fb || ("TG " + tg);
 
-  function showLogin() { $("login").hidden = false; $("dash").hidden = true; es?.close(); }
+  let running = false, curTg = null, es = null, devices = [], ac = null;
+
+  function showLogin() { $("login").hidden = false; $("dash").hidden = true; if (es) es.close(); }
   function showDash()  { $("login").hidden = true;  $("dash").hidden = false; }
 
+  /* ---- tabs ---- */
+  function setTab(t) {
+    $("tabMonitor").className = t === "monitor" ? "on" : "";
+    $("tabLibrary").className = t === "library" ? "on" : "";
+    $("viewMonitor").hidden = t !== "monitor";
+    $("viewLibrary").hidden = t !== "library";
+    if (t === "library") loadLibrary();
+  }
+  $("tabMonitor").onclick = () => setTab("monitor");
+  $("tabLibrary").onclick = () => setTab("library");
+
+  /* ---- login ---- */
   $("go").onclick = async () => {
     const t = $("token").value.trim();
     if (!t) return;
@@ -126,8 +207,8 @@
     try {
       const s = await api("/api/status");
       $("loginErr").textContent = "";
-      await loadNames();
-      showDash(); renderStatus(s); connect();
+      await Promise.all([loadNames(), loadDevices()]);
+      showDash(); renderStatus(s); connect(); loadVolume();
     } catch (e) {
       localStorage.removeItem(TOKEN_KEY);
       $("loginErr").textContent = e.message === "unauthorized" ? "Wrong token." : String(e.message);
@@ -136,91 +217,159 @@
   $("logout").onclick = () => { localStorage.removeItem(TOKEN_KEY); showLogin(); };
 
   function renderStatus(s) {
-    $("run").textContent = s.running ? "running" : "standby";
-    $("dot").className = "dot" + (s.running ? " live" : "");
+    running = !!s.running;
+    $("run").textContent = running ? "running" : "standby";
+    $("dot").className = "dot" + (running ? " live" : "");
     $("cat").textContent = s.catalog_len;
+    $("stopBtn").hidden = !running;
+    $("holdBtn").hidden = !running;
+    $("startBtn").textContent = running ? "Already running" : "Start";
   }
 
-  // ---- live feed ----
-  const feed = $("feed");
-  let first = true;
+  /* ---- live feed ---- */
+  const feed = $("feed"); let first = true;
   function addEntry(cls, time, html) {
     if (first) { feed.innerHTML = ""; first = false; }
-    const div = document.createElement("div");
-    div.className = "entry " + cls;
-    const t = document.createElement("div");
-    t.className = "t"; t.textContent = time;
-    const b = document.createElement("div");
-    b.className = "body"; b.innerHTML = html;
-    div.append(t, b);
-    feed.prepend(div);
+    const d = document.createElement("div"); d.className = "entry " + cls;
+    const t = document.createElement("div"); t.className = "t"; t.textContent = time;
+    const b = document.createElement("div"); b.className = "body"; b.innerHTML = html;
+    d.append(t, b); feed.prepend(d);
     while (feed.children.length > 200) feed.lastChild.remove();
   }
   const now = () => new Date().toLocaleTimeString();
 
   function onFollow(d) {
     switch (d.kind) {
-      case "call_start":
-        addEntry("call", now(), `<b>${nameOf(d.tg, d.name)}</b> — call started @ ${d.freq_mhz.toFixed(4)} MHz`);
-        break;
+      case "call_start": curTg = d.tg; $("holdBtn").textContent = `Hold ${nameOf(d.tg, d.name)}`;
+        addEntry("call", now(), `<b>${nameOf(d.tg, d.name)}</b> — call started @ ${d.freq_mhz.toFixed(4)} MHz`); break;
       case "grant":
-        addEntry("", now(), `grant: <b>${nameOf(d.tg, d.name)}</b> @ ${d.freq_mhz.toFixed(4)} MHz${d.encrypted ? " 🔒" : ""}`);
-        break;
-      case "call":
-        addEntry("call", now(), `<b>${nameOf(d.tg, d.name)}</b> — ${d.secs.toFixed(0)}s${d.emergency ? " 🚨" : ""}${d.encrypted ? " 🔒" : ""}`);
-        break;
-      case "notice":
-        addEntry("notice", now(), d.text);
-        break;
-      case "measured":
-        addEntry("notice", now(), `control ${d.control_mhz.toFixed(4)} MHz (${d.modulation})`);
-        break;
+        addEntry("", now(), `grant: <b>${nameOf(d.tg, d.name)}</b> @ ${d.freq_mhz.toFixed(4)} MHz${d.encrypted ? " 🔒" : ""}`); break;
+      case "call": curTg = null;
+        addEntry("call", now(), `<b>${nameOf(d.tg, d.name)}</b> — ${d.secs.toFixed(0)}s${d.emergency ? " 🚨" : ""}${d.encrypted ? " 🔒" : ""}`); break;
+      case "notice": addEntry("notice", now(), d.text); break;
+      case "measured": addEntry("notice", now(), `control ${d.control_mhz.toFixed(4)} MHz (${d.modulation})`); break;
       case "status":
-        $("run").textContent = "running";
-        $("dot").className = "dot live";
+        running = true; renderStatus({ running: true, catalog_len: +$("cat").textContent });
+        if (d.signal_dbfs != null) $("sig").textContent = d.signal_dbfs.toFixed(1) + " dBFS";
         break;
-      default: break; // high-frequency / uninteresting kinds ignored
+      default: break;
     }
   }
 
-  // ---- audio ----
-  let ac = null;
-  function ensureAudio() {
-    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
-    if (ac.state === "suspended") ac.resume();
-  }
+  /* ---- audio ---- */
+  function ensureAudio() { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); if (ac.state === "suspended") ac.resume(); }
   $("audioBtn").onclick = () => { ensureAudio(); $("audioBtn").textContent = "Audio on ✓"; };
   function playPcm(tg, b64) {
-    if (!ac) return; // audio not enabled yet
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
+    if (!ac) return;
+    const bin = atob(b64), bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const pcm = new Int16Array(bytes.buffer);
-    const buf = ac.createBuffer(1, pcm.length, 8000);
-    const ch = buf.getChannelData(0);
+    const buf = ac.createBuffer(1, pcm.length, 8000), ch = buf.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-    const src = ac.createBufferSource();
-    src.buffer = buf;
-    src.connect(ac.destination);
-    src.start();
+    const src = ac.createBufferSource(); src.buffer = buf; src.connect(ac.destination); src.start();
     addEntry("audio", now(), `▶ <b>${nameOf(tg)}</b> (${(pcm.length / 8000).toFixed(0)}s)`);
   }
 
-  // ---- SSE ----
-  let es = null;
+  /* ---- SSE ---- */
   function connect() {
     es = new EventSource("/api/events?token=" + encodeURIComponent(token()));
     es.addEventListener("follow", e => onFollow(JSON.parse(e.data)));
-    es.addEventListener("audio", e => playPcm(JSON.parse(e.data).tg, JSON.parse(e.data).pcm_b64));
+    es.addEventListener("audio", e => { const d = JSON.parse(e.data); playPcm(d.tg, d.pcm_b64); });
     es.addEventListener("stopped", () => renderStatus({ running: false, catalog_len: +$("cat").textContent }));
-    es.addEventListener("error", () => { /* transient; EventSource auto-reconnects */ });
-    es.onerror = () => { /* auto-reconnect */ };
+    es.onerror = () => {}; // auto-reconnect
   }
+
+  /* ---- control ---- */
+  $("stopBtn").onclick = async () => { try { await command("stop_capture"); } catch (e) { toast(e); } };
+  $("skipBtn").onclick = async () => { try { await command("skip_call"); } catch (e) { toast(e); } };
+  $("replayBtn").onclick = async () => { try { await command("replay_last"); } catch (e) { toast(e); } };
+  $("holdBtn").onclick = async () => {
+    try { await command("set_hold", { tg: curTg }); $("holdBtn").textContent = "Holding…"; }
+    catch (e) { toast(e); }
+  };
+  async function loadVolume() { try { const v = await command("get_volume"); $("vol").value = v; $("volVal").textContent = (v * 100).toFixed(0) + "%"; } catch {} }
+  $("vol").onchange = async () => { try { await command("set_volume", { gain: +$("vol").value }); $("volVal").textContent = (+$("vol").value * 100).toFixed(0) + "%"; } catch {} };
+
+  /* ---- devices / gain / start ---- */
+  async function loadDevices() {
+    try {
+      const v = await command("devices_list");
+      devices = v.devices || [];
+      $("dev").innerHTML = devices.map(d => `<option value="${esc(d.kind)}|${esc(d.id)}">${esc(d.kind)} · ${esc(d.id)}</option>`).join("")
+        || '<option value="">no radios detected</option>';
+      renderRates();
+    } catch (e) { $("dev").innerHTML = '<option value="">—</option>'; }
+  }
+  function renderRates() {
+    const sel = $("dev").value, dev = devices.find(d => `${d.kind}|${d.id}` === sel);
+    const rates = dev && dev.rates && dev.rates.length ? dev.rates : [2.4e6, 2.5e6, 9.6e6, 10e6];
+    $("rate").innerHTML = rates.map(r => `<option value="${r / 1e6}">${(r / 1e6).toFixed(1)}</option>`).join("");
+  }
+  $("dev").onchange = renderRates;
+  $("gain").oninput = () => $("gainVal").textContent = $("gain").value + " dB";
+  $("gain").onchange = async () => {
+    try {
+      const [kind, id] = $("dev").value.split("|");
+      if (!kind) return;
+      await command("gain_live", { key: $("dev").value, settings: { nickname: "", ppm: 0, gain: +$("gain").value, rate: 0, airspy_gain: false, airspy_mode: "agc" } });
+      toast("Gain applied");
+    } catch (e) { toast(e); }
+  };
+  $("startBtn").onclick = async () => {
+    const [kind, device] = $("dev").value.split("|");
+    const ctl = parseFloat($("ctlFreq").value), ctr = parseFloat($("ctrFreq").value) || ctl, rate = parseFloat($("rate").value);
+    if (!kind || !ctl) { toast("Pick a device and enter a control frequency", true); return; }
+    try {
+      await command("start_follow", {
+        source: kind, device, freq: ctr * 1e6, rate: rate * 1e6, control: ctl * 1e6,
+        play: $("playChk").checked, modulation: "auto"
+      });
+      toast("Starting…");
+      renderStatus({ running: true, catalog_len: +$("cat").textContent });
+    } catch (e) { toast(e, true); }
+  };
+
+  /* ---- library ---- */
+  async function loadLibrary() {
+    try {
+      const s = await command("library_stats");
+      $("libStats").textContent = `${s.count} calls · ${Math.round(s.seconds / 3600)}h`;
+    } catch {}
+    renderCalls();
+  }
+  async function renderCalls() {
+    const q = { limit: 60, with_audio: true };
+    const txt = $("libSearch").value.trim();
+    if (txt) q.text = txt;
+    try {
+      const rows = await command("library_search", { query: q });
+      $("libEmpty").hidden = rows.length > 0;
+      $("calls").innerHTML = rows.map(r => `
+        <div class="call" data-id="${r.id}">
+          <div class="top"><span class="name">${esc(nameOf(r.tg, r.tg_name))}</span>
+            <span><span class="when">${new Date(r.start * 1000).toLocaleString()}</span><span class="star" data-star="${r.id}">${r.starred ? "★" : "☆"}</span></span></div>
+          <div class="sub">${r.secs.toFixed(0)}s · ${esc(r.unit_name || "")}${r.transcript ? " · " + esc(r.transcript.slice(0, 80)) : ""}</div>
+        </div>`).join("");
+      $("calls").querySelectorAll(".call").forEach(el => el.onclick = () => playCall(+el.dataset.id));
+      $("calls").querySelectorAll(".star").forEach(el => el.onclick = (e) => { e.stopPropagation(); toggleStar(+el.dataset.star); });
+    } catch (e) { $("calls").innerHTML = `<p class="muted">${esc(e)}</p>`; }
+  }
+  async function playCall(id) {
+    try { ensureAudio(); await command("library_play", { id }); toast("Playing…"); }
+    catch (e) { toast(e, true); }
+  }
+  async function toggleStar(id) {
+    try { await command("library_star", { id, on: true }); renderCalls(); } catch (e) { toast(e); }
+  }
+  let searchTimer;
+  $("libSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderCalls, 300); };
+
+  function toast(msg, isErr) { feed.insertAdjacentHTML("afterbegin", `<div class="entry ${isErr ? "notice" : ""}"><div class="t">${now()}</div><div class="body">${esc(msg)}</div></div>`); }
 
   // already have a token? go straight to the dashboard.
   (async () => {
     if (!token()) { showLogin(); return; }
-    try { const s = await api("/api/status"); await loadNames(); showDash(); renderStatus(s); connect(); }
+    try { const s = await api("/api/status"); await Promise.all([loadNames(), loadDevices()]); showDash(); renderStatus(s); connect(); loadVolume(); }
     catch { /* stays on login */ }
   })();
 </script>

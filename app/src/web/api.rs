@@ -52,7 +52,9 @@ struct StartArgs {
 }
 
 /// Dispatch one command. `args` is the JSON object the client sent.
-pub fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value, String> {
+/// `async` so it can drive the async commands (`devices_list`, `library_play`)
+/// without blocking the web server's runtime.
+pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value, String> {
     let state = app.state::<AppState>();
 
     match cmd {
@@ -106,7 +108,9 @@ pub fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value, Strin
             crate::skip_call(state);
             Ok(Value::Null)
         }
-        "replay_last" => crate::replay_last(state).map(|_| Value::Null).map_err(|e| e),
+        "replay_last" => crate::replay_last(state)
+            .map(|_| Value::Null)
+            .map_err(|e| e),
         "clear_queue" => {
             crate::clear_queue(state);
             Ok(Value::Null)
@@ -161,6 +165,54 @@ pub fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value, Strin
             crate::playlists::playlist_activate(app.clone(), state, id)
                 .map(|p| jv(p).unwrap_or(Value::Null))
                 .map_err(|e| e)
+        }
+
+        // ---- devices / live gain ----
+        "devices_list" => jv(crate::devices::devices_list(app.clone()).await),
+        "gain_live" => {
+            let key = arg::<String>(args, "key")?;
+            let settings: crate::devices::DeviceSettings = arg(args, "settings")?;
+            jv(crate::devices::gain_live(
+                app.clone(),
+                state,
+                key,
+                settings,
+            )?)
+        }
+
+        // ---- library: browse + replay ----
+        "library_search" => {
+            let q: crate::library::Query =
+                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+            jv(crate::library_search(state, q)?)
+        }
+        "library_stats" => {
+            let (count, seconds, transcribed, dir) = crate::library_stats(state)?;
+            Ok(serde_json::json!({
+                "count": count,
+                "seconds": seconds,
+                "transcribed": transcribed,
+                "dir": dir,
+            }))
+        }
+        "library_get" => jv(crate::library_get(state, arg(args, "id")?)?),
+        "library_play" => {
+            let id = arg(args, "id")?;
+            crate::library_play(app.clone(), id).await?;
+            Ok(Value::Null)
+        }
+        "library_star" => {
+            let id = arg(args, "id")?;
+            let on = arg(args, "on")?;
+            crate::library_star(state, id, on)?;
+            Ok(Value::Null)
+        }
+        "tg_latest_call" => jv(crate::tg_latest_call(state, arg(args, "tg")?)?),
+
+        // ---- control extras ----
+        "set_archive_mode" => {
+            crate::set_archive_mode(state, arg(args, "on")?);
+            Ok(Value::Null)
         }
 
         other => Err(format!("unknown command: {other}")),
