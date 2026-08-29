@@ -15,7 +15,7 @@ use hs_core::dual::{DualSdrFollower, Retune};
 use hs_core::priority::PriorityMap;
 use hs_core::stream::Buffered;
 use hs_source::{FreqHandle, SdrSource};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::follow::FollowEvent;
 
@@ -244,6 +244,12 @@ fn finish_call(
     if let Some(pl) = player {
         if !audio.is_empty() {
             pl.play(audio.clone(), c.priority);
+        }
+    }
+    // Live audio to web/SSE clients (independent of the record policy).
+    if !audio.is_empty() {
+        if let Some(tx) = app.state::<crate::AppState>().web_frames.get() {
+            let _ = tx.send(crate::web::Frame::audio(c.tg, c.priority, &audio));
         }
     }
     let _ = app.emit(

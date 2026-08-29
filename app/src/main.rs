@@ -115,6 +115,9 @@ struct AppState {
     streamer: stream::Shared,
     /// Per-call uploads (rdio-scanner / OpenMHz / Broadcastify Calls).
     uploader: upload::Shared,
+    /// Broadcast of web frames (app events + live audio) to SSE clients.
+    /// Initialised once by `web::spawn`; read by the follow loops to tap audio.
+    web_frames: std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::web::Frame>>,
 }
 
 impl AppState {
@@ -1186,6 +1189,11 @@ fn start_follow(
                                 pl.play(pcm.clone(), *priority);
                             }
                         }
+                        // Live audio to web/SSE clients (independent of the
+                        // record policy — this is listening, not storage).
+                        if let Some(tx) = app.state::<AppState>().web_frames.get() {
+                            let _ = tx.send(crate::web::Frame::audio(*tg, *priority, pcm));
+                        }
                     }
                 }
                 let _ = app.emit("follow", ev);
@@ -2106,7 +2114,8 @@ fn main() {
             playlists::playlists_list,
             playlists::playlist_save,
             playlists::playlist_delete,
-            playlists::playlist_activate
+            playlists::playlist_activate,
+            web::web_access_get
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");
