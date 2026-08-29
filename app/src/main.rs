@@ -1706,7 +1706,10 @@ fn describe_event(ev: &hs_decoders::DecoderEvent) -> (String, String) {
         E::SquelchClose => ("squelch".into(), "squelch close".into()),
         E::Dcs { code, inverted } => (
             "dcs".into(),
-            format!("DCS code {code:03o}{}", if *inverted { " (inverted)" } else { "" }),
+            format!(
+                "DCS code {code:03o}{}",
+                if *inverted { " (inverted)" } else { "" }
+            ),
         ),
         E::Ani { id, op } => (
             "ani".into(),
