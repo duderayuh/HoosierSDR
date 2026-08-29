@@ -307,24 +307,61 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         text: "measuring the control channel (frequency and modulation)…".into(),
     });
     let cancel = || !running.load(Ordering::SeqCst);
-    let Some((measured_hz, modulation)) = hs_core::follow::measure_carrier_cancellable(
+    // Measure the control channel near the requested frequency. If it is not
+    // there (P25 sites rotate their control channel among several
+    // frequencies), scan the whole band to find where it actually is, instead
+    // of failing and asking the operator to find it by hand.
+    let measured = hs_core::follow::measure_carrier_cancellable(
         &prime,
         rate,
         p.center_hz,
         p.control_hz,
         &cancel,
-    ) else {
-        if cancel() {
-            return Ok(());
+    );
+    let (control_hz, measured_hz, modulation) = match measured {
+        Some((mh, m)) => (p.control_hz, mh, m),
+        None => {
+            if cancel() {
+                return Ok(());
+            }
+            emit(FollowEvent::Notice {
+                text: format!(
+                    "no control channel near {:.4} MHz — scanning the band…",
+                    p.control_hz / 1e6
+                ),
+            });
+            let found = hs_core::scan::scan(
+                &prime,
+                &hs_core::scan::ScanConfig::new(rate).center(p.center_hz),
+            );
+            match found.iter().find(|f| f.control_channel) {
+                Some(f) => {
+                    let nominal = f.freq_hz.unwrap_or(p.center_hz + f.offset_hz);
+                    let measured = p.center_hz + f.offset_hz;
+                    emit(FollowEvent::Notice {
+                        text: format!(
+                            "found control channel at {:.4} MHz ({}, NAC {})",
+                            nominal / 1e6,
+                            mod_name(Some(f.modulation)),
+                            f.nac
+                                .map(|n| format!("0x{n:03X}"))
+                                .unwrap_or_else(|| "?".into()),
+                        ),
+                    });
+                    (nominal, measured, f.modulation)
+                }
+                None => {
+                    return Err(format!(
+                        "could not find a control channel: nothing near {:.4} MHz, and a \
+                         full-band scan found no P25 control channel. Check the antenna, gain, \
+                         and that a site is within range.",
+                        p.control_hz / 1e6
+                    ));
+                }
+            }
         }
-        return Err(format!(
-            "could not find control {:.4} MHz: nothing decoded within ±12.5 kHz of it on either \
-             modulation. A site lists several control-capable frequencies but only one carries \
-             the control channel at a time — scan the band to see which.",
-            p.control_hz / 1e6
-        ));
     };
-    let mut f = TrunkFollower::new(rate, p.center_hz, p.control_hz, measured_hz, modulation);
+    let mut f = TrunkFollower::new(rate, p.center_hz, control_hz, measured_hz, modulation);
     for (center, label, r, _) in &extra {
         f.add_band(*center, *r);
         emit(FollowEvent::Notice {
