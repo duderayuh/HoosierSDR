@@ -148,8 +148,8 @@ mod tests {
             unit: 790065,
             unit_name: "",
             freq_hz: 851_812_500,
-            system: "SAFE-T",
-            site: "Marion",
+            system: "Statewide",
+            site: "County",
             modulation: "CQPSK",
             secs: 4.6,
             emergency: true,
@@ -173,7 +173,7 @@ mod tests {
         );
         assert_eq!(
             s,
-            "SAFE-T/Sheriff_ Patrol_North/20260821_143012_790065_851.8125_CQPSK_5s_EMERGENCY"
+            "Statewide/Sheriff_ Patrol_North/20260821_143012_790065_851.8125_CQPSK_5s_EMERGENCY"
         );
     }
 

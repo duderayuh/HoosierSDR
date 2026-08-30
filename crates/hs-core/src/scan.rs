@@ -342,7 +342,7 @@ mod tests {
 
     /// Place a synthesized P25 control channel at a known offset inside a
     /// wideband capture and confirm the sweep finds it there — the exact
-    /// situation the Marion County recording presented.
+    /// situation a reference recording presented.
     #[test]
     fn finds_a_control_channel_at_an_offset() {
         const RATE: f64 = 240_000.0;

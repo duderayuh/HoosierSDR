@@ -654,12 +654,12 @@ mod tests {
         let c = open(&d).unwrap();
         let a = insert(
             &c,
-            &call(&d, 10103, "IMPD North Dispatch", 2.0, 1_700_000_000),
+            &call(&d, 10103, "Police North Dispatch", 2.0, 1_700_000_000),
         )
         .unwrap();
         let b = insert(
             &c,
-            &call(&d, 10147, "IFD Fire Dispatch", 1.0, 1_700_000_100),
+            &call(&d, 10147, "Fire Dispatch", 1.0, 1_700_000_100),
         )
         .unwrap();
         set_transcript(

@@ -267,8 +267,8 @@ fn print_help() {
          and encryption events; the .cf32 lets the decode be reproduced exactly.\n\
          \n\
          LEGAL: Decodes unencrypted P25 only. Encrypted talkgroups are detected\n\
-         and skipped by design — HoosierSDR never decrypts. Indiana users: run\n\
-         this at your dwelling or place of business only (IC 35-44.1-2-7)."
+         and skipped by design — HoosierSDR never decrypts. Use only where\n\
+         authorized under applicable law."
     );
 }
 

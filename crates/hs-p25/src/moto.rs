@@ -2,7 +2,7 @@
 //!
 //! TIA-102 lets a manufacturer define its own opcode space, and on a Motorola
 //! P25 system that space carries more traffic than the standard one. A 60
-//! second Marion County control channel held 599 Motorola blocks against 208
+//! second reference control channel held 599 Motorola blocks against 208
 //! standard voice grants — so ignoring them means ignoring most of what the
 //! system is saying.
 //!
@@ -13,7 +13,7 @@
 //! Group Voice Channel Grant never names the supergroup. A receiver that
 //! files these messages away as bookkeeping plays none of the patch's calls,
 //! while consumer scanners (which implement GRG natively) play them all. On
-//! Marion County (MESA), the 49F-NORTH / 49F-SOUTH dispatch supergroups are
+//! a metro county's dispatch, the NORTH / SOUTH dispatch supergroups are
 //! granted exclusively through these opcodes.
 //!
 //! ## Cross-checked against public reporting

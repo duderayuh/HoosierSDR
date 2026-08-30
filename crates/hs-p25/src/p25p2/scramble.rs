@@ -81,10 +81,10 @@ pub fn scramble_slot(wacn: u32, sysid: u32, nac: u32, slot: usize, bits: &mut [u
 mod tests {
     use super::*;
 
-    /// SAFE-T identity (WACN 0xBEE00, SysID 0x6BD, NAC 0x261), from
+    /// A statewide system identity (WACN 0xBEE00, SysID 0x6BD, NAC 0x261), from
     /// docs/ARCHITECTURE.md. First 64 scramble bits, independently computed
     /// against the BBAC figure 7.1 LFSR.
-    const SAFET_64_BITS: &str = "bee006bd26107e32";
+    const REFERENCE_64_BITS: &str = "bee006bd26107e32";
 
     fn bits_to_hex(bits: &[u8]) -> String {
         bits.chunks(4)
@@ -99,7 +99,7 @@ mod tests {
     fn first_64_bits_match_spec_vector() {
         let mut lfsr = P2Scrambler::new(0xBEE00, 0x6BD, 0x261);
         let bits = lfsr.next_bits(64);
-        assert_eq!(bits_to_hex(&bits), SAFET_64_BITS);
+        assert_eq!(bits_to_hex(&bits), REFERENCE_64_BITS);
     }
 
     #[test]

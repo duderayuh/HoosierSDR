@@ -531,7 +531,7 @@ impl ChannelDecoder {
             // channel is announced *only* here — the standard grant never
             // names a supergroup. These must start calls exactly like the
             // standard messages they mirror, or every patch call on the
-            // system is silently skipped (Marion County's 49F-NORTH/SOUTH
+            // system is silently skipped (a metro county's NORTH/SOUTH
             // dispatch supergroups are granted exclusively this way).
             Tsbk::MotoRegroup(r) => match r {
                 MotoRegroup::GrgChannelGrant {

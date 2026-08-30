@@ -33,10 +33,10 @@ win, not a marginal one. The complex echo here is exactly the class of
 distortion the real post-discriminator equalizer *cannot* touch (next
 section) — which is why the CQPSK front end is the path that matters.
 
-## First field decode — Marion County, 2026-08
+## First field decode — metro county, 2026-08
 
-The first real off-air capture decodes. An RTL-SDR recording made in Marion
-County, Indiana (`rtl_sdr -f 858937500 -s 240000 -g 40`, 27.3 s, cu8) was
+The first real off-air capture decodes. An RTL-SDR recording made in a metro
+county (`rtl_sdr -f 858937500 -s 240000 -g 40`, 27.3 s, cu8) was
 decoded end to end by `hoosier-sdr` with no offline preprocessing:
 
 ```sh
@@ -86,14 +86,14 @@ comparable strength.
 
 ### Equalizer A/B across a wideband capture — 8 simulcast channels, 2026-08-18
 
-A second Marion County capture (`marion.cu8`, 2.4 Msps, ~5.7 s) widens the
+A second metro county capture (`reference.cu8`, 2.4 Msps, ~5.7 s) widens the
 sample from one channel to a whole band slice: `--scan` found **9 P25
 channels across three NACs** (0x260, 0x261, 0x6B6) — 8 CQPSK/LSM simulcast
 channels plus one marginal C4FM. Every CQPSK channel was decoded twice, with
 the CMA equalizer in and bypassed:
 
 ```sh
-hoosier-sdr --rate 2400000 --offset <off> --cqpsk [--no-equalizer] --log out.json marion.cu8
+hoosier-sdr --rate 2400000 --offset <off> --cqpsk [--no-equalizer] --log out.json reference.cu8
 ```
 
 | Offset | NAC | Type | Syncs eq/no-eq | Sync bit-err eq/no-eq | Voice frames eq/no-eq |
@@ -129,7 +129,7 @@ one at +2.05 both become the same bits, and every stage downstream treats them
 as equal evidence. Carrying per-bit confidence into the frame-sync correlator
 and the trellis Viterbi decoder recovers most of what the hard path was losing.
 
-Same 27.3 s Marion County capture, same everything else:
+Same 27.3 s metro county capture, same everything else:
 
 | | hard decision | soft decision |
 |---|:--:|:--:|
@@ -176,7 +176,7 @@ is the next increment.
 
 Each LDU1 embeds a 72-bit Link Control Word naming the talkgroup and the
 transmitting radio, so a traffic channel identifies its own call with no
-control channel present. Cross-validated on the Marion County captures: the
+control channel present. Cross-validated on the metro county captures: the
 control channel issued 12 grants onto 857.7625 MHz for talkgroup 10255, and
 that traffic channel — decoded separately, at a different frequency, in a
 different modulation — reports talkgroup 10255 in its own Link Control.
@@ -324,13 +324,13 @@ cqpsk_pipeline` synthesizes a P25 transmission as π/4-DQPSK IQ and decodes it:
 This is validated on **synthetic** IQ end to end (both modulations now decode
 real frames). The open items are live I/O and field validation, not DSP
 theory: run live SDR capture (`hs-source` + Seify) into the decoder, and re-run
-the whole thing on a captured SAFE-T corpus against SDRTrunk / OP25 to fill in
+the whole thing on a captured statewide corpus against SDRTrunk / OP25 to fill in
 the external-baseline table below.
 
-## External-decoder baselines — first numbers, Marion County control channel
+## External-decoder baselines — first numbers, metro county control channel
 
-First head-to-head, 2026-08-19. Input: the Marion County wideband capture
-(`marion.cu8`, 2.4 Msps u8, 5.83 s), control channel at +550 kHz — NAC 0x261,
+First head-to-head, 2026-08-19. Input: the metro county wideband capture
+(`reference.cu8`, 2.4 Msps u8, 5.83 s), control channel at +550 kHz — NAC 0x261,
 CQPSK/LSM simulcast (WACN BEE00, SYS 262, RFSS 1, Site 10, per GopherTrunk's
 own site decode). Every decoder saw the same signal; where a decoder needed a
 single channel, all got the *identical* file: the channel mixed to DC and
@@ -390,9 +390,9 @@ per pass are the next unit of work — rerun this table as it closes.
 
 Reproduce: `docker build` boatbod op25 (gr3.10, Ubuntu 22.04), then
 `rx.py -F <48k.cf32> -S 48000 -D cqpsk -T trunk.tsv -v 10` and count
-`TSBK: op=` lines; `gophertrunk replay -in marion.cu8 -format u8
+`TSBK: op=` lines; `gophertrunk replay -in reference.cu8 -format u8
 -sample-rate 2400000 -protocol p25p1 -demod cqpsk -tune-hz 550000`;
-`hoosier-sdr --rate 2400000 --offset 550k --cqpsk marion.cu8` ("TSBKs
+`hoosier-sdr --rate 2400000 --offset 550k --cqpsk reference.cu8` ("TSBKs
 decoded" line in the summary); SDRTrunk 0.6.1 → Add Recording Tuner on a
 16-bit stereo IQ wav of the capture (center 851.000 MHz), a P25P1 channel
 at 851.550 MHz with modulation CQPSK, preferred tuner = the recording
@@ -448,11 +448,11 @@ the CMA, selected with `--dfe`.
 
 | Control channel | bare | CMA (default) | **DFE (`--dfe`)** | SDRTrunk |
 |---|:--:|:--:|:--:|:--:|
-| Marion County (`marion.cu8`, +550 kHz) | 190 | 192 | **202** | ~205 |
+| metro county (`reference.cu8`, +550 kHz) | 190 | 192 | **202** | ~205 |
 | `live261.cu8` (+537.5 kHz) | 210 | 203 | **207** | — |
-| Marion County, Airspy R2 (`airspy_marion.cs16`, 2.5 MSPS, +462.5 kHz, 6 s) | — | 209 | **216** | — |
+| metro county, Airspy R2 (`airspy_reference.cs16`, 2.5 MSPS, +462.5 kHz, 6 s) | — | 209 | **216** | — |
 
-TSBKs per pass. On Marion County the DFE lifts 192 → **202 — matching
+TSBKs per pass. On the metro county the DFE lifts 192 → **202 — matching
 SDRTrunk's ~205** and closing essentially the whole remaining gap on this
 recording; grants rise 27 → 28. It never regresses below the linear CMA on
 the near-clean `live261` either. Tuning that mattered: the feedback loop is
@@ -475,7 +475,7 @@ decodes the burst, but left running in steady-state it costs ~6 TSBKs (187 vs
 `acquired` — `DFE_FF_ACQ = 0.05` while acquiring, `DFE_FF_TRACK = 0.001` once
 the eye is open (back to fast on `reacquire()`); the feedback stays
 `DFE_FB = 0.0005` throughout (recursive, rings if fast). On the wideband
-Marion control channel the gear-shifted DFE decodes **200 TSBKs** (vs 202
+reference control channel the gear-shifted DFE decodes **200 TSBKs** (vs 202
 slow-only, 192 CMA) — a ~1% regression in exchange for short-burst acquisition
 the slow step cannot do at all. Regression test `dfe_acquires_on_short_burst`
 pins it. Residual ~2 TSBKs are the fast phase's misadjustment; a continuous
@@ -526,7 +526,7 @@ same dongle's `rtl_sdr` recording decoded 1191 TSBKs offline. Draining the
 radio on its own thread (`stream::Buffered`, the trunk follower's policy)
 took it from 0 to 69 grants in 30 s. The Airspy path was immune — its
 callback already queues — and the 10 MSPS run is the Phase 2 path: one radio
-spanning a whole SAFE-T site, calls followed as they are granted.
+spanning a whole statewide site, calls followed as they are granted.
 
 **Phase 2 gate — one hour unattended (2026-08-20, 17:37–18:37).** Airspy R2
 at 10 MSPS centred 855 MHz, `--follow --control 851.5375M --secs 3600`, no
@@ -543,7 +543,7 @@ catalog, stock gain:
 | CPU | ~70% of one core idle, ~115% while a call decodes |
 
 Clean-audio-by-ear remains a human check; by the numbers the receiver ran a
-SAFE-T site unattended for an hour without a crash, a drop, or a leak.
+statewide site unattended for an hour without a crash, a drop, or a leak.
 
 | Decoder | Recording | Sync-loss | Pre-FEC BER | TSBK rate | Voice FER |
 |---------|-----------|-----------|-------------|-----------|-----------|

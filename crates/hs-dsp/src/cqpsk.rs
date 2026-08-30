@@ -370,7 +370,7 @@ const ACQ_FAIL_LIMIT: u32 = 4;
 const DFE_FF_ACQ: f32 = 0.05;
 /// DFE feedforward step during tracking — slow, for low steady-state
 /// misadjustment. A fast feedforward left running in steady-state costs ~6
-/// TSBKs on the Marion control channel (187 vs 193). Reached by the gear-shift
+/// TSBKs on the reference control channel (187 vs 193). Reached by the gear-shift
 /// on acquisition.
 const DFE_FF_TRACK: f32 = 0.001;
 /// DFE feedback step — always slow. The recursive feedback section rings and
@@ -418,7 +418,7 @@ impl CqpskReceiver {
         // acquisition coherence then never clears its threshold — and
         // gear-shifts to the slow tracking step on acquisition in `push_phase`.
         // The feedback stays slow throughout (see [`DFE_FB`]). This lifts the
-        // Marion County control channel 192 → 202 TSBKs without sacrificing
+        // reference control channel 192 → 202 TSBKs without sacrificing
         // short-burst acquisition.
         Self::build(
             sps,

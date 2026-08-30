@@ -57,5 +57,4 @@ cargo tauri build
 
 ## Legal
 
-Decodes unencrypted P25 only. Indiana users: run at your dwelling or place of
-business (IC 35-44.1-2-7).
+Decodes unencrypted P25 only. Use only where authorized under applicable law.

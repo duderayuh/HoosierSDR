@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn rejects_an_adjacent_channel_that_would_fold_in() {
         // A tone 50 kHz off center (the neighbouring active channel in the
-        // Marion County capture) aliases to +2 kHz — dead centre of the
+        // reference capture) aliases to +2 kHz — dead centre of the
         // passband — if it is not filtered before decimating by 5.
         let fs = 240_000.0;
         let mut dec = Decimator::new(fs, TARGET_SPS);
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn downconverter_selects_an_offset_channel() {
         // Two tones: an unwanted one at DC and the wanted one 50 kHz up (the
-        // situation in the Marion County capture, which was tuned one channel
+        // situation in the reference capture, which was tuned one channel
         // low). Tuning to +50 kHz must keep the latter and reject the former.
         let fs = 240_000.0;
         let mut dec = Decimator::with_offset(fs, TARGET_SPS, 50_000.0);

@@ -377,7 +377,7 @@ impl Framer {
 }
 
 /// How many list-Viterbi candidates to test against the TSBK CRC when the
-/// maximum-likelihood path fails it. Chosen on the Marion County
+/// maximum-likelihood path fails it. Chosen on a reference
 /// control-channel capture; deeper lists stopped paying past this.
 const TSBK_LIST: usize = 64;
 

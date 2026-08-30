@@ -2,7 +2,7 @@
 
 **P25 Phase I trunked-radio receiver in Rust.** Equalizes the channel *before* differential detection — the difference that matters on simulcast systems.
 
-- Decodes Indiana's Hoosier SAFE-T (and any P25 Phase I network) to audio
+- Decodes P25 Phase I trunked radio (any network) to audio
 - Desktop app (macOS, Windows) + CLI
 - Pre-alpha, but decodes real off-air P25 end to end
 

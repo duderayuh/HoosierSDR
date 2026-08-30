@@ -120,9 +120,9 @@ pub enum FollowEvent {
         site: Option<u8>,
         emergency: bool,
         encrypted: bool,
-        /// System label (e.g. "SAFE-T") the call was heard on.
+        /// System label (e.g. "Statewide") the call was heard on.
         system: String,
-        /// Site label (e.g. "Marion Co Simulcast") the call was heard on.
+        /// Site label (e.g. "County Simulcast") the call was heard on.
         site_name: String,
         patched_with: Vec<u16>,
         priority: u8,

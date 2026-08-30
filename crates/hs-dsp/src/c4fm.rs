@@ -41,7 +41,7 @@ pub fn slice(sym: f32) -> Dibit {
 /// subsequent symbol scales below the gate, nothing updates it, and it stays
 /// wrong forever. A traffic channel makes this routine rather than theoretical,
 /// because it sits idle until a call arrives and the receiver spends that time
-/// adapting to noise; the Marion County capture had fourteen seconds of it, and
+/// adapting to noise; a reference capture had fourteen seconds of it, and
 /// the whole transmission that followed decoded as nothing.
 ///
 /// So a second, ungated estimate of mean magnitude runs alongside and the outer

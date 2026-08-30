@@ -7,7 +7,7 @@
 //!     project thesis without needing a field recording.
 //!   * `file <path>`: run a raw interleaved-f32 IQ recording (`.cf32`) at a
 //!     given sample rate through the decoder and report metrics. This is the
-//!     entry point for the SAFE-T corpus once captured.
+//!     entry point for a captured P25 control-channel corpus.
 //!
 //! Baselines from SDRTrunk / OP25 / GopherTrunk on the same corpus belong in
 //! `results/baselines.md` (checked in); the corpus IQ itself is never

@@ -2317,7 +2317,7 @@ if (TAURI) {
   }
 } else {
   /* ---------- demo driver: preview the layout without a backend ---------- */
-  const TGS = [[10103,"IMPD Dispatch NW"],[10106,"IMPD Dispatch SE"],[10147,"IFD Fire Dispatch"],[10202,"Marion Co EMS"],[10308,"Sheriff Patrol"]];
+  const TGS = [[10103,"Police Dispatch NW"],[10106,"Police Dispatch SE"],[10147,"Fire Dispatch"],[10202,"County EMS"],[10308,"Sheriff Patrol"]];
   const DLS = [851.8125, 857.3625, 857.3875, 858.3375];
   const rnd = (a, b) => a + Math.random() * (b - a), pick = (a) => a[Math.floor(Math.random() * a.length)];
   let running = false, tick = 0, syncs = 0, calls = 0, raf = 0;
@@ -2352,7 +2352,7 @@ if (TAURI) {
     if (tick > 40 && tick % 20 === 0) { const [tg, name] = pick(TGS.concat([[10999, "TG 10999"]])); handleFollow({ kind: "grant", tg, name, named: tg !== 10999, freq_mhz: pick(DLS), unit: Math.floor(rnd(4910000, 4914000)), encrypted: false }); }
     if (tick > 40 && tick % 45 === 0) { const [tg, name] = pick(TGS); handleFollow({ kind: "mobility", what: pick(["affiliated", "registered", "located"]), unit: Math.floor(rnd(4910000, 4910020)), unit_name: null, tg, name }); }
     if (tick === 120) handleFollow({ kind: "location", unit: 4910007, unit_name: "Car 12", lat: 39.7684 + rnd(-0.02, 0.02), lon: -86.1581 + rnd(-0.02, 0.02) });
-    if (tick === 200) handleFollow({ kind: "talker_alias", tg: 10147, name: "IFD Fire Dispatch", alias: "ENG 21" });
+    if (tick === 200) handleFollow({ kind: "talker_alias", tg: 10147, name: "Fire Dispatch", alias: "ENG 21" });
     if (tick === 41) handleFollow({ kind: "site", nac: 0x260, wacn: 0xBEE00, sys_id: 0x6BD, control_mhz: 851.5375, alternates_mhz: [851.2125], idens: [[1, 851.00625, 6.25]], patches: [], rfss: 1, site: 12, neighbours: [[0x6BD, 1, 13, 856.2375], [0x6BD, 1, 14, null]] });
     raf = requestAnimationFrame(loop);
   }
@@ -2375,17 +2375,17 @@ if (TAURI) {
     handleFollow({ kind: "constellation", modulation: "CQPSK", points: pts });
     TGS.forEach(([tg, name], i) => { handleFollow({ kind: "grant", tg, name, named: true, freq_mhz: DLS[i % DLS.length], unit: 4910000 + i, encrypted: false }); });
     [10999, 11042].forEach((tg) => handleFollow({ kind: "grant", tg, name: `TG ${tg}`, named: false, freq_mhz: 857.3625, unit: 4911111, encrypted: tg === 11042 }));
-    handleFollow({ kind: "call_start", tg: 10147, name: "IFD Fire Dispatch", freq_mhz: 857.3875, priority: 10 });
-    handleFollow({ kind: "call", tg: 10103, name: "IMPD Dispatch NW", source: 4910003, unit_name: "Car 12", talker_alias: "ENG 21", freq_mhz: 851.8125, modulation: "CQPSK", secs: 6.4, wav: null, emergency: false, patched_with: [] });
+    handleFollow({ kind: "call_start", tg: 10147, name: "Fire Dispatch", freq_mhz: 857.3875, priority: 10 });
+    handleFollow({ kind: "call", tg: 10103, name: "Police Dispatch NW", source: 4910003, unit_name: "Car 12", talker_alias: "ENG 21", freq_mhz: 851.8125, modulation: "CQPSK", secs: 6.4, wav: null, emergency: false, patched_with: [] });
     handleFollow({ kind: "call", tg: 10308, name: "Sheriff Patrol", source: 4910008, freq_mhz: 858.3375, modulation: "CQPSK", secs: 3.1, wav: null, emergency: true, patched_with: [10204] });
     [["affiliated", 4910003, 10103], ["registered", 4910008, null], ["located", 4910011, 10147], ["refused", 4910012, 10202]].forEach(([what, unit, tg]) => handleFollow({ kind: "mobility", what, unit, unit_name: unit === 4910003 ? "Car 12" : null, tg, name: tg ? (TGS.find((t) => t[0] === tg) || [])[1] : null }));
     handleFollow({ kind: "location", unit: 4910003, unit_name: "Car 12", lat: 39.7684, lon: -86.1581 });
     handleFollow({ kind: "location", unit: 4910011, unit_name: null, lat: 39.79, lon: -86.17 });
-    handleFollow({ kind: "talker_alias", tg: 10147, name: "IFD Fire Dispatch", alias: "ENG 21" });
+    handleFollow({ kind: "talker_alias", tg: 10147, name: "Fire Dispatch", alias: "ENG 21" });
     handleFollow({ kind: "status", control_syncs: 412, calls: 2, out_of_band: 3, encrypted: 1, locked: 0, msps: 9.6, want_msps: 9.6, dropped: 0, elapsed_secs: 42 });
     if (!groups.length) { groups.push({ id: "gdemo1", name: "Hospitals", tgs: [10202], listen: true }, { id: "gdemo2", name: "EMS / Fire", tgs: [10147, 10202], listen: false }); renderGroupChips(); }
     { const h = history[0]; if (h) { const td = h.el.querySelector("td.tr"); td.textContent = "Engine 21 on scene, working structure fire, requesting second alarm."; } }
-    colors.set(10147, "#f5b544"); tgRules.push({ lo: 10100, hi: 10199, name: "IMPD", pri: 10, color: "#7aa2ff", lock: false, bell: false });
+    colors.set(10147, "#f5b544"); tgRules.push({ lo: 10100, hi: 10199, name: "Police", pri: 10, color: "#7aa2ff", lock: false, bell: false });
     if (location.hash === "#discovery") renderDiscovery();
   }
 }
@@ -2490,7 +2490,7 @@ function obBody() {
         <p style="font-size:12px">If nothing shows up, check the cable and press <b>Rescan</b>.</p>`;
     case 2:
       return `<h2>2 · Name your talkgroups</h2>
-        <p>A RadioReference account turns raw talkgroup numbers into names ("IFD Fire Dispatch"). Free accounts work; a Premium account lets us auto-download the full system. Your password stays on this Mac.</p>
+        <p>A RadioReference account turns raw talkgroup numbers into names ("Fire Dispatch"). Free accounts work; a Premium account lets us auto-download the full system. Your password stays on this Mac.</p>
         <label class="field" style="margin:0"><span class="lab">Username</span><input id="obUser" type="text" autocomplete="username" spellcheck="false" placeholder="yourname" /></label>
         <label class="field" style="margin:0"><span class="lab">Password</span><input id="obPass" type="password" autocomplete="current-password" placeholder="${obCreds ? "saved on this Mac" : ""}" /></label>
         <div class="obresult">${obCreds ? "✓ Account saved" : ""}</div>`;
