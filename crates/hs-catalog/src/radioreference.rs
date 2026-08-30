@@ -508,7 +508,7 @@ impl<T: SoapTransport> RrClient<T> {
         progress: &mut dyn FnMut(&str, usize, usize),
     ) -> Result<Vec<Talkgroup>, RrError> {
         // Whole list first. RadioReference's server has answered HTTP 500
-        // with an empty body for some large systems (MESA, sid 5737); the
+        // with an empty body for some large systems (e.g. sid 5737); the
         // same data comes back fine one category at a time, so fall back to
         // that before giving up.
         let sid = sys_id.to_string();
@@ -1010,12 +1010,12 @@ mod tests {
 
     const COUNTRY: &str = r#"<Envelope><Body><getCountryInfoResponse><return>
         <coid>1</coid><countryName>United States</countryName>
-        <stateList><item><stid>17</stid><stateName>Indiana</stateName><stateCode>IN</stateCode></item>
+        <stateList><item><stid>17</stid><stateName>Example State</stateName><stateCode>EX</stateCode></item>
                    <item><stid>18</stid><stateName>Iowa</stateName><stateCode>IA</stateCode></item></stateList>
         </return></getCountryInfoResponse></Body></Envelope>"#;
 
     const STATE: &str = r#"<Envelope><Body><getStateInfoResponse><return>
-        <stid>17</stid><stateName>Indiana</stateName>
+        <stid>17</stid><stateName>Example State</stateName>
         <trsList><item><sid>100</sid><sName>Example Statewide</sName><sType>8</sType><sFlavor>1</sFlavor><sVoice>2</sVoice><sCity></sCity></item></trsList>
         <countyList><item><ctid>901</ctid><countyName>Example County</countyName><countyHeader>Counties</countyHeader></item>
                     <item><ctid>902</ctid><countyName>Other County</countyName></item></countyList>
@@ -1038,8 +1038,8 @@ mod tests {
             st[0],
             RrState {
                 stid: 17,
-                name: "Indiana".into(),
-                code: "IN".into()
+                name: "Example State".into(),
+                code: "EX".into()
             }
         );
 

@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn decodes_a_position_round_trip() {
-        // Indianapolis, to a tolerance far finer than GPS itself.
+        // A metro-area round trip, to a tolerance far finer than GPS itself.
         let (lat, lon) = (39.7684, -86.1581);
         let pkt = ipv4_udp(4001, LRRP_PORT, &lrrp_payload(lat, lon));
         let r = report_from_packet(0xABCDEF, &pkt).expect("report decodes");

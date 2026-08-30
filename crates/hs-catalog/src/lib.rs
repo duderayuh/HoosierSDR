@@ -43,8 +43,8 @@ pub struct Site {
     pub name: Option<String>,
     pub control_channels_hz: Vec<u64>,
     pub simulcast: bool,
-    /// RR v18 `tdma_cc`: control channel is Phase II TDMA (e.g. the Fort
-    /// Wayne / Westville pilots).
+    /// RR v18 `tdma_cc`: control channel is Phase II TDMA (e.g. certain
+    /// Phase II pilot sites).
     pub tdma_control: bool,
 }
 

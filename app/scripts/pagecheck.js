@@ -23,12 +23,12 @@ w.__exercise = async () => {
   follow({ kind: "spectrum", bins_db: new Array(256).fill(-90) });
   follow({ kind: "constellation", modulation: "CQPSK", points: [[1, 0], [0, 1]] });
   follow({ kind: "grant", tg: 10999, name: "TG 10999", named: false, freq_mhz: 857.3625, unit: 1, encrypted: false });
-  follow({ kind: "call_start", tg: 10147, name: "IFD", freq_mhz: 857.3875, priority: 10 });
-  follow({ kind: "call", tg: 10147, name: "IFD", source: 4910003, unit_name: "Car 12", talker_alias: "ENG 21", freq_mhz: 857.3875, modulation: "CQPSK", secs: 6.4, wav: "/tmp/x.wav", emergency: true, patched_with: [], id: 7, syncs_c4fm: 1, syncs_cqpsk: 9 });
-  follow({ kind: "call", tg: 10103, name: "IMPD", source: 0, unit_name: null, talker_alias: null, freq_mhz: 851.8125, modulation: "?", secs: 0, wav: null, emergency: false, patched_with: [], id: 8, syncs_c4fm: 0, syncs_cqpsk: 0 });
-  follow({ kind: "mobility", what: "affiliated", unit: 4910003, unit_name: "Car 12", tg: 10103, name: "IMPD" });
+  follow({ kind: "call_start", tg: 10147, name: "Fire", freq_mhz: 857.3875, priority: 10 });
+  follow({ kind: "call", tg: 10147, name: "Fire", source: 4910003, unit_name: "Car 12", talker_alias: "ENG 21", freq_mhz: 857.3875, modulation: "CQPSK", secs: 6.4, wav: "/tmp/x.wav", emergency: true, patched_with: [], id: 7, syncs_c4fm: 1, syncs_cqpsk: 9 });
+  follow({ kind: "call", tg: 10103, name: "Police", source: 0, unit_name: null, talker_alias: null, freq_mhz: 851.8125, modulation: "?", secs: 0, wav: null, emergency: false, patched_with: [], id: 8, syncs_c4fm: 0, syncs_cqpsk: 0 });
+  follow({ kind: "mobility", what: "affiliated", unit: 4910003, unit_name: "Car 12", tg: 10103, name: "Police" });
   follow({ kind: "location", unit: 4910003, unit_name: "Car 12", lat: 39.7684, lon: -86.1581 });
-  follow({ kind: "talker_alias", tg: 10147, name: "IFD", alias: "ENG 21" });
+  follow({ kind: "talker_alias", tg: 10147, name: "Fire", alias: "ENG 21" });
   follow({ kind: "notice", text: "control channel moved" });
   follow({ kind: "status", control_syncs: 1, calls: 2, out_of_band: 0, encrypted: 0, locked: 0, busy: 0, msps: 9.6, want_msps: 9.6, dropped: 0, elapsed_secs: 1 });
   // With the receiver-health fields present (lock, multipath meter, clip flag) and again with them absent/null.

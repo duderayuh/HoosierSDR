@@ -290,14 +290,14 @@ mod tests {
         let rules = vec![
             Rule {
                 pattern: "79.*".into(),
-                name: "IMPD {$0}".into(),
+                name: "Police {$0}".into(),
             },
             Rule {
                 pattern: "7900(\\d+)".into(),
                 name: "Never $1".into(),
             },
         ];
-        assert_eq!(apply_rules(&rules, 790065), Some("IMPD {790065}".into()));
+        assert_eq!(apply_rules(&rules, 790065), Some("Police {790065}".into()));
         assert_eq!(apply_rules(&rules, 1790065), None, "not anchored");
     }
 }

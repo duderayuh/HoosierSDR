@@ -187,7 +187,7 @@ pub fn parse(bits96: &[u8]) -> Option<TsbkBlock> {
         }
         // LRA(8) | WACN(20) | SysID(12) | Channel(16) | Service class(8).
         // An earlier split read WACN from bits 43..24 and reported the
-        // Marion County control channel as WACN 0x262, system 5; the real
+        // a reference control channel as WACN 0x262, system 5; the real
         // values — WACN 0xBEE00, system 0x262 — fell out once the fields
         // were placed where the standard puts them.
         0x3B => Tsbk::NetworkStatus {

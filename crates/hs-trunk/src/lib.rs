@@ -10,9 +10,9 @@ pub struct SystemId {
     pub sys_id: u16,
 }
 
-/// Hoosier SAFE-T, the primary target system (Phase I FDMA; Phase II TDMA
-/// pilot at Fort Wayne and Westville only).
-pub const SAFE_T: SystemId = SystemId {
+/// A statewide P25 Phase I system (Phase I FDMA; Phase II TDMA pilot in
+/// limited areas only).
+pub const STATEWIDE: SystemId = SystemId {
     wacn: 0xBEE00,
     sys_id: 0x6BD,
 };
@@ -197,7 +197,7 @@ mod tests {
     ///
     /// This case is the one that mattered. With the offset left at zero (as
     /// the test below had it) a grant resolved correctly by accident, because
-    /// adding zero is harmless. Against a real Marion County control channel
+    /// adding zero is harmless. Against a real control channel
     /// the same code produced 812.7625 MHz — a mobile transmit frequency no
     /// receiver should tune — where three independently-decoded voice channels
     /// said the answer was 857.7625 MHz, exactly 45 MHz up.

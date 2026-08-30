@@ -4,7 +4,7 @@
 //! Seify has no Airspy backend, and SoapySDR would add a plugin layer for
 //! one device — so this is a thin, deliberately minimal FFI over the handful
 //! of `libairspy` calls the receiver needs. The Airspy is the device that
-//! matters for the thesis: an RTL-SDR cannot span a SAFE-T simulcast site's
+//! matters for the thesis: an RTL-SDR cannot span a statewide simulcast site's
 //! 4.8 MHz in one capture; an R2 at 10 MSPS can.
 //!
 //! ## Firmware limits (R2, NOS v1.0.0-rc10, 2016)

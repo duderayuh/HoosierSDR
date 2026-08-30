@@ -50,5 +50,5 @@ Windows need no extra system packages.
 ## Legal
 
 Decodes **unencrypted** P25 only. Encrypted talkgroups are detected and
-skipped by design — HoosierSDR never decrypts. Indiana users: run at your
-dwelling or place of business only (IC 35-44.1-2-7). See the root README.
+skipped by design — HoosierSDR never decrypts. Use only where authorized
+under applicable law. See the root README.

@@ -60,7 +60,7 @@ The equalizer sits **before** differential detection on both paths.
 - **Vocoder from ISC mbelib.** IMBE (Phase I) in-tree; AMBE+2 half-rate (Phase II) vendored from the same ISC code (`ambe3600x2450.c`).
 - **No GPL-derived code.** Never port from OP25, SDRTrunk, trunk-recorder, mbelib-neo, dsd-neo, or JMBE. See `CONTRIBUTING.md`.
 - **No RadioReference data committed.** Synthetic fixtures only.
-- **Desktop-first is legally correct in Indiana** (IC 35-44.1-2-7): a desktop app at a dwelling is exempt; a vehicle/portable rig is not.
+- **Desktop-first is the legally cleanest posture**: a desktop app at a dwelling is generally exempt; a vehicle/portable rig is not.
 
 ## RadioReference
 
@@ -101,13 +101,13 @@ call audio → Silero VAD gate → resample → ASR (Whisper | Parakeet) → hal
 | Solo-maintainer burnout | High | Scope v1 to P25 only |
 | GPL contamination | Medium | Provenance policy in `CONTRIBUTING.md` |
 | Transcription quality disappoints | Medium | Set expectations; ship the filter pipeline |
-| SAFE-T goes encrypted | Low, growing | Interop/dispatch talkgroups clear by IPSC policy |
+| Statewide system goes encrypted | Low, growing | Interop/dispatch talkgroups clear by state policy |
 
 ## Sources
 
 - **Decoders:** [SDRTrunk](https://github.com/DSheirer/sdrtrunk) · [OP25](https://github.com/boatbod/op25) · [DSD-FME](https://github.com/lwvmobile/dsd-fme) · [trunk-recorder](https://github.com/TrunkRecorder/trunk-recorder) · [GopherTrunk](https://github.com/MattCheramie/GopherTrunk)
 - **Simulcast:** [Tait P25 Simulcast (PDF)](https://www.radioresource.com/downloads/tait/whitepapers/p25-simulcast-coverage-white-paper.pdf) · [EFJohnson Simulcasting (PDF)](https://www.efjohnson.com/resources/dyn/files/972772z218319c9/_fn/Simulcasting+Project+25.pdf)
 - **Rust SDR:** [Seify](https://github.com/FutureSDR/seify) · [p25rx](https://github.com/kchmck/p25rx)
-- **Legal:** [18 U.S.C. § 2511](https://www.law.cornell.edu/uscode/text/18/2511) · [IC 35-44.1-2-7](https://law.justia.com/codes/indiana/title-35/article-44-1/chapter-2/section-35-44-1-2-7/) · [mbelib (ISC)](https://github.com/szechyjs/mbelib)
-- **RadioReference:** [API wiki](https://wiki.radioreference.com/index.php/API) · [Hoosier SAFE-T](https://www.radioreference.com/db/sid/8084)
+- **Legal:** [18 U.S.C. § 2511](https://www.law.cornell.edu/uscode/text/18/2511) · [mbelib (ISC)](https://github.com/szechyjs/mbelib)
+- **RadioReference:** [API wiki](https://wiki.radioreference.com/index.php/API)
 - **Transcription:** [Police radio ASR / BPC-CPD (arXiv 2409.10858)](https://arxiv.org/html/2409.10858v1) · [Whisper hallucination (arXiv 2501.11378)](https://arxiv.org/html/2501.11378v1) · [sherpa-onnx hotwords](https://k2-fsa.github.io/sherpa/onnx/hotwords/index.html)

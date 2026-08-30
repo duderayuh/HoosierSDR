@@ -1597,8 +1597,8 @@ mod capture_tests {
     use super::*;
 
     /// What the real NAC 0x260 control channel says about its site — the
-    /// values the decoder-state panel shows. The recording is the Marion
-    /// County (MESA) site: WACN 0xBEE00, system 0x262, whose Adjacent Status
+    /// values the decoder-state panel shows. The recording is a metro
+    /// county site: WACN 0xBEE00, system 0x262, whose Adjacent Status
     /// messages name the same system id independently, so the NetworkStatus
     /// decode is checked against ground truth, not just a round trip. This
     /// is the test that caught the WACN/system field split being wrong.

@@ -131,7 +131,7 @@ pub struct Diagnostics {
     /// A sample of raw argument words from vendor TSBKs. Manufacturer-specific
     /// opcodes are not decoded, but their arguments are the evidence needed to
     /// work out what they mean from a shared log — which is how the Motorola
-    /// Group Regroup blocks on the Marion County control channel were
+    /// Group Regroup blocks on a reference control channel were
     /// identified as patch messages rather than corrupt grants.
     pub vendor_samples: Vec<(u8, u8, u64)>,
     /// Radio position reports decoded from packet data.

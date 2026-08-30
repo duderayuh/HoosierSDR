@@ -4,7 +4,7 @@ Status: **in progress** (`#3`). First increment live: `hs_dsp::diversity::mrc_ph
 
 ## Problem
 
-Marion County (MESA / 49F-DISPATCH) is a single-frequency simulcast P25 Phase I
+A metro-county dispatch site is a single-frequency simulcast P25 Phase I
 (CQPSK) site. One antenna hears the sum of several tower copies; multipath
 fades produce deep spectral nulls that the single-tap / CMA / DFE equalizers
 cannot fully undo. The residual shows up as ~2.5 corrected data-errors per
@@ -46,7 +46,7 @@ weighted by per-branch SNR, then a single soft-slice feeds one framer/vocoder.
    reader) opens both Airspys by serial (`AirspySource::open(serial)` /
    `AirspySource::list()`). Both feed `Normalized` → `ChannelDecoder`
    front-ends; the combining stage sits at stage-3's MRC point.
-5. **Measure** against `captures/49f-2026-08-21/49f_capture.cu8` (replayed
+5. **Measure** against `captures/reference.cu8` (replayed
    twice with decorrelated offsets) and a live two-antenna capture.
 
 ## Hardware
