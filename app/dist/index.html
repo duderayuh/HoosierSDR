@@ -907,6 +907,16 @@
         </div>
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Remote access · phone over Tailscale</span><span class="meta" id="webMeta"></span></div>
+            <div class="body">
+              <label class="field"><span class="lab">Address <span class="mono faint">open this on your phone</span></span>
+                <span class="inline"><input id="webUrl" type="text" readonly spellcheck="false" /><button class="btn ghost sm" id="webUrlCopy">Copy</button></span></label>
+              <label class="field"><span class="lab">Access token <span class="mono faint">type this in on the phone</span></span>
+                <span class="inline"><input id="webToken" type="password" readonly spellcheck="false" /><button class="btn ghost sm" id="webTokenShow">Show</button><button class="btn ghost sm" id="webTokenCopy">Copy</button></span></label>
+              <p class="help">From a phone on your tailnet, open the address and enter the token — the same live feed, calls, and audio as the desktop.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Share calls · rdio-scanner / OpenMHz / Broadcastify Calls</span><span class="meta" id="upMeta"></span></div>
             <div class="body">
               <label class="check"><input id="upRdio" type="checkbox" /> <b>rdio-scanner</b></label>

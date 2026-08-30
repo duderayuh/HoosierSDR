@@ -1623,6 +1623,34 @@ if (TAURI) {
   $("fnSave").onclick = async () => { try { $("fnExample").textContent = await invoke("names_set", { template: $("fnTemplate").value }); logEvent("file name template saved"); } catch (e) { alert(e); } };
   fnRefresh();
 
+  /* ---------- remote access (phone over Tailscale) ---------- */
+  async function webRefresh() {
+    try {
+      const v = await invoke("web_access_get");
+      $("webUrl").value = v.url;
+      $("webToken").value = v.token;
+      $("webToken").type = "password";
+      $("webTokenShow").textContent = "Show";
+      $("webMeta").textContent = `port ${v.port} · listening`;
+    } catch (e) { log(`web_access_get: ${e}`); $("webMeta").textContent = "unavailable"; }
+  }
+  function copyText(s) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(s).catch(() => {});
+    }
+    if (typeof document.execCommand === "function") {
+      try {
+        const ta = document.createElement("textarea"); ta.value = s; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+      } catch (_) {}
+    }
+    return Promise.resolve();
+  }
+  $("webUrlCopy").onclick = () => copyText($("webUrl").value).then(() => uiToast("Address copied"));
+  $("webTokenCopy").onclick = () => copyText($("webToken").value).then(() => uiToast("Token copied"));
+  $("webTokenShow").onclick = () => { const el = $("webToken"); const show = el.type === "password"; el.type = show ? "text" : "password"; $("webTokenShow").textContent = show ? "Hide" : "Show"; };
+  webRefresh();
+
   /* ---------- script hook ---------- */
   const hkSettings = () => ({ enabled: $("hkEnabled").checked, command: $("hkCmd").value.trim(), timeout_secs: parseInt($("hkTimeout").value, 10) || 20, min_secs: parseFloat($("hkMin").value) || 0, emergency_only: $("hkEmg").checked });
   async function hkRefresh(fields = true) {

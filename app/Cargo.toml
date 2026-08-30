@@ -27,6 +27,11 @@ sha2 = "0.10"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
 cpal = "0.15"
 regex = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+base64 = "0.22"
 
 # `cargo tauri dev` builds the dev profile. Unoptimized, the decode stack is
 # ~50x too slow for a 10 MSPS site follow — the UI starved and showed nothing,
