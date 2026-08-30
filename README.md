@@ -14,7 +14,26 @@ curl -fsSL https://raw.githubusercontent.com/duderayuh/HoosierSDR/main/tools/ins
 
 Or double-click `install-mac.command`.
 
-Installs Xcode CLT, Homebrew, Rust, the SDR libraries, and `tauri-cli`; clones to `~/HoosierSDR`; builds the CLI. Re-run any time to repair or update.
+Installs Xcode CLT, Homebrew, Rust, the SDR libraries (`airspy libusb soapysdr soapyrtlsdr librtlsdr pkg-config ffmpeg`), and `tauri-cli` (prebuilt via `cargo-binstall`, not a source compile); clones to `~/HoosierSDR`; builds the CLI; verifies it with a no-hardware demo decode. Idempotent and self-healing — re-run any time to repair or update.
+
+### Known gotchas
+
+- **The installer exits right after "Xcode command-line tools".** That's expected on a fresh Mac — it pops Apple's dialog, you click *Install* and wait for it to finish, then **re-run the installer**. It picks up where it left off.
+- **`cargo tauri --version` → `no such command: tauri`.** `tauri-cli` isn't installed yet. Don't reach for `cargo install tauri-cli` (it compiles ~500 crates and can OOM an 8 GB machine). Use the prebuilt route instead:
+
+  ```sh
+  brew install cargo-binstall
+  cargo binstall tauri-cli -y
+  ```
+
+- **The desktop app is a *separate* workspace under `app/`.** `cargo tauri dev` from `~/HoosierSDR` fails with `Couldn't recognize the current folder as a Tauri project`. Run it from inside the app folder:
+
+  ```sh
+  cd ~/HoosierSDR/app && cargo tauri dev
+  ```
+
+- **8 GB machines (MacBook Neo, A18 Pro).** The first `cargo tauri dev` is the big compile — it can beach-ball or OOM on 8 GB. Let it churn; if it OOMs, retry with `CARGO_BUILD_JOBS=2 cargo tauri dev`.
+- **`brew install …` changes only take effect in a new terminal.** After the installer finishes, open a fresh window before running `hoosier-sdr` or `cargo tauri`.
 
 ## Quick start
 

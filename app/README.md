@@ -10,22 +10,32 @@ Own Cargo workspace — excluded from the main workspace so `cargo build
 
 ```sh
 brew install airspy soapysdr soapyrtlsdr librtlsdr libusb pkg-config ffmpeg
-cargo install tauri-cli --version '^2.0'
+brew install cargo-binstall && cargo binstall tauri-cli -y
 ```
 
 The app links all three SDR backends (`rtlsdr`, `airspy`, `soapy`), so every
-SDR formula above is required — a missing one fails at link time. `ffmpeg`
-enables mp3/m4a/opus call storage (without it, calls stay WAV). macOS ships
-WebKit; on Windows install WebView2 + MSVC.
+SDR formula above is required — a missing one fails at **link time** (after a
+long compile, which is annoying to discover late). `ffmpeg` enables
+mp3/m4a/opus call storage (without it, calls stay WAV). macOS ships WebKit; on
+Windows install WebView2 + MSVC.
+
+Install `tauri-cli` via `cargo-binstall` (prebuilt binary), not
+`cargo install tauri-cli` — the latter compiles ~500 crates and can OOM on an
+8 GB machine (MacBook Neo).
 
 ## Run
 
 ```sh
-cd app
-cargo tauri dev
+cd ~/HoosierSDR/app && cargo tauri dev
 ```
 
+Run from inside the `app/` folder. `cargo tauri dev` from the repo root
+(`~/HoosierSDR`) fails with `Couldn't recognize the current folder as a Tauri
+project` — the desktop app is a separate Tauri workspace one level down.
+
 First build compiles the whole decode stack plus Tauri; takes a few minutes.
+On 8 GB it can OOM or beach-ball — if so, retry with
+`CARGO_BUILD_JOBS=2 cargo tauri dev`.
 
 ## Controls
 
