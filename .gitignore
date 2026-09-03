@@ -11,15 +11,9 @@ node_modules/
 /dist/
 !app/dist/
 .DS_Store
-# Local Hermes agent state — never belongs in the repo
 .hermes/
 !crates/hs-vocoder/vendor/
-
-# Downloaded RadioReference data stays on the user's machine — the database is
-# licensed and no table data belongs in this repository.
 talkgroups.csv
 *.talkgroups.csv
 rr-dump/
-
-# RadioReference app key for local builds — never commit (see app/build.rs)
 app/.rr_app_key
