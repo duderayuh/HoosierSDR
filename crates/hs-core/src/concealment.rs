@@ -57,13 +57,33 @@ impl Concealer {
         }
     }
 
-    /// Process one decoded voice frame's PCM in place: conceal it against
-    /// the held buffer when `quality` is poor, then apply level
-    /// normalization. `pcm` should be the exact samples `quality` scores
+    /// Process one decoded voice frame's PCM in place: level-normalize it,
+    /// then conceal it against the held (already-leveled) buffer when
+    /// `quality` is poor. `pcm` should be the exact samples `quality` scores
     /// (one IMBE frame, 160 samples at 8 kHz for P25 Phase I) — concealment
     /// blends sample-for-sample against the previous frame of the same
     /// length, so mismatched lengths would blend the wrong content together.
     pub fn process(&mut self, pcm: &mut [i16], quality: VoiceQuality) {
+        // Level-normalize the freshly decoded audio *first*, before any
+        // concealment blending or fading touches it. Doing this after
+        // concealment (an earlier version of this function did) let the
+        // AGC's power estimate see whatever concealment had already faded
+        // toward — including near-silence during a bad stretch — so it
+        // drifted to think the channel had gone quiet. The next frame with
+        // real content then looked, to the AGC, like a huge jump from
+        // near-zero, and it overshot exactly like the fresh-instance
+        // startup pop this crate already fixed once, except recurring
+        // *mid-call* every time a marginal stretch resolved back to a good
+        // one — measured on a real archived call as an audible click/pop at
+        // several points through a single transmission (see git history).
+        // Running the AGC on the true decode first means it only ever
+        // tracks the actual signal's level, never a concealment artifact,
+        // and both `held` and the blend below already start from
+        // consistently-leveled audio.
+        for s in pcm.iter_mut() {
+            *s = self.agc.sample(*s as f32 / 32_768.0);
+        }
+
         let score = quality.score();
         if score < CONCEAL_BELOW {
             self.held_repeats += 1;
@@ -89,14 +109,6 @@ impl Concealer {
             self.held_repeats = 0;
             self.held.clear();
             self.held.extend_from_slice(pcm);
-        }
-        // Uses VOICE_AGC_TARGET, not AudioAgc::new's default: a real live
-        // call measured ~2.6% of samples clipped at the default 0.0625
-        // target (see git history) — this crate's other AudioAgc users
-        // (AM/NBFM/DCS) are unaffected, since `with_target` is additive and
-        // their own `AudioAgc::new()` call sites are untouched.
-        for s in pcm.iter_mut() {
-            *s = self.agc.sample(*s as f32 / 32_768.0);
         }
     }
 }
@@ -139,21 +151,21 @@ mod tests {
     #[test]
     fn a_bad_frame_right_after_a_good_one_is_pulled_toward_the_held_buffer() {
         let mut c = Concealer::new();
-        // Establish a held buffer of a distinctive constant level. AGC needs
-        // a moment to settle, so read `held` directly rather than asserting
-        // on this frame's own (still-normalizing) output.
+        // Establish a held buffer at a distinctive positive level. `held`
+        // now stores AGC'd (already leveled), not raw, samples — see
+        // `Concealer::process`'s doc — so its exact values aren't asserted,
+        // only that they came out positive, matching the positive input.
         let mut good_pcm = [20_000i16; 160];
         c.process(&mut good_pcm, good());
-        assert!(c.held.iter().all(|&s| s == 20_000));
+        assert!(c.held.iter().all(|&s| s > 0), "held: {:?}", &c.held[..4]);
 
         // A garbled frame at the opposite extreme, scored fully bad.
         let mut bad_pcm = [-20_000i16; 160];
         c.process(&mut bad_pcm, bad());
         // Fully bad (score 0.0, below CONCEAL_FLOOR) means decoded_weight
-        // clamps to 0: the output should be *entirely* the held level (pre-
-        // AGC it would be exactly +20000; AGC may rescale it, but the sign
-        // must have flipped positive — proof the held buffer dominated,
-        // not the decoded frame it was blended against).
+        // clamps to 0: the output should be *entirely* the held level — its
+        // sign must have flipped positive, proof the held buffer dominated,
+        // not the (negative) decoded frame it was blended against.
         assert!(
             bad_pcm.iter().all(|&s| s > 0),
             "a fully-bad frame should be replaced by the held buffer, not the garbled decode: {:?}",
@@ -180,6 +192,62 @@ mod tests {
         assert!(
             last_conceal_magnitude.abs() < 5000,
             "concealment should fade toward silence, not repeat the held buffer forever: got {last_conceal_magnitude}"
+        );
+    }
+
+    /// Regression test for a real click/pop found in an archived live call
+    /// (talkgroup 49F-DISPATCH on a simulcast site — see git history): a
+    /// stretch of marginal-quality frames whose *raw decode* still carried
+    /// real energy (not literal silence) got attenuated by concealment on
+    /// their way out, and — when the AGC ran on that already-faded output —
+    /// its power estimate drifted down to match the faded audio rather than
+    /// the true decoded signal. The next good, normally-loud frame then
+    /// looked like a huge jump from near-silence and spiked toward full
+    /// scale, an audible click every time a marginal stretch resolved back
+    /// to a good one.
+    #[test]
+    fn a_marginal_stretch_does_not_starve_the_agc_for_the_frame_after_it() {
+        let mut c = Concealer::new();
+        // Settle the AGC on ordinary, good-quality, moderately loud audio.
+        let mut settled_level = 0i16;
+        for _ in 0..500 {
+            let mut pcm = [8_000i16; 160];
+            c.process(&mut pcm, good());
+            settled_level = pcm[0];
+        }
+
+        // A long stretch of fully-bad (concealed, held-dominated) frames
+        // whose raw decode still has real energy — not silence — so a
+        // correctly-behaving AGC should barely move its estimate even
+        // though the concealed *output* fades toward near-zero late in the
+        // stretch (fade approaches 0 as held_repeats approaches
+        // MAX_HELD_REPEATS).
+        let marginal = VoiceQuality {
+            confidence: 0.0,
+            fec_errors: 10,
+            lock: None,
+        };
+        assert!(
+            marginal.score() < CONCEAL_FLOOR,
+            "test setup: must be fully held-dominated (decoded_weight 0)"
+        );
+        for _ in 0..(MAX_HELD_REPEATS - 5) {
+            let mut pcm = [8_000i16; 160];
+            c.process(&mut pcm, marginal);
+        }
+
+        // A normal frame right after the marginal stretch: must land back
+        // near the pre-stretch settled level, not spike to several times it
+        // the way a starved AGC would (found on a real call: a 25311 spike
+        // right after a stretch that had faded to ~1500 — a ~17x jump, well
+        // past anything a real speech onset produces).
+        let mut pcm = [8_000i16; 160];
+        c.process(&mut pcm, good());
+        assert!(
+            pcm.iter().all(|&s| (s as f32) < settled_level as f32 * 2.0),
+            "a normal frame right after a marginal stretch should return near the settled \
+             level ({settled_level}), not spike: {:?}",
+            &pcm[..4]
         );
     }
 
@@ -228,6 +296,7 @@ mod tests {
         let mut c = Concealer::new();
         let mut good_pcm = [20_000i16; 160];
         c.process(&mut good_pcm, good());
+        let held_after_first_frame = c.held[0];
 
         // confidence=0.0, fec_errors=0, lock=None scores exactly
         // 0.5*0.0 + 0.5*1.0 = CONCEAL_BELOW under the documented no-lock
@@ -243,6 +312,12 @@ mod tests {
         let mut distinct_pcm = [5_000i16; 160];
         c.process(&mut distinct_pcm, at_threshold);
         assert_eq!(c.held_repeats, 0);
-        assert_eq!(c.held[0], 5_000);
+        // `held` stores AGC'd, not raw, samples (see `Concealer::process`'s
+        // doc), so the exact value isn't asserted — only that it changed
+        // (this frame's distinct content replaced the previous held buffer,
+        // proving this frame did *not* go through the concealment branch)
+        // and kept the right sign (input was positive).
+        assert_ne!(c.held[0], held_after_first_frame);
+        assert!(c.held[0] > 0);
     }
 }
