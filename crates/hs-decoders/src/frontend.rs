@@ -202,7 +202,19 @@ impl AudioAgc {
     /// which real speech's crest factor exceeds often enough to be audible.
     pub fn with_target(target: f32) -> Self {
         Self {
-            power: 0.0,
+            // Seeded at the target itself, not 0.0: starting "blind" (as if
+            // silent) makes the very first loud sample look like an
+            // enormous power jump relative to the tiny EWMA so far, so the
+            // gain formula overshoots hugely before the slow (alpha=0.001)
+            // average catches up — an abrupt, audible pop right when audio
+            // starts, worst for a caller (like a per-call decoder) that
+            // constructs a fresh AGC right where loud audio is about to
+            // begin, with no gradual ramp-up to let it adapt gently.
+            // Assuming "already at the target level" instead means a
+            // correctly-leveled signal starts with gain ~1.0 and barely
+            // moves; the AGC still adapts (up or down) to whatever the
+            // signal actually is, just without the false-start spike.
+            power: target,
             alpha: 0.001,
             target,
             gain: 1.0,
@@ -315,5 +327,24 @@ mod tests {
         // DC gain (sum of taps) ~ 0.
         let dc: f32 = taps.iter().sum();
         assert!(dc.abs() < 1e-3, "hp DC gain {dc}");
+    }
+
+    /// A fresh `AudioAgc` seeing full-volume audio right from its first
+    /// sample (no gradual ramp-up, e.g. a P25 call decoder allocated fresh
+    /// per call, not per session) must not clip the very first samples: the
+    /// power estimate starting at 0.0 makes the gain formula see almost no
+    /// signal yet, so it overshoots wildly before the slow (alpha=0.001)
+    /// EWMA catches up — an abrupt, audible pop right at the start of every
+    /// clip, distinct from (and worse than) ordinary steady-state clipping.
+    #[test]
+    fn a_fresh_agc_does_not_slam_the_first_loud_samples() {
+        let mut agc = AudioAgc::with_target(0.015);
+        let loud = 0.5f32; // a typical loud speech sample, normalized
+        let first_20: Vec<i16> = (0..20).map(|_| agc.sample(loud)).collect();
+        let clipped = first_20.iter().filter(|&&s| s.unsigned_abs() >= 32_767).count();
+        assert_eq!(
+            clipped, 0,
+            "the first 20 samples of a loud onset should not clip: {first_20:?}"
+        );
     }
 }
