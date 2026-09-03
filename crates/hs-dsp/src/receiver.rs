@@ -1,11 +1,12 @@
 //! Complete C4FM receiver: complex baseband in, soft symbols out.
 //!
 //! Chain: FM discriminator → RRC matched filter → deviation scaling →
-//! Gardner timing recovery. Slicing and FSW-trained equalization happen
-//! downstream (hs-core) so the equalizer can be trained from frame sync
-//! feedback — before the decision device, per the project thesis.
+//! Gardner timing recovery → DC-bias removal → deviation-gain scaling.
+//! Slicing and FSW-trained equalization happen downstream (hs-core) so the
+//! equalizer can be trained from frame sync feedback — before the decision
+//! device, per the project thesis.
 
-use crate::c4fm::SymbolScaler;
+use crate::c4fm::{DcTracker, SymbolScaler};
 use crate::fir::Fir;
 use crate::fm::FmDemod;
 use crate::rrc::rrc_taps;
@@ -15,6 +16,7 @@ use crate::C32;
 pub struct C4fmReceiver {
     fm: FmDemod,
     mf: Fir,
+    dc: DcTracker,
     scaler: SymbolScaler,
     timing: GardnerSync,
     /// rad/sample at max deviation → normalizes discriminator out to ±3.
@@ -33,6 +35,7 @@ impl C4fmReceiver {
         Self {
             fm: FmDemod::new(),
             mf: Fir::new(rrc_taps(sps as usize, 6, 0.2)),
+            dc: DcTracker::default(),
             scaler: SymbolScaler::default(),
             timing: GardnerSync::new(sps as f32, 0.05),
             freq_scale: (3.0 / max_dev_rad) as f32,
@@ -43,6 +46,19 @@ impl C4fmReceiver {
     pub fn push(&mut self, iq: C32) -> Option<f32> {
         let disc = self.fm.demod(iq) * self.freq_scale;
         let shaped = self.mf.filter(disc);
-        self.timing.push(shaped).map(|s| self.scaler.scale(s))
+        self.timing
+            .push(shaped)
+            // Remove the residual carrier/tuner-frequency-offset bias before
+            // the scaler, which only ever looks at |sym| and so can't see
+            // (let alone correct) an additive shift of all four levels — see
+            // `DcTracker`'s docs.
+            .map(|s| self.scaler.scale(self.dc.track(s)))
+    }
+
+    /// The tracked DC-bias estimate — an AFC-style readout of how far off
+    /// this channel's carrier/tuner frequency sits, in the same nominal
+    /// ±1/±3 symbol units `push` returns (see `DcTracker::bias`).
+    pub fn freq_offset_bias(&self) -> f32 {
+        self.dc.bias()
     }
 }

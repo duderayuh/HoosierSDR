@@ -85,6 +85,95 @@ impl SymbolScaler {
     }
 }
 
+/// Tracks and removes a DC bias on the shaped soft-symbol stream (post
+/// timing recovery, pre-[`SymbolScaler`]) — the discriminator-domain
+/// signature of a residual carrier/tuner frequency offset.
+///
+/// A C4FM discriminator's output is nominally symmetric about zero: the four
+/// levels ±1/±3 are equally likely over any real symbol stream, so their mean
+/// is zero. A residual frequency error (LO drift, an uncalibrated tuner —
+/// see `hs_core::follow`'s own notes on tuner error being larger than the
+/// receiver's tolerance) instead shifts *every* sample by a constant, which
+/// silently moves each level off its nominal value without changing its
+/// magnitude — invisible to [`SymbolScaler`], which only ever looks at
+/// `|sym|`, but fatal to [`slice`]'s fixed thresholds. This is the amplitude-
+/// domain counterpart to `cqpsk::CqpskReceiver`'s `freq_bias`, which corrects
+/// the analogous phase-domain bias for CQPSK.
+///
+/// Blind: unlike CQPSK's differential-domain estimator, there is no
+/// modulation-cancelling trick available here, so this leans on a slow time
+/// constant instead — slow enough that real (nominally balanced) data
+/// content averages toward zero over hundreds of symbols, fast enough to
+/// track a tuner's frequency drift.
+pub struct DcTracker {
+    bias: f32,
+}
+
+impl Default for DcTracker {
+    fn default() -> Self {
+        Self { bias: 0.0 }
+    }
+}
+
+impl DcTracker {
+    /// Update the bias estimate from one shaped soft symbol and return it,
+    /// debiased.
+    pub fn track(&mut self, s: f32) -> f32 {
+        self.bias += 0.0005 * (s - self.bias);
+        s - self.bias
+    }
+
+    /// The current bias estimate, in the same units as the shaped soft
+    /// symbol (nominal ±1/±3 before [`SymbolScaler`]). Exposed for
+    /// diagnostics — an AFC-style "how far off is this tuner" readout.
+    pub fn bias(&self) -> f32 {
+        self.bias
+    }
+}
+
+#[cfg(test)]
+mod dc_tracker_tests {
+    use super::*;
+
+    /// A real four-level stream with a constant offset added (the
+    /// discriminator-domain signature of a carrier-frequency error) must have
+    /// that offset tracked out, recovering the correctly-centred levels.
+    #[test]
+    fn recovers_a_constant_frequency_offset_bias() {
+        let mut dc = DcTracker::default();
+        let levels = [1.0f32, 3.0, -1.0, -3.0];
+        let bias = 1.0; // e.g. ~600 Hz at DEVIATION_MAX_HZ=1800 -> level 3.
+        let mut out = Vec::new();
+        for i in 0..20_000 {
+            let v = dc.track(levels[i % 4] + bias);
+            if i >= 19_000 {
+                out.push(v);
+            }
+        }
+        assert!(
+            (dc.bias() - bias).abs() < 0.05,
+            "bias estimate {} did not converge to {bias}",
+            dc.bias()
+        );
+        // Debiased output must land back near the true, symmetric levels.
+        for (v, want) in out.iter().zip(levels.iter().cycle()) {
+            assert!((v - want).abs() < 0.1, "{v} not near {want}");
+        }
+    }
+
+    /// No offset: the tracker must stay near zero and not distort a clean
+    /// signal (a slow but nonzero rate could still drift on data structure).
+    #[test]
+    fn a_clean_signal_is_left_alone() {
+        let mut dc = DcTracker::default();
+        let levels = [1.0f32, 3.0, -1.0, -3.0];
+        for i in 0..20_000 {
+            dc.track(levels[i % 4]);
+        }
+        assert!(dc.bias().abs() < 0.05, "bias drifted to {}", dc.bias());
+    }
+}
+
 #[cfg(test)]
 mod scaler_tests {
     use super::*;
