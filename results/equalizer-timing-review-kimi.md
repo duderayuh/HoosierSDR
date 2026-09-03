@@ -6,10 +6,24 @@ dead-end investigation (gating equalizer adaptation on `acquired` deadlocks
 the blind carrier acquisition on multipath). Findings below are kimi's,
 lightly reformatted.
 
-Landed so far: H1 (NaN front-door guard + watchdog predicate inversion) and
-M4 (failed-acquisition-window tap reset). Not yet applied: M2/M3 (Gardner
-loop hardening + TED normalization), M5 (fractional-spaced equalizer / FSE
-wiring), L6-L12, C13.
+Landed so far: H1 (NaN front-door guard + watchdog predicate inversion), M4
+(failed-acquisition-window tap reset), L6 (leaky-bucket `bad_run` — was a
+hard reset to 0 on any good symbol, so a lock chattering across
+`LOCK_ERR_MAX` could never accumulate 1000 *consecutive* bad symbols and
+never trip the watchdog at all) and L11 (`reacquire()` now resets the
+Gardner timing loop's integrator). Also added, beyond this review's scope:
+an age-gated soft recovery on the first watchdog trip — an acquisition that
+has held cleanly for ~1s gets one non-destructive recovery (reset only the
+trip bookkeeping, keep the equalizer taps and carrier-bias estimate) before
+the full `reacquire()`, addressing "throws away a working lock at moderate
+SNR" without regressing a genuinely wrong acquisition (which still trips
+within one `BAD_RUN_LIMIT` window, long before it looks established). See
+`crates/hs-dsp/src/cqpsk.rs`'s `update_bad_run`/`watchdog_action` and their
+unit tests. 2026-09-03 addendum below records a rejected attempt at a
+related idea (throttling equalizer adaptation itself, not just watchdog
+recovery, by lock quality). Not yet applied: M2/M3 (Gardner loop hardening +
+TED normalization), M5 (fractional-spaced equalizer / FSE wiring), L7-L10,
+L12, C13.
 
 # Code Review: CQPSK pre-detection equalizer receiver
 
@@ -119,3 +133,54 @@ and invert the watchdog predicate to `if !(self.err_ewma <= LOCK_ERR_MAX)` so Na
 ## Summary
 
 The central design — phase-blind CMA/DFE before differential detection, adapt-through-acquisition, reset-on-reacquire — is sound, and the update math is correct in every block (including the DFE feedback sign, which is easy to misread). The two things that will actually bite you in the field are **H1** (a single NaN is a permanent, silent kill — fix the watchdog predicate today) and **M5** (the wired equalizer has never been tested against the fractional-delay channel it exists to solve). Then close the cold-start idle walk with the failed-window tap reset (M4), which is the right answer to Task 1 — not a presence gate.
+
+---
+
+## Addendum, 2026-09-03: a rejected attempt at scaling adaptation by lock quality
+
+A separate concern surfaced independently ("the equalizer adaptation is
+wrong for a noise-limited channel") reads, on its face, like this review's
+own Task 1 all over again: NLMS normalizes the step by *input* energy, which
+the AGC pins to roughly unit power regardless of SNR, so a noise-limited
+channel adapts at essentially the same effective step as a clean one. The
+natural next idea — scale the *tracking* step down as the receiver's own
+`err_ewma` rises, so it chases noise less as SNR drops — was implemented
+(post-acquisition only, gated on lock age so it wouldn't touch the
+pre-acquisition path Task 1 already settled) and rejected after a
+discriminating experiment:
+
+1. **First attempt (`err_ewma`-coupled step scale)** regressed
+   `a_grant_outside_the_primary_band_decodes_on_an_extra_radio` (0 CQPSK
+   syncs). Instrumented `err_ewma` per symbol: it climbed monotonically from
+   acquisition (0.02 → 0.36 over ~2,400 symbols) instead of settling — a
+   feedback loop, not noise. Coupling step size to the error the step is
+   supposed to correct is a control-theory footgun: once error starts
+   rising, the mechanism weakens exactly when it needs to work harder.
+2. **Discriminating experiment**, per the reviewer's own advice: replace the
+   error-coupled scale with a **fixed** low scale (0.15× nominal, no
+   coupling at all) after a settle window, and trace `echo_frac` and
+   `freq_bias` alongside `err_ewma`. Still failed, and the trace explains
+   why: `echo_frac` opened at **0.67** (not near-zero — this "clean"
+   synthetic channel is not actually flat) and `freq_bias` **drifted**
+   continuously (0.52 → 0.78 over the run) rather than converging to a
+   constant. The CMA was doing continuous, load-bearing compensation work —
+   likely a standing timing/frequency residue this review's own **M3**
+   already names (Gardner TED gain is amplitude²-dependent and un-normalized,
+   so loop bandwidth swings with tuner/AGC level) — not idly re-adapting to
+   noise. Throttling it, error-coupled or fixed, prevented it from keeping up
+   and drove `err_ewma` up regardless of the scale law.
+
+**Conclusion: rejected, not just mistuned.** If the equalizer is frequently
+doing real, necessary tracking work even on synthetic "clean" test signals,
+any scheme that slows it down under a lock-quality heuristic is unsafe in
+general, not just under a bad coupling law. The kimi review's own Task 1
+conclusion already covers the noise-limited case correctly: adaptation
+during noise is *bounded and reversible* (NLMS caps the step, the finite-tap
+guard in `cma.rs`/`dfe.rs` catches divergence, M4's failed-window reset
+discards a walk on true idle noise) rather than something that needs slowing
+down — and this review's own leaky-bucket fix above (L6) means a lock that's
+*actually* bad now reliably reaches the `reacquire()` that resets the taps,
+closing the loop. The real fix for the noise-limited/fractional-channel
+regime this uncovered evidence for is still **M5** (the T/2 fractionally-
+spaced equalizer) — large enough to be its own piece of work, not a
+step-scaling heuristic bolted onto the symbol-spaced CMA.

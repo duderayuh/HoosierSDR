@@ -348,8 +348,18 @@ pub struct CqpskReceiver {
     /// Smoothed magnitude of the decision-directed phase error, the receiver's
     /// own measure of whether it is locked.
     err_ewma: f32,
-    /// Consecutive symbols spent above the lock threshold.
+    /// Consecutive-equivalent symbols spent above the lock threshold (leaks
+    /// down on a good symbol rather than resetting — see `BAD_RUN_DECAY`).
     bad_run: u32,
+    /// Symbols tracked since the current acquisition, capped at
+    /// [`SOFT_TRIP_MIN_AGE`] (this only gates a one-time threshold, so it
+    /// never needs to count higher). Distinguishes an established lock that
+    /// degraded from one that was never right to begin with — see
+    /// `soft_trip_used`.
+    since_acquired: u32,
+    /// Whether this acquisition has already spent its one soft recovery (see
+    /// the watchdog in `push_phase`). Cleared on every fresh acquisition.
+    soft_trip_used: bool,
 }
 
 /// Symbols to let the timing loop settle before blind acquisition starts.
@@ -391,10 +401,90 @@ const ACQ_COHERENCE_MIN: f32 = 0.30;
 /// splits those two populations.
 const LOCK_ERR_MAX: f32 = 0.33;
 
-/// Consecutive bad symbols before re-acquiring (~0.2 s). Long enough that a
-/// brief fade does not trigger a re-acquisition, short enough to catch the
-/// start of a transmission.
+/// Consecutive-equivalent bad symbols before a recovery attempt (~0.2 s).
+/// Long enough that a brief fade does not trigger one, short enough to catch
+/// the start of a transmission. "Consecutive-equivalent" because `bad_run`
+/// now leaks down on good symbols (see [`BAD_RUN_DECAY`]) instead of
+/// resetting outright, so a lock that chatters across the threshold — the
+/// moderate-SNR case — still accumulates toward recovery instead of never
+/// reaching it (the failure mode is symmetric: a hard reset to 0 on one good
+/// symbol means a signal hovering right at the threshold can spend most of
+/// its symbols "bad" and still never trip this).
 const BAD_RUN_LIMIT: u32 = 1000;
+
+/// How much `bad_run` leaks down per good (in-threshold) symbol. A hard
+/// reset to 0 was too eager to forgive: a signal at moderate SNR whose error
+/// chatters just above and below [`LOCK_ERR_MAX`] would rack up a long bad
+/// streak, dip below threshold for one symbol, get fully forgiven, and never
+/// reach [`BAD_RUN_LIMIT`] — indistinguishable from "always locked" to this
+/// counter even though it is marginal. A slow leak still forgives a genuinely
+/// recovered lock (leaks the full 1000-symbol bad run off in under a second
+/// of good symbols) without erasing the signal that it was marginal.
+const BAD_RUN_DECAY: u32 = 2;
+
+/// Symbols an acquisition must have held tracking, uninterrupted, before it
+/// earns one soft recovery on the next watchdog trip (~1 s at 4800 baud) —
+/// see `push_phase`'s watchdog and `soft_trip_used`.
+///
+/// An unconditional soft recovery — on the *first* trip, reset only
+/// `err_ewma`/`bad_run` and give the tracking loop another window before the
+/// destructive `reacquire()` (which also discards the equalizer taps and
+/// carrier-bias estimate) — was tried first and measurably regressed
+/// `a_loud_adjacent_channel_does_not_garble_the_call_classically`: that
+/// scenario's *initial* acquisition is often simply wrong, not "moderate but
+/// workable," and every extra ~0.2s window spent limping along on a wrong
+/// acquisition before the hard reset ate into an already-short synthetic
+/// transmission. Gating the grace on lock age fixes that: a wrong
+/// acquisition trips within one `BAD_RUN_LIMIT` window, long before it turns
+/// 5×BAD_RUN_LIMIT symbols old, so it still gets the immediate hard reset
+/// exactly as before this change. Only a lock that has demonstrably held —
+/// tracked cleanly for a full 5 seconds' worth of the fastest possible trip —
+/// gets the benefit of the doubt that its taps and carrier-bias estimate are
+/// still worth keeping when it degrades. One soft recovery per acquisition
+/// (`soft_trip_used`), not a standing exemption, so a lock that is
+/// persistently marginal still reaches the destructive reset on its next
+/// trip rather than limping along indefinitely.
+const SOFT_TRIP_MIN_AGE: u32 = 5 * BAD_RUN_LIMIT;
+
+/// Update the lock watchdog's bad-symbol counter and report whether it just
+/// tripped. Free function (rather than inline in `push_phase`) so the leaky
+/// bucket's behaviour — the fix for the moderate-SNR case, where the old code
+/// reset `bad_run` to 0 on any single good symbol and so could chatter across
+/// the threshold forever without ever tripping it — is directly unit
+/// testable.
+fn update_bad_run(bad_run: &mut u32, err_ewma: f32) -> bool {
+    // `!(<=)` rather than `>` so a NaN err_ewma (poisoned upstream) counts as
+    // unlocked and re-acquires, instead of comparing false forever.
+    if !(err_ewma <= LOCK_ERR_MAX) {
+        *bad_run += 1;
+        *bad_run >= BAD_RUN_LIMIT
+    } else {
+        *bad_run = bad_run.saturating_sub(BAD_RUN_DECAY);
+        false
+    }
+}
+
+/// What the watchdog does once `update_bad_run` reports a trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogAction {
+    /// Reset only the trip bookkeeping; keep the equalizer taps, carrier-bias
+    /// estimate and timing state.
+    SoftRecover,
+    /// The full destructive `CqpskReceiver::reacquire`.
+    HardReacquire,
+}
+
+/// Decide the watchdog's response to a trip. Free function so the
+/// age-gating — the fix for "throws away a working lock at moderate SNR"
+/// without regressing a genuinely wrong acquisition, see [`SOFT_TRIP_MIN_AGE`]
+/// — is directly unit testable independent of the IQ pipeline.
+fn watchdog_action(since_acquired: u32, soft_trip_used: bool) -> WatchdogAction {
+    if !soft_trip_used && since_acquired >= SOFT_TRIP_MIN_AGE {
+        WatchdogAction::SoftRecover
+    } else {
+        WatchdogAction::HardReacquire
+    }
+}
 
 impl CqpskReceiver {
     /// Equalized front end: CMA equalizer before differential detection.
@@ -445,6 +535,8 @@ impl CqpskReceiver {
             acquired: false,
             err_ewma: 0.0,
             bad_run: 0,
+            since_acquired: 0,
+            soft_trip_used: false,
         }
     }
 
@@ -541,6 +633,8 @@ impl CqpskReceiver {
                     if coherence > ACQ_COHERENCE_MIN {
                         self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
                         self.acquired = true;
+                        self.since_acquired = 0;
+                        self.soft_trip_used = false;
                         // The eye is open: gear-shift the DFE feedforward from
                         // the fast acquisition step to the slow tracking step.
                         self.eq.set_step(DFE_FF_TRACK, DFE_FB);
@@ -585,16 +679,27 @@ impl CqpskReceiver {
         // estimate through the entire transmission that follows. A control
         // channel never exposes this because it transmits continuously.
         self.err_ewma += 0.002 * (err.abs() - self.err_ewma);
-        // `!(<=)` rather than `>` so a NaN err_ewma (poisoned upstream) counts
-        // as unlocked and re-acquires, instead of comparing false forever.
-        if !(self.err_ewma <= LOCK_ERR_MAX) {
-            self.bad_run += 1;
-            if self.bad_run >= BAD_RUN_LIMIT {
-                self.reacquire();
-                return None;
+        self.since_acquired = self.since_acquired.saturating_add(1);
+        if update_bad_run(&mut self.bad_run, self.err_ewma) {
+            // An acquisition that has demonstrably held for a while (see
+            // SOFT_TRIP_MIN_AGE) gets one non-destructive recovery before the
+            // full reacquire: reset only the bookkeeping, keep the equalizer
+            // taps and carrier-bias estimate, which are usually still
+            // approximately right if the receiver was genuinely locked a
+            // moment ago. A wrong acquisition trips this within one
+            // BAD_RUN_LIMIT window, long before it could look "established",
+            // so it still gets the immediate hard reset below.
+            match watchdog_action(self.since_acquired, self.soft_trip_used) {
+                WatchdogAction::SoftRecover => {
+                    self.soft_trip_used = true;
+                    self.bad_run = 0;
+                    self.err_ewma = 0.0;
+                }
+                WatchdogAction::HardReacquire => {
+                    self.reacquire();
+                    return None;
+                }
             }
-        } else {
-            self.bad_run = 0;
         }
         Some((dibit, corr))
     }
@@ -619,6 +724,8 @@ impl CqpskReceiver {
         self.settle = 0;
         self.err_ewma = 0.0;
         self.bad_run = 0;
+        self.since_acquired = 0;
+        self.soft_trip_used = false;
         self.freq_bias = 0.0;
         self.prev_sym = None;
         self.acq_failures = 0;
@@ -629,6 +736,10 @@ impl CqpskReceiver {
         self.eq.reset();
         // Back to the fast acquisition step for the next acquisition.
         self.eq.set_step(DFE_FF_ACQ, DFE_FB);
+        // A sustained run of noise-driven TED output can rail the timing
+        // loop's integrator; discharge it so the next real signal doesn't
+        // inherit a stale rate offset while it walks back off the rail.
+        self.gardner.reset_integrator();
     }
 
     /// Smoothed decision-directed phase error: low when locked, near 0.39 on
@@ -669,6 +780,76 @@ pub fn wrap_pi(mut p: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L6: a hard reset of `bad_run` to 0 on any single good symbol let a
+    /// lock chattering across the threshold accumulate a long bad streak,
+    /// dip below threshold once, get fully forgiven, and repeat forever —
+    /// never tripping `BAD_RUN_LIMIT` no matter how marginal it really was.
+    #[test]
+    fn a_chattering_lock_still_trips_the_watchdog() {
+        let mut bad_run = 0u32;
+        let mut tripped = false;
+        // Alternate one bad symbol, one good: net +1 -2(clamped to 0 below
+        // 2) per pair under the old scheme (always 0); under the leaky
+        // bucket, a bad symbol adds 1 and a good one only takes back 2, so
+        // this pattern (mostly bad, chattering below threshold just often
+        // enough to have defeated the old hard reset) still climbs to the
+        // limit given enough symbols.
+        for i in 0..20_000 {
+            let locked = i % 5 == 0; // 1 good symbol out of every 5
+            let err = if locked { 0.0 } else { 0.5 };
+            if update_bad_run(&mut bad_run, err) {
+                tripped = true;
+                break;
+            }
+        }
+        assert!(
+            tripped,
+            "a lock bad 4/5 of the time never tripped the watchdog"
+        );
+    }
+
+    /// The flip side: a lock that's good often enough should settle to a low
+    /// steady state and never trip, so the leaky bucket doesn't turn into a
+    /// hair-trigger for a signal that dips over threshold only occasionally.
+    #[test]
+    fn an_occasionally_noisy_lock_does_not_trip() {
+        let mut bad_run = 0u32;
+        for i in 0..20_000 {
+            let locked = i % 5 != 0; // bad only 1 symbol out of every 5
+            let err = if locked { 0.0 } else { 0.5 };
+            assert!(
+                !update_bad_run(&mut bad_run, err),
+                "an mostly-good lock tripped the watchdog at i={i}, bad_run={bad_run}"
+            );
+        }
+    }
+
+    /// The fix for "throws away a working lock at moderate SNR": an
+    /// acquisition old enough to have demonstrably held gets one soft
+    /// recovery instead of an immediate destructive reacquire.
+    #[test]
+    fn an_established_lock_gets_one_soft_recovery_then_hard_reset() {
+        // Fresh acquisition, or one not yet old enough: no grace, matching
+        // the pre-fix behaviour that the classic-adjacent-channel regression
+        // test depends on (a wrong acquisition trips within one
+        // BAD_RUN_LIMIT window, well short of SOFT_TRIP_MIN_AGE).
+        assert_eq!(watchdog_action(0, false), WatchdogAction::HardReacquire);
+        assert_eq!(
+            watchdog_action(SOFT_TRIP_MIN_AGE - 1, false),
+            WatchdogAction::HardReacquire
+        );
+        // Old enough, first trip: soft recovery.
+        assert_eq!(
+            watchdog_action(SOFT_TRIP_MIN_AGE, false),
+            WatchdogAction::SoftRecover
+        );
+        // Old enough, but the soft recovery is already spent: hard reset.
+        assert_eq!(
+            watchdog_action(SOFT_TRIP_MIN_AGE, true),
+            WatchdogAction::HardReacquire
+        );
+    }
 
     #[test]
     fn echo_profile_identity_taps_read_clean() {

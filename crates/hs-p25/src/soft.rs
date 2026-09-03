@@ -85,6 +85,19 @@ impl SoftDibit {
     }
 }
 
+/// Expand soft dibits to per-bit confidence (MSB of each dibit first),
+/// mirroring `bits::dibits_to_bits`'s bit ordering exactly so the two arrays
+/// stay index-aligned — `soft_dibits_to_bit_conf(d)[i]` is the confidence of
+/// `dibits_to_bits(&d.iter().map(|s| s.bits).collect())[i]`.
+pub fn soft_dibits_to_bit_conf(dibits: &[SoftDibit]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dibits.len() * 2);
+    for d in dibits {
+        out.push(d.conf[0]);
+        out.push(d.conf[1]);
+    }
+    out
+}
+
 /// Soft-slice a C4FM symbol (nominal ±1 / ±3) into a dibit with confidence.
 ///
 /// The two bits are decided by two independent thresholds, so each carries its

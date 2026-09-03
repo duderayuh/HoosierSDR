@@ -679,10 +679,14 @@ let followVoice = 0;
 // Receiver DSP health: carrier lock, the simulcast-multipath meter (echo
 // fraction + delay spread read off the equalizer taps), and the ADC-overload
 // flag. null / negative = no reading (C4FM, equalizer bypassed, unacquired).
-function setDspHealth(lock, echoFrac, spreadUs, clipPct) {
+function setDspHealth(lock, echoFrac, spreadUs, clipPct, voiceQuality) {
   if (lock != null) {
     if (lock >= 0) { $("r-lock").textContent = lock.toFixed(2); $("r-lockbar").style.width = Math.max(0, Math.min(100, lock * 100)) + "%"; }
     else { $("r-lock").textContent = "—"; $("r-lockbar").style.width = "0%"; }
+  }
+  if (voiceQuality != null) {
+    if (voiceQuality >= 0) { $("r-vq").textContent = voiceQuality.toFixed(2); $("r-vqbar").style.width = Math.max(0, Math.min(100, voiceQuality * 100)) + "%"; }
+    else { $("r-vq").textContent = "—"; $("r-vqbar").style.width = "0%"; }
   }
   if (echoFrac != null && echoFrac >= 0) {
     $("r-echo").textContent = `${(echoFrac * 100).toFixed(1)}%` + (spreadUs != null && spreadUs >= 0 ? ` · ${spreadUs.toFixed(0)} µs` : "");
@@ -706,7 +710,7 @@ function setStatus(s) {
   if (s.grants != null) $("r-grants").textContent = s.grants;
   if (s.voice_secs != null) $("r-voice").innerHTML = s.voice_secs.toFixed(1) + "<small>s</small>";
   if (s.modulation) $("tunedSub").textContent = s.modulation.toUpperCase();
-  setDspHealth(s.lock, s.echo_frac, s.echo_spread_us, s.clip_pct);
+  setDspHealth(s.lock, s.echo_frac, s.echo_spread_us, s.clip_pct, s.voice_quality);
   if (s.dropped != null) $("r-syncerr").textContent = s.dropped ? `${s.dropped}` : "0";
 }
 
@@ -784,7 +788,11 @@ function handleFollow(ev) {
       } else {
         $("r-signal").textContent = "— dBFS";
       }
-      setDspHealth(ev.lock ?? -1, ev.echo_frac ?? -1, ev.echo_spread_us ?? -1, ev.clip_pct);
+      // Follow mode's status event doesn't carry a per-call voice_quality yet
+      // (it aggregates several simultaneous calls, each with its own), so
+      // this shows "—" here rather than a single-channel number that would
+      // misrepresent a multi-call site.
+      setDspHealth(ev.lock ?? -1, ev.echo_frac ?? -1, ev.echo_spread_us ?? -1, ev.clip_pct, ev.voice_quality ?? -1);
       $("r-grants").textContent = ev.calls;
       $("r-syncerr").textContent = ev.dropped ? `${ev.dropped}` : "0";
       $("r-stream").textContent = `${ev.msps.toFixed(2)}/${ev.want_msps.toFixed(2)}M · ${ev.dropped || 0}`;

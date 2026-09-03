@@ -27,8 +27,12 @@ pub struct DeviceSettings {
     pub gain: Option<f64>,
     /// Preferred sample rate, Hz (0 = the radio's default for the mode).
     pub rate: f64,
-    /// Airspy: touch the gain at all. Off by default — the R2 firmware this
-    /// project was developed on wedged USB streaming on any gain call.
+    /// Airspy: customize the gain instead of the weak-signal sensitivity
+    /// default `AirspySource::open` now applies on its own
+    /// (`DEFAULT_SENSITIVITY_GAIN`). Off by default — most sites don't need
+    /// hand-tuning; turn this on to pick linearity/manual mode, or a
+    /// different sensitivity level, e.g. to back off from ADC clipping near
+    /// a strong tower.
     #[serde(default)]
     pub airspy_gain: bool,
     /// Airspy mode: "agc" (front-end AGCs on), "linearity", "sensitivity",
@@ -51,8 +55,9 @@ pub struct DeviceSettings {
 }
 
 impl DeviceSettings {
-    /// The gain to apply for a radio of `kind`, or `None` to leave the
-    /// radio at its default (Airspy with gain control opted out).
+    /// The gain to apply for a radio of `kind`, or `None` to leave it at its
+    /// own default (Airspy: `AirspySource::open`'s weak-signal sensitivity
+    /// default; RTL-SDR: see the `gain` field).
     pub fn gain_setting(&self, kind: &str) -> Option<hs_source::GainSetting> {
         use hs_source::GainSetting as G;
         if kind == "airspy" {

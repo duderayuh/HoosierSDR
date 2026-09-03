@@ -22,7 +22,18 @@ void
 mbe_checkGolayBlock (long int *block)
 {
 
-  static int i, syndrome, eccexpected, eccbits, databits;
+  /* Not `static`: every one of these is assigned before its first read on
+   * every call (i by the for loop, the rest below it), so `static` here
+   * served no cross-call purpose — it only made the function non-reentrant.
+   * hs-core's trunk-follow decodes multiple simultaneous calls on their own
+   * threads (see hs-core/src/follow.rs's per-call `thread::scope`), each
+   * independently calling into this function through `mbe_golay2312`; with
+   * `static` locals shared across those threads, one call's in-flight
+   * `eccexpected`/`syndrome` could be clobbered by another's mid-computation,
+   * corrupting either or both calls' voice decode. Found via HoosierSDR's
+   * own soft-FEC unit tests, which run this function concurrently from
+   * multiple test threads and failed nondeterministically until fixed. */
+  int i, syndrome, eccexpected, eccbits, databits;
   long int mask, block_l;
 
   block_l = *block;

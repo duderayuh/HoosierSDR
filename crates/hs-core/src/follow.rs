@@ -77,19 +77,26 @@ const CHANNEL_RATE: f64 = 48_000.0;
 const CONFIRM_CALLS: u32 = 2;
 const REPROBE_EVERY: u32 = 10;
 
-/// Channel filter applied to each channelizer output before its decoders:
-/// the same 8 kHz passband / 24 kHz stopband the per-channel decimator used.
+/// Channel filter applied to each channelizer output before its decoders.
 /// The channelizer's slice is a brick wall at ±24 kHz, which lets a
 /// neighbouring channel 12.5 kHz away straight into the demodulator — the
 /// first live run without this filter garbled every call on a busy site.
-const CHANNEL_PASSBAND_HZ: f64 = 8_000.0;
+///
+/// Passband is [`hs_dsp::P25_CHANNEL_HALF_BW_HZ`] (was 8 kHz — about three
+/// times the ~2.9 kHz a CQPSK channel actually occupies, and itself past the
+/// 6.25 kHz midpoint to the next channel, so the filter that was supposed to
+/// reject the neighbour didn't). Stopband is tied to that midpoint
+/// (`P25_CHANNEL_SPACING_HZ / 2`), not to the channel rate's own Nyquist —
+/// the old `stop = 0.5` bought a transition four times wider than the
+/// requirement (all the way to 24 kHz) instead of one aimed at the neighbour.
+const CHANNEL_PASSBAND_HZ: f64 = hs_dsp::P25_CHANNEL_HALF_BW_HZ;
 
 fn channel_filter() -> hs_dsp::fir::FirC {
     let cutoff = CHANNEL_PASSBAND_HZ / CHANNEL_RATE;
-    let stop = 0.5;
-    let transition = stop - cutoff;
+    let stop = hs_dsp::P25_CHANNEL_SPACING_HZ / 2.0 / CHANNEL_RATE;
+    let transition = (stop - cutoff).max(1e-3);
     let mut n = (3.3 / transition).ceil() as usize;
-    n = n.clamp(31, 255);
+    n = n.clamp(31, 511);
     if n.is_multiple_of(2) {
         n += 1;
     }

@@ -42,6 +42,13 @@ const IZ: [usize; 72] = [
 /// exactly the `char imbe_fr[8][23]` layout mbelib consumes.
 pub type ImbeFrame = [[u8; 23]; 8];
 
+/// Meaningful bit width of each of the 8 codeword rows in [`ImbeFrame`] /
+/// [`ImbeConf`]: 4× Golay(23,12), 3× Hamming(15,11), one 7-bit unprotected
+/// tail. Positions beyond a row's own width exist only because every row
+/// shares the same `[u8; 23]` storage (mbelib's own layout); they carry no
+/// real bit and must be excluded from any per-frame confidence/error summary.
+pub const IMBE_CODEWORD_WIDTHS: [usize; 8] = [23, 23, 23, 23, 15, 15, 15, 7];
+
 /// De-interleave 144 channel bits into the 8×23 codeword matrix.
 pub fn deinterleave_imbe(bits144: &[u8]) -> ImbeFrame {
     assert_eq!(bits144.len(), 144);
@@ -79,6 +86,38 @@ pub fn extract_imbe_frames(payload_bits: &[u8]) -> Option<[ImbeFrame; 9]> {
     let mut out = [[[0u8; 23]; 8]; 9];
     for (k, &off) in IMBE_OFFSETS.iter().enumerate() {
         out[k] = deinterleave_imbe(&payload_bits[off..off + 144]);
+    }
+    Some(out)
+}
+
+/// Per-bit confidence for one de-interleaved IMBE codeword matrix — same
+/// shape as [`ImbeFrame`], holding a `SoftDibit`-style confidence byte (0 =
+/// no information, 255 = certain) per bit instead of the bit itself. Used to
+/// drive soft-decision FEC ahead of the vocoder (see `hs_vocoder::imbe`).
+pub type ImbeConf = [[u8; 23]; 8];
+
+/// De-interleave 144 channel-bit confidences the same way [`deinterleave_imbe`]
+/// de-interleaves the bits themselves, so `conf[w][x]` is the confidence of
+/// `frame[w][x]`.
+pub fn deinterleave_imbe_conf(conf144: &[u8]) -> ImbeConf {
+    assert_eq!(conf144.len(), 144);
+    let mut fr = [[0u8; 23]; 8];
+    for i in 0..72 {
+        fr[IW[i]][IX[i]] = conf144[i * 2];
+        fr[IY[i]][IZ[i]] = conf144[i * 2 + 1];
+    }
+    fr
+}
+
+/// Extract the nine de-interleaved IMBE confidence matrices from an LDU
+/// payload's per-bit confidence, index-aligned with [`extract_imbe_frames`].
+pub fn extract_imbe_conf(payload_conf: &[u8]) -> Option<[ImbeConf; 9]> {
+    if payload_conf.len() < LDU_PAYLOAD_BITS {
+        return None;
+    }
+    let mut out = [[[0u8; 23]; 8]; 9];
+    for (k, &off) in IMBE_OFFSETS.iter().enumerate() {
+        out[k] = deinterleave_imbe_conf(&payload_conf[off..off + 144]);
     }
     Some(out)
 }
@@ -121,6 +160,26 @@ mod tests {
         }
         let bits = interleave_imbe(&fr);
         assert_eq!(deinterleave_imbe(&bits), fr);
+    }
+
+    /// `deinterleave_imbe_conf` must place `conf144[i]` exactly where
+    /// `deinterleave_imbe` places `bits144[i]` — otherwise a confidence value
+    /// would end up describing the wrong bit, silently corrupting every
+    /// downstream soft-decision decision.
+    #[test]
+    fn conf_deinterleave_stays_aligned_with_bit_deinterleave() {
+        let bits: Vec<u8> = (0..144).map(|i| (i % 2) as u8).collect();
+        let conf: Vec<u8> = (0..144).map(|i| (i % 256) as u8).collect();
+        let fr = deinterleave_imbe(&bits);
+        let fr_conf = deinterleave_imbe_conf(&conf);
+        for i in 0..72 {
+            assert_eq!(fr_conf[IW[i]][IX[i]], conf[i * 2]);
+            assert_eq!(fr_conf[IY[i]][IZ[i]], conf[i * 2 + 1]);
+            // Same source index fed both arrays, so the *position* a bit
+            // lands at and the *position* its confidence lands at must
+            // match exactly.
+            assert_eq!((fr[IW[i]][IX[i]], fr_conf[IW[i]][IX[i]]), (bits[i * 2] & 1, conf[i * 2]));
+        }
     }
 
     #[test]

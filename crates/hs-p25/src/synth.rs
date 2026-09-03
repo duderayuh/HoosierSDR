@@ -16,6 +16,19 @@ pub fn sync_dibits() -> Vec<u8> {
 
 /// Insert status dibits at transmitted positions ≡ 35 (mod 36) from frame
 /// start. Input: FS+NID+payload without status; output: over-the-air stream.
+///
+/// Call this once per frame, not once over several frames' content
+/// concatenated together: `Framer` resets its own status-dibit counter
+/// (`since_fs`) to the FSW length on every sync it finds, so each frame's
+/// status dibits are numbered from *its own* FSW, not from a running count
+/// since stream start. A multi-frame test fixture that wants back-to-back
+/// frames must therefore call this per frame (as [`build_tsdu`] does) and,
+/// when one frame's declared length leaves a status dibit due exactly where
+/// the next frame's FSW would start, insert one deferred idle dibit (`0b01`)
+/// between them by hand — the FSW itself is never interrupted, so the status
+/// dibit is pushed to just before it rather than into it. See
+/// `framer_e2e.rs`'s flywheel test for a worked example of the collision
+/// case.
 pub fn insert_status(frame: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(frame.len() + frame.len() / 35 + 1);
     let mut it = frame.iter();
@@ -38,7 +51,8 @@ pub fn insert_status(frame: &[u8]) -> Vec<u8> {
 }
 
 /// Build a complete TSDU over-the-air dibit stream for the given TSBKs
-/// (each as (opcode, mfid, args); last block flagged automatically).
+/// (each as (opcode, mfid, args); last block flagged automatically). See
+/// [`insert_status`] for how to correctly chain several of these together.
 pub fn build_tsdu(nac: u16, tsbks: &[(u8, u8, u64)]) -> Vec<u8> {
     assert!(!tsbks.is_empty() && tsbks.len() <= 3);
     let codec = NidCodec::new();

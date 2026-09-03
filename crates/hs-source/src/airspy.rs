@@ -14,10 +14,22 @@
 //!   firmware for float32 hangs it. Samples are 12-bit data in int16, scaled
 //!   here by 1/32768 exactly as the `.cs16` file loader does, so a live run
 //!   and a replayed `airspy_rx -t 2` capture are numerically identical.
-//! * **Setting any gain wedges USB streaming** until the board is replugged.
-//!   This source therefore makes *no* gain or AGC calls and runs the
-//!   firmware's defaults — which decoded a control channel at its full TSBK
-//!   rate. A requested gain is reported back as ignored rather than applied.
+//! * **Gain is applied at open, before `airspy_start_rx`** — the same order
+//!   `airspy_rx` itself uses. This module used to claim "setting any gain
+//!   wedges USB streaming until the board is replugged" and made no gain
+//!   calls at all, running whatever the firmware defaults to (measured
+//!   2026-09-03 on this exact board/firmware/serial at idle: RMS ≈ 0.0008,
+//!   too low to detect the local control channel at all — see
+//!   `results/baselines.md`). That claim does not reproduce on today's
+//!   libairspy (1.0.10): `airspy_rx -l 14 -m 12 -v 12` captured cleanly (RMS
+//!   0.0008 → 0.122, ~43 dB more) and `airspy_info` still saw the device
+//!   immediately afterward, no replug needed. Gain-at-open now defaults to
+//!   [`DEFAULT_SENSITIVITY_GAIN`], tuned for weak-signal reception, and is
+//!   still fully overridable via [`GainSetting`]. A *mid-stream* gain change
+//!   (the [`GainHandle`] path `read()` applies on the fly) was not
+//!   specifically re-tested and stays exactly as before — opt-in, used only
+//!   when a caller asks for a live gain change after the radio is already
+//!   streaming.
 //! * Supported rates are exactly those the board advertises (10 and 2.5 MSPS
 //!   on an R2). Neither divides by 4800; the caller normalizes downstream
 //!   (see `hs_core::stream::Normalized`).
@@ -78,11 +90,20 @@ extern "C" {
     fn airspy_set_sensitivity_gain(device: *mut AirspyDevice, value: u8) -> i32;
 }
 
-/// Apply one gain setting to an open device. **Opt-in only**: on the R2
-/// firmware this project was developed against (NOS rc10, 2016) any gain
-/// call wedged USB streaming until the board was replugged, so the app
-/// asks before using these. Newer firmware takes them normally (this is
-/// what SDRTrunk's Airspy linearity/sensitivity controls do).
+/// Sensitivity-gain level (0–21) applied by default when the caller doesn't
+/// request a specific gain. Sensitivity favours front-end (LNA) gain over
+/// linearity, which is the right tradeoff for a weak, already-band-limited
+/// P25 signal rather than a strong nearby blocker (this is what SDRTrunk's
+/// Airspy "sensitivity" control does too). Picked from a real off-air
+/// capture of the local site (see `results/baselines.md`); raise it further
+/// if a site is still too weak to detect, or drop to `AirspyLinearity`/
+/// `AirspyManual` if a strong nearby signal starts clipping the ADC.
+pub const DEFAULT_SENSITIVITY_GAIN: u8 = 15;
+
+/// Apply one gain setting to an open device. Called from `open()` before
+/// `airspy_start_rx` (see the module notes — this firmware takes gain calls
+/// fine at that point) and from the live [`GainHandle`] path while already
+/// streaming.
 ///
 /// # Safety
 /// `dev` must be an open device.
@@ -179,7 +200,7 @@ pub struct AirspySource {
     /// Leftover from a block the caller's buffer couldn't hold.
     pending: Vec<f32>,
     pending_pos: usize,
-    gain_ignored: Option<f64>,
+    applied_gain: GainSetting,
     gain: GainHandle,
     freq: FreqHandle,
 }
@@ -204,8 +225,11 @@ impl AirspySource {
     /// Open an Airspy (the one with `serial`, or the first found), tune to
     /// `center_freq` Hz and stream INT16 IQ at `sample_rate` — which must be
     /// one of the rates the board advertises (10 or 2.5 MSPS on an R2).
-    /// `gain` is accepted for interface parity but **not applied** (see the
-    /// module notes); `gain_ignored()` reports it so the caller can say so.
+    /// `gain` sets the sensitivity-gain level (0–21, clamped) at open, before
+    /// streaming starts; `None` defaults to [`DEFAULT_SENSITIVITY_GAIN`].
+    /// `applied_gain()` reports what was actually set. For finer control
+    /// (linearity gain, or hand-set LNA/mixer/VGA) use [`Self::set_gain`] or
+    /// a live [`GainHandle`] with the richer [`GainSetting`] variants.
     pub fn open(
         serial: Option<u64>,
         center_freq: f64,
@@ -268,7 +292,17 @@ impl AirspySource {
                 close(dev);
                 return Err(fail("set_freq", r));
             }
-            // Deliberately no gain / AGC calls — see the module notes.
+            // Gain at open, before streaming starts — see the module notes on
+            // why this is safe on this firmware despite the historical claim
+            // to the contrary.
+            let level = gain
+                .map(|g| g.clamp(0.0, 21.0).round() as u8)
+                .unwrap_or(DEFAULT_SENSITIVITY_GAIN);
+            let applied_gain = GainSetting::AirspySensitivity(level);
+            if let Err(e) = apply_airspy_gain(dev, &applied_gain) {
+                close(dev);
+                return Err(e);
+            }
 
             // ~2 s of queue at 2.5 MSPS (blocks are 65536 complex samples).
             let (tx, rx) = sync_channel::<Vec<f32>>(96);
@@ -291,16 +325,16 @@ impl AirspySource {
                 center_freq,
                 pending: Vec::new(),
                 pending_pos: 0,
-                gain_ignored: gain,
+                applied_gain,
                 gain: GainHandle::default(),
                 freq: FreqHandle::default(),
             })
         }
     }
 
-    /// The gain the caller asked for, which this firmware cannot be given.
-    pub fn gain_ignored(&self) -> Option<f64> {
-        self.gain_ignored
+    /// The gain setting actually applied at open (see `open()`).
+    pub fn applied_gain(&self) -> &GainSetting {
+        &self.applied_gain
     }
 
     /// Apply a gain setting now (the radio may be streaming). Opt-in: see

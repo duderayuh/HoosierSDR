@@ -477,7 +477,16 @@ fn a_loud_adjacent_channel_does_not_garble_the_call() {
         "traffic channel lost to its neighbour"
     );
     assert!(!call.pcm.is_empty(), "no audio with a loud neighbour");
-    assert_eq!(call.modulation, Some(Modulation::Cqpsk));
+    // This used to pin Cqpsk: the channel filter was wide enough (an 8 kHz
+    // half-width, past the 6.25 kHz midpoint to this very neighbour) that the
+    // 3x-amplitude interferer differentially impaired C4FM more than CQPSK,
+    // forcing the arbitration race. With the filter fixed to a half-width
+    // that actually rejects a channel one spacing away
+    // (P25_CHANNEL_HALF_BW_HZ), both decoders now lock cleanly through this
+    // neighbour (verified: nonzero syncs on both), so the outcome is the
+    // legitimate either-way race the module doc describes for a clean
+    // channel — same relaxed assertion as the no-neighbour test above.
+    assert!(call.modulation.is_some(), "call reported no modulation");
 }
 
 #[test]
