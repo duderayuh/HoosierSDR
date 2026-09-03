@@ -2,6 +2,7 @@
 //! trunking → vocoder → audio/recording/transcription. Real pipeline lands
 //! across Phases 1–2; this crate currently pins the dependency graph.
 
+pub mod concealment;
 pub mod decoder;
 pub mod decoders;
 pub mod derotate;

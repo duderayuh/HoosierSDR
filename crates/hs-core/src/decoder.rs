@@ -179,9 +179,11 @@ pub struct ChannelDecoder {
     /// Over-the-air alias words on a traffic channel.
     talker: hs_p25::talker_alias::TalkerAliasAssembler,
     /// Composite quality of the most recently decoded voice frame — see
-    /// [`VoiceQuality`]. Surfaced for a live UI meter and for concealment
-    /// decisions downstream (`app::player`).
+    /// [`VoiceQuality`]. Surfaced for a live UI meter.
     last_voice_quality: Option<VoiceQuality>,
+    /// Frame-repeat concealment and level normalization applied to voice PCM
+    /// before it leaves this decoder — see [`crate::concealment`].
+    concealer: crate::concealment::Concealer,
 }
 
 impl ChannelDecoder {
@@ -256,6 +258,7 @@ impl ChannelDecoder {
             prev_level: 0.0,
             talker: hs_p25::talker_alias::TalkerAliasAssembler::new(),
             last_voice_quality: None,
+            concealer: crate::concealment::Concealer::new(),
         }
     }
 
@@ -577,7 +580,7 @@ impl ChannelDecoder {
                 // guide FEC correction ahead of the vocoder, rather than
                 // handing it hard-sliced bits alone.
                 for (frame, frame_conf) in imbe.iter().zip(conf.iter()) {
-                    let pcm = self.vocoder.decode_soft(frame, frame_conf);
+                    let mut pcm = self.vocoder.decode_soft(frame, frame_conf);
                     self.diag.voice_frames += 1;
                     self.diag.pcm_samples += pcm.len() as u64;
                     let errs = self.vocoder.last_errs.max(0) as u32;
@@ -596,6 +599,9 @@ impl ChannelDecoder {
                     self.diag.record_voice_quality(quality);
                     self.last_voice_quality = Some(quality);
                     out.voice_quality.push(quality);
+                    // Concealment/leveling operates on the frame mbelib just
+                    // produced, in place — see `crate::concealment`.
+                    self.concealer.process(&mut pcm, quality);
                     out.pcm.extend_from_slice(&pcm);
                 }
             }
