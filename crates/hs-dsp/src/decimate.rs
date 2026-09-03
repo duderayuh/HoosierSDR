@@ -13,12 +13,13 @@
 //! passband.
 
 use crate::fir::{lowpass_taps, FirC};
-use crate::{C32, P25_SYMBOL_RATE};
+use crate::{C32, P25_CHANNEL_HALF_BW_HZ, P25_SYMBOL_RATE};
 
-/// Passband half-width to preserve, in Hz. A 12.5 kHz P25 channel is
-/// comfortably inside ±8 kHz for both C4FM (frequency deviation ±1.8 kHz plus
-/// shaping skirts) and CQPSK (β=0.2 → ±2.88 kHz).
-const PASSBAND_HZ: f64 = 8_000.0;
+/// Passband half-width to preserve, in Hz. See
+/// [`P25_CHANNEL_HALF_BW_HZ`](crate::P25_CHANNEL_HALF_BW_HZ) — this used to be
+/// 8 kHz, roughly three times the CQPSK requirement, which let a channel one
+/// spacing away fold straight into the passband.
+const PASSBAND_HZ: f64 = P25_CHANNEL_HALF_BW_HZ;
 
 /// Samples/symbol the demodulators are tuned for. Decimation targets the
 /// largest integer factor that keeps the working rate at or above this.
@@ -108,14 +109,33 @@ impl Decimator {
         let fir = if plan.factor == 1 {
             None
         } else {
-            // Passband to PASSBAND_HZ, stopband from the output Nyquist so
-            // nothing can fold in. Hamming needs ~3.3/Δf normalized taps to
-            // resolve that transition.
+            // Passband to PASSBAND_HZ; stopband to halfway to the next P25
+            // channel (P25_CHANNEL_SPACING_HZ / 2) — the actual
+            // adjacent-channel rejection requirement, not the decimator's own
+            // output Nyquist. The output Nyquist is usually much farther out
+            // (24 kHz at TARGET_SPS=10) and using it as the stopband target is
+            // what let a channel one spacing away leak through: it bought a
+            // needlessly loose transition instead of one aimed at the actual
+            // neighbour. Clamped below by the output Nyquist as a safety net
+            // (it should never be closer than the 6.25 kHz target, but this
+            // keeps the filter well-formed if TARGET_SPS ever changes).
             let cutoff = PASSBAND_HZ / sample_rate;
-            let stop = plan.working_rate / 2.0 / sample_rate;
+            let stop = (crate::P25_CHANNEL_SPACING_HZ / 2.0 / sample_rate)
+                .min(plan.working_rate / 2.0 / sample_rate);
             let transition = (stop - cutoff).max(1e-3);
+            // Hamming needs ~3.3/Δf normalized taps to resolve that
+            // transition. At a heavily-oversampled input (a raw multi-MSPS
+            // Airspy capture decoded as one channel, rather than through the
+            // whole-site channelizer) that normalized transition is tiny and
+            // would call for tens of thousands of taps; clamp the compute
+            // budget and accept a wider realized transition there rather than
+            // blow the real-time budget. RTL-SDR (240 kHz) and Airspy
+            // normalized to 2.4 MSPS still get the full 1,750 Hz design under
+            // this clamp; only the rarely-used direct-9.6-MSPS single-channel
+            // path is clamped, and even clamped it still lands its −6 dB
+            // point well inside the old 8 kHz-half-width design's transition.
             let mut n = (3.3 / transition).ceil() as usize;
-            n = n.clamp(31, 4095);
+            n = n.clamp(31, 8_191);
             if n.is_multiple_of(2) {
                 n += 1;
             }
@@ -215,6 +235,39 @@ mod tests {
         assert!(
             rejection_db > 40.0,
             "adjacent-channel rejection only {rejection_db:.1} dB"
+        );
+    }
+
+    /// The 50 kHz test above is deep stopband on *any* half-width under
+    /// 25 kHz, so it passed even with the old 8 kHz half-width bug and proved
+    /// nothing about the real requirement: rejecting a channel a single P25
+    /// spacing (12.5 kHz) away, which the old passband was wide enough to let
+    /// straight through (its half-width, 8 kHz, was itself past the 6.25 kHz
+    /// midpoint between channels). Put the interferer at the real spacing.
+    #[test]
+    fn rejects_the_true_next_p25_channel_at_12_5_khz_spacing() {
+        let fs = 240_000.0;
+        let mut dec = Decimator::new(fs, TARGET_SPS);
+        let mut wanted = Decimator::new(fs, TARGET_SPS);
+        let (mut adj_pow, mut want_pow) = (0.0f64, 0.0f64);
+        let n = 80_000;
+        for i in 0..n {
+            let t = i as f64 / fs;
+            // A tone at the adjacent channel's own centre frequency —
+            // P25_CHANNEL_SPACING_HZ away, not an arbitrary 50 kHz.
+            let a = 2.0 * std::f64::consts::PI * crate::P25_CHANNEL_SPACING_HZ * t;
+            let w = 2.0 * std::f64::consts::PI * 1_000.0 * t;
+            if let Some(y) = dec.push(C32::new(a.cos() as f32, a.sin() as f32)) {
+                adj_pow += y.norm_sq() as f64;
+            }
+            if let Some(y) = wanted.push(C32::new(w.cos() as f32, w.sin() as f32)) {
+                want_pow += y.norm_sq() as f64;
+            }
+        }
+        let rejection_db = 10.0 * (want_pow / adj_pow.max(1e-30)).log10();
+        assert!(
+            rejection_db > 30.0,
+            "true-adjacent-channel rejection only {rejection_db:.1} dB"
         );
     }
 

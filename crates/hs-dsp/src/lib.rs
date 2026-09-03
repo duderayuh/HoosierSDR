@@ -82,3 +82,23 @@ impl core::ops::Mul for C32 {
 
 /// P25 symbol rate, symbols/second.
 pub const P25_SYMBOL_RATE: f64 = 4800.0;
+
+/// P25 channel spacing, Hz — adjacent channels on a site sit this far apart.
+pub const P25_CHANNEL_SPACING_HZ: f64 = 12_500.0;
+
+/// Half-width, Hz, to preserve when filtering a single P25 channel out of a
+/// wideband capture. Covers both modulations' occupied bandwidth — CQPSK RRC
+/// (β=0.2, 4800 baud) needs ±2,880 Hz; C4FM's Carson's-rule bandwidth is
+/// wider, ±(1,800 Hz deviation + 2,400 Hz half-symbol-rate) = ±4,200 Hz —
+/// with real margin (not just past the theoretical edge) for practical,
+/// finite-length pulse shaping, timing jitter and residual tuner error, while
+/// still leaving a guard band (750 Hz) before the midpoint to the next
+/// channel at half the spacing (±6,250 Hz). A half-width anywhere near that
+/// midpoint (the once-used ±8,000 Hz was past it) lets the neighbouring
+/// channel straight into the demodulator; cutting all the way down to the
+/// ±2,880 Hz CQPSK number with no margin measurably hurt acquisition in
+/// practice (see `hs-core/tests/follow_trunk.rs`) — it clips enough of the
+/// RRC pulse's own tails to compound with the receiver's matched filter and
+/// raise ISI. 6 kHz was the narrowest value that still acquired reliably in
+/// that regression.
+pub const P25_CHANNEL_HALF_BW_HZ: f64 = 6_000.0;
