@@ -222,12 +222,14 @@ fn print_help() {
                through SoapySDR/librtlsdr — needed for an E4000 (Smartee XTR)
                the pure-Rust driver can't drive. An Airspy R2 runs at
                --rate 2500000 or 10000000; the stream is normalized to
-               2.4/9.6 MSPS on the fly. Its firmware takes no gain setting.
+               2.4/9.6 MSPS on the fly.
 --serial <HEX> Pick one of several Airspys by serial (see airspy_info)
 --secs <S>     Stop a live capture after S seconds and print the summary
                (otherwise it runs until Ctrl-C)\n\
              --freq <HZ>    SDR center frequency (accepts 851M, 851.0125e6; default 851M)\n\
-             --gain <DB>    SDR manual gain in dB (omit for hardware AGC)\n\
+             --gain <DB>    RTL-SDR: manual gain in dB (omit for hardware AGC). Airspy:\n\
+             \x20              a 0-21 sensitivity-gain level (omit for a weak-signal\n\
+             \x20              default); lower it if a strong nearby signal clips.\n\
              --catalog <P>  RadioReference talkgroup CSV: show names instead of TG numbers\n\
              --rr-system <N> Download a trunked system\'s sites, control channels and\n\
              \x20              talkgroups from RadioReference and print where to tune.\n\
@@ -916,12 +918,16 @@ fn run_sdr(args: &Args) {
                     std::process::exit(1);
                 }
             };
-            if let Some(g) = src.gain_ignored() {
-                eprintln!(
-                    "note: --gain {g} ignored — the Airspy R2 firmware hangs on gain \
-                     commands, so it runs at its default gain"
-                );
-            }
+            println!(
+                "airspy gain: {:?}{}",
+                src.applied_gain(),
+                if args.gain.is_none() {
+                    " (default — pass --gain 0-21 for a sensitivity-gain level, \
+                     lower if a strong nearby signal clips)"
+                } else {
+                    ""
+                }
+            );
             let src = Normalized::new(src);
             if src.is_resampling() {
                 use hs_source::SdrSource;
