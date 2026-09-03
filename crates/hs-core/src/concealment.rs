@@ -41,12 +41,19 @@ pub struct Concealer {
     agc: AudioAgc,
 }
 
+/// AGC target power for voice PCM: 0.015 (RMS ≈ 0.12 of full scale) rather
+/// than `AudioAgc::new`'s default 0.0625 (RMS 0.25), which measurably
+/// clipped real decoded speech (see the commit that added this constant —
+/// ~2.6% of samples on a real live call). At 0.015, a peak needs to reach
+/// ~8x RMS before clipping, comfortably past real speech's crest factor.
+const VOICE_AGC_TARGET: f32 = 0.015;
+
 impl Concealer {
     pub fn new() -> Self {
         Self {
             held: Vec::new(),
             held_repeats: 0,
-            agc: AudioAgc::new(),
+            agc: AudioAgc::with_target(VOICE_AGC_TARGET),
         }
     }
 
@@ -83,17 +90,11 @@ impl Concealer {
             self.held.clear();
             self.held.extend_from_slice(pcm);
         }
-        // NOTE: measured on a real live-decoded call (see the commit that
-        // added this module), AudioAgc's shared 0.0625-power target — tuned
-        // against the AM/NBFM/DCS analog paths — left ~2.6% of samples
-        // clipped on real IMBE-synthesized speech, well above the <0.5% a
-        // transparent limiter should produce. Left as-is rather than
-        // changed here: AudioAgc is shared with those other decoders, and
-        // lowering its target to suit voice's apparent crest factor needs
-        // verifying against *their* audio too, which this pass didn't do.
-        // Worth a follow-up: either a voice-specific target/headroom, or a
-        // soft-knee limiter ahead of the hard clamp `AudioAgc::sample` does
-        // internally.
+        // Uses VOICE_AGC_TARGET, not AudioAgc::new's default: a real live
+        // call measured ~2.6% of samples clipped at the default 0.0625
+        // target (see git history) — this crate's other AudioAgc users
+        // (AM/NBFM/DCS) are unaffected, since `with_target` is additive and
+        // their own `AudioAgc::new()` call sites are untouched.
         for s in pcm.iter_mut() {
             *s = self.agc.sample(*s as f32 / 32_768.0);
         }
@@ -179,6 +180,46 @@ mod tests {
         assert!(
             last_conceal_magnitude.abs() < 5000,
             "concealment should fade toward silence, not repeat the held buffer forever: got {last_conceal_magnitude}"
+        );
+    }
+
+    /// Regression test for real clipping measured on a live-decoded call:
+    /// a synthetic signal with a speech-like crest factor (~5x, periodic
+    /// loud bursts over a quiet baseline) fed through many "good" frames —
+    /// enough for the slow (alpha=0.001) AGC to settle before measuring —
+    /// must clip only rarely once settled.
+    #[test]
+    fn agc_target_leaves_headroom_for_a_speech_like_crest_factor() {
+        let mut c = Concealer::new();
+        let settle_frames = 300;
+        let measure_frames = 300;
+        let mut clipped = 0usize;
+        let mut total = 0usize;
+        for frame_idx in 0..(settle_frames + measure_frames) {
+            let mut pcm = [0i16; 160];
+            for (i, s) in pcm.iter_mut().enumerate() {
+                let n = (frame_idx * 160 + i) as f32;
+                let base = 3000.0 * (n * 0.05).sin();
+                // A short, ~5x-amplitude burst every 50 samples — a crude
+                // stand-in for a syllable peak over quieter speech.
+                let in_burst = (n as i64) % 50 < 5;
+                let burst = if in_burst { 15_000.0 * (n * 0.3).sin() } else { 0.0 };
+                *s = (base + burst) as i16;
+            }
+            c.process(&mut pcm, good());
+            if frame_idx >= settle_frames {
+                for &s in &pcm {
+                    total += 1;
+                    if s.unsigned_abs() >= 32_767 {
+                        clipped += 1;
+                    }
+                }
+            }
+        }
+        let frac = clipped as f32 / total as f32;
+        assert!(
+            frac < 0.005,
+            "clipped fraction too high for a speech-like crest factor: {frac:.4} ({clipped}/{total})"
         );
     }
 

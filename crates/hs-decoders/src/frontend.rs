@@ -191,11 +191,20 @@ pub struct AudioAgc {
 
 impl AudioAgc {
     pub fn new() -> Self {
+        Self::with_target(0.0625)
+    }
+
+    /// As [`AudioAgc::new`], but targeting `target` mean-square power instead
+    /// of the default 0.0625 (~0.25 full-scale RMS). A caller whose audio has
+    /// a higher crest factor than the analog paths this default was tuned
+    /// against — e.g. vocoded speech — needs a lower target for the same
+    /// clipping margin: at 0.0625 (RMS 0.25), any peak past 4x RMS clips,
+    /// which real speech's crest factor exceeds often enough to be audible.
+    pub fn with_target(target: f32) -> Self {
         Self {
             power: 0.0,
             alpha: 0.001,
-            // ~0.25 full-scale RMS leaves headroom for peaks before clipping.
-            target: 0.0625,
+            target,
             gain: 1.0,
         }
     }
