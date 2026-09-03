@@ -83,6 +83,17 @@ impl Concealer {
             self.held.clear();
             self.held.extend_from_slice(pcm);
         }
+        // NOTE: measured on a real live-decoded call (see the commit that
+        // added this module), AudioAgc's shared 0.0625-power target — tuned
+        // against the AM/NBFM/DCS analog paths — left ~2.6% of samples
+        // clipped on real IMBE-synthesized speech, well above the <0.5% a
+        // transparent limiter should produce. Left as-is rather than
+        // changed here: AudioAgc is shared with those other decoders, and
+        // lowering its target to suit voice's apparent crest factor needs
+        // verifying against *their* audio too, which this pass didn't do.
+        // Worth a follow-up: either a voice-specific target/headroom, or a
+        // soft-knee limiter ahead of the hard clamp `AudioAgc::sample` does
+        // internally.
         for s in pcm.iter_mut() {
             *s = self.agc.sample(*s as f32 / 32_768.0);
         }

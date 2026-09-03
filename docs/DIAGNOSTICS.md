@@ -36,6 +36,11 @@ pass to `--rate` must match the capture and be a multiple of 4800.
 | `equalizer` | whether the experimental equalizer was enabled |
 | `symbols_processed` | total C4FM symbols recovered |
 | `voice_frames` / `pcm_samples` | decoded IMBE frames and audio samples |
+| `voice_frame_errors` | cumulative post-FEC bit-error count across all voice frames (mbelib's `errs2`) |
+| `voice_frames_holding` | voice frames whose `errs2` exceeded 5 — mbelib rejected them as too corrupt and concealed by holding the previous frame |
+| `voice_error_max` | worst single-frame `errs2` seen |
+| `mean_voice_quality` | mean composite `VoiceQuality` score (0..1) across all voice frames — combines FEC error count, pre-FEC demodulator confidence, and (CQPSK) carrier lock; a fuller picture than `voice_frame_errors` alone, which can miss a frame that passed FEC clean while every symbol sat on a decision boundary the whole time |
+| `voice_frames_low_quality` | voice frames whose composite score fell under 0.5 — a superset of `voice_frames_holding` that also catches the low-confidence-but-FEC-clean case above |
 | `sync_count` | frame-sync detections |
 | `mean_sync_bit_errors` | avg bit errors in the 48-bit sync correlation (↓ better) |
 | `symbol_health.level_counts` | histogram of sliced dibits `[+3,+1,-1,-3]` |
