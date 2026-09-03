@@ -35,6 +35,67 @@ pub enum Modulation {
     Cqpsk,
 }
 
+/// A composite per-voice-frame quality signal, combining sources that used
+/// to live in isolation: FEC syndrome errors (mbelib's `errs2`, corrected
+/// *after* the fact) and the demodulator's own amplitude-margin confidence
+/// (before FEC — see `hs_p25::soft`) and carrier lock (CQPSK only). Any one
+/// alone is a partial picture: a frame can pass FEC cleanly (`fec_errors` at
+/// or near 0) while every symbol sat right on a decision boundary the whole
+/// time (`confidence` low) — a channel visibly *about* to drop, that a purely
+/// error-count-based signal only notices after it already has.
+#[derive(Clone, Copy, Debug)]
+pub struct VoiceQuality {
+    /// Mean per-bit demodulator confidence across the frame's protected bits
+    /// (`hs_p25::soft`'s 0..255 scale), normalized to 0.0..1.0.
+    pub confidence: f32,
+    /// mbelib's post-correction error count for this frame (`errs2`).
+    pub fec_errors: u32,
+    /// CQPSK carrier-lock quality at decode time (`ChannelDecoder::cqpsk_lock`),
+    /// `None` on the C4FM path, which has no equivalent metric.
+    pub lock: Option<f32>,
+}
+
+/// Mean per-bit confidence across an IMBE frame's real (protected or not)
+/// bit positions, normalized to 0.0..1.0. Positions beyond a codeword row's
+/// own width (see `hs_p25::voice::IMBE_CODEWORD_WIDTHS`) are unused storage,
+/// not real bits, and must be excluded or they'd silently dilute the mean
+/// with `CERTAIN`-defaulted padding that was never actually demodulated.
+fn mean_confidence(conf: &hs_p25::voice::ImbeConf) -> f32 {
+    use hs_p25::voice::IMBE_CODEWORD_WIDTHS;
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for (row, &width) in conf.iter().zip(IMBE_CODEWORD_WIDTHS.iter()) {
+        for &c in &row[..width] {
+            sum += c as u64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return 1.0;
+    }
+    (sum as f32 / n as f32) / 255.0
+}
+
+impl VoiceQuality {
+    /// Above this many FEC corrections a frame is graded as if it had none
+    /// left to spend — matches the FEC-only threshold `voice_frames_holding`
+    /// used before this existed, so the two signals agree at the edges.
+    const FEC_ERROR_SATURATION: f32 = 10.0;
+
+    /// Combine the three signals into one 0.0 (drop it) .. 1.0 (solid) score.
+    /// Weighted 40% confidence / 40% FEC / 20% lock when lock is available;
+    /// confidence and FEC split the lock's share evenly on C4FM (no lock
+    /// metric exists there, and a missing signal should never silently
+    /// downgrade every C4FM frame relative to CQPSK).
+    pub fn score(&self) -> f32 {
+        let fec_frac = (1.0 - self.fec_errors as f32 / Self::FEC_ERROR_SATURATION).clamp(0.0, 1.0);
+        match self.lock {
+            Some(lock) => 0.4 * self.confidence + 0.4 * fec_frac + 0.2 * lock.clamp(0.0, 1.0),
+            None => 0.5 * self.confidence + 0.5 * fec_frac,
+        }
+    }
+}
+
 /// Output of the decoder for one processed IQ block.
 #[derive(Default)]
 pub struct DecodeOutput {
@@ -42,6 +103,9 @@ pub struct DecodeOutput {
     pub grants: Vec<Grant>,
     /// PCM samples (8 kHz mono i16) decoded from clear voice frames.
     pub pcm: Vec<i16>,
+    /// Quality signal for each voice frame decoded this block, index-aligned
+    /// with 160-sample chunks of `pcm` in order (one entry per IMBE frame).
+    pub voice_quality: Vec<VoiceQuality>,
     /// Talkgroups skipped this block because they were encrypted.
     pub encrypted_skips: Vec<u16>,
     /// Frame-sync detections (for diagnostics / bench metrics).
@@ -114,6 +178,10 @@ pub struct ChannelDecoder {
     prev_level: f32,
     /// Over-the-air alias words on a traffic channel.
     talker: hs_p25::talker_alias::TalkerAliasAssembler,
+    /// Composite quality of the most recently decoded voice frame — see
+    /// [`VoiceQuality`]. Surfaced for a live UI meter and for concealment
+    /// decisions downstream (`app::player`).
+    last_voice_quality: Option<VoiceQuality>,
 }
 
 impl ChannelDecoder {
@@ -187,7 +255,18 @@ impl ChannelDecoder {
             symbols: std::collections::VecDeque::with_capacity(SYMBOL_RING),
             prev_level: 0.0,
             talker: hs_p25::talker_alias::TalkerAliasAssembler::new(),
+            last_voice_quality: None,
         }
+    }
+
+    /// Composite quality of the most recently decoded voice frame (see
+    /// [`VoiceQuality`]), `None` before the first one. Combines what used to
+    /// be three separate signals — FEC error count, demodulator confidence,
+    /// and (CQPSK only) carrier lock — that a UI or concealment stage would
+    /// otherwise have to reconcile itself, or (as before this existed) not
+    /// reconcile at all and rely on FEC error count alone.
+    pub fn last_voice_quality(&self) -> Option<VoiceQuality> {
+        self.last_voice_quality
     }
 
     /// Recent decision-stage symbols, oldest first. CQPSK: equalized (I, Q),
@@ -476,7 +555,7 @@ impl ChannelDecoder {
                 }
             }
             FramerEvent::Ldu {
-                imbe, algid, duid, ..
+                imbe, conf, algid, duid, ..
             } => {
                 let encrypted = match duid {
                     Duid::LogicalLinkDataUnit2 => algid
@@ -492,9 +571,13 @@ impl ChannelDecoder {
                     self.active_enc = true;
                     return;
                 }
-                // Clear voice: synthesize audio for all nine IMBE frames.
-                for frame in imbe.iter() {
-                    let pcm = self.vocoder.decode(frame);
+                // Clear voice: synthesize audio for all nine IMBE frames,
+                // using the demodulator's per-bit confidence (amplitude
+                // margin from the decision boundary — see hs_p25::soft) to
+                // guide FEC correction ahead of the vocoder, rather than
+                // handing it hard-sliced bits alone.
+                for (frame, frame_conf) in imbe.iter().zip(conf.iter()) {
+                    let pcm = self.vocoder.decode_soft(frame, frame_conf);
                     self.diag.voice_frames += 1;
                     self.diag.pcm_samples += pcm.len() as u64;
                     let errs = self.vocoder.last_errs.max(0) as u32;
@@ -505,6 +588,14 @@ impl ChannelDecoder {
                     if errs > self.diag.voice_error_max {
                         self.diag.voice_error_max = errs;
                     }
+                    let quality = VoiceQuality {
+                        confidence: mean_confidence(frame_conf),
+                        fec_errors: errs,
+                        lock: self.cqpsk_lock(),
+                    };
+                    self.diag.record_voice_quality(quality);
+                    self.last_voice_quality = Some(quality);
+                    out.voice_quality.push(quality);
                     out.pcm.extend_from_slice(&pcm);
                 }
             }
@@ -743,5 +834,102 @@ impl ChannelDecoder {
 
     pub fn vocoder_name(&self) -> &'static str {
         self.vocoder.name()
+    }
+}
+
+#[cfg(test)]
+mod voice_quality_tests {
+    use super::*;
+    use hs_p25::soft::CERTAIN;
+
+    fn conf_at(level: u8) -> hs_p25::voice::ImbeConf {
+        [[level; 23]; 8]
+    }
+
+    #[test]
+    fn mean_confidence_ignores_padding_beyond_each_codewords_real_width() {
+        // Real bits certain, padding beyond each row's width set to 0 (the
+        // lowest possible confidence) — if padding leaked into the mean it
+        // would pull this well under 1.0.
+        let mut conf = conf_at(CERTAIN);
+        for (row, &width) in conf.iter_mut().zip(hs_p25::voice::IMBE_CODEWORD_WIDTHS.iter()) {
+            for c in &mut row[width..] {
+                *c = 0;
+            }
+        }
+        assert_eq!(mean_confidence(&conf), 1.0);
+    }
+
+    #[test]
+    fn mean_confidence_is_zero_for_a_totally_uncertain_frame() {
+        assert_eq!(mean_confidence(&conf_at(0)), 0.0);
+    }
+
+    #[test]
+    fn score_rewards_confidence_fec_and_lock_independently() {
+        let clean = VoiceQuality {
+            confidence: 1.0,
+            fec_errors: 0,
+            lock: Some(1.0),
+        };
+        assert_eq!(clean.score(), 1.0);
+
+        let low_confidence = VoiceQuality {
+            confidence: 0.0,
+            ..clean
+        };
+        let high_fec = VoiceQuality {
+            fec_errors: 20,
+            ..clean
+        };
+        let no_lock = VoiceQuality {
+            lock: Some(0.0),
+            ..clean
+        };
+        // Each degraded signal, alone, must pull the score down from a
+        // perfect frame — a signal that never moves the score would be
+        // dead weight in the formula, exactly the "ignoring amplitude" bug
+        // this replaces (confidence used to be exactly such dead weight).
+        assert!(low_confidence.score() < clean.score());
+        assert!(high_fec.score() < clean.score());
+        assert!(no_lock.score() < clean.score());
+    }
+
+    #[test]
+    fn score_does_not_penalize_c4fm_for_lacking_a_lock_metric() {
+        // No lock signal exists on C4FM; a clean C4FM frame must still score
+        // a perfect 1.0, not be capped below CQPSK for missing a metric that
+        // doesn't apply to it.
+        let c4fm_clean = VoiceQuality {
+            confidence: 1.0,
+            fec_errors: 0,
+            lock: None,
+        };
+        assert_eq!(c4fm_clean.score(), 1.0);
+    }
+
+    #[test]
+    fn record_voice_quality_tracks_a_running_mean_and_low_quality_count() {
+        let mut diag = crate::diag::Diagnostics::new(48_000.0, false);
+        // Frame 1: perfect.
+        diag.voice_frames = 1;
+        diag.record_voice_quality(VoiceQuality {
+            confidence: 1.0,
+            fec_errors: 0,
+            lock: None,
+        });
+        assert_eq!(diag.mean_voice_quality(), 1.0);
+        assert_eq!(diag.voice_frames_low_quality, 0);
+
+        // Frame 2: bad enough to count as low-quality even though FEC alone
+        // (fec_errors: 1, barely nonzero) would call this frame nearly clean.
+        diag.voice_frames = 2;
+        diag.record_voice_quality(VoiceQuality {
+            confidence: 0.0,
+            fec_errors: 1,
+            lock: None,
+        });
+        assert_eq!(diag.voice_frames_low_quality, 1);
+        assert!(diag.mean_voice_quality() < 1.0);
     }
 }

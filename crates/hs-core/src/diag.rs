@@ -162,6 +162,17 @@ pub struct Diagnostics {
     pub voice_frames_holding: u64,
     /// Worst single-frame error count seen.
     pub voice_error_max: u32,
+    /// Running sum of `VoiceQuality::score()` across all voice frames, for
+    /// `mean_voice_quality`. FEC error count alone (`voice_frame_errors`
+    /// above) is blind to a frame that passed FEC clean while every symbol
+    /// sat on a decision boundary the whole time; this is the composite
+    /// signal that also sees that.
+    voice_quality_sum: f64,
+    /// Voice frames whose *composite* quality score fell under 0.5 — frames
+    /// a purely FEC-error-count view (`voice_frames_holding` above) can miss
+    /// entirely when low confidence didn't happen to produce a correctable
+    /// error this particular frame.
+    pub voice_frames_low_quality: u64,
     pub health: SymbolHealth,
 }
 
@@ -198,6 +209,29 @@ impl Diagnostics {
         self.syncs.iter().map(|s| s.bit_errors as f64).sum::<f64>() / self.syncs.len() as f64
     }
 
+    /// Fold one voice frame's composite quality into the running diagnostics.
+    /// Separate from `voice_frames_holding` (FEC-error-count only, kept
+    /// unchanged for anything already reading it) — this is the fuller
+    /// picture that also counts a frame low quality *before* a low-confidence
+    /// symbol run happens to also become a correctable FEC error.
+    pub fn record_voice_quality(&mut self, q: crate::decoder::VoiceQuality) {
+        let score = q.score();
+        self.voice_quality_sum += score as f64;
+        if score < 0.5 {
+            self.voice_frames_low_quality += 1;
+        }
+    }
+
+    /// Mean composite voice quality (see [`crate::decoder::VoiceQuality`])
+    /// across every frame recorded so far, 0.0..1.0. 1.0 (vacuously, no
+    /// frames yet) before any voice has decoded.
+    pub fn mean_voice_quality(&self) -> f64 {
+        if self.voice_frames == 0 {
+            return 1.0;
+        }
+        self.voice_quality_sum / self.voice_frames as f64
+    }
+
     /// Serialize to a JSON string. Hand-rolled to keep hs-core dependency-free;
     /// the schema is stable and documented in docs/DIAGNOSTICS.md.
     pub fn to_json(&self) -> String {
@@ -228,6 +262,14 @@ impl Diagnostics {
         s.push_str(&format!(
             "  \"voice_error_max\": {},\n",
             self.voice_error_max
+        ));
+        s.push_str(&format!(
+            "  \"mean_voice_quality\": {:.4},\n",
+            self.mean_voice_quality()
+        ));
+        s.push_str(&format!(
+            "  \"voice_frames_low_quality\": {},\n",
+            self.voice_frames_low_quality
         ));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
         s.push_str(&format!("  \"tsbks\": {},\n", self.tsbks));

@@ -670,6 +670,12 @@ struct StatusMsg {
     sync_err: f64,
     /// Samples/blocks lost between the radio and the decoder so far.
     dropped: u64,
+    /// Composite voice quality (0..1, see `hs_core::decoder::VoiceQuality`)
+    /// of the most recently decoded voice frame — combines FEC error count,
+    /// demodulator confidence, and (CQPSK) carrier lock into the one number
+    /// this app shows for "how good does this call sound right now"; -1
+    /// before any voice has decoded.
+    voice_quality: f32,
 }
 
 #[derive(Serialize, Clone)]
@@ -1437,6 +1443,7 @@ fn capture_loop(
                     clip_pct,
                     sync_err: dec.diagnostics().mean_sync_errors(),
                     dropped: src.dropped(),
+                    voice_quality: dec.last_voice_quality().map(|q| q.score()).unwrap_or(-1.0),
                 },
             );
         }
@@ -1714,6 +1721,7 @@ async fn decode_file(
                 clip_pct: 0.0,
                 sync_err: dec.diagnostics().mean_sync_errors(),
                 dropped: 0,
+                voice_quality: dec.last_voice_quality().map(|q| q.score()).unwrap_or(-1.0),
             },
         );
         Ok(())

@@ -8,7 +8,9 @@
 use crate::nid::{Nid, NidCodec};
 use crate::soft::{SoftDibit, CERTAIN};
 use crate::tsbk::{self, TsbkBlock};
-use crate::voice::{extract_imbe_frames, ldu2_algid_raw, ImbeFrame, LDU_PAYLOAD_BITS};
+use crate::voice::{
+    extract_imbe_conf, extract_imbe_frames, ldu2_algid_raw, ImbeConf, ImbeFrame, LDU_PAYLOAD_BITS,
+};
 use crate::{Duid, FRAME_SYNC, FRAME_SYNC_BITS};
 
 /// Max bit errors tolerated in the 48-bit sync correlation.
@@ -77,6 +79,11 @@ pub enum FramerEvent {
         nac: u16,
         duid: Duid,
         imbe: Box<[ImbeFrame; 9]>,
+        /// Per-bit demodulator confidence for `imbe`, index-aligned
+        /// (`conf[k][w][x]` is the confidence of `imbe[k][w][x]`). Lets a
+        /// downstream soft-decision FEC pass (see `hs_vocoder::imbe`) use
+        /// amplitude information the hard-sliced `imbe` bits alone discard.
+        conf: Box<[ImbeConf; 9]>,
         /// Raw ALGID from LDU2 encryption sync (None for LDU1).
         algid: Option<u8>,
     },
@@ -341,6 +348,12 @@ impl Framer {
                             }
                         }
                         if let Some(frames) = extract_imbe_frames(&bits) {
+                            // Same length guard as `extract_imbe_frames` above
+                            // (`bits` and `conf` are both `self.buf.len() * 2`
+                            // long), so this cannot fail when `frames` did not.
+                            let conf_bits = crate::soft::soft_dibits_to_bit_conf(&self.buf);
+                            let conf: [ImbeConf; 9] = extract_imbe_conf(&conf_bits)
+                                .expect("conf and bits are the same length");
                             let algid = if nid.duid == Duid::LogicalLinkDataUnit2 {
                                 ldu2_algid_raw(&bits)
                             } else {
@@ -350,6 +363,7 @@ impl Framer {
                                 nac: nid.nac,
                                 duid: nid.duid,
                                 imbe: Box::new(frames),
+                                conf: Box::new(conf),
                                 algid,
                             });
                         }
