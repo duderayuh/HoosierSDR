@@ -32,6 +32,17 @@ pub struct ComplexGardner {
 }
 
 impl ComplexGardner {
+    /// Discharge the loop integrator and rate back to nominal. A sustained
+    /// run of noise-driven TED output (an idle channel, a lost lock) can
+    /// rail the integrator at ±0.5·w0 (see the clamp below); left alone it
+    /// takes real time to walk back off the rail once a real signal returns.
+    /// Call this alongside a carrier re-acquisition, when the timing state
+    /// built up during the loss is more likely to be wrong than helpful.
+    pub fn reset_integrator(&mut self) {
+        self.integ = 0.0;
+        self.w = self.w0;
+    }
+
     pub fn new(samples_per_symbol: f32, loop_bw: f32) -> Self {
         // Half-symbol strobing: NCO increments by 1/(sps/2) per input sample.
         let w0 = 1.0 / (samples_per_symbol / 2.0);
