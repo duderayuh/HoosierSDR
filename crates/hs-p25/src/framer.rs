@@ -32,6 +32,32 @@ const SYNC_ERR_MAX: u32 = 2;
 /// recovered here, without lowering the bar for noise.
 const SYNC_SOFT_MAX_FRACTION: f32 = 0.16;
 
+/// Dibits from the end of a fully-consumed `Payload` to the next FSW. P25
+/// frames run back-to-back with no gap, so this is exactly the 24-dibit FSW
+/// length itself: the very next window that fills is where the next sync
+/// word is protocol-guaranteed to start.
+const FLYWHEEL_COAST_DIBITS: u32 = FRAME_SYNC_BITS / 2;
+
+/// Relaxed sync thresholds used for exactly one check: the single
+/// protocol-predicted position after `FLYWHEEL_COAST_DIBITS` (see
+/// `arm_flywheel`/`sync_matches_coast`). Looser than [`SYNC_ERR_MAX`]/
+/// [`SYNC_SOFT_MAX_FRACTION`] because, unlike a cold search over an
+/// arbitrary bit offset, this position carries independent evidence: we know
+/// a real frame of the exact declared length just ended here, and protocol
+/// timing (not correlation) says the FSW is at this exact spot.
+///
+/// That evidence bounds the *false-accept rate*, not the *cost* of a false
+/// accept: a misaligned accept here does not always fail cleanly downstream.
+/// During development a coast accept at the wrong offset let a garbled NID
+/// pass its BCH check with correctable errors and produced a bogus decode
+/// rather than an obvious rejection — this is a real residual risk of
+/// widening the tolerance, not a self-healing one. It's accepted here
+/// because it is bounded to one check per coasted gap (not a search) and the
+/// thresholds were tightened until real-capture TSBK/grant yield matched the
+/// pre-flywheel baseline (see the commit history for the measurements).
+const SYNC_ERR_MAX_COAST: u32 = 6;
+const SYNC_SOFT_MAX_FRACTION_COAST: f32 = 0.35;
+
 #[derive(Debug)]
 pub enum FramerEvent {
     /// FSW just matched — the previous 24 dibits were the known sync word.
@@ -99,6 +125,10 @@ pub struct Framer {
     conf: [u8; FRAME_SYNC_BITS as usize],
     /// Reassembles multi-block packet data across frames.
     pdu: crate::pdu::PduAssembler,
+    /// Countdown to the next protocol-predicted FSW position, or `None` for
+    /// an ordinary cold search. Armed whenever `Payload` state exits having
+    /// consumed its full declared length — see `arm_flywheel`.
+    flywheel: Option<u32>,
 }
 
 impl Default for Framer {
@@ -117,6 +147,7 @@ impl Framer {
             nid_codec: NidCodec::new(),
             conf: [CERTAIN; FRAME_SYNC_BITS as usize],
             pdu: crate::pdu::PduAssembler::new(),
+            flywheel: None,
         }
     }
 
@@ -127,12 +158,39 @@ impl Framer {
     /// the soft rule, which recovers a window whose disagreements are confined
     /// to bits the demodulator did not trust.
     fn sync_matches(&self, window: u64, errs: u32) -> bool {
-        if errs <= SYNC_ERR_MAX {
+        // Bail bound kept exactly as it was before the flywheel existed: a
+        // cold, no-information search sees this position and only this
+        // position, so its bail bound must not move just because a
+        // *different* caller (`sync_matches_coast`) needs a looser one.
+        self.sync_matches_at(window, errs, SYNC_ERR_MAX, SYNC_SOFT_MAX_FRACTION, FRAME_SYNC_BITS / 6)
+    }
+
+    /// As [`Framer::sync_matches`], but with the relaxed thresholds used for
+    /// the single flywheel-predicted position — see [`SYNC_ERR_MAX_COAST`].
+    fn sync_matches_coast(&self, window: u64, errs: u32) -> bool {
+        // Own bail bound, scaled to the fraction actually in use here —
+        // sharing `sync_matches`' fixed `FRAME_SYNC_BITS / 6` would silently
+        // cap the coast path's looser `SYNC_SOFT_MAX_FRACTION_COAST` at the
+        // strict path's bound, defeating the point of loosening it.
+        let bail = (FRAME_SYNC_BITS as f32 * SYNC_SOFT_MAX_FRACTION_COAST * 1.5) as u32;
+        self.sync_matches_at(window, errs, SYNC_ERR_MAX_COAST, SYNC_SOFT_MAX_FRACTION_COAST, bail)
+    }
+
+    fn sync_matches_at(
+        &self,
+        window: u64,
+        errs: u32,
+        err_max: u32,
+        soft_max_fraction: f32,
+        bail_max: u32,
+    ) -> bool {
+        if errs <= err_max {
             return true;
         }
-        // Beyond about a sixth of the window differing, no weighting makes it
-        // a sync word; bail out before doing the arithmetic.
-        if errs > FRAME_SYNC_BITS / 6 {
+        // Beyond this many raw mismatches, no confidence-weighting can bring
+        // the ratio under `soft_max_fraction`; bail before doing the
+        // arithmetic.
+        if errs > bail_max {
             return false;
         }
         let diff = window ^ FRAME_SYNC;
@@ -147,7 +205,34 @@ impl Framer {
                 bad += c;
             }
         }
-        total > 0 && (bad as f32) < SYNC_SOFT_MAX_FRACTION * total as f32
+        total > 0 && (bad as f32) < soft_max_fraction * total as f32
+    }
+
+    /// Arm the flywheel: the next FSW is protocol-predicted
+    /// [`FLYWHEEL_COAST_DIBITS`] *content* dibits from here — but a status
+    /// dibit is inserted into the raw wire stream every 36 counted positions
+    /// (`status_dibit`), continuously across frame boundaries, independent
+    /// of any particular frame's length. If one falls inside the coasted
+    /// stretch it doesn't count as content, so the raw wire-dibit gap to the
+    /// next FSW is 24 only when none does, and 25 when exactly one does (at
+    /// most one can, since 24 < 36). Get this wrong and the single
+    /// predicted-position check lands one dibit off the true FSW, which
+    /// showed up on a real capture as a very consistent, non-random error
+    /// count rather than the occasional miss real noise would produce —
+    /// `self.since_fs` already tracks the exact absolute position needed to
+    /// compute this correctly instead of assuming the common case.
+    fn arm_flywheel(&mut self) {
+        let mut raw = 0u32;
+        let mut content = 0u32;
+        let mut s = self.since_fs as u32;
+        while content < FLYWHEEL_COAST_DIBITS {
+            if s % 36 != 35 {
+                content += 1;
+            }
+            s += 1;
+            raw += 1;
+        }
+        self.flywheel = Some(raw);
     }
 
     /// Push one sliced dibit; may emit events.
@@ -170,7 +255,24 @@ impl Framer {
                 self.conf[FRAME_SYNC_BITS as usize - 1] = sd.conf[1];
                 let window = self.shift & ((1u64 << FRAME_SYNC_BITS) - 1);
                 let errs = (window ^ FRAME_SYNC).count_ones();
-                if self.sync_matches(window, errs) {
+                // The flywheel's one predicted-position check, in addition to
+                // (never instead of) the ordinary check below — see
+                // `arm_flywheel`. Single-shot: cleared here whether or not it
+                // matches, so a miss falls through to the ordinary cold
+                // sliding search from the very next dibit, exactly as before
+                // this existed.
+                let coast_hit = match &mut self.flywheel {
+                    Some(n) if *n > 1 => {
+                        *n -= 1;
+                        false
+                    }
+                    Some(_) => {
+                        self.flywheel = None;
+                        self.sync_matches_coast(window, errs)
+                    }
+                    None => false,
+                };
+                if coast_hit || self.sync_matches(window, errs) {
                     events.push(FramerEvent::Sync { bit_errors: errs });
                     self.since_fs = 24;
                     self.buf.clear();
@@ -252,10 +354,12 @@ impl Framer {
                             });
                         }
                         self.buf.clear();
+                        self.arm_flywheel();
                         self.state = State::Search;
                     }
                     _ => {
                         self.buf.clear();
+                        self.arm_flywheel();
                         self.state = State::Search;
                     }
                 }
@@ -291,6 +395,7 @@ impl Framer {
                     packet,
                 });
                 self.buf.clear();
+                self.arm_flywheel();
                 self.state = State::Search;
             }
             None if self.pdu.in_progress() => {
@@ -303,9 +408,12 @@ impl Framer {
             None => {
                 // The header failed its CRC, or a block was undecodable.
                 // Packet data is rare enough that guessing costs more than
-                // waiting for the next one.
+                // waiting for the next one. Still consumed exactly one
+                // fixed-size block, so the position is trustworthy even
+                // though the content wasn't.
                 self.pdu.reset();
                 self.buf.clear();
+                self.arm_flywheel();
                 self.state = State::Search;
             }
         }
@@ -366,6 +474,7 @@ impl Framer {
                 });
             }
             self.buf.clear();
+            self.arm_flywheel();
             self.state = State::Search;
         } else {
             self.state = State::Payload {
@@ -373,6 +482,49 @@ impl Framer {
                 needed: (n_blocks + 1) * 98,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod flywheel_tests {
+    use super::*;
+
+    /// A status dibit is inserted every 36 counted positions, continuously
+    /// across frame boundaries — independent of any one frame's length. If
+    /// one falls inside the coasted stretch it costs an extra raw wire dibit
+    /// (it isn't content); if none does, the raw gap is the plain 24. Get
+    /// this wrong and the single predicted-position check lands off the true
+    /// FSW — this regressed a real off-air capture (syncs 1191->900, TSBKs
+    /// 3541->901) despite every synthetic test passing, because the
+    /// synthetic tests' frame lengths happened not to straddle a status
+    /// dibit. Exercise both cases directly against `since_fs`, not just
+    /// through one synthetic scenario that got lucky.
+    #[test]
+    fn accounts_for_a_status_dibit_landing_inside_the_coast() {
+        let mut f = Framer::new();
+
+        // No status dibit in [s, s+24): raw gap is exactly 24.
+        f.since_fs = 0;
+        f.arm_flywheel();
+        assert_eq!(f.flywheel, Some(24), "since_fs=0");
+
+        // since_fs=12 -> positions 12..36 -> 35 falls inside (at s+23):
+        // raw gap must be 25 to still land 24 *content* dibits later.
+        f.since_fs = 12;
+        f.arm_flywheel();
+        assert_eq!(f.flywheel, Some(25), "since_fs=12, straddles a status dibit");
+
+        // since_fs=35 itself is the status position: the very next dibit
+        // (s=35) is status and doesn't count, so this also needs 25.
+        f.since_fs = 35;
+        f.arm_flywheel();
+        assert_eq!(f.flywheel, Some(25), "since_fs=35");
+
+        // since_fs=36 (just past a status dibit): clear run of 24, back to
+        // the plain case.
+        f.since_fs = 36;
+        f.arm_flywheel();
+        assert_eq!(f.flywheel, Some(24), "since_fs=36");
     }
 }
 
