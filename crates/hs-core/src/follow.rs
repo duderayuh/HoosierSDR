@@ -415,7 +415,20 @@ impl TrunkFollower {
             uv_quality: hs_vocoder::imbe::DEFAULT_UV_QUALITY,
             center_hz,
             correction_ppm,
-            quiet_secs: 2.0,
+            // 2.0 (the original default) was measured against real archived
+            // calls to be splitting a large share of single transmissions
+            // into several separate library entries: grouping consecutive
+            // same-talkgroup, same-frequency calls by gap size on a real
+            // multi-hour capture found 49 clusters where a *single* known
+            // radio unit's transmission was split across an average of 2.4
+            // fragments (vs. only 22 clusters that were genuinely different
+            // units taking turns) — and the gaps causing the false splits
+            // clustered tightly at 1.5-2.4s, well inside the old timeout.
+            // 3.5s clears that whole cluster with room to spare while still
+            // sitting well short of the gaps between genuinely separate
+            // transmissions (which thin out sharply past ~4s in the same
+            // data) — see git history for the full analysis.
+            quiet_secs: 3.5,
             hang_secs: 0.3,
             max_calls: 12,
             modulation,
@@ -1573,6 +1586,41 @@ mod priority_tests {
                 "not retired after 1 s at {block_secs}s blocks"
             );
         }
+    }
+
+    /// Regression test for a real bug found by analyzing an archived call
+    /// library: the *default* quiet timeout (2.0s, before this test) was
+    /// splitting a large share of single radio transmissions into several
+    /// separate library entries. Grouping consecutive same-talkgroup,
+    /// same-frequency calls by gap size on a real multi-hour capture found
+    /// 49 clusters where a *single* known radio unit's transmission was
+    /// split across an average of 2.4 fragments — vs. only 22 clusters that
+    /// were genuinely different units taking turns — and the false-split
+    /// gaps clustered tightly at 1.5-2.4s, comfortably inside the old 2.0s
+    /// timeout. A gap in that range, with no explicit `set_hang` override,
+    /// must not retire the call.
+    #[test]
+    fn the_default_quiet_timeout_tolerates_a_typical_intra_transmission_gap() {
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        let block_secs = 0.1;
+        let block = vec![0.0f32; (2_400_000.0 * block_secs) as usize * 2];
+        let mut fed = 0.0;
+        let mut completed = 0;
+        // 2.4s: the upper edge of the real false-split gap cluster found in
+        // the archived data — the old 2.0s default would have retired the
+        // call here.
+        while fed < 2.4 {
+            completed += f.process(&block).completed.len();
+            fed += block_secs;
+        }
+        assert_eq!(
+            completed, 0,
+            "the default quiet timeout retired a call within a real, \
+             typical intra-transmission gap (2.4s) — this is the exact \
+             mechanism that was splitting single transmissions into \
+             several library entries"
+        );
     }
 
     /// Ranges lock out and prioritise whole blocks of talkgroups; an explicit
