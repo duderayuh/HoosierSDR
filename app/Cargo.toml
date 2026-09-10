@@ -39,6 +39,11 @@ base64 = "0.22"
 # stay on.
 [profile.dev]
 opt-level = 3
+# Incremental + opt-level 3 hits a rustc bug: after an edit, the link step
+# reports "Undefined symbols" for generic instances (Option::zip, ureq
+# headers…) that the stale codegen units dropped. A full build of this crate
+# is ~15 s, so incremental buys little and costs mysterious link failures.
+incremental = false
 
 [profile.release]
 lto = "thin"

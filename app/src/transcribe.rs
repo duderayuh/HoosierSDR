@@ -55,6 +55,7 @@ pub type Shared = Arc<Mutex<Worker>>;
 fn engine_module(engine: &str) -> &'static str {
     match engine {
         "openai-whisper" => "whisper",
+        "mlx-whisper" => "mlx_whisper",
         _ => "faster_whisper",
     }
 }
@@ -245,7 +246,18 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
         return true;
     }
     let s = w.settings.clone();
-    let mut child = match Command::new(find_python(&s.engine))
+    // Below the decoder and the audio thread in scheduling priority: a
+    // transcription is a burst of many-core work the moment a call ends, and
+    // it must never starve the radio stream that is decoding the next one.
+    let py = find_python(&s.engine);
+    let mut cmd = if cfg!(unix) {
+        let mut c = Command::new("nice");
+        c.args(["-n", "10", &py]);
+        c
+    } else {
+        Command::new(&py)
+    };
+    let mut child = match cmd
         .arg(script_path(app))
         .args([
             "--engine",
@@ -338,6 +350,7 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                         crate::alerts::on_transcript(&app2, id, &corrected);
                         crate::conversations::on_transcript(&app2, id, &corrected);
                         crate::analyzers::on_transcript(&app2, id, &corrected);
+                        crate::dispatch::on_transcript(&app2, id, &corrected);
                     }
                 } else if let Some(err) = v["error"].as_str() {
                     // A decode/transcribe failure on this file is terminal: mark

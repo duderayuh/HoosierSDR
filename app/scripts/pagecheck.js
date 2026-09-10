@@ -40,7 +40,9 @@ w.__exercise = async () => {
   fire("grant", { tg: 1, name: "TG 1", source: 2, freq_mhz: 851.1, encrypted: false });
   fire("rr_progress", { step: "sites", done: 1, total: 3 }); fire("rr_progress", { step: "done" });
   fire("stopped", null); fire("conversations", null);
-  for (const v of ["library", "playlists", "aliases", "discovery", "alerts", "devices", "settings", "monitor"]) { try { w.showView(v); } catch (e) { console.log("PAGE ERROR: view " + v + ": " + e.stack); } }
+  fire("incident", { id: 1, created: 0, updated: Math.floor(Date.now() / 1000), tg: 10147, tg_name: "Fire", call_type: "Structure Fire", emoji: "🔥", address: "1 Main Street", validated: "", lat: 39.77, lon: -86.16, geocode: "ok", units: ["Engine 1"], summary: "smoke showing", confidence: 90, calls: 1, revision: 0 });
+  fire("incident_deleted", 1); fire("dispatch", null); fire("dispatch_progress", { done: 1, total: 1, finished: true });
+  for (const v of ["library", "playlists", "aliases", "discovery", "alerts", "analyzers", "dispatch", "devices", "settings", "monitor"]) { try { w.showView(v); } catch (e) { console.log("PAGE ERROR: view " + v + ": " + e.stack); } }
   // Click every button that has a handler, with dialogs auto-cancelled.
   w.uiConfirm = async () => false;
   for (const b of w.document.querySelectorAll("button")) { if (typeof b.onclick === "function") { try { const r = b.onclick({ target: b, preventDefault() {} }); if (r && r.catch) r.catch((e) => console.log("PAGE ERROR: async click " + (b.id || b.textContent.trim()) + ": " + e)); } catch (e) { console.log("PAGE ERROR: click " + (b.id || b.textContent.trim()) + ": " + e.stack); } } }

@@ -132,6 +132,11 @@ pub enum FollowEvent {
         syncs_cqpsk: u32,
         /// Voice-frame FEC errors over the call (for the upload errorCount).
         voice_frame_errors: u64,
+        /// Voice frames the concealer had to patch or mute — audible chops.
+        poor_frames: u64,
+        /// Radio-stream blocks dropped while this call was up (the decoder
+        /// fell behind): each one is a hole in this call's audio.
+        dropped_blocks: u64,
         /// Over-the-air alias the radio's system broadcast, if any.
         talker_alias: Option<String>,
         wav: Option<String>,
@@ -309,7 +314,12 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             Ok(0) => continue,
             Ok(n) => prime.extend_from_slice(&buf[..n]),
             Err(SourceError::Eof) => break,
-            Err(e) => return Err(format!("capture error while measuring: {e:?}")),
+            Err(e) => {
+                return Err(format!(
+                    "capture error while measuring: {}",
+                    crate::usb_advice(&format!("{e:?}"))
+                ))
+            }
         }
     }
     if prime.is_empty() {
@@ -439,6 +449,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         busy: 0,
         gate: GrantGate::new(5.0),
         started: std::collections::HashMap::new(),
+        drops_now: 0,
         encrypted_active: std::collections::HashMap::new(),
         priorities: std::collections::HashMap::new(),
         unnamed: std::collections::HashSet::new(),
@@ -505,13 +516,19 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     // slightly, so the threshold sits a little inside them.
     let mut clip_win = 0u64;
     let mut clip_total = 0u64;
+    let mut drops_seen = 0u64;
 
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
             Ok(0) => continue,
             Ok(n) => n,
             Err(SourceError::Eof) => break,
-            Err(e) => return Err(format!("capture error: {e:?}")),
+            Err(e) => {
+                return Err(format!(
+                    "capture error: {}",
+                    crate::usb_advice(&format!("{e:?}"))
+                ))
+            }
         };
         let chunk = &buf[..n];
         clip_win += chunk.iter().filter(|s| s.abs() >= 0.98).count() as u64;
@@ -521,6 +538,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         // The UI may change lockout / hold / playlist / priorities any time.
         apply_live(&mut f, &mut rep);
         let out = f.process(chunk);
+        rep.drops_now = src.dropped().saturating_sub(drop_base);
         rep.report(out, (n / 2) as f64 / rate, emit);
         // Drain whatever the extra radios have queued since the last block.
         for (bi, (_, label, r, e)) in extra.iter_mut().enumerate() {
@@ -534,7 +552,10 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                     Err(SourceError::Eof) => break,
                     Err(err) => {
                         emit(FollowEvent::Notice {
-                            text: format!("{label}: capture error: {err:?}"),
+                            text: format!(
+                                "{label}: capture error: {}",
+                                crate::usb_advice(&format!("{err:?}"))
+                            ),
                         });
                         break;
                     }
@@ -574,6 +595,18 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             last_status = std::time::Instant::now();
             let secs = start.elapsed().as_secs_f64().max(1e-3);
             let extra_drops: u64 = extra.iter().map(|(_, _, _, e)| e.dropped()).sum();
+            // A drop is a hole in every call being decoded at that moment —
+            // heard as a chop — so say when it happens, not just count it.
+            let drops_now = src.dropped().saturating_sub(drop_base) + extra_drops;
+            if drops_now > drops_seen {
+                emit(FollowEvent::Notice {
+                    text: format!(
+                        "radio stream dropped {} block(s) — the decoder fell behind; audio decoded just now has holes (check CPU: transcription, other apps)",
+                        drops_now - drops_seen
+                    ),
+                });
+                drops_seen = drops_now;
+            }
             let clip_pct = if clip_total > 0 {
                 100.0 * clip_win as f32 / clip_total as f32
             } else {
@@ -690,7 +723,12 @@ struct Reporter<'a> {
     busy: u32,
     gate: GrantGate,
     /// When each active call started (epoch s), by (tg, freq).
-    started: std::collections::HashMap<(u16, u64), u64>,
+    /// When each active call started (epoch s) and the stream-drop count at
+    /// that moment, by (tg, freq) — so a completed call can say how many
+    /// blocks were dropped while it was up.
+    started: std::collections::HashMap<(u16, u64), (u64, u64)>,
+    /// Radio-stream blocks dropped so far this run (updated every block).
+    drops_now: u64,
     /// Active encrypted transmissions by voice frequency.
     encrypted_active: std::collections::HashMap<u64, EncAct>,
     priorities: std::collections::HashMap<u16, u8>,
@@ -889,6 +927,8 @@ impl Reporter<'_> {
             syncs_c4fm: 0,
             syncs_cqpsk: 0,
             voice_frame_errors: 0,
+            poor_frames: 0,
+            dropped_blocks: 0,
             talker_alias: None,
             wav: None,
             id,
@@ -1019,7 +1059,8 @@ impl Reporter<'_> {
             emit(FollowEvent::Notice { text });
         }
         for (tg, hz) in &out.started {
-            self.started.insert((*tg, *hz), epoch_secs());
+            self.started
+                .insert((*tg, *hz), (epoch_secs(), self.drops_now));
             if !self.is_named(*tg) && self.unnamed.insert(*tg) {
                 emit(FollowEvent::Notice {
                     text: format!(
@@ -1074,10 +1115,11 @@ impl Reporter<'_> {
         }
         for c in out.completed {
             self.calls += 1;
-            let start = self
+            let (start, drops_at_start) = self
                 .started
                 .remove(&(c.talkgroup, c.freq_hz))
-                .unwrap_or_else(epoch_secs);
+                .unwrap_or_else(|| (epoch_secs(), self.drops_now));
+            let dropped_blocks = self.drops_now.saturating_sub(drops_at_start);
             let secs = c.pcm.len() as f64 / 8000.0;
             let name = self.name_of(c.talkgroup);
             let desc = self.description_of(c.talkgroup);
@@ -1182,6 +1224,8 @@ impl Reporter<'_> {
                     system: self.system_name.clone(),
                     site: self.site_name.clone(),
                     audio: wav.clone(),
+                    poor_frames: c.voice_frames_poor,
+                    dropped_blocks,
                     ..Default::default()
                 };
                 match crate::library::insert(&*db.lock().ok()?, &row) {
@@ -1216,6 +1260,8 @@ impl Reporter<'_> {
                 syncs_c4fm: c.syncs_c4fm,
                 syncs_cqpsk: c.syncs_cqpsk,
                 voice_frame_errors: c.voice_frame_errors,
+                poor_frames: c.voice_frames_poor,
+                dropped_blocks,
                 talker_alias: c.talker_alias.clone(),
                 wav,
                 id,

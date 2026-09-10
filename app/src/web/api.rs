@@ -69,6 +69,14 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "conversations_state" => jv(crate::conversations::conversations_state(state)),
         "digests_log" => jv(crate::digest::digests_log(state)),
         "analyzers_log" => jv(crate::analyzers::analyzers_log(state)),
+        "dispatch_get" => jv(crate::dispatch::dispatch_get(state)),
+        "dispatch_log" => jv(crate::dispatch::dispatch_log(state)),
+        "incidents_list" => jv(crate::dispatch::incidents_list(
+            state,
+            arg::<Option<i64>>(args, "since")?.unwrap_or(0),
+            arg(args, "limit")?,
+        )?),
+        "incident_get" => jv(crate::dispatch::incident_get(state, arg(args, "id")?)?),
         "units_list" => jv(crate::units::units_list(state)),
         "rr_settings" => jv(crate::rr::rr_settings(app.clone(), state)),
 
@@ -290,6 +298,20 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             Ok(Value::Null)
         }
         "analyzers_get" => jv(crate::analyzers::analyzers_get(state)),
+        "analyzer_templates" => jv(crate::analyzers::analyzer_templates()),
+        "ollama_capabilities" => {
+            jv(crate::alerts::ollama_capabilities(arg(args, "url")?, arg(args, "model")?).await?)
+        }
+        "analyzer_template_import" => jv(crate::analyzers::analyzer_template_import(arg(
+            args, "text",
+        )?)?),
+        "analyzer_template_export" => jv(crate::analyzers::analyzer_template_export(
+            state,
+            arg::<Option<Vec<String>>>(args, "ids")?.unwrap_or_default(),
+            arg::<Option<String>>(args, "name")?.unwrap_or_default(),
+            arg::<Option<String>>(args, "author")?.unwrap_or_default(),
+            arg::<Option<String>>(args, "description")?.unwrap_or_default(),
+        )?),
         "analyzers_set" => {
             let rules: Vec<crate::analyzers::AnalyzerRule> = arg(args, "rules")?;
             crate::analyzers::analyzers_set(app.clone(), state, rules)?;

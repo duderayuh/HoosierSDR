@@ -162,6 +162,11 @@ pub struct Call {
     /// Voice-frame FEC error count the chosen decoder accumulated over the
     /// call — surfaced to the app as the upload `errorCount`.
     pub voice_frame_errors: u64,
+    /// Voice frames whose composite quality fell under the concealment
+    /// threshold — each one was blended toward the previous frame or muted,
+    /// which is what a listener hears as a chop. From the decoder whose
+    /// audio was kept.
+    pub voice_frames_poor: u64,
     /// Talkgroups patched to this one; audio may be shared with them.
     pub patched_with: Vec<u16>,
     /// A radio signalled emergency during the call (link-control service
@@ -860,15 +865,18 @@ impl TrunkFollower {
             (0, Some(l)) => l.source_unit,
             (s, _) => s,
         };
-        let voice_frame_errors = if pick_c4fm {
-            c.c4fm.diagnostics().voice_frame_errors
+        let winner = if pick_c4fm {
+            c.c4fm.diagnostics()
         } else {
-            c.cqpsk.diagnostics().voice_frame_errors
+            c.cqpsk.diagnostics()
         };
+        let voice_frame_errors = winner.voice_frame_errors;
+        let voice_frames_poor = winner.voice_frames_low_quality;
         Call {
             syncs_c4fm: c.syncs_c4fm,
             syncs_cqpsk: c.syncs_cqpsk,
             voice_frame_errors,
+            voice_frames_poor,
             talkgroup: c.talkgroup,
             source_unit,
             freq_hz: c.freq_hz,
@@ -1356,53 +1364,86 @@ pub fn measure_carrier_cancellable(
     // seconds, not one, or it catches none and the modulation choice falls back
     // to a coin toss. Three seconds holds enough grants to be decisive while
     // keeping the whole sweep to a few seconds of work at 13x real time.
-    let want = 3 * sample_rate as usize;
-    let probe = &iq[..want.min(iq.len())];
-
-    let try_at = |cand: f64, m: Modulation| -> (usize, u32) {
-        if (cand - center_hz).abs() >= sample_rate / 2.0 {
-            return (0, 0);
-        }
-        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand, m);
-        f.process(probe);
-        control_score(&f)
-    };
+    //
+    // The probe is not pinned to the start of the recording: a head that is
+    // unusable (recording started before the radio was tuned, a start-up
+    // transient, a control channel that was momentarily off the air) would
+    // otherwise report "not found" for a file whose control channel decodes
+    // everywhere else. Try successive windows into the file until one scores;
+    // a good head returns on the first.
+    let want = probe_len(sample_rate);
+    let starts = probe_starts(sample_rate, iq.len(), want);
 
     // Modulation is swept alongside frequency rather than asked for. It is not
     // knowable from the frequency — a scan of one band found control channels
     // of both kinds — and getting it wrong looks exactly like being tuned to
     // the wrong place, so guessing would produce a confident silence.
     let mods = [Modulation::Cqpsk, Modulation::C4fm];
-    let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
     let coarse = (SEARCH_HZ / COARSE_HZ) as i32;
-    for k in -coarse..=coarse {
-        if cancel() {
-            return None;
+    let fine = (COARSE_HZ / FINE_HZ) as i32;
+    for start in starts {
+        let probe = &iq[start..(start + want).min(iq.len())];
+        let try_at = |cand: f64, m: Modulation| -> (usize, u32) {
+            if (cand - center_hz).abs() >= sample_rate / 2.0 {
+                return (0, 0);
+            }
+            let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, cand, m);
+            f.process(probe);
+            control_score(&f)
+        };
+        let mut best = ((0usize, 0u32), nominal_hz, Modulation::Cqpsk);
+        for k in -coarse..=coarse {
+            if cancel() {
+                return None;
+            }
+            let cand = nominal_hz + k as f64 * COARSE_HZ;
+            for m in mods {
+                let score = try_at(cand, m);
+                if score > best.0 {
+                    best = (score, cand, m);
+                }
+            }
         }
-        let cand = nominal_hz + k as f64 * COARSE_HZ;
-        for m in mods {
+        if best.0 == (0, 0) {
+            continue;
+        }
+        let (centre, m) = (best.1, best.2);
+        for k in -fine..=fine {
+            if cancel() {
+                return None;
+            }
+            let cand = centre + k as f64 * FINE_HZ;
             let score = try_at(cand, m);
             if score > best.0 {
                 best = (score, cand, m);
             }
         }
+        return Some((best.1, best.2));
     }
-    if best.0 == (0, 0) {
-        return None;
-    }
-    let (centre, m) = (best.1, best.2);
-    let fine = (COARSE_HZ / FINE_HZ) as i32;
-    for k in -fine..=fine {
-        if cancel() {
-            return None;
+    None
+}
+
+/// Probe length in interleaved f32s: three seconds of complex samples.
+/// (`iq` holds I and Q alternately, so a second is `2 * sample_rate` values —
+/// an earlier `3 * sample_rate` probe was really a second and a half.)
+fn probe_len(sample_rate: f64) -> usize {
+    2 * 3 * sample_rate as usize
+}
+
+/// Where successive probe windows begin, in interleaved f32s: the head of
+/// the recording, then 3, 6, 10 and 15 seconds in — as far as the file
+/// allows. A live capture (short buffer) yields just the head.
+fn probe_starts(sample_rate: f64, len: usize, want: usize) -> Vec<usize> {
+    let per_sec = 2 * sample_rate as usize;
+    let mut v = vec![0usize];
+    for secs in [3usize, 6, 10, 15] {
+        let start = secs * per_sec;
+        // Only when at least half a probe remains past this start.
+        if start + want / 2 <= len {
+            v.push(start);
         }
-        let cand = centre + k as f64 * FINE_HZ;
-        let score = try_at(cand, m);
-        if score > best.0 {
-            best = (score, cand, m);
-        }
     }
-    Some((best.1, best.2))
+    v
 }
 
 /// De-noises repeated grant announcements. A control channel repeats a grant
@@ -1451,19 +1492,48 @@ pub fn pick_modulation(
     nominal_hz: f64,
     measured_hz: f64,
 ) -> Option<Modulation> {
-    let probe = &iq[..(sample_rate as usize).min(iq.len())];
-    let score = |m: Modulation| {
-        let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
-        f.process(probe);
-        control_score(&f)
-    };
-    let (c4, cq) = (score(Modulation::C4fm), score(Modulation::Cqpsk));
-    if c4 == (0, 0) && cq == (0, 0) {
-        None
-    } else if c4 > cq {
-        Some(Modulation::C4fm)
-    } else {
-        Some(Modulation::Cqpsk)
+    // Same windows as `measure_carrier`, for the same reason.
+    let want = probe_len(sample_rate);
+    for start in probe_starts(sample_rate, iq.len(), want) {
+        let probe = &iq[start..(start + want).min(iq.len())];
+        let score = |m: Modulation| {
+            let mut f = TrunkFollower::new(sample_rate, center_hz, nominal_hz, measured_hz, m);
+            f.process(probe);
+            control_score(&f)
+        };
+        let (c4, cq) = (score(Modulation::C4fm), score(Modulation::Cqpsk));
+        if c4 == (0, 0) && cq == (0, 0) {
+            continue;
+        }
+        return Some(if c4 > cq {
+            Modulation::C4fm
+        } else {
+            Modulation::Cqpsk
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn probe_windows_step_into_the_file_only_as_far_as_it_goes() {
+        let rate = 9_600_000.0;
+        let want = probe_len(rate);
+        assert_eq!(want, 2 * 3 * 9_600_000);
+        // A 60 s file: every window.
+        let starts = probe_starts(rate, 60 * 2 * 9_600_000, want);
+        assert_eq!(starts.len(), 5);
+        assert_eq!(starts[1], 3 * 2 * 9_600_000);
+        // A 4 s file: the head, and the 3 s window (1 s of it remains — too
+        // short — so only the head).
+        let starts = probe_starts(rate, 4 * 2 * 9_600_000, want);
+        assert_eq!(starts, vec![0]);
+        // A 5 s file: the head and the 3 s window (2 s remain, over half).
+        let starts = probe_starts(rate, 5 * 2 * 9_600_000, want);
+        assert_eq!(starts, vec![0, 3 * 2 * 9_600_000]);
     }
 }
 

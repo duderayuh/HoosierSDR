@@ -56,6 +56,17 @@ function uiConfirm(msg, okLabel) {
     document.body.appendChild(wrap); wrap.querySelector("[data-yes]").focus();
   });
 }
+// A modal with arbitrary content. Returns the wrapper; call close() to dismiss.
+function uiModal(html, opts) {
+  const wrap = document.createElement("div"); wrap.className = "modal-wrap";
+  wrap.innerHTML = `<div class="modal ${opts && opts.wide ? "wide" : ""}"></div>`;
+  wrap.firstChild.innerHTML = html;
+  wrap.close = () => wrap.remove();
+  wrap.onclick = (e) => { if (e.target === wrap) wrap.close(); };
+  wrap.onkeydown = (e) => { if (e.key === "Escape") wrap.close(); };
+  document.body.appendChild(wrap);
+  return wrap;
+}
 window.alert = (m) => uiToast(m, /error|fail|could not|not found|invalid|enter |choose |no /i.test(String(m)) ? "err" : "");
 function wireSeg(el, onPick) {
   el.querySelectorAll("button").forEach((b) => {
@@ -66,9 +77,10 @@ function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttri
 
 /* ---------- views ---------- */
 function showView(v) {
-  ["monitor", "library", "playlists", "aliases", "discovery", "alerts", "analyzers", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  ["monitor", "library", "playlists", "aliases", "discovery", "alerts", "analyzers", "dispatch", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "alerts" && typeof alertsOnShow === "function") alertsOnShow();
   if (v === "analyzers" && typeof analyzersOnShow === "function") analyzersOnShow();
+  if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
   if (v === "devices" && typeof devicesOnShow === "function") devicesOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
   if (v === "aliases" && typeof aliasesOnShow === "function") aliasesOnShow();
@@ -76,7 +88,7 @@ function showView(v) {
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
-setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases", "#discovery", "#alerts", "#devices"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
+setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases", "#discovery", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
 
 /* ---------- tuning state ---------- */
 let modeSel = "follow", modSel = "cqpsk", eqSel = "cma", decoderSel = "p25", squelchVal = 0.3;
@@ -757,6 +769,9 @@ function handleFollow(ev) {
       addCall({ tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,
                 secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk, system: ev.system, site_name: ev.site_name });
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
+      // Say when a call's audio has holes, and why: stream drops mean the
+      // decoder fell behind (CPU/USB); poor frames mean the signal itself.
+      if (ev.secs > 0 && (ev.dropped_blocks > 0 || ev.poor_frames > ev.secs * 50 * 0.05)) logEvent(`${ev.name} ${ev.secs.toFixed(1)}s: ${ev.dropped_blocks ? ev.dropped_blocks + " stream drop(s)" : ""}${ev.dropped_blocks && ev.poor_frames ? ", " : ""}${ev.poor_frames ? ev.poor_frames + " of " + Math.round(ev.secs * 50) + " frames concealed" : ""} — audio has holes`, "warn");
       if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);
       $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
       break;
@@ -933,10 +948,11 @@ const lon2x = (lon, z) => (lon + 180) / 360 * Math.pow(2, z);
 const lat2y = (lat, z) => (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z);
 const x2lon = (x, z) => x / Math.pow(2, z) * 360 - 180;
 const y2lat = (y, z) => { const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); };
+const tileBase = () => TAURI ? (navigator.userAgent.includes("Windows") ? "http://tiles.localhost" : "tiles://localhost") : "https://tile.openstreetmap.org";
 function tile(z, x, y) {
   const n = Math.pow(2, z); x = ((x % n) + n) % n; if (y < 0 || y >= n) return null;
   const k = `${z}/${x}/${y}`; let im = tiles.get(k);
-  if (!im) { im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => renderMap(); im.src = `https://${"abcd"[(x + y) % 4]}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`; tiles.set(k, im); if (tiles.size > 400) tiles.delete(tiles.keys().next().value); }
+  if (!im) { im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => renderMap(); im.src = `${tileBase()}/${z}/${x}/${y}.png`; tiles.set(k, im); if (tiles.size > 400) tiles.delete(tiles.keys().next().value); }
   return im.complete && im.naturalWidth ? im : null;
 }
 function renderMap() {
@@ -1349,7 +1365,7 @@ if (TAURI) {
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
     $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt;
+    $("akTelegram").checked = a.telegram; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
     akKindUi();
   }
@@ -1361,7 +1377,7 @@ if (TAURI) {
     a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
     a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
     a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value;
+    a.telegram = $("akTelegram").checked; a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
     return a;
   }
   async function akPersist() {
@@ -1393,12 +1409,36 @@ if (TAURI) {
       akRenderList(); akLogRefresh(); olRefresh(true);
     } catch (e) { log(`alerts_get: ${e}`); }
   }
+  /* Reasoning ("think") is only offered for a model that has a thinking mode,
+     per Ollama's /api/show capabilities. Cached per model; a saved rule keeps
+     its flag either way — the backend simply sends think=false to a model
+     that lacks the mode. */
+  const olCaps = new Map();   // model → capabilities[] (or null while loading)
+  async function olCapsOf(model) {
+    if (!model) return [];
+    if (olCaps.has(model)) return olCaps.get(model) || [];
+    olCaps.set(model, null);
+    try { const caps = await invoke("ollama_capabilities", { url: $("olUrl").value.trim() || "http://localhost:11434", model }); olCaps.set(model, caps || []); return caps || []; }
+    catch (e) { log(`ollama_capabilities: ${e}`); olCaps.delete(model); return []; }
+  }
+  async function olThinkUi() {
+    const model = $("olModel").value;
+    const caps = await olCapsOf(model);
+    const can = caps.includes("thinking");
+    for (const [box, hint] of [["akAiThink", "akThinkHint"], ["azThink", "azThinkHint"]]) {
+      const b = $(box), h = $(hint); if (!b) continue;
+      b.disabled = !can;
+      h.textContent = !model ? "pick an Ollama model" : can ? "" : `${model} has no thinking mode`;
+    }
+  }
+  window.olThinkUi = olThinkUi;
   async function olRefresh(quiet) {
     try { const models = await invoke("ollama_models", { url: $("olUrl").value.trim() || "http://localhost:11434" }); const cur = akSettings.ollama.model || $("olModel").value; $("olModel").innerHTML = '<option value="">—</option>' + models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join(""); $("olModel").value = models.includes(cur) ? cur : ""; $("olMeta").textContent = `${models.length} models`; }
     catch (e) { $("olMeta").textContent = "not reachable"; if (!quiet) uiToast(`Ollama: ${e}`, "err"); }
   }
   $("olRefresh").onclick = () => olRefresh(false);
   ["olModel", "olTimeout", "olFailOpen", "olUrl"].forEach((id) => $(id).onchange = akPersist);
+  $("olModel").addEventListener("change", () => olThinkUi());
   $("tgSave").onclick = async () => { try { if ($("tgToken").value.trim()) { await invoke("telegram_save", { token: $("tgToken").value.trim() }); $("tgToken").value = ""; } if (await akPersist()) { uiToast("Telegram settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
   $("bsSave").onclick = async () => { try { if ($("bsPassword").value.trim()) { await invoke("bluesky_save", { password: $("bsPassword").value.trim() }); $("bsPassword").value = ""; } if (await akPersist()) { uiToast("Bluesky settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
   $("bsTest").onclick = async () => { try { await $("bsSave").onclick(); uiToast(await invoke("bluesky_test")); } catch (e) { uiToast(`Bluesky test failed: ${e}`, "err"); } };
@@ -1414,8 +1454,8 @@ if (TAURI) {
 
   /* ---------- conversation rules: stitch, summarise, send ---------- */
   let cvView = null, cvSel = null;
-  const CV_DEFAULT = { id: "", name: "", enabled: true, tgs: [], fixed_units: [], learn_fixed: true, end_gap_secs: 90, late_window_secs: 180, max_secs: 900, min_calls: 1,
-    summary_prompt: "Summarise this EMS-to-hospital radio report for a clinician in two or three sentences: unit, patient age/sex, chief complaint, vitals or interventions mentioned, and ETA. Use only what was said; mark anything unclear as unclear.",
+  const CV_DEFAULT = { id: "", name: "", enabled: true, tgs: [], fixed_units: [], learn_fixed: true, end_gap_secs: 90, reply_gap_secs: 45, late_window_secs: 180, max_secs: 900, min_calls: 1,
+    summary_prompt: "Summarise this EMS-to-hospital radio report as a hand-off note for the receiving clinician: which unit is coming and where, patient age/sex, chief complaint, pertinent findings and vitals, interventions given, ETA, and anything the hospital asked for.",
     message: "🏥 {rule} · {tgname}\n{summary}\n\n{unitnames} · {calls} transmissions · {duration} · {started}{revision}", chat_id: "", attach_audio: true, send_without_transcript: false };
   function cvRenderList() {
     const rules = cvView ? cvView.settings.rules : [];
@@ -1428,7 +1468,7 @@ if (TAURI) {
     const r = cvView.settings.rules.find((x) => x.id === id); if (!r) return;
     cvSel = id; cvRenderList(); $("cvEditor").style.display = "";
     $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
-    $("cvGap").value = r.end_gap_secs; $("cvLate").value = r.late_window_secs; $("cvMax").value = r.max_secs; $("cvPrompt").value = r.summary_prompt; $("cvMessage").value = r.message;
+    $("cvGap").value = r.end_gap_secs; $("cvReply").value = r.reply_gap_secs ?? 45; $("cvLate").value = r.late_window_secs; $("cvMax").value = r.max_secs; $("cvPrompt").value = r.summary_prompt; $("cvMessage").value = r.message;
     $("cvChat").value = r.chat_id; $("cvMin").value = r.min_calls; $("cvAudio").checked = r.attach_audio; $("cvNoTr").checked = r.send_without_transcript;
     const proposed = Object.entries(cvView.proposed_fixed || {}).filter(([k]) => k.startsWith(id + ":")).flatMap(([k, units]) => units.map((u) => ({ tg: k.split(":")[1], u })));
     $("cvProposed").innerHTML = proposed.length ? "learned fixed IDs: " + proposed.map((p) => `<button class="btn ghost sm" data-cvadopt="${p.u}" title="TG ${p.tg}">${p.u} ✔ adopt</button>`).join(" ") : "";
@@ -1438,7 +1478,7 @@ if (TAURI) {
   function cvRead() {
     const r = cvView.settings.rules.find((x) => x.id === cvSel); if (!r) return null;
     r.name = $("cvName").value.trim(); r.tgs = nums($("cvTgs").value); r.enabled = $("cvEnabled").checked; r.fixed_units = nums($("cvFixed").value); r.learn_fixed = $("cvLearn").checked;
-    r.end_gap_secs = parseInt($("cvGap").value, 10) || 90; r.late_window_secs = parseInt($("cvLate").value, 10) || 0; r.max_secs = parseInt($("cvMax").value, 10) || 900; r.summary_prompt = $("cvPrompt").value; r.message = $("cvMessage").value;
+    r.end_gap_secs = parseInt($("cvGap").value, 10) || 90; r.reply_gap_secs = Math.max(0, parseInt($("cvReply").value, 10) || 0); r.late_window_secs = parseInt($("cvLate").value, 10) || 0; r.max_secs = parseInt($("cvMax").value, 10) || 900; r.summary_prompt = $("cvPrompt").value; r.message = $("cvMessage").value;
     r.chat_id = $("cvChat").value.trim(); r.min_calls = parseInt($("cvMin").value, 10) || 1; r.attach_audio = $("cvAudio").checked; r.send_without_transcript = $("cvNoTr").checked;
     return r;
   }
@@ -1547,7 +1587,7 @@ if (TAURI) {
     azSel = id; azRenderList(); $("azEditor").style.display = "";
     $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); $("azEnabled").checked = r.enabled;
     $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
-    $("azEngine").value = r.engine || "ollama"; $("azTelegram").checked = r.telegram !== false; $("azBluesky").checked = !!r.bluesky;
+    $("azEngine").value = r.engine || "ollama"; $("azThink").checked = !!r.think; if (typeof olThinkUi === "function") olThinkUi(); $("azTelegram").checked = r.telegram !== false; $("azBluesky").checked = !!r.bluesky;
     $("azMatch").value = r.conditions.length ? r.match_mode : "";
     $("azMessage").value = r.message; $("azChat").value = r.chat_id; $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
     azFieldsBuf = r.fields.map((f) => ({ ...f })); azCondsBuf = r.conditions.map((c) => ({ ...c }));
@@ -1559,7 +1599,7 @@ if (TAURI) {
     azSyncBuffers();
     r.name = $("azName").value.trim(); r.tgs = nums($("azTgs").value); r.enabled = $("azEnabled").checked;
     r.keywords = azKw($("azKeywords").value); r.instructions = $("azInstructions").value;
-    r.engine = $("azEngine").value; r.telegram = $("azTelegram").checked; r.bluesky = $("azBluesky").checked;
+    r.engine = $("azEngine").value; r.think = $("azThink").checked; r.telegram = $("azTelegram").checked; r.bluesky = $("azBluesky").checked;
     r.fields = azFieldsBuf.filter((f) => f.key);
     const mm = $("azMatch").value;
     r.conditions = mm ? azCondsBuf.filter((c) => c.field) : [];
@@ -1585,7 +1625,7 @@ if (TAURI) {
   }
   $("azFieldAdd").onclick = () => { azSyncBuffers(); azFieldsBuf.push({ key: "", kind: "string", desc: "" }); azRenderFields(); };
   $("azCondAdd").onclick = () => { if (!$("azMatch").value) $("azMatch").value = "all"; azSyncBuffers(); azCondsBuf.push({ field: "", op: "==", value: "" }); azRenderConds(); };
-  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, bluesky: false, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
+  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", think: false, tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, bluesky: false, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
   $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
   $("azDelete").onclick = async () => { if (!(await uiConfirm("Delete this analyzer?", "Delete"))) return; azView.rules = azView.rules.filter((x) => x.id !== azSel); azSel = null; $("azEditor").style.display = "none"; await azPersist(); };
   $("azTest").onclick = async () => { if (!azRead()) return; if (!(await azPersist())) return; uiToast("Running the analyzer on a recent call…"); try { const out = await invoke("analyzer_test", { id: azSel }); await uiConfirm(out, "OK"); setTimeout(azLogRefresh, 500); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
@@ -1599,6 +1639,71 @@ if (TAURI) {
       for (const t of tpls) { t.id = `z${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; t.enabled = false; azView.rules.push(t); }
       if (await azPersist()) { uiToast("Templates added — review and enable them"); azEdit(azView.rules[azView.rules.length - tpls.length].id); }
     } catch (e) { uiToast(`Could not load templates: ${e}`, "err"); }
+  };
+  /* ---- shareable template files: import (hardened in Rust) and export ---- */
+  const azSlug = (t) => (t || "analyzers").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "analyzers";
+  async function azImportText(text, m) {
+    text = String(text || "").trim();
+    if (!text) { uiToast("Choose a template file or paste its JSON first", "err"); return; }
+    let t;
+    try { t = await invoke("analyzer_template_import", { text }); }
+    catch (e) { uiToast(`Template refused: ${e}`, "err"); return; }
+    if (m) m.close();
+    const list = t.rules.map((r) => `<div class="row"><span class="grow"><b>${esc(r.name)}</b><br><small>${r.tgs.length ? "TG " + r.tgs.join(",") : "any talkgroup"} · ${r.fields.length} field${r.fields.length === 1 ? "" : "s"} · ${r.conditions.length ? r.conditions.length + " condition" + (r.conditions.length === 1 ? "" : "s") : "always sends"} · ${esc(r.engine)}</small></span></div>`).join("");
+    const rv = uiModal(`<div class="eyebrow">Review imported template</div>
+      <p class="msg" style="margin:8px 0 2px"><b>${esc(t.name || "Untitled template")}</b>${t.author ? ` <small class="faint">by ${esc(t.author)}</small>` : ""}</p>
+      ${t.description ? `<p class="help" style="white-space:pre-wrap">${esc(t.description)}</p>` : ""}
+      <div class="list" style="margin:10px 0;max-height:36vh">${list}</div>
+      <p class="help">These arrive <b>disabled</b>, with no Telegram chat and Bluesky off. Read each prompt before enabling it — a prompt decides what gets extracted and sent.</p>
+      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Add ${t.rules.length} analyzer${t.rules.length === 1 ? "" : "s"}</button></div>`, { wide: true });
+    rv.querySelector("[data-no]").onclick = rv.close;
+    rv.querySelector("[data-yes]").onclick = async () => {
+      rv.close();
+      for (const r of t.rules) azView.rules.push(r);
+      if (await azPersist()) { uiToast(`Added ${t.rules.length} analyzer${t.rules.length === 1 ? "" : "s"} — review and enable them`); azEdit(t.rules[0].id); }
+      else azView.rules = azView.rules.filter((r) => !t.rules.includes(r));
+    };
+  }
+  $("azImport").onclick = () => {
+    if (!azView) return;
+    const m = uiModal(`<div class="eyebrow">Import analyzer template</div>
+      <p class="help">A template is a <span class="mono">.json</span> file exported from another HoosierSDR. It is checked in the app before anything is added: sizes and field names are limited, hidden characters are stripped, and every imported analyzer is quarantined (disabled, no chat, no Bluesky).</p>
+      <div class="inline" style="margin:10px 0"><button class="btn ghost" data-pick>Choose file…</button><span class="help" data-fname></span></div>
+      <label class="field"><span class="lab">or paste the template JSON</span><textarea data-paste style="min-height:120px" spellcheck="false"></textarea></label>
+      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Review…</button></div>`, { wide: true });
+    const fileIn = $("azImportFile"); fileIn.value = "";
+    m.querySelector("[data-pick]").onclick = () => fileIn.click();
+    fileIn.onchange = () => {
+      const f = fileIn.files && fileIn.files[0]; if (!f) return;
+      m.querySelector("[data-fname]").textContent = `${f.name} · ${Math.ceil(f.size / 1024)} KB`;
+      if (f.size > 512 * 1024) { uiToast("That file is over 512 KB — not a template", "err"); return; }
+      const rd = new FileReader(); rd.onload = () => { m.querySelector("[data-paste]").value = String(rd.result || ""); }; rd.readAsText(f);
+    };
+    m.querySelector("[data-no]").onclick = m.close;
+    m.querySelector("[data-yes]").onclick = () => azImportText(m.querySelector("[data-paste]").value, m);
+  };
+  $("azExport").onclick = () => {
+    if (!azView || !azView.rules.length) { uiToast("Nothing to export yet"); return; }
+    const rows = azView.rules.map((r) => `<label class="row check" style="margin:0"><input type="checkbox" data-xid="${esc(r.id)}" ${azSel === r.id || !azSel ? "checked" : ""}> <span class="grow"><b>${esc(r.name)}</b> <small>${r.tgs.length ? "TG " + r.tgs.join(",") : "any"}</small></span></label>`).join("");
+    const m = uiModal(`<div class="eyebrow">Export analyzer template</div>
+      <div class="row2" style="margin-top:8px"><label class="field"><span class="lab">Template name</span><input data-xname type="text" placeholder="EMS medical screens" spellcheck="false"></label><label class="field"><span class="lab">Author <span class="mono faint">optional</span></span><input data-xauthor type="text" spellcheck="false"></label></div>
+      <label class="field"><span class="lab">Description <span class="mono faint">optional · what it watches for and which model it was tuned on</span></span><textarea data-xdesc style="min-height:56px"></textarea></label>
+      <div class="lab">Analyzers to include</div><div class="list" style="max-height:30vh;margin-bottom:8px">${rows}</div>
+      <label class="field"><span class="lab">Save to</span><input data-xpath type="text" spellcheck="false"></label>
+      <p class="help">Your Telegram chat id, the enabled flag and Bluesky are left out of the file. Prompts and messages are included as written.</p>
+      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn ghost" data-copy>Copy JSON</button><button class="btn primary" data-save>Save file</button></div>`, { wide: true });
+    const nameIn = m.querySelector("[data-xname]"), pathIn = m.querySelector("[data-xpath]");
+    const syncPath = () => { if (!pathIn.dataset.touched) pathIn.value = `~/Downloads/${azSlug(nameIn.value)}.hoosier-analyzers.json`; };
+    nameIn.oninput = syncPath; pathIn.oninput = () => { pathIn.dataset.touched = "1"; }; syncPath();
+    const build = async () => {
+      const ids = [...m.querySelectorAll("input[data-xid]:checked")].map((c) => c.dataset.xid);
+      if (!ids.length) { uiToast("Tick at least one analyzer", "err"); return null; }
+      try { return await invoke("analyzer_template_export", { ids, name: nameIn.value.trim(), author: m.querySelector("[data-xauthor]").value.trim(), description: m.querySelector("[data-xdesc]").value.trim() }); }
+      catch (e) { uiToast(`Export failed: ${e}`, "err"); return null; }
+    };
+    m.querySelector("[data-no]").onclick = m.close;
+    m.querySelector("[data-copy]").onclick = async () => { const t = await build(); if (!t) return; try { await navigator.clipboard.writeText(t); uiToast("Template JSON copied"); } catch (_) { uiConfirm(t, "OK"); } };
+    m.querySelector("[data-save]").onclick = async () => { const t = await build(); if (!t) return; try { const p = await invoke("save_text", { path: pathIn.value.trim(), text: t }); uiToast(`Saved ${p}`); m.close(); } catch (e) { uiToast(`Could not save: ${e}`, "err"); } };
   };
   /* cloud model settings (shared by analyzers set to "Cloud") */
   async function azcLoad() {
@@ -1772,7 +1877,7 @@ if (TAURI) {
     $("libBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.id === id));
     try {
       const r = await invoke("library_get", { id }); if (!r) return;
-      $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}`;
+      $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}${r.dropped_blocks ? ` · ${r.dropped_blocks} stream drop(s)` : ""}${r.poor_frames ? ` · ${r.poor_frames}/${Math.round(r.secs * 50)} frames concealed` : ""}`;
       $("detBody").innerHTML = `<div class="det">
         <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
@@ -2569,3 +2674,264 @@ function obRender() {
 $("help").onclick = obOpen;
 /* first run: open the guide once */
 setTimeout(() => { if (!store("hs.onboarded", false)) obOpen(); }, 700);
+
+/* ---------- dispatch bridge: the Tauri backend, or canned data when the page is opened standalone ---------- */
+const dpDemoNow = Math.floor(Date.now() / 1000);
+const dpDemoIncidents = [
+  { id: 1, created: dpDemoNow - 240, updated: dpDemoNow - 60, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Cardiac Arrest", emoji: "🫀", address: "8241 East 41st Street", validated: "8241 East 41st Street, Indianapolis, IN", lat: 39.8318, lon: -86.0223, geocode: "ok", units: ["Ladder 38", "Medic 21"], summary: "Cardiac arrest, CPR in progress on arrival", confidence: 95, calls: 3, revision: 2 },
+  { id: 2, created: dpDemoNow - 600, updated: dpDemoNow - 600, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Structure Fire", emoji: "🔥", address: "2000 South Meridian Street", validated: "2000 S Meridian St, Indianapolis, IN", lat: 39.7452, lon: -86.1579, geocode: "ok", units: ["Engine 23", "Engine 35", "Ladder 5", "Battalion 4"], summary: "Smoke showing from a two-storey residence", confidence: 92, calls: 1, revision: 0 },
+  { id: 3, created: dpDemoNow - 900, updated: dpDemoNow - 900, tg: 10202, tg_name: "County EMS", call_type: "Vehicle Accident", emoji: "🚗", address: "38th and Keystone", validated: "E 38th St & N Keystone Ave, Indianapolis, IN", lat: 39.8264, lon: -86.1178, geocode: "ok", units: ["Medic 63"], summary: "Two-vehicle crash, one patient complaining of neck pain", confidence: 88, calls: 1, revision: 0 },
+  { id: 4, created: dpDemoNow - 1500, updated: dpDemoNow - 1500, tg: 10202, tg_name: "County EMS", call_type: "Stroke/CVA", emoji: "🧠", address: "9111 Avenue", validated: "", lat: null, lon: null, geocode: "none", units: ["Medic 42", "Engine 42"], summary: "Possible stroke, facial droop", confidence: 61, calls: 1, revision: 0 },
+  { id: 5, created: dpDemoNow - 2400, updated: dpDemoNow - 2000, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Gas Odor", emoji: "⚠️", address: "4232 Cardinal Drive", validated: "4232 Cardinal Dr, Indianapolis, IN", lat: 39.7043, lon: -86.2137, geocode: "ok", units: ["Engine 23", "Engine 46"], summary: "Odor of natural gas inside the residence", confidence: 90, calls: 2, revision: 1 },
+  { id: 6, created: dpDemoNow - 3300, updated: dpDemoNow - 3300, tg: 10202, tg_name: "County EMS", call_type: "Sick Person", emoji: "🤒", address: "1124 North Whitcomb Avenue", validated: "1124 N Whitcomb Ave, Indianapolis, IN", lat: 39.7817, lon: -86.2418, geocode: "ok", units: ["Medic 85"], summary: "Sick person, weakness", confidence: 95, calls: 1, revision: 0 },
+];
+const dpDemo = async (cmd, args) => {
+  switch (cmd) {
+    case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Indianapolis, IN", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "" };
+    case "incidents_list": return dpDemoIncidents.filter((i) => !args || !args.since || i.updated >= args.since);
+    case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
+    case "dispatch_log": return dpDemoIncidents.map((i) => ({ at: i.updated, tg: i.tg, tg_name: i.tg_name, call: 700 + i.id, outcome: "new", detail: `#${i.id} ${i.call_type} · ${i.address}`, incident: i.id }));
+    case "dispatch_set": case "incident_delete": return null;
+    case "incident_locate": { const i = dpDemoIncidents.find((x) => x.id === args.id); if (i && args.lat != null) { i.lat = args.lat; i.lon = args.lon; i.geocode = "manual"; } return i; }
+    case "dispatch_test": return "demo mode — no radio";
+    case "dispatch_backfill": return 0;
+    default: return null;
+  }
+};
+const dpInvoke = TAURI ? invoke : dpDemo;
+const dpListen = TAURI ? listen : async () => () => {};
+
+/* ---------- dispatch: live incident map (Leaflet + OSM/CARTO tiles) ---------- */
+// Everything drawn here came from the model or the geocoder: it is escaped
+// before it meets innerHTML, and the emoji was checked in Rust to be one.
+let dpMap = null, dpTiles = null, dpLayer = null, dpSettings = null, dpSel = null, dpChBuf = [];
+let dpWinHours = store("hs.dp.win", 6), dpChanFilter = "", dpQuery = "";
+const dpInc = new Map();       // id → incident
+const dpMarkers = new Map();   // id → L.marker
+const dpHidden = new Set(store("hs.dp.hidden", []));   // call types unticked in Layers
+const dpNow = () => Math.floor(Date.now() / 1000);
+const dpAgo = (t) => ago(t * 1000);
+const dpShown = () => $("view-dispatch").style.display !== "none" && $("dpMain").style.display !== "none";
+const dpIsDark = () => { const t = document.documentElement.getAttribute("data-theme"); return t ? t !== "light" : matchMedia("(prefers-color-scheme: dark)").matches; };
+// OpenStreetMap tiles. In the app they come through the Rust `tiles://` scheme (fetched
+// with the app's User-Agent and cached on disk); standalone they load straight from OSM.
+// The dark theme is a CSS filter over them.
+const dpTileUrl = () => `${tileBase()}/{z}/{x}/{y}.png`;
+const dpHome = () => (dpSettings ? [dpSettings.home_lat, dpSettings.home_lon] : [39.7684, -86.1581]);
+
+function dpInitMap() {
+  if (dpMap || typeof L === "undefined") return;
+  try {
+    dpMap = L.map("dpMap", { zoomControl: false, attributionControl: false }).setView(dpHome(), 11);
+    L.control.zoom({ position: "bottomright" }).addTo(dpMap);
+    dpTiles = L.tileLayer(dpTileUrl(), { maxZoom: 19, className: "dptiles" }).addTo(dpMap);
+    dpLayer = L.layerGroup().addTo(dpMap);
+    dpMap.on("click", () => dpSelect(null));
+    dpMap.on("popupopen", (e) => { const el = e.popup.getElement(); if (!el) return; el.querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det)); });
+    new MutationObserver(() => { $("dpMap").classList.toggle("light", !dpIsDark()); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    $("dpMap").classList.toggle("light", !dpIsDark());
+  } catch (e) { log(`map init: ${e}`); dpMap = null; }
+}
+
+function dpVisible(i) {
+  if (dpWinHours && i.updated < dpNow() - dpWinHours * 3600) return false;
+  if (dpChanFilter && String(i.tg) !== dpChanFilter) return false;
+  if (dpHidden.has(i.call_type)) return false;
+  if (dpQuery) { const hay = `${i.call_type} ${i.address} ${i.validated} ${(i.units || []).join(" ")} ${i.summary} ${i.tg_name}`.toLowerCase(); if (!hay.includes(dpQuery)) return false; }
+  return true;
+}
+const dpUnits = (i, cls) => (i.units || []).map((u) => `<span class="unit ${cls || ""}">${esc(u)}</span>`).join("");
+function dpCard(i) {
+  const fresh = i.updated > dpNow() - 300, stale = i.updated < dpNow() - 3 * 3600;
+  return `<div class="dpcard ${dpSel === i.id ? "on" : ""} ${fresh ? "fresh" : ""} ${stale ? "stale" : ""}" data-id="${i.id}">
+    <div class="top"><span class="chan" title="${esc(i.tg_name)}">${esc(i.tg_name || "TG " + i.tg)}</span>${i.calls > 1 ? `<span class="linked">Linked · ${i.calls - 1} update${i.calls === 2 ? "" : "s"}</span>` : ""}<span class="conf ${i.confidence < 50 ? "low" : ""}" title="model confidence">${i.confidence}%</span><span class="ago" data-t="${i.updated}">${dpAgo(i.updated)}</span><button class="btn ghost sm" data-det="${i.id}" title="Details">⤢</button></div>
+    <div class="title"><span class="em">${esc(i.emoji)}</span><b>${esc(i.call_type)}</b>${i.address ? `<span class="addr">· ${esc(i.address)}</span>` : `<span class="noaddr">· no address heard</span>`}${i.address && i.lat == null ? `<span class="nogeo" title="address not found on the map — open details to fix it">⚠ unmapped</span>` : ""}</div>
+    ${(i.units || []).length ? `<div class="units">${dpUnits(i)}</div>` : ""}
+    ${i.summary ? `<div class="summ" title="${esc(i.summary)}">${esc(i.summary)}</div>` : ""}
+  </div>`;
+}
+function dpIcon(i) {
+  const fresh = i.updated > dpNow() - 300;
+  const html = `<div class="dpmk ${fresh ? "fresh" : ""} ${dpSel === i.id ? "sel" : ""}"><span class="em">${esc(i.emoji)}</span>${i.calls > 1 ? `<span class="cnt">${i.calls}</span>` : ""}${$("dpShowLabels").checked ? `<span class="lbl">${esc(i.call_type)}</span>` : ""}</div>`;
+  return L.divIcon({ html, className: "dpmkwrap", iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -20] });
+}
+const dpPopup = (i) => `<div class="pt">${esc(i.emoji)} ${esc(i.call_type)}</div><div class="pa">${esc(i.address || "no address heard")}</div>${(i.units || []).length ? `<div class="pu">${dpUnits(i)}</div>` : ""}${i.summary ? `<div>${esc(i.summary)}</div>` : ""}<div class="pl"><small class="faint">${esc(i.tg_name)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</small> <button class="btn ghost sm" data-det="${i.id}">Details</button></div>`;
+function dpSyncMarker(i) {
+  if (!dpMap) return;
+  const show = dpVisible(i) && i.lat != null && i.lon != null && $("dpShowPins").checked;
+  let m = dpMarkers.get(i.id);
+  if (!show) { if (m) { dpLayer.removeLayer(m); dpMarkers.delete(i.id); } return; }
+  if (!m) {
+    m = L.marker([i.lat, i.lon], { icon: dpIcon(i), riseOnHover: true });
+    m.on("click", () => dpSelect(i.id));
+    m.bindPopup(() => dpPopup(dpInc.get(i.id) || i), { maxWidth: 300 });
+    dpLayer.addLayer(m); dpMarkers.set(i.id, m);
+  } else { m.setLatLng([i.lat, i.lon]); m.setIcon(dpIcon(i)); }
+  m.setZIndexOffset(Math.round((i.updated - 1.7e9) / 10));
+}
+function dpRenderTypes() {
+  const counts = new Map();
+  for (const i of dpInc.values()) { if (dpWinHours && i.updated < dpNow() - dpWinHours * 3600) continue; counts.set(i.call_type, (counts.get(i.call_type) || 0) + 1); }
+  const types = dpSettings ? dpSettings.call_types.map((t) => t.name) : [];
+  for (const k of counts.keys()) if (!types.includes(k)) types.push(k);
+  const emojiOf = (n) => { const t = dpSettings && dpSettings.call_types.find((x) => x.name === n); if (t) return t.emoji; const i = [...dpInc.values()].find((x) => x.call_type === n); return i ? i.emoji : "📍"; };
+  $("dpTypes").innerHTML = types.map((n) => `<label><input type="checkbox" data-type="${esc(n)}" ${dpHidden.has(n) ? "" : "checked"}><span>${esc(emojiOf(n))}</span><span>${esc(n)}</span><span class="n">${counts.get(n) || ""}</span></label>`).join("");
+  $("dpTypes").querySelectorAll("input[data-type]").forEach((c) => c.onchange = () => { if (c.checked) dpHidden.delete(c.dataset.type); else dpHidden.add(c.dataset.type); save("hs.dp.hidden", [...dpHidden]); dpRender(); });
+}
+function dpRender() {
+  const list = [...dpInc.values()].filter(dpVisible).sort((a, b) => b.updated - a.updated);
+  $("dpList").innerHTML = list.map(dpCard).join("");
+  $("dpEmpty").style.display = list.length ? "none" : "";
+  $("dpMeta").textContent = list.length ? `${list.length} incident${list.length === 1 ? "" : "s"}${dpWinHours ? ` · last ${dpWinHours >= 24 ? dpWinHours / 24 + "d" : dpWinHours + "h"}` : ""}` : "";
+  $("dpList").querySelectorAll(".dpcard").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-det]")) return; dpSelect(+c.dataset.id, { fly: true }); }; c.ondblclick = () => dpDetails(+c.dataset.id); });
+  $("dpList").querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det));
+  for (const i of dpInc.values()) dpSyncMarker(i);
+  $("dpPinCount").textContent = dpMarkers.size;
+  $("dpMapEmpty").style.display = dpMarkers.size ? "none" : "";
+  dpRenderTypes();
+}
+function dpSelect(id, o) {
+  dpSel = id;
+  $("dpList").querySelectorAll(".dpcard").forEach((c) => c.classList.toggle("on", +c.dataset.id === id));
+  for (const [k, m] of dpMarkers) { const i = dpInc.get(k); if (i) m.setIcon(dpIcon(i)); }
+  const i = id != null ? dpInc.get(id) : null;
+  if (i && dpMap && i.lat != null && o && o.fly) {
+    dpMap.flyTo([i.lat, i.lon], Math.max(dpMap.getZoom(), 14), { duration: .6 });
+    const m = dpMarkers.get(id); if (m) setTimeout(() => m.openPopup(), 650);
+    const card = $("dpList").querySelector(`.dpcard[data-id="${id}"]`); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+  } else if (i && !i.lat && o && o.fly) uiToast("This incident has no map position yet — open details to fix the address");
+}
+async function dpLoad() {
+  try {
+    const since = dpWinHours ? dpNow() - dpWinHours * 3600 : 0;
+    const rows = await dpInvoke("incidents_list", { since, limit: 2000 });
+    dpInc.clear(); for (const i of rows || []) dpInc.set(i.id, i);
+    dpRender();
+  } catch (e) { log(`incidents_list: ${e}`); }
+}
+async function dpSettingsLoad() {
+  try { dpSettings = await dpInvoke("dispatch_get"); } catch (e) { log(`dispatch_get: ${e}`); return; }
+  if (!dpSettings) return;
+  const sel = $("dpChannel"); const cur = sel.value;
+  sel.innerHTML = '<option value="">All channels</option>' + dpSettings.channels.map((c) => `<option value="${c.tg}">${esc(c.name || "TG " + c.tg)}${c.role === "tactical" ? " (tac)" : ""}</option>`).join("");
+  sel.value = cur;
+}
+dpListen("incident", (e) => {
+  const i = e.payload; if (!i || i.id == null) return;
+  const had = dpInc.has(i.id); dpInc.set(i.id, i);
+  logEvent(`DISPATCH ${i.emoji} ${i.call_type} · ${i.address || "no address"}${had ? ` (update #${i.revision})` : ""}`, had ? "" : "alarm");
+  if (!dpShown()) return;
+  dpRender();
+  if (!had && $("dpFollowNew").checked && dpMap && i.lat != null && dpVisible(i)) dpMap.flyTo([i.lat, i.lon], Math.max(dpMap.getZoom(), 13), { duration: .8 });
+});
+dpListen("incident_deleted", (e) => { dpInc.delete(e.payload); if (dpShown()) dpRender(); });
+setInterval(() => { if (!dpShown()) return; $("dpList").querySelectorAll(".ago[data-t]").forEach((s) => { s.textContent = dpAgo(+s.dataset.t); }); }, 30000);
+setInterval(() => { if (dpShown()) dpRender(); }, 300000);   // freshness rings / stale fade
+
+/* feed controls */
+$("dpSearch").oninput = () => { dpQuery = $("dpSearch").value.trim().toLowerCase(); dpRender(); };
+$("dpChannel").onchange = () => { dpChanFilter = $("dpChannel").value; dpRender(); };
+setSeg($("dpWindow"), String(dpWinHours));
+wireSeg($("dpWindow"), (v) => { dpWinHours = +v; save("hs.dp.win", dpWinHours); dpLoad(); });
+$("dpShowPins").onchange = dpRender; $("dpShowLabels").onchange = dpRender;
+$("dpTypesAll").onclick = () => { dpHidden.clear(); save("hs.dp.hidden", []); dpRender(); };
+$("dpTypesNone").onclick = () => { for (const t of [...dpInc.values()].map((i) => i.call_type).concat(dpSettings ? dpSettings.call_types.map((t) => t.name) : [])) dpHidden.add(t); save("hs.dp.hidden", [...dpHidden]); dpRender(); };
+if (store("hs.dp.layers", "open") === "closed") $("dpLayers").classList.add("closed");
+$("dpLayersHead").onclick = () => { const c = $("dpLayers").classList.toggle("closed"); save("hs.dp.layers", c ? "closed" : "open"); };
+
+/* details */
+async function dpDetails(id) {
+  let d; try { d = await dpInvoke("incident_get", { id }); } catch (e) { uiToast(`${e}`, "err"); return; }
+  if (!d) { uiToast("That incident is gone"); dpInc.delete(id); dpRender(); return; }
+  const i = d.incident;
+  const t = (s) => new Date(s * 1000).toLocaleTimeString("en-US", { hour12: false });
+  const calls = d.calls.map((c) => `<div class="call"><div class="ch"><span class="mono">${t(c.at)}</span><span>${esc(c.tg_name || "TG " + c.tg)}</span><span class="badge ${c.role === "tactical" ? "clear" : ""}">${esc(c.role)}</span>${c.unit_name ? `<span>${esc(c.unit_name)}</span>` : ""}<span class="mono">${(+c.secs || 0).toFixed(1)}s</span><span class="spacer"></span>${c.audio ? `<button class="btn ghost sm" data-play="${c.call}" title="Play">▶</button>` : ""}</div>${c.summary ? `<div><b>${esc(c.summary)}</b></div>` : ""}<div class="tr">${esc(c.transcript || "(no transcript)")}</div></div>`).join("");
+  const m = uiModal(`<div class="dpdet">
+    <div class="inline"><span class="eyebrow">Incident #${i.id}</span><span class="badge ${i.confidence >= 50 ? "clear" : "enc"}">${i.confidence}% confidence</span><span class="spacer"></span>${d.calls.some((c) => c.audio) ? `<button class="btn ghost sm" data-playlast>▶ Play latest</button>` : ""}<button class="btn ghost sm danger" data-del>Delete</button><button class="btn ghost sm" data-close>✕</button></div>
+    <div class="grid">
+      <div><div class="k">Call type</div><div class="v big">${esc(i.emoji)} ${esc(i.call_type)}</div></div>
+      <div><div class="k">First heard · last update</div><div class="v">${t(i.created)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</div></div>
+      <div><div class="k">Units</div><div class="v units" style="display:flex;flex-wrap:wrap;gap:4px">${dpUnits(i) || "—"}</div></div>
+      <div><div class="k">Channel</div><div class="v">${esc(i.tg_name)} <span class="mono faint">TG ${i.tg}</span></div></div>
+      <div><div class="k">Address · as heard</div><div class="v">${esc(i.address) || "<span class='faint'>none</span>"}</div></div>
+      <div><div class="k">Validated</div><div class="v">${i.validated ? "✓ " + esc(i.validated) : i.geocode === "manual" ? "placed by hand" : i.geocode === "none" ? "<span class='warn'>not found near home — fix the address below</span>" : i.geocode === "error" ? "<span class='warn'>geocoder error — try again</span>" : "<span class='faint'>—</span>"}</div></div>
+      <div><div class="k">Coordinates</div><div class="v mono">${i.lat != null ? `${(+i.lat).toFixed(6)}, ${(+i.lon).toFixed(6)}` : "—"}</div></div>
+      <div><div class="k">Summary</div><div class="v">${esc(i.summary) || "—"}</div></div>
+    </div>
+    <div class="fix"><input data-fixaddr type="text" value="${esc(i.address)}" placeholder="Corrected street address or intersection" spellcheck="false"><button class="btn ghost sm" data-fixgo>Re-geocode</button><button class="btn ghost sm" data-fixmap title="Place the pin at the current map centre">Use map centre</button></div>
+    <div class="k" style="margin-top:10px">Transmissions</div>
+    <div class="calls">${calls || '<div class="faint">none</div>'}</div>
+  </div>`, { wide: true });
+  m.querySelector("[data-close]").onclick = m.close;
+  m.querySelectorAll("[data-play]").forEach((b) => b.onclick = () => dpInvoke("library_play", { id: +b.dataset.play }).catch((e) => uiToast(`${e}`, "err")));
+  const pl = m.querySelector("[data-playlast]"); if (pl) pl.onclick = () => { const c = [...d.calls].reverse().find((x) => x.audio); if (c) dpInvoke("library_play", { id: c.call }).catch((e) => uiToast(`${e}`, "err")); };
+  m.querySelector("[data-del]").onclick = async () => { if (!(await uiConfirm(`Delete incident #${i.id} and its ${i.calls} attached transmission${i.calls === 1 ? "" : "s"}? The recordings stay in the library.`, "Delete"))) return; try { await dpInvoke("incident_delete", { id: i.id }); dpInc.delete(i.id); m.close(); dpRender(); } catch (e) { uiToast(`${e}`, "err"); } };
+  const relocate = async (args) => { try { const u = await dpInvoke("incident_locate", { id: i.id, ...args }); dpInc.set(u.id, u); m.close(); dpRender(); if (u.lat != null) { dpSelect(u.id, { fly: true }); uiToast(`Placed at ${u.validated || u.address || "the chosen point"}`); } else uiToast("Still not found near home — try an intersection or add the city", "err"); } catch (e) { uiToast(`${e}`, "err"); } };
+  m.querySelector("[data-fixgo]").onclick = () => relocate({ address: m.querySelector("[data-fixaddr]").value.trim() || null, lat: null, lon: null });
+  m.querySelector("[data-fixmap]").onclick = () => { if (!dpMap) return; const c = dpMap.getCenter(); relocate({ address: m.querySelector("[data-fixaddr]").value.trim() || null, lat: c.lat, lon: c.lng }); };
+}
+
+/* setup */
+function dpSetupShow(on) { $("dpSetup").style.display = on ? "" : "none"; $("dpMain").style.display = on ? "none" : ""; if (on) { dpSetupFill(); dpLogRefresh(); } else { dpSettingsLoad().then(() => { setTimeout(() => { if (dpMap) dpMap.invalidateSize(); }, 30); dpRender(); }); } }
+$("dpSetupBtn").onclick = () => dpSetupShow(true);
+$("dpBack").onclick = () => dpSetupShow(false);
+function dpChRender() {
+  $("dpChannels").innerHTML = dpChBuf.map((c, k) => `<div class="row" data-k="${k}"><span class="grow inline" style="gap:6px;flex-wrap:wrap"><input data-ctg type="text" inputmode="numeric" placeholder="TG" value="${c.tg || ""}" style="width:64px"><input data-cname type="text" placeholder="name" value="${esc(c.name)}" style="width:170px"><select data-crole style="width:auto"><option value="dispatch" ${c.role !== "tactical" ? "selected" : ""}>dispatch</option><option value="tactical" ${c.role === "tactical" ? "selected" : ""}>tactical</option></select><input data-cfixed type="text" placeholder="fixed call type (optional)" value="${esc(c.fixed_call_type)}" style="width:150px" list="dpTypeList"><label class="check" style="margin:0"><input data-cen type="checkbox" ${c.enabled ? "checked" : ""}> on</label></span><button class="btn ghost sm" data-cdel="${k}" title="remove">✕</button></div>`).join("");
+  $("dpChannels").querySelectorAll("[data-cdel]").forEach((b) => b.onclick = () => { dpChSync(); dpChBuf.splice(+b.dataset.cdel, 1); dpChRender(); });
+  $("dpChannels").querySelectorAll("[data-ctg]").forEach((inp) => inp.onchange = () => { const row = inp.closest(".row"); const name = row.querySelector("[data-cname]"); if (!name.value.trim()) { const r = (typeof alRows !== "undefined" ? alRows : []).find((x) => x.id === parseInt(inp.value, 10)); if (r) name.value = r.alias || ""; } });
+  $("dpChMeta").textContent = dpChBuf.length ? `${dpChBuf.filter((c) => c.enabled).length} of ${dpChBuf.length} on` : "";
+}
+function dpChSync() {
+  dpChBuf = [...$("dpChannels").querySelectorAll(".row")].map((r) => ({ tg: parseInt(r.querySelector("[data-ctg]").value, 10) || 0, name: r.querySelector("[data-cname]").value.trim(), role: r.querySelector("[data-crole]").value, fixed_call_type: r.querySelector("[data-cfixed]").value.trim(), enabled: r.querySelector("[data-cen]").checked }));
+}
+function dpSetupFill() {
+  const s = dpSettings; if (!s) return;
+  dpChBuf = s.channels.map((c) => ({ ...c })); dpChRender();
+  $("dpHomeLat").value = s.home_lat; $("dpHomeLon").value = s.home_lon; $("dpRegion").value = s.region_hint; $("dpRadiusKm").value = s.search_radius_km;
+  $("dpGeoUrl").value = s.geocoder_url; $("dpGeoEmail").value = s.geocoder_email; $("dpEngine").value = s.engine;
+  $("dpWindowMin").value = Math.round(s.group_window_secs / 60); $("dpRadiusM").value = s.group_radius_m; $("dpRetention").value = s.retention_days;
+  $("dpTypesText").value = s.call_types.map((t) => `${t.emoji} ${t.name}`).join("\n"); $("dpExtra").value = s.extra_instructions;
+  let dl = $("dpTypeList"); if (!dl) { dl = document.createElement("datalist"); dl.id = "dpTypeList"; document.body.appendChild(dl); } dl.innerHTML = s.call_types.map((t) => `<option value="${esc(t.name)}">`).join("");
+  $("dpGeoMeta").textContent = s.geocoder_url.includes("nominatim.openstreetmap.org") ? "public Nominatim · 1 req/s" : "custom server";
+}
+function dpSetupRead() {
+  dpChSync();
+  const types = $("dpTypesText").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => { const m = l.match(/^(\S+)\s+(.+)$/); return m && !/^[A-Za-z0-9]/.test(m[1]) ? { emoji: m[1], name: m[2].trim() } : { emoji: "📍", name: l }; });
+  return { ...dpSettings, channels: dpChBuf.filter((c) => c.tg > 0), call_types: types,
+    home_lat: parseFloat($("dpHomeLat").value), home_lon: parseFloat($("dpHomeLon").value), region_hint: $("dpRegion").value.trim(), search_radius_km: parseFloat($("dpRadiusKm").value) || 40,
+    geocoder_url: $("dpGeoUrl").value.trim(), geocoder_email: $("dpGeoEmail").value.trim(), engine: $("dpEngine").value,
+    group_window_secs: (parseInt($("dpWindowMin").value, 10) || 45) * 60, group_radius_m: parseInt($("dpRadiusM").value, 10) || 150, retention_days: parseInt($("dpRetention").value, 10) || 14,
+    extra_instructions: $("dpExtra").value };
+}
+async function dpSave() {
+  if (!dpSettings) { uiToast("Dispatch settings did not load — reopen the tab", "err"); return false; }
+  const s = dpSetupRead();
+  if (!Number.isFinite(s.home_lat) || !Number.isFinite(s.home_lon)) { uiToast("Home latitude/longitude must be numbers", "err"); return false; }
+  try { await dpInvoke("dispatch_set", { settings: s }); } catch (e) { uiToast(`Could not save: ${e}`, "err"); return false; }
+  await dpSettingsLoad(); dpSetupFill(); return true;
+}
+$("dpSave").onclick = async () => { if (await dpSave()) { uiToast("Dispatch settings saved"); if (!$("trEnabled").checked) uiToast("The dispatch map needs transcription — enable it in Settings → Transcription", "err"); if (dpSettings.engine === "ollama" && !$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
+$("dpHomeFromMap").onclick = () => { if (!dpMap) { uiToast("Open the map first"); return; } const c = dpMap.getCenter(); $("dpHomeLat").value = c.lat.toFixed(5); $("dpHomeLon").value = c.lng.toFixed(5); };
+$("dpChAdd").onclick = () => { dpChSync(); dpChBuf.push({ tg: 0, name: "", role: "dispatch", fixed_call_type: "", enabled: true }); dpChRender(); const last = $("dpChannels").querySelector(".row:last-child [data-ctg]"); if (last) last.focus(); };
+$("dpTest").onclick = async () => { if (!(await dpSave())) return; uiToast("Running the extractor on the latest dispatch call…"); try { await uiConfirm(await dpInvoke("dispatch_test", { tg: null }), "OK"); dpLogRefresh(); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
+$("dpBackfill").onclick = async () => { if (!(await dpSave())) return; const hours = Math.max(1, parseInt($("dpBackfillHours").value, 10) || 24); try { const n = await dpInvoke("dispatch_backfill", { hours }); $("dpBackfillState").textContent = n ? `queued ${n} calls…` : "nothing new to process"; uiToast(n ? `Backfilling ${n} calls — one geocode per second, so give it a minute` : "No unprocessed transcribed calls on those channels in that window"); } catch (e) { uiToast(`${e}`, "err"); } };
+dpListen("dispatch_progress", (e) => { const p = e.payload || {}; $("dpBackfillState").textContent = p.finished ? `done · ${p.total} processed` : `${p.done} / ${p.total}…`; });
+async function dpLogRefresh() {
+  try {
+    const rows = await dpInvoke("dispatch_log");
+    $("dpLogMeta").textContent = rows && rows.length ? `${rows.length} recent` : "";
+    const badge = (o) => o === "new" ? '<span class="badge clear">new</span>' : o === "update" ? '<span class="badge clear">update</span>' : o === "error" ? '<span class="badge enc">error</span>' : '<span class="badge">skip</span>';
+    $("dpLog").innerHTML = (rows || []).map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td><small>${esc(l.tg_name)} <span class="mono">${l.tg}</span></small></td><td>${badge(l.outcome)} <small>${esc(l.detail)}</small>${l.incident != null ? ` <button class="btn ghost sm" data-det="${l.incident}">⤢</button>` : ""}</td></tr>`).join("");
+    $("dpLog").querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det));
+  } catch (e) { log(`dispatch_log: ${e}`); }
+}
+$("dpLogRefresh").onclick = dpLogRefresh;
+dpListen("dispatch", () => { if ($("dpSetup").style.display !== "none") dpLogRefresh(); });
+
+window.dispatchOnShow = async () => {
+  if (!dpSettings) await dpSettingsLoad();
+  dpInitMap();
+  setTimeout(() => { if (dpMap) { dpMap.invalidateSize(); if (!dpInc.size) dpMap.setView(dpHome(), 11); } }, 30);
+  dpLoad();
+};
+
