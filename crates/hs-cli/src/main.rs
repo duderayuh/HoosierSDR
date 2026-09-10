@@ -554,17 +554,20 @@ fn build_decoder(args: &Args) -> ChannelDecoder {
     } else {
         Modulation::C4fm
     };
-    // C4FM: the symbol-domain equalizer is experimental and opt-in.
-    // CQPSK: the CMA equalizer before differential detection IS the shipping
-    // path (the project thesis), so it is on unless explicitly disabled.
+    // CQPSK ships BARE (detect-first); the CMA/DFE equalizers are opt-in. That
+    // bare path carries ~0.4 errs2/frame less voice-FEC error while DFE halves
+    // the sync error — trade sync vs FEC per system. (Recovered on live air;
+    // 2026-09-10 probe_040238.) C4FM's experimental FSW equalizer stays opt-in.
     let mode = if args.dfe {
         EqMode::Dfe
     } else if args.no_equalizer {
         EqMode::Bypass
-    } else if args.cqpsk || args.equalizer {
+    } else if args.equalizer {
         EqMode::Enabled
-    } else {
+    } else if args.cqpsk {
         EqMode::Bypass
+    } else {
+        EqMode::Enabled
     };
     ChannelDecoder::with_offset(args.rate, modulation, mode, args.offset)
 }
