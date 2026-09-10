@@ -636,3 +636,47 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .dpdet .fix { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-top: 8px; }
 .dpdet .warn { color: var(--amber); }
 :root.lt980 .dispatch { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }
+
+/* ---------- Conversations tab ---------- */
+.cv-layout { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; height: 100%; min-height: 0; }
+:root.lt980 .cv-layout { grid-template-columns: 1fr; }
+.cv-main { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.cv-side { min-height: 0; overflow: auto; }
+.cv-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cv-top select { width: auto; max-width: 320px; }
+.cvlist { display: flex; flex-direction: column; gap: 8px; max-height: calc(66vh / var(--z)); overflow: auto; padding-right: 2px; }
+.cvcard { border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 10px; padding: 9px 11px; background: var(--panel-2); }
+.cvcard.sent { border-left-color: var(--clear); }
+.cvcard.failed { border-left-color: var(--enc); }
+.cvcard .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cvcard .cid { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.cvcard .when { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
+.cvcard .tgpill { margin-left: auto; font-family: var(--mono); font-size: 10.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-dim); max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cvcard .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.cvcard .summ, .cvsumm { margin-top: 6px; padding: 8px 10px; border-left: 3px solid var(--signal); background: color-mix(in srgb, var(--signal) 8%, transparent); border-radius: 0 8px 8px 0; font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.cvsumm { margin-top: 0; }
+.cvcard .summ .eyebrow { display: block; margin-bottom: 3px; color: var(--signal); }
+.cvcard .acts { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.cvunit { font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--enc) 16%, transparent); color: var(--enc); white-space: nowrap; }
+.cvunit.fixed { background: color-mix(in srgb, var(--clear) 16%, transparent); color: var(--clear); }
+.cvdet-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cvdet-title { font-family: var(--display); font-size: 17px; font-weight: 700; margin: 0 6px 0 0; }
+.cvkv.kv .v { font-size: 12.5px; font-weight: 600; word-break: break-word; }
+.cvparts { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.cvparts .p { display: flex; align-items: center; gap: 8px; font-size: 12.5px; flex-wrap: wrap; }
+.cvparts .p .star { color: var(--amber); }
+.cvpre { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; margin: 0; max-height: calc(38vh / var(--z)); overflow: auto; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.cvfold summary { cursor: pointer; font-size: 12px; color: var(--ink-dim); padding: 4px 0; }
+.cvfold[open] summary { color: var(--ink); }
+.cvsegs { max-height: calc(70vh / var(--z)); }
+.cvsegs td.tr { white-space: normal; min-width: 220px; line-height: 1.4; }
+.cvsegs td.who { white-space: nowrap; }
+.cvstat { text-align: center; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.cvstat b { display: block; font-family: var(--display); font-size: 20px; color: var(--signal); }
+.cvstat.big b { font-size: 26px; }
+.cvstat.ok b { color: var(--clear); }
+.cvstat.bad b { color: var(--enc); }
+.cvstat small { color: var(--ink-faint); font-size: 11px; }
+.cvstats3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
+#cvStBody td:last-child { text-align: right; font-family: var(--mono); }
+#cvStBody tr { cursor: pointer; }

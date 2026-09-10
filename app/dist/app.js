@@ -77,14 +77,14 @@ function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttri
 
 /* ---------- views ---------- */
 function showView(v) {
-  ["monitor", "library", "playlists", "aliases", "discovery", "alerts", "analyzers", "dispatch", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
+  ["monitor", "library", "conversations", "playlists", "aliases", "alerts", "analyzers", "dispatch", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "alerts" && typeof alertsOnShow === "function") alertsOnShow();
   if (v === "analyzers" && typeof analyzersOnShow === "function") analyzersOnShow();
   if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
   if (v === "devices" && typeof devicesOnShow === "function") devicesOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
   if (v === "aliases" && typeof aliasesOnShow === "function") aliasesOnShow();
-  if (v === "discovery" && typeof discoveryOnShow === "function") discoveryOnShow();
+  if (v === "conversations" && typeof conversationsOnShow === "function") conversationsOnShow();
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
@@ -95,14 +95,18 @@ function setPage(p) {
   if (!nav) return;
   nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.p === p));
   document.querySelectorAll("#setPages .settings-page").forEach((pg) => pg.style.display = pg.id === "set-" + p ? "" : "none");
+  if (p === "discovery" && typeof discoveryOnShow === "function") discoveryOnShow();
 }
+// Discovery lives on a Settings page: it is on screen only when both are.
+function discoveryVisible() { return $("view-settings").style.display !== "none" && $("set-discovery").style.display !== "none"; }
 $("setNav").querySelectorAll("button").forEach((b) => b.onclick = () => setPage(b.dataset.p));
 setPage("appearance");
 
 setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
-  if (["#playlists", "#library", "#aliases", "#discovery", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1));
+  if (location.hash === "#discovery") { showView("settings"); setPage("discovery"); return; }
+  if (["#playlists", "#library", "#conversations", "#aliases", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1));
 }, 0);
 
 /* ---------- tuning state ---------- */
@@ -933,7 +937,7 @@ function discoveryGrant(ev) {
   f.n++; f.last = Date.now(); f.tgs[ev.tg] = 1;
   discDirty = true;
 }
-setInterval(() => { if (discDirty) { discDirty = false; const keys = Object.keys(disc.tgs); if (keys.length > 3000) keys.sort((a, b) => disc.tgs[a].last - disc.tgs[b].last).slice(0, keys.length - 3000).forEach((k) => delete disc.tgs[k]); save("hs.discovery", disc); if ($("view-discovery").style.display !== "none") renderDiscovery(); } }, 2000);
+setInterval(() => { if (discDirty) { discDirty = false; const keys = Object.keys(disc.tgs); if (keys.length > 3000) keys.sort((a, b) => disc.tgs[a].last - disc.tgs[b].last).slice(0, keys.length - 3000).forEach((k) => delete disc.tgs[k]); save("hs.discovery", disc); if (discoveryVisible()) renderDiscovery(); } }, 2000);
 const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m ago`; };
 let bandLo = 0, bandHi = 0;
 function renderDiscovery() {
@@ -987,7 +991,7 @@ function affiliationEvent(ev) {
     affil.set(ev.unit, a);
     if (affil.size > 4096) affil.delete(affil.keys().next().value);
   }
-  if ($("view-discovery").style.display !== "none") renderAffiliations();
+  if (discoveryVisible()) renderAffiliations();
 }
 function renderAffiliations() {
   const q = $("afFilter").value.trim().toLowerCase();
@@ -1008,7 +1012,7 @@ function locationEvent(ev) {
   fixes.set(ev.unit, { lat: ev.lat, lon: ev.lon, name: ev.unit_name, t: Date.now() });
   if (!mapView) mapView = { lat: ev.lat, lon: ev.lon, z: 12 };
   logEvent(`position: ${ev.unit_name || ev.unit} at ${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)}`);
-  if ($("view-discovery").style.display !== "none") renderMap();
+  if (discoveryVisible()) renderMap();
 }
 const lon2x = (lon, z) => (lon + 180) / 360 * Math.pow(2, z);
 const lat2y = (lat, z) => (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z);
@@ -2593,9 +2597,131 @@ if (TAURI) {
     if (!groups.length) { groups.push({ id: "gdemo1", name: "Hospitals", tgs: [10202], listen: true }, { id: "gdemo2", name: "EMS / Fire", tgs: [10147, 10202], listen: false }); renderGroupChips(); }
     { const h = history[0]; if (h) { const td = h.el.querySelector("td.tr"); td.textContent = "Engine 21 on scene, working structure fire, requesting second alarm."; } }
     colors.set(10147, "#f5b544"); tgRules.push({ lo: 10100, hi: 10199, name: "Police", pri: 10, color: "#7aa2ff", lock: false, bell: false });
-    if (location.hash === "#discovery") renderDiscovery();
+    if (location.hash === "#discovery") { showView("settings"); setPage("discovery"); }
   }
 }
+
+/* ================= conversations tab ================= */
+// Stored conversations: what a conversation rule stitched, summarised and sent.
+let cvRows = [], cvSel = null, cvStats = null;
+const cvAgo = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };
+const cvWhen = (t) => new Date(t * 1000).toLocaleString("en-US", { month: "numeric", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
+const cvClock = (t) => new Date(t * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const cvDur = (s) => { s = Math.max(0, Math.round(s)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
+const cvBadge = (st) => `<span class="badge ${st === "sent" ? "clear" : st === "failed" ? "enc" : ""}">${esc(st || "?")}</span>`;
+const cvUnitName = (p) => p.unit_name || `radio ${p.unit}`;
+function cvArgs() { const tg = $("cvTgFilter").value; return { q: $("cvSearch").value.trim() || null, tg: tg ? +tg : null, before: null, limit: 100 }; }
+async function cvLoad(more) {
+  if (!TAURI) return;
+  try {
+    const args = cvArgs(); if (more && cvRows.length) args.before = cvRows[cvRows.length - 1].last_at;
+    const rows = (await invoke("conversations_list", args)) || [];
+    cvRows = more ? cvRows.concat(rows) : rows;
+    $("cvOlder").disabled = rows.length < 100;
+    cvRenderList();
+  } catch (e) { log(`conversations_list: ${e}`); }
+  cvLoadStats();
+}
+async function cvLoadStats() {
+  if (!TAURI) return;
+  try {
+    const st = (await invoke("conversations_stats")) || {};
+    cvStats = st;
+    $("cvStTotal").textContent = st.total || 0; $("cvStSent").textContent = st.sent || 0; $("cvStFailed").textContent = st.failed || 0; $("cvStSkipped").textContent = st.skipped || 0;
+    $("cvCount").textContent = st.total ? `(${st.total})` : "";
+    const by = st.by_tg || [];
+    $("cvStEmpty").style.display = by.length ? "none" : "";
+    $("cvStBody").innerHTML = by.map(([tg, name, n]) => `<tr data-cvtg="${tg}" title="Show only this talkgroup"><td>${esc(name)} <span class="faint mono">${tg}</span></td><td>${n}</td></tr>`).join("");
+    $("cvStBody").querySelectorAll("[data-cvtg]").forEach((tr) => tr.onclick = () => { $("cvTgFilter").value = tr.dataset.cvtg; cvShowPage("list"); cvLoad(false); });
+    const sel = $("cvTgFilter"); const cur = sel.value;
+    sel.innerHTML = `<option value="">All talkgroups</option>` + by.map(([tg, name]) => `<option value="${tg}">${esc(name)} (${tg})</option>`).join("");
+    sel.value = cur; if (sel.value !== cur) sel.value = "";
+  } catch (e) { log(`conversations_stats: ${e}`); }
+}
+function cvRenderList() {
+  $("cvCardsEmpty").style.display = cvRows.length ? "none" : "";
+  $("cvListMeta").textContent = cvRows.length ? `${cvRows.length} shown` : "";
+  $("cvCards").innerHTML = cvRows.map((r) => `<div class="cvcard ${esc(r.status)}" data-cvid="${r.id}">
+    <div class="top"><span class="cid">${esc(r.conv_id)}</span>${cvBadge(r.status)}${r.revision ? `<span class="badge">rev ${r.revision}</span>` : ""}${r.source === "test" ? `<span class="badge">test</span>` : ""}<span class="tgpill" title="TG ${r.tg} · ${esc(r.tg_name)}">${esc(r.tg_desc || r.tg_name)}</span></div>
+    <div class="when">${esc(cvWhen(r.first_at))} · ${esc(r.rule_name)} · ${r.calls} transmission${r.calls === 1 ? "" : "s"} · ${cvDur(r.last_at - r.first_at)}</div>
+    <div class="tags">${(r.units || []).map((u) => `<span class="cvunit">${esc(u)}</span>`).join("")}</div>
+    <div class="summ"><span class="eyebrow">AI summary</span>${esc(r.summary || r.detail || "(no summary)")}</div>
+    <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button></div>
+  </div>`).join("");
+  const cards = $("cvCards");
+  cards.querySelectorAll("[data-cvopen]").forEach((b) => b.onclick = () => cvOpen(+b.dataset.cvopen));
+  cards.querySelectorAll("[data-cvlisten]").forEach((b) => b.onclick = () => { const r = cvRows.find((x) => x.id === +b.dataset.cvlisten); if (r) cvListen(r); });
+  cards.querySelectorAll("[data-cvcopy]").forEach((b) => b.onclick = () => { const r = cvRows.find((x) => x.id === +b.dataset.cvcopy); if (r) cvCopy(r); });
+}
+function cvCopy(r) { const cb = navigator.clipboard; if (!cb) return; cb.writeText(r.message || r.summary || "").then(() => uiToast("Message copied"), () => {}); }
+async function cvListen(r) {
+  const pieces = (r.pieces || []).filter((p) => p.id != null || p.audio);
+  if (!pieces.length) { uiToast("No audio stored for this conversation", "err"); return; }
+  uiToast(`Queued ${pieces.length} transmission${pieces.length === 1 ? "" : "s"}`);
+  for (const p of pieces) { try { if (p.id != null) await invoke("library_play", { id: p.id }); else await invoke("play_wav", { path: p.audio }); } catch (e) { uiToast(`${e}`, "err"); return; } }
+}
+function cvShowPage(which) {
+  $("cvListPage").style.display = which === "list" ? "" : "none";
+  $("cvDetailPage").style.display = which === "detail" ? "" : "none";
+  $("cvSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === which)));
+}
+async function cvOpen(id) {
+  let r = cvRows.find((x) => x.id === id);
+  if (TAURI) { try { r = (await invoke("conversation_get", { id })) || r; } catch (e) { uiToast(`${e}`, "err"); } }
+  if (!r) return;
+  cvSel = r;
+  $("cvSeg").querySelector('[data-v="detail"]').disabled = false;
+  cvShowPage("detail");
+  $("cvdStatus").innerHTML = cvBadge(r.status) + (r.revision ? ` <span class="badge">revised ×${r.revision}</span>` : "") + (r.source === "test" ? ` <span class="badge">test run</span>` : "");
+  $("cvdAgo").textContent = r.sent_at ? `${cvAgo(r.sent_at)}` : "";
+  const pieces = r.pieces || [];
+  const kv = [
+    ["Talkgroup", `${esc(r.tg_desc || r.tg_name)} <span class="faint mono">${esc(r.tg_name)} · TG ${r.tg}</span>`],
+    ["Conversation ID", `<span class="mono">${esc(r.conv_id)}</span>`],
+    ["Rule", esc(r.rule_name)],
+    ["Transmissions", `${pieces.length}`],
+    ["Started", esc(cvWhen(r.first_at))],
+    ["Ended", `${esc(cvWhen(r.last_at))} <span class="faint">· ${cvDur(r.last_at - r.first_at)}</span>`],
+    ["Sent", r.sent_at ? esc(cvWhen(r.sent_at)) : "—"],
+    ["Telegram chat", r.chat ? `<span class="mono">${esc(r.chat)}</span>` : "—"],
+  ];
+  $("cvdInfo").innerHTML = kv.map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+  // Participants: the mobile units in order of first appearance (the first
+  // is the primary), then the fixed party's consoles.
+  const seen = new Set(); const parts = [];
+  for (const p of pieces) { if (seen.has(p.unit)) continue; seen.add(p.unit); parts.push(p); }
+  const mobiles = parts.filter((p) => !p.fixed), fixed = parts.filter((p) => p.fixed);
+  $("cvdParts").innerHTML = mobiles.map((p, i) => `<div class="p">${i === 0 ? '<span class="star" title="Primary unit">★</span>' : '<span style="width:1em"></span>'}<span class="mono faint">UID ${p.unit}</span><b>${esc(cvUnitName(p))}</b><span class="cvunit">unit</span>${i === 0 ? '<span class="badge">primary</span>' : ""}</div>`).join("")
+    + fixed.map((p) => `<div class="p"><span style="width:1em"></span><span class="mono faint">UID ${p.unit}</span><b>${esc(p.unit_name || "fixed party")}</b><span class="cvunit fixed">hospital</span></div>`).join("")
+    || `<div class="faint small">No radios recorded.</div>`;
+  $("cvdSummary").textContent = r.summary || (r.status === "skipped" ? "(skipped — no transcript arrived, so nothing was summarised)" : "(no summary)");
+  $("cvdSummMeta").textContent = r.summary ? `${r.summary.length} chars` : "";
+  $("cvdMessage").textContent = r.message || "(nothing was sent)";
+  $("cvdSentMeta").textContent = r.status === "sent" ? `sent ${r.sent_at ? cvWhen(r.sent_at) : ""}` : r.status;
+  $("cvdDetail").textContent = r.detail || "";
+  $("cvdTranscript").textContent = r.transcript || "(empty)";
+  $("cvdPrompt").textContent = r.prompt || "(no prompt — no transcript, so the model was not asked)";
+  $("cvdSegMeta").textContent = `${pieces.length} · ${cvDur(pieces.reduce((a, p) => a + (p.secs || 0), 0))} of audio`;
+  $("cvdSegs").innerHTML = pieces.map((p) => `<tr><td class="mono time">${esc(cvClock(p.at))}<br><small class="faint">${(p.secs || 0).toFixed(1)} s</small></td><td class="who"><span class="cvunit ${p.fixed ? "fixed" : ""}">${p.fixed ? "hospital" : "unit"}</span><br><span class="mono faint">UID ${p.unit}</span> ${esc(p.fixed ? (p.unit_name || "") : cvUnitName(p))}</td><td class="tr">${p.transcript ? esc(p.transcript) : '<span class="faint">[no transcript]</span>'}</td><td class="act">${p.id != null ? `<button class="btn ghost sm" data-cvplay="${p.id}" title="Play this transmission">▶</button>` : p.audio ? `<button class="btn ghost sm" data-cvwav="${esc(p.audio)}" title="Play this transmission">▶</button>` : ""}</td></tr>`).join("")
+    || `<tr><td colspan="4" class="faint">No transmissions recorded.</td></tr>`;
+  $("cvdSegs").querySelectorAll("[data-cvplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.cvplay }).catch((e) => uiToast(`${e}`, "err")));
+  $("cvdSegs").querySelectorAll("[data-cvwav]").forEach((b) => b.onclick = () => invoke("play_wav", { path: b.dataset.cvwav }).catch((e) => uiToast(`${e}`, "err")));
+}
+$("cvSeg").querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.dataset.v === "detail" && !cvSel) return; cvShowPage(b.dataset.v); });
+$("cvdBack").onclick = () => cvShowPage("list");
+$("cvdListen").onclick = () => { if (cvSel) cvListen(cvSel); };
+$("cvdCopy").onclick = () => { if (cvSel) cvCopy(cvSel); };
+$("cvdDelete").onclick = async () => {
+  if (!cvSel) return;
+  if (!(await uiConfirm(`Delete stored conversation ${cvSel.conv_id}? The library calls it points at are kept.`, "Delete"))) return;
+  try { await invoke("conversation_delete", { id: cvSel.id }); cvRows = cvRows.filter((x) => x.id !== cvSel.id); cvSel = null; $("cvSeg").querySelector('[data-v="detail"]').disabled = true; cvShowPage("list"); cvRenderList(); cvLoadStats(); } catch (e) { uiToast(`${e}`, "err"); }
+};
+$("cvRefresh").onclick = () => cvLoad(false);
+$("cvOlder").onclick = () => cvLoad(true);
+$("cvSearch").onkeydown = (e) => { if (e.key === "Enter") cvLoad(false); };
+$("cvTgFilter").onchange = () => { cvShowPage("list"); cvLoad(false); };
+if (listen) listen("conversations", () => { if ($("view-conversations").style.display !== "none" && $("cvListPage").style.display !== "none") cvLoad(false); });
+window.conversationsOnShow = () => cvLoad(false);
 
 /* ================= onboarding / setup wizard ================= */
 /* A short guided setup: radio → RadioReference → find system → start.

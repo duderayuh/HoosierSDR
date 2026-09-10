@@ -67,6 +67,22 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "alerts_get" => jv(crate::alerts::alerts_get(state)),
         "alerts_log" => jv(crate::alerts::alerts_log(state)),
         "conversations_state" => jv(crate::conversations::conversations_state(state)),
+        "conversations_list" => jv(crate::conversations::conversations_list(
+            state,
+            arg(args, "q")?,
+            arg(args, "tg")?,
+            arg(args, "before")?,
+            arg(args, "limit")?,
+        )?),
+        "conversation_get" => jv(crate::conversations::conversation_get(
+            state,
+            arg(args, "id")?,
+        )?),
+        "conversation_delete" => {
+            crate::conversations::conversation_delete(state, arg(args, "id")?)?;
+            Ok(Value::Null)
+        }
+        "conversations_stats" => jv(crate::conversations::conversations_stats(state)?),
         "digests_log" => jv(crate::digest::digests_log(state)),
         "analyzers_log" => jv(crate::analyzers::analyzers_log(state)),
         "dispatch_get" => jv(crate::dispatch::dispatch_get(state)),

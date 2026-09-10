@@ -122,7 +122,7 @@ pub struct Settings {
     pub seen: HashMap<String, u32>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Piece {
     pub id: Option<i64>,
     pub unit: u32,
@@ -702,6 +702,20 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     if !has_text && !r.send_without_transcript {
         let why = "no transcript arrived (is transcription enabled?) — summary skipped".to_string();
         log_it(&app, &r, &c, false, why.clone(), String::new());
+        store_outcome(
+            &app,
+            &r,
+            &c,
+            &Outcome {
+                status: "skipped",
+                detail: &why,
+                summary: "",
+                message: "",
+                prompt: "",
+                chat: &chat,
+                revision: c.revision,
+            },
+        );
         finish(&app, c.key, n_pieces, |cc| {
             cc.last_error = Some(why);
             cc.sent_at = Some(crate::library::now());
@@ -711,14 +725,18 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     }
     // 1. Summary.
     let transcript = stitched_transcript(&c);
-    let summary = if has_text {
-        let prompt = format!(
+    let prompt = if has_text {
+        format!(
             "{}\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
             r.summary_prompt.trim(),
             c.tg_name,
             c.tg,
             transcript
-        );
+        )
+    } else {
+        String::new()
+    };
+    let summary = if has_text {
         match crate::alerts::ollama_complete(&ollama, &prompt) {
             Ok(s) => s,
             Err(e) => format!("(summary unavailable: {e})\n{}", transcript.trim()),
@@ -806,8 +824,22 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                     ..c.clone()
                 },
                 true,
-                detail,
+                detail.clone(),
                 summary.clone(),
+            );
+            store_outcome(
+                &app,
+                &r,
+                &c,
+                &Outcome {
+                    status: "sent",
+                    detail: &detail,
+                    summary: &summary,
+                    message: &message,
+                    prompt: &prompt,
+                    chat: &chat,
+                    revision,
+                },
             );
             finish(&app, c.key, n_pieces, |cc| {
                 cc.sent_ids = ids;
@@ -821,6 +853,20 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
         }
         Err(e) => {
             log_it(&app, &r, &c, false, format!("{detail}{e}"), summary.clone());
+            store_outcome(
+                &app,
+                &r,
+                &c,
+                &Outcome {
+                    status: "failed",
+                    detail: &format!("{detail}{e}"),
+                    summary: &summary,
+                    message: &message,
+                    prompt: &prompt,
+                    chat: &chat,
+                    revision: c.revision,
+                },
+            );
             finish(&app, c.key, n_pieces, |cc| {
                 cc.attempts += 1;
                 cc.last_summary = Some(summary);
@@ -1060,6 +1106,346 @@ pub fn conversation_resend(app: AppHandle, state: State<AppState>, key: u64) -> 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// stored conversations — the Conversations tab
+// ---------------------------------------------------------------------------
+//
+// `open` is pruned once a conversation's late window passes and `log` is a
+// short in-memory ring, so neither can show *what went out* an hour later.
+// Every outcome of `summarise_and_send_with` — sent, failed, or skipped for
+// want of a transcript — is written to a `conversations` table in the call
+// library (`calls.db`, beside dispatch's incidents) with everything that went
+// into the message: the pieces with their transcripts, the stitched transcript
+// the model saw, the full prompt, the summary it returned, the rendered
+// message, and the Telegram result. A revision updates the same row.
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+pub fn ensure_schema(c: &Connection) {
+    let _ = c.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY,
+            rule_id TEXT NOT NULL,
+            rule_name TEXT NOT NULL DEFAULT '',
+            tg INTEGER NOT NULL,
+            tg_name TEXT NOT NULL DEFAULT '',
+            tg_desc TEXT NOT NULL DEFAULT '',
+            first_at INTEGER NOT NULL,
+            last_at INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL DEFAULT 0,
+            revision INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '',
+            prompt TEXT NOT NULL DEFAULT '',
+            transcript TEXT NOT NULL DEFAULT '',
+            chat TEXT NOT NULL DEFAULT '',
+            participants TEXT NOT NULL DEFAULT '[]',
+            pieces TEXT NOT NULL DEFAULT '[]',
+            calls INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'live'
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS conversations_key ON conversations(rule_id, tg, first_at);
+        CREATE INDEX IF NOT EXISTS conversations_last ON conversations(last_at);
+        "#,
+    );
+}
+
+/// What one summary attempt produced, for the stored row.
+struct Outcome<'a> {
+    status: &'a str,
+    detail: &'a str,
+    summary: &'a str,
+    message: &'a str,
+    prompt: &'a str,
+    chat: &'a str,
+    revision: u32,
+}
+
+/// The display identity of a stored conversation: talkgroup and start time
+/// never change across revisions, so this is stable where `key` is not.
+pub fn conv_id(tg: u16, first_at: i64) -> String {
+    format!("CONV-{tg}-{first_at}")
+}
+
+/// Insert or revise the stored row for `c`. Called with no lock held: the
+/// library connection is its own mutex and `log_it` takes the conversations
+/// one.
+fn store_outcome(app: &AppHandle, r: &Rule, c: &Conversation, o: &Outcome) {
+    let state = app.state::<AppState>();
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return;
+    };
+    let db = db.lock().unwrap();
+    let source = if c.key == 0 { "test" } else { "live" };
+    if let Err(e) = store_row(&db, r, c, o, source) {
+        eprintln!("conversation store: {e}");
+    }
+}
+
+/// The row for one outcome: insert on first send, update on a revision.
+fn store_row(
+    db: &Connection,
+    r: &Rule,
+    c: &Conversation,
+    o: &Outcome,
+    source: &str,
+) -> Result<(), String> {
+    let participants = serde_json::to_string(&c.participants).unwrap_or_else(|_| "[]".into());
+    let pieces = serde_json::to_string(&c.pieces).unwrap_or_else(|_| "[]".into());
+    let transcript = stitched_transcript(c);
+    let now = crate::library::now();
+    let existing: Option<i64> = db
+        .query_row(
+            "SELECT id FROM conversations WHERE rule_id = ?1 AND tg = ?2 AND first_at = ?3",
+            params![r.id, c.tg, c.first_at],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    let res = match existing {
+        Some(id) => db.execute(
+            "UPDATE conversations SET rule_name = ?1, tg_name = ?2, tg_desc = ?3, last_at = ?4, sent_at = ?5, revision = ?6,
+             status = ?7, detail = ?8, summary = ?9, message = ?10, prompt = ?11, transcript = ?12, chat = ?13,
+             participants = ?14, pieces = ?15, calls = ?16 WHERE id = ?17",
+            params![
+                r.name, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.last_at, now, o.revision,
+                o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
+                participants, pieces, c.pieces.len() as i64, id
+            ],
+        ),
+        None => db.execute(
+            "INSERT INTO conversations (rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision,
+             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            params![
+                r.id, r.name, c.tg, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.first_at, c.last_at, now, o.revision,
+                o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
+                participants, pieces, c.pieces.len() as i64, source
+            ],
+        ),
+    };
+    res.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One stored conversation, in full.
+#[derive(Serialize, Clone, Debug)]
+pub struct Stored {
+    pub id: i64,
+    pub conv_id: String,
+    pub rule_id: String,
+    pub rule_name: String,
+    pub tg: u16,
+    pub tg_name: String,
+    pub tg_desc: String,
+    pub first_at: i64,
+    pub last_at: i64,
+    pub sent_at: i64,
+    pub revision: u32,
+    pub status: String,
+    pub detail: String,
+    pub summary: String,
+    pub message: String,
+    pub prompt: String,
+    pub transcript: String,
+    pub chat: String,
+    pub participants: Vec<u32>,
+    pub pieces: Vec<Piece>,
+    pub calls: u32,
+    pub source: String,
+    /// Mobile units by name (or ID), first appearance first.
+    pub units: Vec<String>,
+}
+
+const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source";
+
+fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
+    let tg = row.get::<_, i64>(3)? as u16;
+    let first_at: i64 = row.get(6)?;
+    let participants: Vec<u32> =
+        serde_json::from_str(&row.get::<_, String>(17)?).unwrap_or_default();
+    let pieces: Vec<Piece> = serde_json::from_str(&row.get::<_, String>(18)?).unwrap_or_default();
+    let mut units: Vec<String> = pieces
+        .iter()
+        .filter(|p| !p.fixed)
+        .map(|p| p.unit_name.clone().unwrap_or_else(|| p.unit.to_string()))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    units.retain(|u| seen.insert(u.clone()));
+    Ok(Stored {
+        id: row.get(0)?,
+        conv_id: conv_id(tg, first_at),
+        rule_id: row.get(1)?,
+        rule_name: row.get(2)?,
+        tg,
+        tg_name: row.get(4)?,
+        tg_desc: row.get(5)?,
+        first_at,
+        last_at: row.get(7)?,
+        sent_at: row.get(8)?,
+        revision: row.get::<_, i64>(9)? as u32,
+        status: row.get(10)?,
+        detail: row.get(11)?,
+        summary: row.get(12)?,
+        message: row.get(13)?,
+        prompt: row.get(14)?,
+        transcript: row.get(15)?,
+        chat: row.get(16)?,
+        participants,
+        pieces,
+        calls: row.get::<_, i64>(19)? as u32,
+        source: row.get(20)?,
+        units,
+    })
+}
+
+fn with_db<T>(
+    state: &State<AppState>,
+    f: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let db = state
+        .db
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("the call library is not open")?;
+    let c = db.lock().unwrap();
+    f(&c)
+}
+
+/// Stored conversations, newest last activity first. `q` matches the
+/// summary, message, transcript, talkgroup, rule, units and display ID;
+/// `before` (a `last_at`) pages older.
+#[tauri::command]
+pub fn conversations_list(
+    state: State<AppState>,
+    q: Option<String>,
+    tg: Option<u16>,
+    before: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<Stored>, String> {
+    with_db(&state, |c| list_rows(c, q.as_deref(), tg, before, limit))
+}
+
+fn list_rows(
+    c: &Connection,
+    q: Option<&str>,
+    tg: Option<u16>,
+    before: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<Stored>, String> {
+    let limit = limit.unwrap_or(100).clamp(1, 500) as i64;
+    let q = q.unwrap_or_default().trim();
+    let like = format!("%{q}%");
+    let tg_filter = tg.map(|t| t as i64).unwrap_or(-1);
+    let before = before.unwrap_or(i64::MAX);
+    {
+        let mut stmt = c
+            .prepare(&format!(
+                "SELECT {STORED_COLS} FROM conversations
+                 WHERE last_at < ?1 AND (?2 < 0 OR tg = ?2)
+                   AND (?3 = '' OR summary LIKE ?4 OR message LIKE ?4 OR transcript LIKE ?4 OR tg_name LIKE ?4
+                        OR tg_desc LIKE ?4 OR rule_name LIKE ?4 OR pieces LIKE ?4
+                        OR ('CONV-' || tg || '-' || first_at) LIKE ?4)
+                 ORDER BY last_at DESC LIMIT ?5"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![before, tg_filter, q, like, limit], stored_row)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub fn conversation_get(state: State<AppState>, id: i64) -> Result<Stored, String> {
+    with_db(&state, |c| get_row(c, id))
+}
+
+fn get_row(c: &Connection, id: i64) -> Result<Stored, String> {
+    {
+        c.query_row(
+            &format!("SELECT {STORED_COLS} FROM conversations WHERE id = ?1"),
+            params![id],
+            stored_row,
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "that conversation is gone".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn conversation_delete(state: State<AppState>, id: i64) -> Result<(), String> {
+    with_db(&state, |c| delete_row(c, id))
+}
+
+fn delete_row(c: &Connection, id: i64) -> Result<(), String> {
+    c.execute("DELETE FROM conversations WHERE id = ?1", params![id])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Totals for the tab's side panel.
+#[derive(Serialize, Default)]
+pub struct StoredStats {
+    pub total: u32,
+    pub sent: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    /// (talkgroup, name, conversations), most first.
+    pub by_tg: Vec<(u16, String, u32)>,
+}
+
+#[tauri::command]
+pub fn conversations_stats(state: State<AppState>) -> Result<StoredStats, String> {
+    with_db(&state, stats_rows)
+}
+
+fn stats_rows(c: &Connection) -> Result<StoredStats, String> {
+    {
+        let mut st = StoredStats::default();
+        let mut stmt = c
+            .prepare("SELECT status, COUNT(*) FROM conversations GROUP BY status")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (status, n) = row.map_err(|e| e.to_string())?;
+            st.total += n;
+            match status.as_str() {
+                "sent" => st.sent += n,
+                "failed" => st.failed += n,
+                _ => st.skipped += n,
+            }
+        }
+        let mut stmt = c
+            .prepare(
+                "SELECT tg, MAX(tg_name), COUNT(*) AS n FROM conversations GROUP BY tg ORDER BY n DESC, tg",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u16,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u32,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        st.by_tg = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(st)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1458,139 @@ mod tests {
             fixed_units: vec![900001],
             ..Default::default()
         }
+    }
+
+    /// A sent conversation is stored with everything that went into the
+    /// message; a revision updates the same row; the tab's list, search,
+    /// filter, stats and delete all read it back.
+    #[test]
+    fn stored_conversations_round_trip() {
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db);
+        let r = rule();
+        let mut c = conv(7, 10202, Some(790065), 1_700_000_030, false);
+        c.first_at = 1_700_000_000;
+        c.pieces = vec![
+            Piece {
+                id: Some(41),
+                unit: 790065,
+                unit_name: Some("Medic 3".into()),
+                fixed: false,
+                at: 1_700_000_000,
+                secs: 4.0,
+                audio: Some("/tmp/a.wav".into()),
+                transcript: Some("Medic 3 inbound with a 60 year old male".into()),
+            },
+            Piece {
+                id: Some(42),
+                unit: 900001,
+                unit_name: None,
+                fixed: true,
+                at: 1_700_000_030,
+                secs: 2.0,
+                audio: Some("/tmp/b.wav".into()),
+                transcript: Some("Copy, room 4".into()),
+            },
+        ];
+        let o = Outcome {
+            status: "sent",
+            detail: "sent (2 pieces)",
+            summary: "Medic 3 is inbound with a 60-year-old male.",
+            message: "🏥 Hospitals\nMedic 3 is inbound.",
+            prompt: "Summarise…",
+            chat: "123",
+            revision: 0,
+        };
+        store_row(&db, &r, &c, &o, "live").unwrap();
+        let rows = list_rows(&db, None, None, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.conv_id, "CONV-10202-1700000000");
+        assert_eq!(row.units, vec!["Medic 3".to_string()]);
+        assert_eq!(row.pieces.len(), 2);
+        assert!(row
+            .transcript
+            .starts_with("RADIO \"Medic 3\": Medic 3 inbound"));
+        assert_eq!(row.status, "sent");
+
+        // A late transmission revises the same conversation: one row, rev 1.
+        c.pieces.push(Piece {
+            id: Some(43),
+            unit: 790065,
+            unit_name: Some("Medic 3".into()),
+            fixed: false,
+            at: 1_700_000_090,
+            secs: 3.0,
+            audio: None,
+            transcript: Some("ETA five minutes".into()),
+        });
+        c.last_at = 1_700_000_090;
+        let o2 = Outcome {
+            revision: 1,
+            detail: "edited in place; sent (3 pieces)",
+            ..o
+        };
+        store_row(&db, &r, &c, &o2, "live").unwrap();
+        let rows = list_rows(&db, None, None, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revision, 1);
+        assert_eq!(rows[0].calls, 3);
+        let full = get_row(&db, rows[0].id).unwrap();
+        assert_eq!(
+            full.pieces[2].transcript.as_deref(),
+            Some("ETA five minutes")
+        );
+        assert_eq!(full.message, o.message);
+        assert_eq!(full.prompt, o.prompt);
+
+        // Search hits summary, units and the display ID; misses miss.
+        assert_eq!(
+            list_rows(&db, Some("inbound"), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_rows(&db, Some("Medic 3"), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_rows(&db, Some("CONV-10202"), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_rows(&db, Some("zebra"), None, None, None)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            list_rows(&db, None, Some(10203), None, None).unwrap().len(),
+            0
+        );
+        assert_eq!(
+            list_rows(&db, None, Some(10202), None, None).unwrap().len(),
+            1
+        );
+        // Paging: nothing older than the one row's last activity.
+        assert_eq!(
+            list_rows(&db, None, None, Some(1_700_000_090), None)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let st = stats_rows(&db).unwrap();
+        assert_eq!((st.total, st.sent, st.failed, st.skipped), (1, 1, 0, 0));
+        assert_eq!(st.by_tg, vec![(10202, "TG".to_string(), 1)]);
+
+        delete_row(&db, full.id).unwrap();
+        assert!(list_rows(&db, None, None, None, None).unwrap().is_empty());
+        assert!(get_row(&db, full.id).is_err());
     }
 
     #[test]

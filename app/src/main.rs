@@ -2040,6 +2040,7 @@ fn main() {
                     Ok(c) => {
                         upload::ensure_schema(&c);
                         dispatch::ensure_schema(&c);
+                        conversations::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2112,6 +2113,10 @@ fn main() {
             conversations::conversations_state,
             conversations::conversation_test,
             conversations::conversation_resend,
+            conversations::conversations_list,
+            conversations::conversation_get,
+            conversations::conversation_delete,
+            conversations::conversations_stats,
             digest::digests_get,
             digest::digests_set,
             digest::digests_log,
