@@ -182,6 +182,10 @@ pub struct CallFacts {
     pub start: i64,
     pub tg: u16,
     pub tg_name: String,
+    /// RadioReference "Description" — longer human label next to the alias,
+    /// e.g. "IU Methodist" where the alpha tag is "49M-03". Surfaced as the
+    /// `{tgdesc}` token in alert templates.
+    pub tg_desc: Option<String>,
     pub unit: u32,
     pub unit_name: Option<String>,
     pub secs: f64,
@@ -288,6 +292,7 @@ pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai:
         .replace("{alert}", &a.name)
         .replace("{tg}", &f.tg.to_string())
         .replace("{tgname}", &f.tg_name)
+        .replace("{tgdesc}", f.tg_desc.as_deref().unwrap_or(""))
         .replace("{unit}", &f.unit.to_string())
         .replace(
             "{unitname}",
@@ -357,11 +362,19 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
+    let tg_desc = state
+        .catalog
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.get(r.tg))
+        .and_then(|t| t.description.clone());
     let f = CallFacts {
         id: Some(r.id),
         start: r.start,
         tg: r.tg,
         tg_name: r.tg_name,
+        tg_desc,
         unit: r.unit,
         unit_name: r.unit_name,
         secs: r.secs,
@@ -1098,6 +1111,7 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
                 start: r.start,
                 tg: r.tg,
                 tg_name: r.tg_name,
+                tg_desc: None,
                 unit: r.unit,
                 unit_name: r.unit_name,
                 secs: r.secs,
@@ -1113,6 +1127,7 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
                 start: crate::library::now(),
                 tg: a.trigger.tgs.first().copied().unwrap_or(0),
                 tg_name: "Test talkgroup".into(),
+                tg_desc: None,
                 unit: 0,
                 unit_name: None,
                 secs: 0.0,
@@ -1228,6 +1243,7 @@ mod tests {
             start: 0,
             tg: 20308,
             tg_name: "Medic 3".into(),
+            tg_desc: None,
             unit: 790065,
             unit_name: Some("Medic 3".into()),
             secs: 6.0,
