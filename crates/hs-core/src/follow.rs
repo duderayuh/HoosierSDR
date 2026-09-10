@@ -46,6 +46,15 @@
 //! grant that reassigns an active channel retires the old call on the spot.
 //! The quiet timeout remains as the fallback for a terminator lost to noise.
 //!
+//! **One clip per transmission.** The hang keeps the *decoders* alive, not
+//! the clip: each terminator closes the audio decoded since the last one as
+//! its own clip, attributed to the radio whose Link Control opened that
+//! transmission. A hospital's reply keyed up inside the hang is therefore
+//! its own call, not the tail of the unit's report. A repeated grant that
+//! names a different radio cuts the clip the same way, for the terminator
+//! that noise ate. The clips are reported together when the call retires,
+//! because the modulation is judged on the whole call's evidence.
+//!
 //! **The control channel does not stay put.** A site rotates its control
 //! channel among a set of frequencies — for maintenance, or on its own
 //! schedule — and announces the alternates over SCCB while it runs. A control
@@ -146,6 +155,76 @@ struct ActiveCall {
     /// clears it — the conversation continued — and the decoders stay alive
     /// through the hang, so a continuation costs no re-acquisition.
     ending: Option<f64>,
+    /// Where the current transmission starts in each decoder's cumulative
+    /// diagnostics, so a clip is attributed to and scored by its own frames.
+    seg: SegmentBase,
+    /// Transmissions already cut from this call, waiting for the call to
+    /// retire so the modulation can be chosen on the whole call's evidence.
+    done: Vec<Segment>,
+}
+
+/// One transmission cut from a call: its audio from both decoders, and the
+/// diagnostics range that belongs to it.
+struct Segment {
+    pcm_c4fm: Vec<i16>,
+    pcm_cqpsk: Vec<i16>,
+    syncs_c4fm: u32,
+    syncs_cqpsk: u32,
+    /// The grant's radio for the first transmission; 0 afterwards.
+    source_unit: u32,
+    start: SegmentBase,
+    end: SegmentBase,
+}
+
+/// End the transmission in progress on `c`: keep what was decoded as its
+/// own segment and start the next one clean — its own audio, its own sync
+/// count, its own Link Control, and no radio until one names itself.
+fn cut(c: &mut ActiveCall) {
+    let end = SegmentBase::now(&c.c4fm, &c.cqpsk);
+    c.done.push(Segment {
+        pcm_c4fm: core::mem::take(&mut c.pcm_c4fm),
+        pcm_cqpsk: core::mem::take(&mut c.pcm_cqpsk),
+        syncs_c4fm: core::mem::take(&mut c.syncs_c4fm),
+        syncs_cqpsk: core::mem::take(&mut c.syncs_cqpsk),
+        source_unit: core::mem::take(&mut c.source_unit),
+        start: c.seg,
+        end,
+    });
+    c.seg = end;
+}
+
+/// The decoder counters at the start of a transmission: Link Control words
+/// and voice-frame tallies accumulate for the life of the decoders, and a
+/// clip cut after the first must not inherit the previous speaker's.
+#[derive(Clone, Copy, Default)]
+struct SegmentBase {
+    lc_c4: usize,
+    lc_cq: usize,
+    err_c4: u64,
+    err_cq: u64,
+    poor_c4: u64,
+    poor_cq: u64,
+}
+
+impl SegmentBase {
+    fn now(c4fm: &ChannelDecoder, cqpsk: &ChannelDecoder) -> Self {
+        let (a, b) = (c4fm.diagnostics(), cqpsk.diagnostics());
+        Self {
+            lc_c4: a.link_control.len(),
+            lc_cq: b.link_control.len(),
+            err_c4: a.voice_frame_errors,
+            err_cq: b.voice_frame_errors,
+            poor_c4: a.voice_frames_low_quality,
+            poor_cq: b.voice_frames_low_quality,
+        }
+    }
+}
+
+impl ActiveCall {
+    /// Audio decoded since the last cut.
+    fn has_audio(&self) -> bool {
+        !self.pcm_c4fm.is_empty() || !self.pcm_cqpsk.is_empty()
+    }
 }
 
 /// A call the follower has finished with.
@@ -683,6 +762,14 @@ impl TrunkFollower {
         }
     }
 
+    /// Put a call back where `remove_call` took it from.
+    fn insert_call(&mut self, loc: (Option<usize>, usize), call: ActiveCall) {
+        match loc.0 {
+            None => self.band.active.insert(loc.1, call),
+            Some(bi) => self.extra[bi].active.insert(loc.1, call),
+        }
+    }
+
     /// Where a call on this frequency is being decoded, if anywhere.
     fn find_by_freq(&self, freq_hz: u64) -> Option<(Option<usize>, usize)> {
         if let Some(i) = self.band.active.iter().position(|c| c.freq_hz == freq_hz) {
@@ -810,13 +897,19 @@ impl TrunkFollower {
         for b in self.extra.iter_mut() {
             active.extend(core::mem::take(&mut b.active));
         }
-        active.into_iter().map(|c| self.retire(c)).collect()
+        active.into_iter().flat_map(|c| self.retire(c)).collect()
     }
 
-    /// Turn a finished call into its reported form: pick the modulation that
-    /// produced audio, and name the radio from Link Control when the grant
-    /// did not.
-    fn retire(&mut self, c: ActiveCall) -> Call {
+    /// Turn a finished call into its reported form: one `Call` per
+    /// transmission cut from it, in order. The modulation is chosen once, on
+    /// the whole call's evidence — an early cut would always favour C4FM,
+    /// whose discriminator locks in one frame while CQPSK's acquisition is
+    /// still blind — and each clip is attributed to and scored by its own
+    /// frames. A grant that never produced audio is still reported once.
+    fn retire(&mut self, mut c: ActiveCall) -> Vec<Call> {
+        if c.has_audio() || c.done.is_empty() {
+            cut(&mut c);
+        }
         // Choose on BCH-clean network identifiers, not on decoded audio.
         // Both C4FM and CQPSK partially decode each other's signals — a C4FM
         // discriminator on a CQPSK channel still emits audio, of similar
@@ -836,20 +929,16 @@ impl TrunkFollower {
                 Modulation::Cqpsk => n_c4 = 0,
             }
         }
-        let emergency = c
-            .c4fm
-            .diagnostics()
-            .link_control
-            .iter()
-            .chain(c.cqpsk.diagnostics().link_control.iter())
-            .any(|l| l.emergency);
+        let (len_c4, len_cq) = c.done.iter().fold((0, 0), |(a, b), s| {
+            (a + s.pcm_c4fm.len(), b + s.pcm_cqpsk.len())
+        });
         let pick_c4fm = match self.forced {
             Some(Modulation::C4fm) => true,
             Some(Modulation::Cqpsk) => false,
             None => match n_c4.cmp(&n_cq) {
                 std::cmp::Ordering::Greater => true,
                 std::cmp::Ordering::Less => false,
-                std::cmp::Ordering::Equal => c.pcm_c4fm.len() >= c.pcm_cqpsk.len(),
+                std::cmp::Ordering::Equal => len_c4 >= len_cq,
             },
         };
         // A dual-decoded call with clean frames is evidence about the site:
@@ -874,50 +963,78 @@ impl TrunkFollower {
             c.cqpsk.talker_alias().or(c.c4fm.talker_alias())
         }
         .map(str::to_string);
-        let (modulation, pcm, lc) = if c.pcm_c4fm.is_empty() && c.pcm_cqpsk.is_empty() {
-            (None, Vec::new(), None)
-        } else if pick_c4fm {
-            (
-                Some(Modulation::C4fm),
-                c.pcm_c4fm,
-                c.c4fm.diagnostics().link_control.first().cloned(),
-            )
+        let patched_with = self.control.patches().siblings(c.talkgroup);
+        let lc_all = if pick_c4fm {
+            &c.c4fm.diagnostics().link_control
         } else {
-            (
-                Some(Modulation::Cqpsk),
-                c.pcm_cqpsk,
-                c.cqpsk.diagnostics().link_control.first().cloned(),
-            )
+            &c.cqpsk.diagnostics().link_control
         };
-        // A grant does not always name the radio; Link Control, which the
-        // traffic channel sends about itself, usually does. Take the first
-        // confirmed word — the radio that opened the transmission — rather
-        // than the last, which on a shared talkgroup may be someone else.
-        let source_unit = match (c.source_unit, lc.as_ref()) {
-            (0, Some(l)) => l.source_unit,
-            (s, _) => s,
-        };
-        let winner = if pick_c4fm {
-            c.c4fm.diagnostics()
-        } else {
-            c.cqpsk.diagnostics()
-        };
-        let voice_frame_errors = winner.voice_frame_errors;
-        let voice_frames_poor = winner.voice_frames_low_quality;
-        Call {
-            syncs_c4fm: c.syncs_c4fm,
-            syncs_cqpsk: c.syncs_cqpsk,
-            voice_frame_errors,
-            voice_frames_poor,
-            talkgroup: c.talkgroup,
-            source_unit,
-            freq_hz: c.freq_hz,
-            modulation,
-            patched_with: self.control.patches().siblings(c.talkgroup),
-            emergency,
-            talker_alias,
-            pcm,
-        }
+        let lc_c4 = &c.c4fm.diagnostics().link_control;
+        let lc_cq = &c.cqpsk.diagnostics().link_control;
+        let segments = core::mem::take(&mut c.done);
+        segments
+            .into_iter()
+            .map(|s| {
+                let (lc_lo, lc_hi, err_lo, err_hi, poor_lo, poor_hi) = if pick_c4fm {
+                    (
+                        s.start.lc_c4,
+                        s.end.lc_c4,
+                        s.start.err_c4,
+                        s.end.err_c4,
+                        s.start.poor_c4,
+                        s.end.poor_c4,
+                    )
+                } else {
+                    (
+                        s.start.lc_cq,
+                        s.end.lc_cq,
+                        s.start.err_cq,
+                        s.end.err_cq,
+                        s.start.poor_cq,
+                        s.end.poor_cq,
+                    )
+                };
+                let has_audio = !s.pcm_c4fm.is_empty() || !s.pcm_cqpsk.is_empty();
+                let (modulation, pcm) = if !has_audio {
+                    (None, Vec::new())
+                } else if pick_c4fm {
+                    (Some(Modulation::C4fm), s.pcm_c4fm)
+                } else {
+                    (Some(Modulation::Cqpsk), s.pcm_cqpsk)
+                };
+                // A grant does not always name the radio; Link Control, which
+                // the traffic channel sends about itself, usually does. Take
+                // the first confirmed word of *this transmission* — the radio
+                // that opened it — rather than the last, which on a shared
+                // talkgroup may be someone else. After the first cut the
+                // grant's radio no longer applies, so Link Control decides.
+                let lc = (lc_lo < lc_hi).then(|| lc_all.get(lc_lo)).flatten();
+                let source_unit = match (s.source_unit, lc) {
+                    (0, Some(l)) => l.source_unit,
+                    (u, _) => u,
+                };
+                let emergency = lc_c4[s.start.lc_c4.min(lc_c4.len())..s.end.lc_c4.min(lc_c4.len())]
+                    .iter()
+                    .chain(
+                        lc_cq[s.start.lc_cq.min(lc_cq.len())..s.end.lc_cq.min(lc_cq.len())].iter(),
+                    )
+                    .any(|l| l.emergency);
+                Call {
+                    syncs_c4fm: s.syncs_c4fm,
+                    syncs_cqpsk: s.syncs_cqpsk,
+                    voice_frame_errors: err_hi.saturating_sub(err_lo),
+                    voice_frames_poor: poor_hi.saturating_sub(poor_lo),
+                    talkgroup: c.talkgroup,
+                    source_unit,
+                    freq_hz: c.freq_hz,
+                    modulation,
+                    patched_with: patched_with.clone(),
+                    emergency,
+                    talker_alias: talker_alias.clone(),
+                    pcm,
+                }
+            })
+            .collect()
     }
 
     /// Feed wideband IQ; returns the calls that started and finished.
@@ -968,7 +1085,22 @@ impl TrunkFollower {
             if let Some(loc) = self.find_by_freq(g.freq_hz) {
                 if self.call_talkgroup(loc) == g.talkgroup {
                     // The same grant, repeated — grants are re-broadcast for
-                    // the whole life of a call.
+                    // the whole life of a call — unless it names a different
+                    // radio: a new transmission whose predecessor's
+                    // terminator was lost. Cut the clip here so the reply is
+                    // not appended to the report it answers.
+                    if g.source_unit != 0 {
+                        let mut call = self.remove_call(loc);
+                        if call.source_unit != 0 && call.source_unit != g.source_unit {
+                            if call.has_audio() {
+                                cut(&mut call);
+                            }
+                            call.source_unit = g.source_unit;
+                        } else if call.source_unit == 0 {
+                            call.source_unit = g.source_unit;
+                        }
+                        self.insert_call(loc, call);
+                    }
                     continue;
                 }
                 // The channel was reassigned to another talkgroup: whatever
@@ -981,15 +1113,13 @@ impl TrunkFollower {
                 // history into the new call's attribution, which is the very
                 // mistake this exists to fix.
                 let old = self.remove_call(loc);
-                let done = self.retire(old);
-                out.completed.push(done);
+                out.completed.extend(self.retire(old));
             }
             if self.active_count() >= self.max_calls {
                 match self.contention_victim(self.priority_of(g.talkgroup)) {
                     Some(loc) => {
                         let old = self.remove_call(loc);
-                        let done = self.retire(old);
-                        out.completed.push(done);
+                        out.completed.extend(self.retire(old));
                     }
                     None => {
                         out.grants_busy.push((g.talkgroup, g.freq_hz));
@@ -1061,6 +1191,8 @@ impl TrunkFollower {
                 syncs_cqpsk: 0,
                 quiet: 0.0,
                 ending: None,
+                seg: SegmentBase::default(),
+                done: Vec::new(),
             };
             call.c4fm.set_uv_quality(self.uv_quality);
             call.cqpsk.set_uv_quality(self.uv_quality);
@@ -1221,12 +1353,17 @@ impl TrunkFollower {
             } else {
                 call.quiet = 0.0;
             }
-            // A terminator ends the transmission explicitly; hold the call
-            // open for a short hang in case the conversation continues, then
-            // retire it. Both decoders watch the same RF, so a terminator
-            // from either is the channel's own word. New voice during the
-            // hang means the call carried on.
+            // A terminator ends the transmission explicitly: close its
+            // audio as its own clip, then hold the call open for a short
+            // hang in case the conversation continues. Both decoders
+            // watch the same RF, so a terminator from either is the
+            // channel's own word. New voice during the hang means the
+            // channel carried on — a further transmission, cut at its own
+            // terminator — and the decoders never had to re-acquire.
             if a.terminators + b.terminators > 0 {
+                if call.has_audio() {
+                    cut(call);
+                }
                 call.ending.get_or_insert(0.0);
             } else if let Some(h) = call.ending.as_mut() {
                 if a.pcm.is_empty() && b.pcm.is_empty() {
@@ -1252,7 +1389,7 @@ impl TrunkFollower {
             }
         }
         for c in finished {
-            out.completed.push(self.retire(c));
+            out.completed.extend(self.retire(c));
         }
 
         self.put_band(which, band);
@@ -1620,7 +1757,14 @@ impl TrunkFollower {
             syncs_cqpsk: 0,
             quiet: 0.0,
             ending: None,
+            seg: SegmentBase::default(),
+            done: Vec::new(),
         });
+    }
+
+    /// The transmission in progress on the only active call, for tests.
+    fn only_call(&mut self) -> &mut ActiveCall {
+        &mut self.band.active[0]
     }
 }
 
@@ -1667,6 +1811,53 @@ mod priority_tests {
         assert_eq!(f.priority_of(9), 50);
         f.set_hang(0.0, 0.0);
         assert_eq!(f.hang(), (0.05, 0.5));
+    }
+
+    /// Each transmission on a channel is its own clip: a terminator closes
+    /// the audio decoded so far, the next keyup starts clean and gets its
+    /// own radio, and retiring the call reports every clip in order. A
+    /// grant that never produced audio still reports once.
+    #[test]
+    fn a_terminator_cuts_the_clip_and_the_next_keyup_starts_clean() {
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().source_unit = 790065;
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2, 3, 4]);
+        f.only_call().syncs_c4fm = 5;
+
+        // The unit's report ends.
+        cut(f.only_call());
+        assert!(!f.only_call().has_audio());
+        assert_eq!(f.only_call().syncs_c4fm, 0);
+        // The grant's radio does not carry into the reply.
+        assert_eq!(f.only_call().source_unit, 0);
+
+        // The reply keyed up inside the hang, then the channel went quiet.
+        f.only_call().pcm_c4fm.extend_from_slice(&[9, 9]);
+        f.only_call().syncs_c4fm = 2;
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].pcm, vec![1, 2, 3, 4]);
+        assert_eq!(calls[0].source_unit, 790065);
+        assert_eq!(calls[0].syncs_c4fm, 5);
+        assert_eq!(calls[1].pcm, vec![9, 9]);
+        assert_eq!(calls[1].source_unit, 0);
+        assert_eq!(calls[1].syncs_c4fm, 2);
+
+        // Nothing decoded after the last terminator adds no clip.
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().pcm_c4fm.extend_from_slice(&[7]);
+        cut(f.only_call());
+        let c = f.band.active.remove(0);
+        assert_eq!(f.retire(c).len(), 1);
+
+        // A silent grant is still reported once.
+        f.push_fake_call(101, 851_200_000);
+        let c = f.band.active.remove(0);
+        let silent = f.retire(c);
+        assert_eq!(silent.len(), 1);
+        assert!(silent[0].pcm.is_empty());
     }
 
     /// A call with no sync is retired after the quiet time in *seconds*,
