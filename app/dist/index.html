@@ -165,8 +165,9 @@
               <select id="wfFft" title="FFT size"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option></select>
               <select id="wfAvg" title="Averaging"><option value="1">avg 1</option><option value="2">avg 2</option><option value="4" selected>avg 4</option><option value="8">avg 8</option></select>
               <select id="wfMap" title="Colour map"><option value="phosphor">phosphor</option><option value="inferno">inferno</option><option value="viridis">viridis</option><option value="turbo">turbo</option><option value="grey">grey</option></select>
-              <label title="Floor dB">min <input id="wfMin" type="range" min="-120" max="-40" value="-95" /></label>
-              <label title="Ceiling dB">max <input id="wfMax" type="range" min="-60" max="20" value="-20" /></label>
+              <label title="Floor dB — Auto preferred (locked to the bins range)"><input id="wfAuto" type="checkbox" checked /> auto range</label>
+              <label title="Floor dB">min <input id="wfMin" type="range" min="-120" max="-40" value="-95" disabled /></label>
+              <label title="Ceiling dB">max <input id="wfMax" type="range" min="-60" max="20" value="-20" disabled /></label>
               <label class="chk"><input id="wfLine" type="checkbox" checked /> spectrum</label>
               <label class="chk"><input id="wfPeak" type="checkbox" /> peak hold</label>
               <label class="chk"><input id="wfConst" type="checkbox" checked /> constellation</label>

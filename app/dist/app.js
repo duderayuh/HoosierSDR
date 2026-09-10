@@ -518,7 +518,7 @@ const MAPS = {
   turbo:    [[48,18,59],[70,107,227],[40,187,213],[87,238,133],[189,247,57],[251,184,39],[240,97,16],[175,29,4]],
   grey:     [[0,0,0],[255,255,255]],
 };
-const wfCfg = store("hs.wf", { fft: 1024, avg: 4, map: "phosphor", min: -95, max: -20, line: true, peak: false });
+const wfCfg = store("hs.wf", { fft: 1024, avg: 4, map: "phosphor", min: -95, max: -20, line: true, peak: false, auto: true, constellation: true });
 let peakHold = null;
 let specCenter = null, specRate = null;   // live SDR passband (MHz, Hz)
 const channelCounts = new Map();            // active voice freq MHz → refcount
@@ -536,6 +536,14 @@ function pushSpectrum(db) {
   if (!spectrumRaf) spectrumRaf = requestAnimationFrame(() => { spectrumRaf = 0; const d = pendingSpectrum; pendingSpectrum = null; if (d) drawSpectrum(d); });
 }
 function drawSpectrum(db) {
+  // If auto-range: scene the bins dbRange so "how much is actually on" is honest.
+  // quantiles at 5/95 over the most recent frame; -120 dB floor avoids clipping on quiet ones.
+  if (wfCfg.auto) {
+    let mn = Infinity, mx = -Infinity;
+    for (const v of db) { if (v < mn) mn = v; if (v > mx) mx = v; }
+    // pad a little so weak channels still draw visible above the noise floor
+    wfCfg.min = Math.max(-120, mn - 5); wfCfg.max = Math.min(20, mx + 5);
+  }
   const w = wf.width, h = wf.height, n = db.length, lo = wfCfg.min, hi = wfCfg.max;
   wctx.drawImage(wf, 0, 0, w, h - 1, 0, 1, w, h - 1);
   const row = wctx.createImageData(w, 1);
@@ -589,7 +597,9 @@ function drawSpectrumOverlay() {
   }
 }
 function wfApply() {
-  $("wfFft").value = wfCfg.fft; $("wfAvg").value = wfCfg.avg; $("wfMap").value = wfCfg.map; $("wfMin").value = wfCfg.min; $("wfMax").value = wfCfg.max; $("wfLine").checked = wfCfg.line; $("wfPeak").checked = wfCfg.peak;
+  $("wfFft").value = wfCfg.fft; $("wfAvg").value = wfCfg.avg; $("wfMap").value = wfCfg.map; $("wfMin").value = wfCfg.min; $("wfMax").value = wfCfg.max; $("wfLine").checked = wfCfg.line; $("wfPeak").checked = wfCfg.peak; $("wfAuto").checked = wfCfg.auto; $("wfConst").checked = wfCfg.constellation !== false;
+  $("wfMin").disabled = wfCfg.auto;
+  $("wfMax").disabled = wfCfg.auto;
   sp.style.display = wfCfg.line ? "" : "none";
   save("hs.wf", wfCfg);
   if (TAURI) invoke("spectrum_set", { fft: +wfCfg.fft, average: +wfCfg.avg }).catch(() => {});
@@ -868,6 +878,20 @@ function alertFired(p) {
 /* ---------- constellation (control channel symbols) ---------- */
 const cc = $("constellation"), cctx = cc.getContext("2d");
 let lastConst = null;
+function phaseScatter(pts) {
+  if (!pts.length) return "—";
+  let e = 0, n = 0;
+  for (const [x, y] of pts) {
+    const ang = Math.atan2(y, x);
+    let best = Infinity;
+    for (const t of [Math.PI / 4, 3 * Math.PI / 4, -Math.PI / 4, -3 * Math.PI / 4]) {
+      let d = Math.abs(ang - t); if (d > Math.PI) d = 2 * Math.PI - d;
+      if (d < best) best = d;
+    }
+    e += best; n++;
+  }
+  return ((e / n) * 180 / Math.PI).toFixed(1) + "°";
+}
 function drawConstellation(ev) {
   lastConst = ev;
   $("constBox").style.display = wfCfg.constellation === false ? "none" : "";
@@ -889,8 +913,13 @@ function drawConstellation(ev) {
     cctx.fillStyle = `rgba(52,224,207,${a.toFixed(2)})`;
     cctx.fillRect(cx + x * scale - 1.2, cy - y * scale - 1.2, 2.4, 2.4);
   });
-  $("constLabel").textContent = cq ? "CQPSK · I/Q after equalizer" : "C4FM · level vs previous level";
+  $("constLabel").textContent = cq ? "CQPSK · phase scatter " + phaseScatter(pts) : "C4FM · level vs previous level";
 }
+$("wfAuto").onchange = () => { wfCfg.auto = $("wfAuto").checked; wfApply(); };
+$("wfConst").onchange = () => { wfCfg.constellation = $("wfConst").checked; save("hs.wf", wfCfg); $("constBox").style.display = wfCfg.constellation ? "" : "none"; };
+$("wfConst").checked = wfCfg.constellation !== false; $("constBox").style.display = wfCfg.constellation === false ? "none" : "";
+$("wfAuto").title = "Scopes min/max to the bins range — cleaned-up = cleaned-up, fudge-proof.";
+$("constLabel").title = "Mean distance of your symbol points from the four ideal CQPSK phases (±45°/±135°). Low scatter → you'll hear it clean.";
 $("wfConst").onchange = () => { wfCfg.constellation = $("wfConst").checked; save("hs.wf", wfCfg); $("constBox").style.display = wfCfg.constellation ? "" : "none"; };
 $("wfConst").checked = wfCfg.constellation !== false; $("constBox").style.display = wfCfg.constellation === false ? "none" : "";
 

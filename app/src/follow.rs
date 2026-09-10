@@ -227,6 +227,9 @@ pub enum FollowEvent {
         /// last status — front-end overload, which garbles decode in a way
         /// that mimics simulcast distortion. The cure is less gain.
         clip_pct: f32,
+        /// Mean voice-quality score 0..1 across in-flight traffic decoders —
+        /// the live clean/degraded number that the scope-grade reads off.
+        voice_quality: Option<f32>,
     },
     Spectrum {
         bins_db: Vec<f32>,
@@ -623,6 +626,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 f.control_lock(),
                 f.control_echo(),
                 clip_pct,
+                f.mean_voice_quality(),
             ));
         }
     }
@@ -642,6 +646,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         None,
         None,
         0.0,
+        None,
     ));
     Ok(())
 }
@@ -947,6 +952,7 @@ impl Reporter<'_> {
         lock: Option<f32>,
         echo: Option<hs_core::dsp::cqpsk::EchoProfile>,
         clip_pct: f32,
+        voice_quality: Option<f32>,
     ) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
@@ -964,6 +970,7 @@ impl Reporter<'_> {
             echo_frac: echo.map(|e| e.echo_frac),
             echo_spread_us: echo.map(|e| e.rms_spread_us()),
             clip_pct,
+            voice_quality,
         }
     }
 

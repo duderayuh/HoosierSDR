@@ -518,6 +518,32 @@ impl TrunkFollower {
         self.control.cqpsk_lock()
     }
 
+    /// Live mean voice-quality score 0..1 across in-flight traffic decoders;
+    /// None when no call produced a frame this window. Drives the scope-grade.
+    pub fn mean_voice_quality(&self) -> Option<f32> {
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        for c in self.band.active.iter() {
+            for d in [&c.c4fm, &c.cqpsk] {
+                if let Some(q) = d.last_voice_quality() {
+                    sum += q.score();
+                    n += 1;
+                }
+            }
+        }
+        for band in self.extra.iter() {
+            for c in band.active.iter() {
+                for d in [&c.c4fm, &c.cqpsk] {
+                    if let Some(q) = d.last_voice_quality() {
+                        sum += q.score();
+                        n += 1;
+                    }
+                }
+            }
+        }
+        (n > 0).then_some(sum / n as f32)
+    }
+
     /// Echo profile the control-channel equalizer has learned — the live
     /// simulcast-distortion readout. The control channel transmits
     /// continuously, so on a simulcast site this tracks the multipath the
