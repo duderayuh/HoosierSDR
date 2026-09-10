@@ -426,7 +426,7 @@ impl ChannelDecoder {
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
         self.diag.trim(50_000);
-        let mut derot_buf: Vec<u8> = Vec::new();
+        let mut derot_buf: Vec<(u8, [u8; 2])> = Vec::new();
         let mut i = 0;
         while i + 1 < iq.len() {
             let s = C32::new(iq[i], iq[i + 1]);
@@ -451,20 +451,23 @@ impl ChannelDecoder {
                         if let Some(sym) = self.cqpsk.as_ref().unwrap().last_symbol() {
                             self.push_symbol((sym.re, sym.im));
                         }
-                        derot_buf.clear();
-                        self.derot.push(raw, &mut derot_buf);
                         // Confidence comes from the differential phase's
                         // distance to its decision boundaries. Derotation
                         // permutes which dibit is meant but not how well the
-                        // symbol was resolved, so the confidences carry over.
+                        // symbol was resolved, so the confidence carries
+                        // over — through the derotator's delay line, so it
+                        // stays with its own dibit.
                         let conf = hs_p25::soft::soft_slice_cqpsk(dphi).conf;
-                        for &d in &derot_buf {
-                            self.feed_dibit(hs_p25::soft::SoftDibit::new(d, conf), None, &mut out);
+                        derot_buf.clear();
+                        self.derot.push(raw, conf, &mut derot_buf);
+                        for &(d, c) in &derot_buf {
+                            self.feed_dibit(hs_p25::soft::SoftDibit::new(d, c), None, &mut out);
                         }
                     }
                 }
             }
         }
+        self.diag.derotator_slips = self.derot.slips();
         out
     }
 

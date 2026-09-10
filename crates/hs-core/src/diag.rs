@@ -117,6 +117,11 @@ pub struct Diagnostics {
     pub nids: Vec<NidStat>,
     /// Packet data units reassembled.
     pub packets: u64,
+    /// Times the CQPSK derotator re-pinned the quarter-turn rotation after
+    /// its first lock — carrier-bias slips (or re-acquisitions on another
+    /// turn) that, before it re-pinned continuously, silenced the framer
+    /// until the next hard re-acquire.
+    pub derotator_slips: u32,
     /// TSBKs that survived trellis decode and CRC — the raw control-channel
     /// throughput number external decoders report, so A/B tables can compare
     /// like for like.
@@ -269,6 +274,10 @@ impl Diagnostics {
         s.push_str(&format!(
             "  \"voice_frames_holding\": {},\n",
             self.voice_frames_holding
+        ));
+        s.push_str(&format!(
+            "  \"derotator_slips\": {},\n",
+            self.derotator_slips
         ));
         s.push_str(&format!(
             "  \"voice_error_max\": {},\n",

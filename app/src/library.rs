@@ -36,6 +36,10 @@ pub struct CallRow {
     pub transcript_edited: Option<String>,
     pub edited_at: Option<i64>,
     pub starred: bool,
+    /// Voice frames the concealer patched or muted (audible chops).
+    pub poor_frames: u64,
+    /// Radio-stream blocks dropped while the call was up (holes in it).
+    pub dropped_blocks: u64,
 }
 
 pub fn open(dir: &Path) -> Result<Connection, String> {
@@ -98,6 +102,8 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
         ("service", "TEXT NOT NULL DEFAULT ''"),
         ("category", "TEXT NOT NULL DEFAULT ''"),
         ("encrypted", "INTEGER NOT NULL DEFAULT 0"),
+        ("poor_frames", "INTEGER NOT NULL DEFAULT 0"),
+        ("dropped_blocks", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !column_exists(&c, "calls", col)? {
             c.execute(&format!("ALTER TABLE calls ADD COLUMN {col} {ty}"), [])
@@ -140,8 +146,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
         None => None,
     };
     c.execute(
-        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             r.start,
             r.secs,
@@ -160,6 +166,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
             r.site,
             r.audio,
             sha,
+            r.poor_frames as i64,
+            r.dropped_blocks as i64,
         ],
     )
     .map_err(|e| format!("insert call: {e}"))?;
@@ -183,7 +191,7 @@ pub struct Query {
     pub after_id: Option<i64>,
 }
 
-const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted";
+const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     let patched: String = r.get(10)?;
@@ -214,6 +222,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         service: r.get(20)?,
         category: r.get(21)?,
         encrypted: r.get::<_, i64>(22)? != 0,
+        poor_frames: r.get::<_, i64>(23)? as u64,
+        dropped_blocks: r.get::<_, i64>(24)? as u64,
     })
 }
 

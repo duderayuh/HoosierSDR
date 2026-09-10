@@ -60,6 +60,10 @@ pub struct AnalyzerRule {
     /// (the shared cloud provider configured below).
     #[serde(default = "default_engine")]
     pub engine: String,
+    /// Let a thinking model reason before extracting (Ollama `think: true`).
+    /// Slower; ignored by models without a thinking mode and by cloud engines.
+    #[serde(default)]
+    pub think: bool,
     /// Talkgroups to watch; empty = any.
     #[serde(default)]
     pub tgs: Vec<u16>,
@@ -144,6 +148,7 @@ impl Default for AnalyzerRule {
             name: String::new(),
             enabled: true,
             engine: "ollama".into(),
+            think: false,
             tgs: Vec::new(),
             keywords: Vec::new(),
             instructions: String::new(),
@@ -348,7 +353,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
 }
 
 /// Pick the extraction engine (local Ollama or the shared cloud model) and run it.
-fn run_extract(
+pub(crate) fn run_extract(
     state: &AppState,
     r: &AnalyzerRule,
     f: &CallFacts,
@@ -506,13 +511,16 @@ fn ollama_extract(
         .http_status_as_error(false)
         .build()
         .into();
-    let call = |think: bool| -> Result<(u16, String), String> {
+    let call = |send_think: bool| -> Result<(u16, String), String> {
         let mut body = serde_json::json!({
             "model": o.model, "prompt": full, "stream": false, "format": "json",
             "options": { "temperature": 0 }
         });
-        if think {
-            body["think"] = serde_json::Value::Bool(false);
+        if send_think {
+            // `think: true` when the rule asks for reasoning (the thought
+            // comes back in `thinking`, the JSON in `response`), else false
+            // so a thinking model does not spend its output on the thought.
+            body["think"] = serde_json::Value::Bool(r.think);
         }
         let mut resp = agent
             .post(&format!("{}/api/generate", o.url.trim_end_matches('/')))
@@ -780,6 +788,283 @@ fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Val
 }
 
 // ---------------------------------------------------------------------------
+// hardening
+//
+// Every rule that enters the app — from the editor, from the mobile web API,
+// or from a template file someone shared — goes through `sanitize_rule`.
+// Nothing here is code: a rule is data (prompt text, a field list, clauses,
+// a message template), so the risks are size, hidden/spoofed text, and the
+// two fields that would let a template redirect the listener's own bot at
+// someone else's chat or public feed. Imported rules are additionally
+// quarantined: fresh id, disabled, no chat, no Bluesky.
+// ---------------------------------------------------------------------------
+
+pub const MAX_RULES: usize = 200;
+/// Largest template file accepted, in bytes.
+pub const MAX_TEMPLATE_BYTES: usize = 512 * 1024;
+const MAX_TEMPLATE_RULES: usize = 50;
+const MAX_NAME: usize = 80;
+const MAX_INSTRUCTIONS: usize = 12_000;
+const MAX_MESSAGE: usize = 3_000;
+const MAX_KEYWORDS: usize = 64;
+const MAX_KEYWORD: usize = 64;
+const MAX_FIELDS: usize = 32;
+const MAX_FIELD_DESC: usize = 400;
+const MAX_CONDITIONS: usize = 32;
+const MAX_COND_VALUE: usize = 200;
+const MAX_TGS: usize = 512;
+const MAX_CHAT_ID: usize = 64;
+const MAX_ID: usize = 64;
+pub const TEMPLATE_FORMAT: &str = "hoosiersdr-analyzer-template";
+pub const TEMPLATE_VERSION: u32 = 1;
+
+/// Drop characters that have no business in a prompt, a message or a name:
+/// C0/C1 controls (newline and tab survive), and the Unicode bidi and
+/// zero-width controls that hide text or reverse how it displays (the
+/// "Trojan Source" trick). Then cap the length in chars and trim.
+pub fn clean_text(s: &str, max_chars: usize) -> String {
+    s.chars()
+        .filter(|&c| {
+            !(c.is_control() && c != '\n' && c != '\t')
+                && !matches!(
+                    c,
+                    '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                )
+        })
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `clean_text` for single-line values: line breaks and tabs become spaces.
+pub fn clean_line(s: &str, max_chars: usize) -> String {
+    clean_text(&s.replace(['\n', '\r', '\t'], " "), max_chars)
+}
+
+/// A field key is also a JSON key, a `{field.KEY}` token and a DOM attribute
+/// value, so it is kept to `[A-Za-z0-9_-]{1,40}`.
+pub fn valid_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 40
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Normalise one rule in place: strip hidden characters, cap every length,
+/// whitelist every enum. Returns `Err` only for what cannot be repaired
+/// without changing the author's meaning (a malformed field key, an unknown
+/// operator), so a bad template is refused rather than silently rewritten.
+pub fn sanitize_rule(r: &mut AnalyzerRule) -> Result<(), String> {
+    r.id = clean_line(&r.id, MAX_ID);
+    if !r.id.is_empty() && !valid_id(&r.id) {
+        return Err(format!("rule id '{}' must be [A-Za-z0-9_-]", r.id));
+    }
+    r.name = clean_line(&r.name, MAX_NAME);
+    r.engine = match r.engine.trim() {
+        "cloud" => "cloud".into(),
+        _ => "ollama".into(),
+    };
+    r.tgs.sort_unstable();
+    r.tgs.dedup();
+    r.tgs.truncate(MAX_TGS);
+    r.keywords = r
+        .keywords
+        .iter()
+        .map(|k| clean_line(k, MAX_KEYWORD))
+        .filter(|k| !k.is_empty())
+        .take(MAX_KEYWORDS)
+        .collect();
+    r.instructions = clean_text(&r.instructions, MAX_INSTRUCTIONS);
+    if r.fields.len() > MAX_FIELDS {
+        return Err(format!(
+            "'{}' declares {} fields (limit {MAX_FIELDS})",
+            r.name,
+            r.fields.len()
+        ));
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    for f in &mut r.fields {
+        f.key = clean_line(&f.key, 40);
+        if !valid_key(&f.key) {
+            return Err(format!(
+                "'{}': field key '{}' must be letters, digits, _ or - (max 40)",
+                r.name, f.key
+            ));
+        }
+        if !seen.insert(f.key.clone()) {
+            return Err(format!("'{}': field '{}' is declared twice", r.name, f.key));
+        }
+        f.kind = match f.kind.trim() {
+            "number" => "number".into(),
+            "bool" => "bool".into(),
+            _ => "string".into(),
+        };
+        f.desc = clean_line(&f.desc, MAX_FIELD_DESC);
+    }
+    if r.conditions.len() > MAX_CONDITIONS {
+        return Err(format!(
+            "'{}' has {} conditions (limit {MAX_CONDITIONS})",
+            r.name,
+            r.conditions.len()
+        ));
+    }
+    for c in &mut r.conditions {
+        c.field = clean_line(&c.field, 40);
+        if !valid_key(&c.field) {
+            return Err(format!(
+                "'{}': condition field '{}' must be letters, digits or _",
+                r.name, c.field
+            ));
+        }
+        c.op = c.op.trim().to_string();
+        if !matches!(
+            c.op.as_str(),
+            "==" | "!=" | ">" | ">=" | "<" | "<=" | "contains"
+        ) {
+            return Err(format!("'{}': unknown operator '{}'", r.name, c.op));
+        }
+        c.value = clean_line(&c.value, MAX_COND_VALUE);
+    }
+    r.match_mode = if r.match_mode.eq_ignore_ascii_case("any") {
+        "any".into()
+    } else {
+        "all".into()
+    };
+    r.message = clean_text(&r.message, MAX_MESSAGE);
+    r.chat_id = clean_line(&r.chat_id, MAX_CHAT_ID);
+    if !r
+        .chat_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'))
+    {
+        return Err(format!("'{}': chat id has unexpected characters", r.name));
+    }
+    r.cooldown_secs = r.cooldown_secs.clamp(0, 86_400);
+    Ok(())
+}
+
+/// What an imported rule may never bring with it: an id that could replace
+/// an existing rule, the enabled flag, a Telegram chat (the listener's bot
+/// token would deliver transcripts wherever the file said), and Bluesky
+/// (public posting). The listener turns each of those on deliberately.
+pub fn quarantine(r: &mut AnalyzerRule, i: usize) {
+    r.id = format!("z{}-i{i}", crate::library::now());
+    r.enabled = false;
+    r.chat_id.clear();
+    r.bluesky = false;
+}
+
+/// A shareable bundle of analyzers. `format` and `version` are checked on
+/// import; the descriptive fields are cleaned like any other text.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Template {
+    pub format: String,
+    pub version: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    pub rules: Vec<AnalyzerRule>,
+}
+
+/// Parse and harden a template file. The returned rules are sanitized and
+/// quarantined; the caller still has to add them with `analyzers_set`, which
+/// sanitizes again — the two passes are cheap and keep one code path honest
+/// about the other.
+pub fn parse_template(text: &str) -> Result<Template, String> {
+    if text.len() > MAX_TEMPLATE_BYTES {
+        return Err(format!(
+            "template is {} KB; the limit is {} KB",
+            text.len() / 1024,
+            MAX_TEMPLATE_BYTES / 1024
+        ));
+    }
+    let text = text.trim_start_matches('\u{FEFF}');
+    let mut t: Template =
+        serde_json::from_str(text).map_err(|e| format!("not a template file: {e}"))?;
+    if t.format != TEMPLATE_FORMAT {
+        return Err(format!(
+            "not an analyzer template (format '{}')",
+            clean_line(&t.format, 60)
+        ));
+    }
+    if t.version > TEMPLATE_VERSION {
+        return Err(format!(
+            "template version {} is newer than this app understands ({TEMPLATE_VERSION})",
+            t.version
+        ));
+    }
+    if t.rules.is_empty() {
+        return Err("template has no analyzers".into());
+    }
+    if t.rules.len() > MAX_TEMPLATE_RULES {
+        return Err(format!(
+            "template has {} analyzers (limit {MAX_TEMPLATE_RULES})",
+            t.rules.len()
+        ));
+    }
+    t.name = clean_line(&t.name, MAX_NAME);
+    t.author = clean_line(&t.author, MAX_NAME);
+    t.description = clean_text(&t.description, 1_000);
+    for (i, r) in t.rules.iter_mut().enumerate() {
+        sanitize_rule(r)?;
+        if r.name.is_empty() {
+            r.name = format!("Imported analyzer {}", i + 1);
+        }
+        if r.instructions.is_empty() {
+            return Err(format!("'{}' has no instructions", r.name));
+        }
+        quarantine(r, i);
+    }
+    Ok(t)
+}
+
+/// Build a template from the listener's own rules. The chat id and enabled
+/// flag are personal to this install and never leave it.
+pub fn make_template(
+    rules: Vec<AnalyzerRule>,
+    name: &str,
+    author: &str,
+    description: &str,
+) -> Template {
+    let rules = rules
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut r)| {
+            r.id = format!("t{}", i + 1);
+            r.enabled = false;
+            r.chat_id.clear();
+            r.bluesky = false;
+            r
+        })
+        .collect();
+    Template {
+        format: TEMPLATE_FORMAT.into(),
+        version: TEMPLATE_VERSION,
+        name: clean_line(name, MAX_NAME),
+        author: clean_line(author, MAX_NAME),
+        description: clean_text(description, 1_000),
+        rules,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
 
@@ -795,16 +1080,24 @@ pub fn analyzers_set(
     rules: Vec<AnalyzerRule>,
 ) -> Result<(), String> {
     let mut rules = rules;
+    if rules.len() > MAX_RULES {
+        return Err(format!(
+            "{} analyzers is more than the limit of {MAX_RULES}",
+            rules.len()
+        ));
+    }
+    let mut ids: HashSet<String> = HashSet::new();
     for (i, r) in rules.iter_mut().enumerate() {
-        if r.id.trim().is_empty() {
+        sanitize_rule(r)?;
+        if r.id.is_empty() {
             r.id = format!("z{}-{i}", crate::library::now());
         }
-        if r.name.trim().is_empty() {
+        if !ids.insert(r.id.clone()) {
+            return Err(format!("two analyzers share the id '{}'", r.id));
+        }
+        if r.name.is_empty() {
             r.name = format!("Analyzer {}", i + 1);
         }
-        r.cooldown_secs = r.cooldown_secs.clamp(0, 86_400);
-        r.tgs.sort_unstable();
-        r.tgs.dedup();
     }
     let mut st = state.analyzers.lock().unwrap();
     let keep: HashSet<(String, u16)> = rules
@@ -814,6 +1107,40 @@ pub fn analyzers_set(
     st.last_fired.retain(|k, _| keep.contains(k));
     st.settings.rules = rules;
     store(&app, &st.settings)
+}
+
+/// Parse a template file the listener chose, returning the hardened rules
+/// for review. Nothing is saved until the UI adds them with `analyzers_set`.
+#[tauri::command]
+pub fn analyzer_template_import(text: String) -> Result<Template, String> {
+    parse_template(&text)
+}
+
+/// Bundle the given rules (all, when `ids` is empty) as a template file's
+/// JSON text.
+#[tauri::command]
+pub fn analyzer_template_export(
+    state: State<AppState>,
+    ids: Vec<String>,
+    name: String,
+    author: String,
+    description: String,
+) -> Result<String, String> {
+    let rules: Vec<AnalyzerRule> = state
+        .analyzers
+        .lock()
+        .unwrap()
+        .settings
+        .rules
+        .iter()
+        .filter(|r| ids.is_empty() || ids.contains(&r.id))
+        .cloned()
+        .collect();
+    if rules.is_empty() {
+        return Err("no analyzers to export".into());
+    }
+    let t = make_template(rules, &name, &author, &description);
+    serde_json::to_string_pretty(&t).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -982,6 +1309,7 @@ fn templates() -> Vec<AnalyzerRule> {
             name: "ECPR candidate".into(),
             enabled: false,
             engine: "ollama".into(),
+            think: false,
             tgs: Vec::new(),
             keywords: vec![
                 "cardiac arrest".into(),
@@ -1015,6 +1343,7 @@ fn templates() -> Vec<AnalyzerRule> {
             name: "SOR (stroke) survey".into(),
             enabled: false,
             engine: "ollama".into(),
+            think: false,
             tgs: Vec::new(),
             keywords: vec!["stroke".into(), "cva".into(), "facial droop".into(), "slurred".into()],
             instructions: "From this EMS hospital pre-arrival summary, extract the stroke (SOR — Stroke On Radio) screen: is a stroke alert or suspected stroke being called, last-known-well time if stated, and the deficits mentioned. Do not infer beyond what is said.".into(),
@@ -1037,6 +1366,7 @@ fn templates() -> Vec<AnalyzerRule> {
             name: "Cardiac arrest — CPR in progress".into(),
             enabled: false,
             engine: "ollama".into(),
+            think: false,
             tgs: Vec::new(),
             keywords: vec![
                 "cpr".into(),
@@ -1079,6 +1409,7 @@ fn templates() -> Vec<AnalyzerRule> {
             name: "Cardiac arrest — outcome (ROSC / terminated)".into(),
             enabled: false,
             engine: "ollama".into(),
+            think: false,
             tgs: Vec::new(),
             keywords: vec![
                 "rosc".into(),
@@ -1113,4 +1444,131 @@ fn templates() -> Vec<AnalyzerRule> {
             cooldown_secs: 120,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule() -> AnalyzerRule {
+        AnalyzerRule {
+            id: "abc".into(),
+            name: "Test".into(),
+            instructions: "Do the thing".into(),
+            fields: vec![Field {
+                key: "ok".into(),
+                kind: "bool".into(),
+                desc: "yes/no".into(),
+            }],
+            conditions: vec![Clause {
+                field: "ok".into(),
+                op: "==".into(),
+                value: "true".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn clean_text_strips_controls_and_bidi() {
+        let s = "Hello\u{202E}dlrow\u{0}\u{200B}!\n\ttab";
+        assert_eq!(clean_text(s, 100), "Hellodlrow!\n\ttab");
+        assert_eq!(clean_line("a\nb\tc", 100), "a b c");
+        assert_eq!(clean_text("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn sanitize_accepts_a_good_rule() {
+        let mut r = rule();
+        assert!(sanitize_rule(&mut r).is_ok());
+        assert_eq!(r.engine, "ollama");
+        assert_eq!(r.match_mode, "all");
+    }
+
+    #[test]
+    fn sanitize_refuses_bad_keys_ops_and_ids() {
+        let mut r = rule();
+        r.fields[0].key = "bad key".into();
+        assert!(sanitize_rule(&mut r).is_err());
+        let mut r = rule();
+        r.conditions[0].op = "=~".into();
+        assert!(sanitize_rule(&mut r).is_err());
+        let mut r = rule();
+        r.id = "../x".into();
+        assert!(sanitize_rule(&mut r).is_err());
+        let mut r = rule();
+        r.chat_id = "123; drop".into();
+        assert!(sanitize_rule(&mut r).is_err());
+        let mut r = rule();
+        r.fields.push(r.fields[0].clone());
+        assert!(sanitize_rule(&mut r).is_err());
+    }
+
+    #[test]
+    fn sanitize_caps_and_whitelists() {
+        let mut r = rule();
+        r.engine = "shell".into();
+        r.match_mode = "ANY".into();
+        r.fields[0].kind = "object".into();
+        r.cooldown_secs = 10_000_000;
+        r.keywords = (0..200).map(|i| format!("k{i}")).collect();
+        r.instructions = "x".repeat(MAX_INSTRUCTIONS + 500);
+        sanitize_rule(&mut r).unwrap();
+        assert_eq!(r.engine, "ollama");
+        assert_eq!(r.match_mode, "any");
+        assert_eq!(r.fields[0].kind, "string");
+        assert_eq!(r.cooldown_secs, 86_400);
+        assert_eq!(r.keywords.len(), MAX_KEYWORDS);
+        assert_eq!(r.instructions.chars().count(), MAX_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn import_quarantines_and_export_strips_personal_fields() {
+        let mut r = rule();
+        r.enabled = true;
+        r.chat_id = "12345".into();
+        r.bluesky = true;
+        let text = serde_json::to_string(&make_template(vec![r.clone()], "N", "A", "D")).unwrap();
+        assert!(!text.contains("12345"));
+        // Tamper: put the personal fields back and try to reuse an id.
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["rules"][0]["chat_id"] = "666".into();
+        v["rules"][0]["enabled"] = true.into();
+        v["rules"][0]["bluesky"] = true.into();
+        v["rules"][0]["id"] = "abc".into();
+        let t = parse_template(&v.to_string()).unwrap();
+        let got = &t.rules[0];
+        assert!(!got.enabled);
+        assert!(got.chat_id.is_empty());
+        assert!(!got.bluesky);
+        assert_ne!(got.id, "abc");
+    }
+
+    #[test]
+    fn import_refuses_wrong_format_size_and_shape() {
+        assert!(parse_template("{}").is_err());
+        assert!(parse_template("[1,2]").is_err());
+        assert!(parse_template(&format!(
+            "{{\"format\":\"{TEMPLATE_FORMAT}\",\"version\":99,\"rules\":[]}}"
+        ))
+        .is_err());
+        assert!(parse_template(&format!(
+            "{{\"format\":\"{TEMPLATE_FORMAT}\",\"version\":1,\"rules\":[]}}"
+        ))
+        .is_err());
+        let big = "x".repeat(MAX_TEMPLATE_BYTES + 1);
+        assert!(parse_template(&big).is_err());
+        // A rule with an unknown operator poisons the whole file.
+        let mut r = rule();
+        r.conditions[0].op = "exec".into();
+        let text = serde_json::to_string(&make_template(vec![r], "", "", "")).unwrap();
+        assert!(parse_template(&text).is_err());
+    }
+
+    #[test]
+    fn builtin_templates_pass_the_sanitizer() {
+        for mut r in templates() {
+            sanitize_rule(&mut r).unwrap();
+        }
+    }
 }

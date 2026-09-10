@@ -44,8 +44,12 @@ impl Fir {
 pub struct FirC {
     /// Taps in reverse order (oldest-sample-first), for a straight dot product.
     taps_rev: Vec<f32>,
-    /// Doubled delay line: index i and i+n always hold the same sample.
-    delay: Vec<C32>,
+    /// Doubled delay line, real and imaginary parts apart: index i and i+n
+    /// always hold the same sample, so any window of length n starting in
+    /// [0, n) is contiguous, and each part is a plain f32 slice the dot
+    /// product below can run through eight lanes at a time.
+    re: Vec<f32>,
+    im: Vec<f32>,
     pos: usize,
     decim: usize,
     phase: usize,
@@ -59,7 +63,8 @@ impl FirC {
         taps_rev.reverse();
         Self {
             taps_rev,
-            delay: vec![C32::ZERO; 2 * n],
+            re: vec![0.0; 2 * n],
+            im: vec![0.0; 2 * n],
             pos: 0,
             decim,
             phase: 0,
@@ -70,10 +75,10 @@ impl FirC {
     pub fn push(&mut self, x: C32) -> Option<C32> {
         let n = self.taps_rev.len();
         self.pos = (self.pos + 1) % n;
-        // Write to both halves so a window of length n starting anywhere in
-        // [0, n) stays contiguous.
-        self.delay[self.pos] = x;
-        self.delay[self.pos + n] = x;
+        self.re[self.pos] = x.re;
+        self.re[self.pos + n] = x.re;
+        self.im[self.pos] = x.im;
+        self.im[self.pos + n] = x.im;
         self.phase += 1;
         if self.phase < self.decim {
             return None;
@@ -81,13 +86,37 @@ impl FirC {
         self.phase = 0;
         // Window holds the last n samples oldest-first: index pos+1 is the
         // oldest, pos+n the newest — the same order as taps_rev.
-        let window = &self.delay[self.pos + 1..self.pos + 1 + n];
-        let mut acc = C32::ZERO;
-        for (s, &t) in window.iter().zip(self.taps_rev.iter()) {
-            acc = acc + s.scale(t);
-        }
-        Some(acc)
+        let (a, b) = (self.pos + 1, self.pos + 1 + n);
+        Some(C32::new(
+            dot(&self.re[a..b], &self.taps_rev),
+            dot(&self.im[a..b], &self.taps_rev),
+        ))
     }
+}
+
+/// Dot product with eight independent partial sums, so the compiler can keep
+/// it in SIMD lanes (a single running f32 sum cannot be reordered, and so
+/// cannot be vectorized). The order of summation differs from a plain loop
+/// by rounding only. This is the inner loop of every filter at the capture
+/// rate — the wideband decimator runs it 48 000 times a second over
+/// thousands of taps at 9.6 MSPS.
+#[inline]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut acc = [0.0f32; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let mut s = (acc[0] + acc[4]) + (acc[1] + acc[5]) + (acc[2] + acc[6]) + (acc[3] + acc[7]);
+    for (x, y) in ra.iter().zip(rb) {
+        s += x * y;
+    }
+    s
 }
 
 /// Windowed-sinc lowpass taps (Hamming window). `cutoff` is normalized to

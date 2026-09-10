@@ -58,6 +58,7 @@ struct Args {
     rr_dump: Option<String>,
     scan: bool,
     scan_secs: f64,
+    scan_start: Option<f64>,
     uv_quality: Option<i32>,
     decoder: Option<String>,
     squelch: f32,
@@ -98,6 +99,7 @@ fn parse_args() -> Args {
         rr_dump: None,
         scan: false,
         scan_secs: 4.0,
+        scan_start: None,
         uv_quality: None,
         decoder: None,
         squelch: 0.3,
@@ -144,6 +146,7 @@ fn parse_args() -> Args {
             }
             "--scan" => a.scan = true,
             "--scan-secs" => a.scan_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(4.0),
+            "--scan-start" => a.scan_start = it.next().and_then(|s| s.parse().ok()),
             "--cqpsk" => a.cqpsk = true,
             "--decoder" => a.decoder = it.next(),
             "--squelch" => {
@@ -259,6 +262,8 @@ fn print_help() {
              \x20              Marks control vs voice channels and reports each NAC.\n\
              \x20              Pass --freq <centre> to get absolute frequencies.\n\
              --scan-secs <S> Seconds of capture to test per channel (default 4).\n\
+             --scan-start <S> Seconds into the capture to start testing (default 0);\n\
+             for a recording whose first seconds are unusable.\n\
              --play         Play decoded audio live (requires build --features audio)\n\
              --demo         Decode a synthesized transmission (no input file needed)\n\
              -h, --help     Show this help\n\
@@ -489,17 +494,25 @@ fn run_rr(_sys_id: u32, _cache: Option<&str>, _dump: Option<&str>) -> i32 {
 
 /// Sweep the captured band and report every channel that actually decodes.
 fn run_scan(iq: &[f32], args: &Args) {
-    let mut cfg = hs_core::scan::ScanConfig::new(args.rate).secs(args.scan_secs);
+    let mut cfg = hs_core::scan::ScanConfig::new(args.rate)
+        .secs(args.scan_secs)
+        .start(args.scan_start);
     // --freq doubles as the capture centre here, so results can be reported as
     // absolute frequencies rather than offsets.
     if args.freq > 0.0 {
         cfg = cfg.center(args.freq);
     }
     let channels = ((args.rate / 12_500.0) as u64).max(1);
+    let from_secs = cfg.start_offset(iq.len()) as f64 / (args.rate * 2.0);
     println!(
-        "Scanning {:.0} kHz (~{channels} P25 channels), {:.0}s per channel…\n",
+        "Scanning {:.0} kHz (~{channels} P25 channels), {:.0}s per channel{}…\n",
         args.rate / 1000.0,
-        args.scan_secs
+        args.scan_secs,
+        if from_secs > 0.0 {
+            format!(" from {from_secs:.0}s in")
+        } else {
+            String::new()
+        }
     );
     let found = hs_core::scan::scan(iq, &cfg);
     if found.is_empty() {
@@ -584,7 +597,10 @@ fn run_analog(iq: &[f32], args: &Args, kind: hs_decoders::DecoderKind) {
             DecoderEvent::SquelchOpen => "squelch open".to_string(),
             DecoderEvent::SquelchClose => "squelch close".to_string(),
             DecoderEvent::Dcs { code, inverted } => {
-                format!("DCS code {code:03o}{}", if *inverted { " (inverted)" } else { "" })
+                format!(
+                    "DCS code {code:03o}{}",
+                    if *inverted { " (inverted)" } else { "" }
+                )
             }
             DecoderEvent::Ani { id, op } => match op {
                 Some(o) => format!("ANI {id} ({o})"),
@@ -593,9 +609,7 @@ fn run_analog(iq: &[f32], args: &Args, kind: hs_decoders::DecoderKind) {
             DecoderEvent::Status { id, status } => format!("status from {id}: {status}"),
             DecoderEvent::Gps { id, lat, lon } => format!("GPS {id}: {lat:.5}, {lon:.5}"),
             DecoderEvent::Grant {
-                talkgroup,
-                freq_hz,
-                ..
+                talkgroup, freq_hz, ..
             } => match freq_hz {
                 Some(f) => format!("grant TG {talkgroup} → {:.4} MHz", f / 1e6),
                 None => format!("grant TG {talkgroup}"),

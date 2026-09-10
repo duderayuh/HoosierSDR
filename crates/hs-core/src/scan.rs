@@ -160,6 +160,11 @@ pub struct ScanConfig {
     /// — and a few seconds already carries tens of frame syncs, which is
     /// plenty to tell a channel from noise.
     pub secs: f64,
+    /// Seconds into the capture the analysed window starts (default 0).
+    /// Useful when a recording's head is unusable — started before the radio
+    /// was tuned, or through a start-up transient — and something later in
+    /// the file is what needs scanning.
+    pub start_secs: Option<f64>,
 }
 
 impl ScanConfig {
@@ -170,7 +175,21 @@ impl ScanConfig {
             min_syncs: 4,
             min_clean_nids: 2,
             secs: 4.0,
+            start_secs: None,
         }
+    }
+
+    /// Where the analysed window starts, in interleaved f32s, clamped to the
+    /// capture length.
+    pub fn start_offset(&self, len: usize) -> usize {
+        let per_sec = self.sample_rate * 2.0;
+        let start = self.start_secs.unwrap_or(0.0).max(0.0);
+        ((start * per_sec) as usize).min(len)
+    }
+
+    pub fn start(mut self, s: Option<f64>) -> Self {
+        self.start_secs = s;
+        self
     }
 
     pub fn secs(mut self, s: f64) -> Self {
@@ -235,7 +254,8 @@ pub fn scan(iq: &[f32], cfg: &ScanConfig) -> Vec<Found> {
     // Analysing the whole of a long capture at every offset is pure waste;
     // a few seconds already holds tens of frame syncs.
     let want = (cfg.secs * cfg.sample_rate * 2.0) as usize;
-    let iq = &iq[..want.min(iq.len())];
+    let from = cfg.start_offset(iq.len());
+    let iq = &iq[from..(from + want).min(iq.len())];
 
     let candidates = cfg.screen(iq, cfg.offsets());
     let mut out: Vec<Found> = Vec::new();
@@ -434,5 +454,20 @@ mod tests {
             .collect();
         let found = scan(&iq, &ScanConfig::new(240_000.0));
         assert!(found.is_empty(), "sweep hallucinated signals: {found:?}");
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    #[test]
+    fn start_defaults_to_the_head_and_is_clamped() {
+        let cfg = ScanConfig::new(9_600_000.0).secs(4.0);
+        let per_sec = 2 * 9_600_000;
+        assert_eq!(cfg.start_offset(60 * per_sec), 0);
+        let cfg = cfg.start(Some(10.0));
+        assert_eq!(cfg.start_offset(60 * per_sec), 10 * per_sec);
+        assert_eq!(cfg.start_offset(5 * per_sec), 5 * per_sec);
     }
 }
