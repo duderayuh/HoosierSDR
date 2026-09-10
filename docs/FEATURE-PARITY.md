@@ -29,7 +29,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | Auto-start on launch | ✅ | — | — | service | ✅ | ✅ opt-in, last playlist |
 | Multiple systems at once | ✅ | ✅ | ✅ | ✅ | — | ❌ → P3 (extra radios now pool on one site; a second system needs a second follower) |
 | Skip encrypted grants | ❌ | — | ✅ | ✅ | — | ✅ |
-| Discovery (log unknown TGs/freqs) | events | history | auto files | dump | ✅ | ✅ Discovery tab: every grant, unnamed filter, name-it, CSV export |
+| Discovery (log unknown TGs/freqs) | events | history | auto files | dump | ✅ | ✅ Discovery (Settings → Discovery): every grant, unnamed filter, name-it, CSV export |
 
 ## 2. Talkgroup / unit management
 
@@ -40,7 +40,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | CSV import | ❌ | ❌ | files | tsv | ✅ |
 | Unit/radio ID aliases | ✅ | ✅ | ✅ | ✅ | ✅ local table + CSV import (RR API has no roster) |
 | Talker alias (OTA) | ✅ | ❌ | ✅ | ❌ | 🟡 Motorola words assembled, printable text confirmed by repetition; parser-tested, **not yet seen live** (no capture carries alias words); learned into radio IDs on request |
-| Affiliations / registrations view | ✅ | history | ✅ | ✅ | ✅ (0x28/0x2B/0x2C/0x2F parsed; Discovery tab) |
+| Affiliations / registrations view | ✅ | history | ✅ | ✅ | ✅ (0x28/0x2B/0x2C/0x2F parsed; Settings → Discovery) |
 | Patch / regroup tracking | ✅ | ✅ | — | ✅ | ✅ shown on calls and site panel |
 | Per-alias color / icon | ✅ | ✅ | — | colors | ✅ colour per talkgroup or range; calls and now-playing tinted |
 | Ranges / wildcards | ✅ | ❌ | ❌ | ✅ | ✅ talkgroup range rules (lock/priority native in the engine, colour, alert); radio-ID regex rules with `$1` |

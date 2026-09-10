@@ -17,9 +17,9 @@
     <div class="seg nav" id="navSeg" role="tablist">
       <button data-v="monitor" aria-pressed="true">Monitor</button>
       <button data-v="library" aria-pressed="false">Library</button>
+      <button data-v="conversations" aria-pressed="false">Conversations</button>
       <button data-v="playlists" aria-pressed="false">Playlists</button>
       <button data-v="aliases" aria-pressed="false">Aliases</button>
-      <button data-v="discovery" aria-pressed="false">Discovery</button>
       <button data-v="alerts" aria-pressed="false">Alerts</button>
       <button data-v="analyzers" aria-pressed="false">Analyzers</button>
       <button data-v="dispatch" aria-pressed="false">Dispatch</button>
@@ -349,75 +349,6 @@
             <div class="body">
               <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>
                 <span class="inline"><input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" /><button class="btn ghost" id="loadcat">Load</button></span></label>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <!-- ===================== DISCOVERY ===================== -->
-    <div class="view" id="view-discovery" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Talkgroups heard</span>
-              <input id="dcFilter" type="text" placeholder="filter: TG, name, frequency…" spellcheck="false" />
-              <span class="meta" id="dcMeta"></span></div>
-            <div class="body tight">
-              <div class="xport">
-                <label class="check" style="margin:0"><input id="dcUnnamed" type="checkbox" checked /> unnamed only</label>
-                <span class="spacer"></span>
-                <input id="dcExport" type="text" placeholder="~/Desktop/discovered.csv" spellcheck="false" style="max-width:260px" />
-                <button class="btn ghost sm" id="dcExportGo">Export CSV</button>
-                <button class="btn ghost sm" id="dcClear">Clear</button>
-              </div>
-              <div class="tablewrap tgs" style="max-height:calc(48vh / var(--z))">
-                <table><thead><tr><th>TG</th><th>Name</th><th>Grants</th><th>Last channel</th><th>Last radio</th><th>Last heard</th><th class="actions-h">Play · Name it · Pri · Lock</th></tr></thead><tbody id="dcBody"></tbody></table>
-              </div>
-              <div class="empty small" id="dcEmpty">Every grant the control channel issues is counted here — followed or not, named or not. Unnamed talkgroups are the ones missing from your catalogs.</div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Channels in use</span><span class="meta" id="dfMeta"></span></div>
-            <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:calc(30vh / var(--z))">
-                <table><thead><tr><th>Frequency</th><th>Grants</th><th>Talkgroups</th><th>In band</th><th>Last heard</th></tr></thead><tbody id="dfBody"></tbody></table>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Affiliations</span>
-              <input id="afFilter" type="text" placeholder="filter: radio, talkgroup…" spellcheck="false" />
-              <span class="meta" id="afMeta"></span></div>
-            <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:calc(36vh / var(--z))">
-                <table><thead><tr><th>Radio</th><th>Talkgroup</th><th>Status</th><th>Last heard</th></tr></thead><tbody id="afBody"></tbody></table>
-              </div>
-              <div class="empty small" id="afEmpty">Radios the control channel has affiliated, registered or released. Nothing yet.</div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Radio positions · LRRP</span><button id="surveyToggle" class="btn ghost" aria-pressed="false">Survey: off</button><span class="meta" id="mapMeta"></span></div>
-            <div class="body tight">
-              <div class="mapbox"><canvas id="map" width="560" height="360"></canvas><div class="mapattr">© OpenStreetMap contributors</div></div>
-              <div id="surveyForm" class="survey-form" style="display:none">
-                <input id="surveyLabel" type="text" placeholder="pin label" spellcheck="false" style="flex:2;min-width:140px" />
-                <input id="surveySecs" type="number" value="60" min="5" max="3600" step="5" style="width:64px" />
-                <span class="faint">sec</span>
-                <button id="surveyCapture" class="btn primary">Capture here</button>
-                <button id="surveyCancel" class="btn ghost">Cancel</button>
-                <input id="surveyCorpus" type="text" value="~/hoosier-field/survey" title="corpus directory" spellcheck="false" style="flex:3;min-width:180px" />
-                <div class="faint mono" id="surveyPos" style="flex-basis:100%"></div>
-              </div>
-              <div class="tablewrap tgs" style="max-height:calc(22vh / var(--z));margin-top:8px">
-                <table><thead><tr><th>Radio</th><th>Latitude</th><th>Longitude</th><th>Last fix</th></tr></thead><tbody id="mapBody"></tbody></table>
-              </div>
-              <div class="tablewrap tgs" style="max-height:calc(20vh / var(--z));margin-top:8px">
-                <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th><th></th></tr></thead><tbody id="surveyBody"></tbody></table>
-              </div>
-              <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from OpenStreetMap when online.</p>
             </div>
           </div>
         </div>
@@ -822,6 +753,95 @@
       </section>
     </div>
 
+    <!-- ===================== CONVERSATIONS ===================== -->
+    <div class="view" id="view-conversations" style="display:none">
+      <section class="cv-layout">
+        <div class="cv-main">
+          <div class="cv-top">
+            <div class="seg" id="cvSeg" role="tablist">
+              <button data-v="list" aria-pressed="true">Conversations <span class="mono faint" id="cvCount"></span></button>
+              <button data-v="detail" aria-pressed="false" disabled>Details</button>
+            </div>
+            <span class="spacer"></span>
+            <select id="cvTgFilter" title="Only this talkgroup"><option value="">All talkgroups</option></select>
+          </div>
+          <div id="cvListPage" class="stack">
+            <div class="panel grow">
+              <div class="head"><span class="eyebrow">Conversations sent</span><span class="meta" id="cvListMeta"></span><button class="btn ghost sm" id="cvRefresh" title="Refresh">↻</button></div>
+              <div class="body tight">
+                <p class="help">Each card is one back-and-forth a conversation rule (Alerts tab) stitched together, summarised with the local model, and sent to Telegram. Open a card to see every transmission with its transcript, the prompt the model was given, and the message exactly as it went out.</p>
+                <div class="cvlist" id="cvCards"></div>
+                <div class="empty small" id="cvCardsEmpty">No conversations stored yet. They appear here as your conversation rules summarise and send them.</div>
+                <div class="xport"><span class="spacer"></span><button class="btn ghost sm" id="cvOlder">Older…</button></div>
+              </div>
+            </div>
+          </div>
+          <div id="cvDetailPage" class="stack" style="display:none">
+            <div class="cvdet-head">
+              <h2 class="cvdet-title">Conversation details</h2>
+              <span id="cvdStatus"></span>
+              <button class="btn ghost sm" id="cvdBack">← Back</button>
+              <button class="btn ghost sm" id="cvdListen" title="Queue every transmission, in order">▶ Listen to all</button>
+              <button class="btn ghost sm" id="cvdCopy" title="Copy the message as sent">Copy message</button>
+              <button class="btn ghost sm" id="cvdDelete">Delete</button>
+              <span class="meta" id="cvdAgo"></span>
+            </div>
+            <div class="two-col cvdet">
+              <div class="stack">
+                <div class="panel">
+                  <div class="head"><span class="eyebrow">Conversation information</span></div>
+                  <div class="body tight">
+                    <div class="kv cvkv" id="cvdInfo"></div>
+                    <div class="lab" style="margin-top:8px">Participants</div>
+                    <div id="cvdParts" class="cvparts"></div>
+                  </div>
+                </div>
+                <div class="panel">
+                  <div class="head"><span class="eyebrow">Summary</span><span class="meta" id="cvdSummMeta"></span></div>
+                  <div class="body tight"><div class="cvsumm" id="cvdSummary"></div></div>
+                </div>
+                <div class="panel">
+                  <div class="head"><span class="eyebrow">Message as sent</span><span class="meta" id="cvdSentMeta"></span></div>
+                  <div class="body tight"><pre class="cvpre" id="cvdMessage"></pre><div class="mono small faint" id="cvdDetail" style="margin-top:6px"></div></div>
+                </div>
+                <div class="panel">
+                  <div class="head"><span class="eyebrow">How it was put together</span></div>
+                  <div class="body tight">
+                    <details class="cvfold"><summary>Stitched transcript the model saw</summary><pre class="cvpre" id="cvdTranscript"></pre></details>
+                    <details class="cvfold"><summary>Full prompt sent to the model</summary><pre class="cvpre" id="cvdPrompt"></pre></details>
+                  </div>
+                </div>
+              </div>
+              <div class="stack">
+                <div class="panel grow">
+                  <div class="head"><span class="eyebrow">Audio segments</span><span class="meta" id="cvdSegMeta"></span></div>
+                  <div class="body tight">
+                    <p class="help" style="margin-top:0">Every transmission in the exchange, with its transcript and audio.</p>
+                    <div class="tablewrap tgs cvsegs"><table><thead><tr><th>Time</th><th>Radio</th><th>Transcript</th><th class="actions-h">Play</th></tr></thead><tbody id="cvdSegs"></tbody></table></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="cv-side stack">
+          <div class="panel">
+            <div class="body tight"><input id="cvSearch" type="text" placeholder="Search summaries, transcripts, units, or conversation ID… (Enter)" spellcheck="false" /></div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Conversation analytics</span></div>
+            <div class="body tight">
+              <div class="cvstat big"><b id="cvStTotal">0</b><small>conversations stored</small></div>
+              <div class="cvstats3"><div class="cvstat ok"><b id="cvStSent">0</b><small>sent</small></div><div class="cvstat bad"><b id="cvStFailed">0</b><small>failed</small></div><div class="cvstat"><b id="cvStSkipped">0</b><small>skipped</small></div></div>
+              <div class="lab" style="margin-top:10px">Conversations by talkgroup</div>
+              <div class="tablewrap tgs" style="max-height:calc(44vh / var(--z))"><table><tbody id="cvStBody"></tbody></table></div>
+              <div class="empty small" id="cvStEmpty">Nothing yet.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <!-- ===================== PLAYLISTS ===================== -->
     <div class="view" id="view-playlists" style="display:none">
       <section class="two-col">
@@ -901,6 +921,7 @@
           <button data-p="share">Share calls</button>
           <button data-p="stream">Live feed</button>
           <button data-p="hook">Script hook</button>
+          <button data-p="discovery">Discovery</button>
         </nav>
         <div class="settings-pages" id="setPages">
           <div class="stack settings-page" id="set-appearance">
@@ -1115,6 +1136,73 @@
               <p class="help">Broadcastify feeds: use the host, port, mount and source password from your feed's "Feed Technical Details" page. Encoding and connection are done by ffmpeg.</p>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-discovery" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroups heard</span>
+              <input id="dcFilter" type="text" placeholder="filter: TG, name, frequency…" spellcheck="false" />
+              <span class="meta" id="dcMeta"></span></div>
+            <div class="body tight">
+              <div class="xport">
+                <label class="check" style="margin:0"><input id="dcUnnamed" type="checkbox" checked /> unnamed only</label>
+                <span class="spacer"></span>
+                <input id="dcExport" type="text" placeholder="~/Desktop/discovered.csv" spellcheck="false" style="max-width:260px" />
+                <button class="btn ghost sm" id="dcExportGo">Export CSV</button>
+                <button class="btn ghost sm" id="dcClear">Clear</button>
+              </div>
+              <div class="tablewrap tgs" style="max-height:calc(48vh / var(--z))">
+                <table><thead><tr><th>TG</th><th>Name</th><th>Grants</th><th>Last channel</th><th>Last radio</th><th>Last heard</th><th class="actions-h">Play · Name it · Pri · Lock</th></tr></thead><tbody id="dcBody"></tbody></table>
+              </div>
+              <div class="empty small" id="dcEmpty">Every grant the control channel issues is counted here — followed or not, named or not. Unnamed talkgroups are the ones missing from your catalogs.</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Channels in use</span><span class="meta" id="dfMeta"></span></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:calc(30vh / var(--z))">
+                <table><thead><tr><th>Frequency</th><th>Grants</th><th>Talkgroups</th><th>In band</th><th>Last heard</th></tr></thead><tbody id="dfBody"></tbody></table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Affiliations</span>
+              <input id="afFilter" type="text" placeholder="filter: radio, talkgroup…" spellcheck="false" />
+              <span class="meta" id="afMeta"></span></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:calc(36vh / var(--z))">
+                <table><thead><tr><th>Radio</th><th>Talkgroup</th><th>Status</th><th>Last heard</th></tr></thead><tbody id="afBody"></tbody></table>
+              </div>
+              <div class="empty small" id="afEmpty">Radios the control channel has affiliated, registered or released. Nothing yet.</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Radio positions · LRRP</span><button id="surveyToggle" class="btn ghost" aria-pressed="false">Survey: off</button><span class="meta" id="mapMeta"></span></div>
+            <div class="body tight">
+              <div class="mapbox"><canvas id="map" width="560" height="360"></canvas><div class="mapattr">© OpenStreetMap contributors</div></div>
+              <div id="surveyForm" class="survey-form" style="display:none">
+                <input id="surveyLabel" type="text" placeholder="pin label" spellcheck="false" style="flex:2;min-width:140px" />
+                <input id="surveySecs" type="number" value="60" min="5" max="3600" step="5" style="width:64px" />
+                <span class="faint">sec</span>
+                <button id="surveyCapture" class="btn primary">Capture here</button>
+                <button id="surveyCancel" class="btn ghost">Cancel</button>
+                <input id="surveyCorpus" type="text" value="~/hoosier-field/survey" title="corpus directory" spellcheck="false" style="flex:3;min-width:180px" />
+                <div class="faint mono" id="surveyPos" style="flex-basis:100%"></div>
+              </div>
+              <div class="tablewrap tgs" style="max-height:calc(22vh / var(--z));margin-top:8px">
+                <table><thead><tr><th>Radio</th><th>Latitude</th><th>Longitude</th><th>Last fix</th></tr></thead><tbody id="mapBody"></tbody></table>
+              </div>
+              <div class="tablewrap tgs" style="max-height:calc(20vh / var(--z));margin-top:8px">
+                <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th><th></th></tr></thead><tbody id="surveyBody"></tbody></table>
+              </div>
+              <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from OpenStreetMap when online.</p>
+            </div>
+          </div>
+        </div>
+      </section>
         </div>
         </div>
         <span class="legal" title="Decodes unencrypted P25 only. Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. Use only where authorized under applicable law.">ⓘ&nbsp;legal</span>
