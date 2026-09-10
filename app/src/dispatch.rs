@@ -854,14 +854,23 @@ fn cache_key(s: &Settings, address_key: &str) -> String {
 pub type Db = std::sync::Arc<Mutex<Connection>>;
 
 pub fn geocode(db: &Db, s: &Settings, address: &str) -> Result<Geo, String> {
-    let address = clean_line(address, 160);
+    geocode_with(db, s, address, false)
+}
+
+/// `retry_negative`: ignore a cached "not found" (a manual retry after the
+/// server had a bad day, or after the query normalisation improved).
+fn geocode_with(db: &Db, s: &Settings, address: &str, retry_negative: bool) -> Result<Geo, String> {
+    // The geocoder sees the address without the apartment / suite / room
+    // and without a city the region hint already supplies; the incident
+    // keeps the address as heard.
+    let address = geocode_query(&clean_line(address, 160), &s.region_hint);
     if address.len() < 4 {
         return Ok(None);
     }
     let key = cache_key(s, &address_key(&address));
     let cached = cache_get(&db.lock().unwrap(), &key);
     if let Some((g, at)) = cached {
-        if g.is_some() || crate::library::now() - at < 86_400 {
+        if g.is_some() || (!retry_negative && crate::library::now() - at < 86_400) {
             return Ok(g);
         }
     }
@@ -880,6 +889,88 @@ pub fn geocode(db: &Db, s: &Settings, address: &str) -> Result<Geo, String> {
     };
     cache_put(&db.lock().unwrap(), &key, &g);
     Ok(g)
+}
+
+/// Secondary-unit designators a dispatcher reads after the street address
+/// ("apartment 604", "Suite 200", "#4"). Nominatim indexes buildings, not
+/// units, and returns nothing at all for a query that carries one.
+const UNIT_WORDS: &[&str] = &[
+    "apartment",
+    "apt",
+    "suite",
+    "ste",
+    "unit",
+    "room",
+    "rm",
+    "building",
+    "bldg",
+    "floor",
+    "fl",
+    "lot",
+    "trailer",
+    "space",
+    "spc",
+];
+
+/// The address as the geocoder wants it: the unit designator and its number
+/// dropped ("4350 Madison Avenue, apartment 604" → "4350 Madison Avenue"),
+/// and a trailing city / state that `region_hint` supplies anyway removed
+/// ("7510 Rogate Drive, Indianapolis" → "7510 Rogate Drive"). A unit word
+/// is only stripped when it is followed by something unit-like (a token
+/// with a digit, or one or two letters), so "1200 Unit Drive" survives.
+pub fn geocode_query(addr: &str, region_hint: &str) -> String {
+    let region: Vec<String> = region_hint
+        .split(',')
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let unit_word = |w: &str| UNIT_WORDS.contains(&w.to_lowercase().trim_end_matches('.'));
+    let unit_id = |w: &str| {
+        let w = w.trim_matches(|c: char| c == '#' || c == '.' || c == ',');
+        !w.is_empty()
+            && w.len() <= 6
+            && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && (w.chars().any(|c| c.is_ascii_digit()) || w.len() <= 2)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for (pi, part) in addr.split(',').enumerate() {
+        let words: Vec<&str> = part.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let lower = words.join(" ").to_lowercase();
+        // A whole part that is the city / state from the region hint.
+        if pi > 0 && region.iter().any(|r| *r == lower) {
+            continue;
+        }
+        let mut kept: Vec<&str> = Vec::new();
+        let mut skip = false;
+        for (wi, w) in words.iter().enumerate() {
+            if skip {
+                skip = false;
+                continue;
+            }
+            let next = words.get(wi + 1).copied();
+            // "#604" on its own, or "# 604".
+            if w.starts_with('#') && !(pi == 0 && wi == 0) {
+                if w.len() == 1 && next.is_some_and(unit_id) {
+                    skip = true;
+                }
+                continue;
+            }
+            // "apartment 604" / "Suite 200" / "Apt B" — never the leading word
+            // of the first part, which is the house number or street.
+            if !(pi == 0 && wi == 0) && unit_word(w) && next.is_some_and(unit_id) {
+                skip = true;
+                continue;
+            }
+            kept.push(w);
+        }
+        if !kept.is_empty() {
+            parts.push(kept.join(" "));
+        }
+    }
+    parts.join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1783,6 +1874,72 @@ fn locate_blocking(
     Ok(i)
 }
 
+/// Incidents the geocoder could not place, newest first.
+fn inc_unmapped(c: &Connection, limit: u32) -> Result<Vec<Incident>, String> {
+    let mut st = c
+        .prepare(&format!(
+            "SELECT {INC_COLS} FROM incidents WHERE geocode IN ('none', 'error') AND address <> '' ORDER BY created DESC LIMIT ?1"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![limit.max(1) as i64], |r| inc_row(r).map(|(i, _)| i))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Try the geocoder again on every unmapped incident (the query
+/// normalisation may have improved, or the server was down). Returns
+/// (tried, placed). One request per second against the public server, so
+/// this runs off the main thread and can take a minute.
+#[tauri::command]
+pub async fn dispatch_regeocode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(u32, u32), String> {
+    let settings = state.dispatch.lock().unwrap().settings.clone();
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return Err("library not open".into());
+    };
+    tauri::async_runtime::spawn_blocking(move || regeocode_blocking(&app, &db, &settings))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(u32, u32), String> {
+    let todo = {
+        let c = db.lock().unwrap();
+        inc_unmapped(&c, 500)?
+    };
+    let (mut tried, mut placed) = (0u32, 0u32);
+    for mut i in todo {
+        // A hundred-block grid reference is not a place; Indiana county
+        // roads are named like one ("N 100 E"), so never offer it.
+        if is_grid_ref(&i.address) {
+            continue;
+        }
+        tried += 1;
+        match geocode_with(db, settings, &i.address, true) {
+            Ok(Some((a, b, d))) => {
+                i.lat = Some(a);
+                i.lon = Some(b);
+                i.validated = d;
+                i.geocode = "ok".into();
+                i.revision += 1;
+                let key = address_key(&i.address);
+                {
+                    let c = db.lock().unwrap();
+                    inc_update(&c, &i, &key)?;
+                }
+                let _ = app.emit("incident", &i);
+                placed += 1;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[dispatch] retry geocode #{}: {e}", i.id),
+        }
+    }
+    Ok((tried, placed))
+}
+
 /// Geocode a free-text query (the Fix-address dialog's preview).
 #[tauri::command]
 pub async fn dispatch_geocode(state: State<'_, AppState>, q: String) -> Result<Geo, String> {
@@ -1972,6 +2129,41 @@ mod tests {
         assert_ne!(
             address_key("8241 East 41st Street"),
             address_key("8241 East 21st Street")
+        );
+    }
+
+    #[test]
+    fn geocode_query_drops_units_and_region() {
+        let r = "Indianapolis, IN";
+        for (heard, want) in [
+            ("4350 Madison Avenue, apartment 604", "4350 Madison Avenue"),
+            (
+                "2250 Harvest Moon Drive, Room 402",
+                "2250 Harvest Moon Drive",
+            ),
+            ("9135 Bryant Lane, Apartment 1B", "9135 Bryant Lane"),
+            (
+                "8820 South Meridian Street, Suite 200",
+                "8820 South Meridian Street",
+            ),
+            ("8241 East 41st Street Apt. 3", "8241 East 41st Street"),
+            ("8241 East 41st Street Apt B", "8241 East 41st Street"),
+            ("123 Main Street #4", "123 Main Street"),
+            ("123 Main Street # 4", "123 Main Street"),
+            ("7510 Rogate Drive, Indianapolis", "7510 Rogate Drive"),
+            ("7510 Rogate Drive, Indianapolis, IN", "7510 Rogate Drive"),
+            ("1200 Unit Drive", "1200 Unit Drive"),
+            ("Unit Street and Lot Road", "Unit Street and Lot Road"),
+            (
+                "North Delaware Street and East 32nd Street",
+                "North Delaware Street and East 32nd Street",
+            ),
+        ] {
+            assert_eq!(geocode_query(heard, r), want, "{heard:?}");
+        }
+        assert_eq!(
+            geocode_query("7510 Rogate Drive, Indianapolis", ""),
+            "7510 Rogate Drive, Indianapolis"
         );
     }
 

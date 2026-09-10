@@ -1106,11 +1106,7 @@ fn start_follow(
                 } = &ev
                 {
                     if let Some(u) = uploader.lock().unwrap().as_ref().filter(|_| allowed(&upload_policy, *tg)) {
-                        let group = catalog
-                            .lock()
-                            .ok()
-                            .and_then(|cat| cat.as_ref().and_then(|c| c.get(*tg)).and_then(|t| t.category.clone()))
-                            .unwrap_or_default();
+                        let meta = upload::tg_meta(&catalog, *tg);
                         u.submit(upload::Job {
                             id: *id,
                             audio: wav.clone(),
@@ -1118,6 +1114,8 @@ fn start_follow(
                             secs: *secs,
                             tg: *tg,
                             tg_name: name.clone(),
+                            tg_desc: meta.desc,
+                            tg_tag: meta.tag,
                             unit: *source,
                             unit_name: unit_name.clone(),
                             freq_hz: (*freq_mhz * 1e6).round() as u64,
@@ -1126,7 +1124,7 @@ fn start_follow(
                             system: params.system_name.clone(),
                             site: *site,
                             voice_frame_errors: *voice_frame_errors,
-                            group,
+                            group: meta.group,
                         });
                     }
                 }
@@ -2116,6 +2114,7 @@ fn main() {
             dispatch::dispatch_test,
             dispatch::dispatch_backfill,
             dispatch::dispatch_geocode,
+            dispatch::dispatch_regeocode,
             dispatch::incidents_list,
             dispatch::incident_get,
             dispatch::incident_delete,
