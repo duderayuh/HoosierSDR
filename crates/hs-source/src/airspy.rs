@@ -36,16 +36,30 @@
 //!
 //! ## Threading
 //!
-//! `libairspy` delivers blocks on its own USB thread through a C callback.
-//! The callback converts and `try_send`s each block into a bounded channel
-//! and never blocks: if the decoder falls behind, the block is dropped and
-//! counted rather than letting the device's own buffer overflow (the same
-//! policy as the trunk follower's reader thread). Device-side drops the
-//! firmware reports are counted separately.
+//! `libairspy` delivers blocks on its own conversion thread through a C
+//! callback. The callback converts and `try_send`s each block into a bounded
+//! channel and never blocks: if the decoder falls behind, the block is
+//! dropped and counted rather than letting the device's own buffer overflow
+//! (the same policy as the trunk follower's reader thread).
+//!
+//! Upstream of that channel, `libairspy` keeps its own ring of only
+//! `RAW_BUFFER_COUNT` (8) raw USB transfers between the libusb event thread
+//! and the conversion thread that runs the 12-bit → int16 IQ converter and
+//! then this callback. At 10 MSPS a transfer is 65536 complex samples
+//! (~6.5 ms), so that ring holds ~52 ms: if the conversion thread is
+//! descheduled longer than that — a whisper burst, a WebKit paint, anything
+//! with more priority — libusb overwrites the oldest transfer and reports it
+//! as `dropped_samples` on the next callback (a per-transfer delta, in
+//! samples). Those are the "65536 stream drop(s)" a lightly loaded machine
+//! still shows: one transfer, not 65536 blocks, and nothing to do with the
+//! decoder's own queue. They are counted here in *blocks* as
+//! [`AirspySource::device_drops`]. Since the pthread `libairspy` spawns runs
+//! at default QoS, the first callback promotes it to user-interactive
+//! (macOS) so it is scheduled ahead of the app's own bulk work.
 
 use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
@@ -156,8 +170,34 @@ struct Shared {
     tx: SyncSender<Vec<f32>>,
     /// Blocks this side dropped because the decoder was behind.
     queue_drops: AtomicU64,
-    /// Samples the firmware reported dropping (USB starvation on its side).
+    /// Blocks (USB transfers) `libairspy`'s own ring dropped because its
+    /// conversion thread — the one that calls `on_block` — was starved.
     device_drops: AtomicU64,
+    /// Whether `on_block` has already raised its thread's scheduling class.
+    promoted: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// `QOS_CLASS_USER_INTERACTIVE` from `<sys/qos.h>`.
+#[cfg(target_os = "macos")]
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+/// Promote the calling thread (libairspy's conversion thread) so a 50 ms
+/// scheduling gap under ordinary desktop load stops costing a USB transfer.
+/// Best effort: a failure just leaves the default class.
+fn promote_current_thread() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: plain libc call on the current thread; no pointers involved.
+    unsafe {
+        let r = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        if r != 0 {
+            eprintln!("airspy: could not raise conversion thread QoS ({r})");
+        }
+    }
 }
 
 unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
@@ -166,10 +206,17 @@ unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
     // streaming (see `Drop`).
     let t = &*t;
     let shared = &*(t.ctx as *const Shared);
-    if t.dropped_samples > 0 {
-        shared
-            .device_drops
-            .fetch_add(t.dropped_samples, Ordering::Relaxed);
+    if !shared.promoted.swap(true, Ordering::Relaxed) {
+        promote_current_thread();
+    }
+    // `dropped_samples` is transfers lost since the previous callback, times
+    // this transfer's `sample_count`; count them as blocks, the unit every
+    // other drop counter uses.
+    if t.dropped_samples > 0 && t.sample_count > 0 {
+        shared.device_drops.fetch_add(
+            t.dropped_samples.div_ceil(t.sample_count as u64),
+            Ordering::Relaxed,
+        );
     }
     if t.sample_type != AIRSPY_SAMPLE_INT16_IQ || t.sample_count <= 0 {
         return 0;
@@ -310,6 +357,7 @@ impl AirspySource {
                 tx,
                 queue_drops: AtomicU64::new(0),
                 device_drops: AtomicU64::new(0),
+                promoted: AtomicBool::new(false),
             });
             let ctx = Arc::as_ptr(&shared) as *mut c_void;
             let r = airspy_start_rx(dev, on_block, ctx);
@@ -362,7 +410,8 @@ impl AirspySource {
         self.shared.queue_drops.load(Ordering::Relaxed)
     }
 
-    /// Samples the device reported dropping on its side of the USB link.
+    /// Blocks `libairspy` dropped inside its own USB ring because its
+    /// conversion thread was starved (see the module notes on threading).
     pub fn device_drops(&self) -> u64 {
         self.shared.device_drops.load(Ordering::Relaxed)
     }
@@ -383,6 +432,10 @@ impl SdrSource for AirspySource {
 
     fn dropped(&self) -> u64 {
         self.queue_drops() + self.device_drops()
+    }
+
+    fn driver_dropped(&self) -> u64 {
+        self.device_drops()
     }
 
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {

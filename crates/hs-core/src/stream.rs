@@ -70,6 +70,10 @@ impl<S: SdrSource> SdrSource for Normalized<S> {
         self.inner.dropped()
     }
 
+    fn driver_dropped(&self) -> u64 {
+        self.inner.driver_dropped()
+    }
+
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
         let Some(rs) = self.rs.as_mut() else {
             return self.inner.read(buf);
@@ -138,6 +142,8 @@ pub struct Buffered {
     center_freq: f64,
     queue_drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
     inner_drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The inner source's `driver_dropped`, snapshotted by the reader thread.
+    driver_drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pending: Vec<f32>,
     pending_pos: usize,
 }
@@ -173,7 +179,12 @@ impl Buffered {
         let (tx, rx) = sync_channel::<Result<Vec<f32>, SourceError>>(depth);
         let queue_drops = Arc::new(AtomicU64::new(0));
         let inner_drops = Arc::new(AtomicU64::new(0));
-        let (qd, id) = (Arc::clone(&queue_drops), Arc::clone(&inner_drops));
+        let driver_drops = Arc::new(AtomicU64::new(0));
+        let (qd, id, dd) = (
+            Arc::clone(&queue_drops),
+            Arc::clone(&inner_drops),
+            Arc::clone(&driver_drops),
+        );
         let reader = std::thread::spawn(move || {
             let mut buf = vec![0.0f32; block_pairs * 2];
             loop {
@@ -181,6 +192,7 @@ impl Buffered {
                     Ok(0) => continue,
                     Ok(n) => {
                         id.store(inner.dropped(), Ordering::Relaxed);
+                        dd.store(inner.driver_dropped(), Ordering::Relaxed);
                         let block = Ok(buf[..n].to_vec());
                         if lossless {
                             if tx.send(block).is_err() {
@@ -214,6 +226,7 @@ impl Buffered {
             center_freq,
             queue_drops,
             inner_drops,
+            driver_drops,
             pending: Vec::new(),
             pending_pos: 0,
         }
@@ -280,6 +293,11 @@ impl SdrSource for Buffered {
     fn dropped(&self) -> u64 {
         use std::sync::atomic::Ordering;
         self.queue_drops.load(Ordering::Relaxed) + self.inner_drops.load(Ordering::Relaxed)
+    }
+
+    fn driver_dropped(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.driver_drops.load(Ordering::Relaxed)
     }
 
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
