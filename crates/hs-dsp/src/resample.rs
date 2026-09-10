@@ -16,11 +16,18 @@ use crate::C32;
 pub struct RationalResampler {
     up: usize,
     down: usize,
-    /// Lowpass at the design rate, scaled by `up` (zero-insertion loses a
-    /// factor of `up` in level), zero-padded to a multiple of `up`.
-    taps: Vec<f32>,
-    /// Ring buffer of the most recent inputs, indexed by absolute count.
-    hist: Vec<C32>,
+    /// The lowpass split into `up` polyphase branches, each branch's taps
+    /// stored contiguously and reversed (oldest-sample-first), so an output
+    /// is one straight dot product over a contiguous history window.
+    /// Branch `p` lives at `[p * per_phase, (p + 1) * per_phase)`.
+    branches: Vec<f32>,
+    /// Doubled history rings, real and imaginary apart (see `FirC`): the
+    /// window ending at any sample is contiguous, and each is an f32 slice
+    /// the vectorized dot product can run over.
+    re: Vec<f32>,
+    im: Vec<f32>,
+    /// Ring length (power of two; index is a mask).
+    len: usize,
     /// Taps per polyphase branch = history samples per output.
     per_phase: usize,
     /// Inputs consumed so far; the newest sample has index `n_in − 1`.
@@ -46,6 +53,8 @@ impl RationalResampler {
             n += 1;
         }
         let design = cutoff + transition / 2.0;
+        // Scaled by `up` (zero-insertion loses a factor of `up` in level),
+        // zero-padded to a multiple of `up`.
         let mut taps: Vec<f32> = lowpass_taps(n, design)
             .into_iter()
             .map(|t| t * up as f32)
@@ -54,15 +63,26 @@ impl RationalResampler {
             taps.push(0.0);
         }
         let per_phase = taps.len() / up;
+        // Branch p, tap i (i = 0 newest … per_phase−1 oldest) is
+        // taps[p + i·up]; store it reversed so oldest comes first.
+        let mut branches = vec![0.0f32; up * per_phase];
+        for p in 0..up {
+            for i in 0..per_phase {
+                branches[p * per_phase + (per_phase - 1 - i)] = taps[p + i * up];
+            }
+        }
+        // One slot of slack: an output's base sample can lag the newest
+        // input by one, so `per_phase + 1` distinct samples are live.
+        // Power-of-two length so indexing is a mask, not a division —
+        // this runs per sample at 10 MSPS.
+        let len = (per_phase + 2).next_power_of_two();
         Self {
             up,
             down,
-            taps,
-            // One slot of slack: an output's base sample can lag the newest
-            // input by one, so `per_phase + 1` distinct samples are live.
-            // Power-of-two length so indexing is a mask, not a division —
-            // this runs per sample at 10 MSPS.
-            hist: vec![C32::ZERO; (per_phase + 2).next_power_of_two()],
+            branches,
+            re: vec![0.0; 2 * len],
+            im: vec![0.0; 2 * len],
+            len,
             per_phase,
             n_in: 0,
             k_out: 0,
@@ -72,11 +92,14 @@ impl RationalResampler {
     /// Push one input sample; returns a resampled output when one is due.
     /// With `down ≥ up` at most one output falls between consecutive inputs.
     pub fn push(&mut self, x: C32) -> Option<C32> {
-        let mask = (self.hist.len() - 1) as u64;
-        self.hist[(self.n_in & mask) as usize] = x;
+        let mask = (self.len - 1) as u64;
+        let pos = (self.n_in & mask) as usize;
+        self.re[pos] = x.re;
+        self.re[pos + self.len] = x.re;
+        self.im[pos] = x.im;
+        self.im[pos + self.len] = x.im;
         self.n_in += 1;
         let newest = self.n_in - 1;
-
         // Output k lives at upsampled tick k·down; it is computable once the
         // input covering that tick (index ⌊k·down/up⌋) has arrived.
         let tick = self.k_out * self.down as u64;
@@ -85,19 +108,19 @@ impl RationalResampler {
         }
         let phase = (tick % self.up as u64) as usize;
         let base = tick / self.up as u64;
-        let mut acc = C32::ZERO;
-        // Taps before the first sample read zeros; bound the loop instead of
-        // checking inside it.
+        // Taps before the first sample read zeros; bound the window instead
+        // of checking inside the loop. The window is the `live` samples
+        // ending at `base`, oldest first, contiguous in the doubled ring.
         let live = (base + 1).min(self.per_phase as u64) as usize;
-        for i in 0..live {
-            let t = self.taps[phase + i * self.up];
-            if t == 0.0 {
-                continue;
-            }
-            acc = acc + self.hist[((base - i as u64) & mask) as usize].scale(t);
-        }
+        let start = ((base + 1 - live as u64) & mask) as usize;
+        let b0 = phase * self.per_phase + (self.per_phase - live);
+        let taps = &self.branches[b0..b0 + live];
+        let out = C32::new(
+            crate::fir::dot(&self.re[start..start + live], taps),
+            crate::fir::dot(&self.im[start..start + live], taps),
+        );
         self.k_out += 1;
-        Some(acc)
+        Some(out)
     }
 }
 
@@ -250,5 +273,31 @@ mod tests {
         }
         let hz = acc / (tail.len() - 1) as f64 * 48_000.0 / (2.0 * std::f64::consts::PI);
         assert!((hz - 3_000.0).abs() < 5.0, "tone moved to {hz:.1} Hz");
+    }
+
+    /// Throughput of the 24/25 Airspy normalizer: `cargo test --release -p
+    /// hs-dsp -- --ignored --nocapture resampler_throughput`.
+    #[test]
+    #[ignore]
+    fn resampler_throughput() {
+        let (fs, up, down) = (10_000_000.0, 24, 25);
+        let mut rs = RationalResampler::new(fs, up, down, 0.4 * 9_600_000.0);
+        let n = 20_000_000usize;
+        let mut acc = C32::ZERO;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let x = ((i % 97) as f32 - 48.0) / 48.0;
+            if let Some(y) = rs.push(C32::new(x, -x)) {
+                acc = acc + y;
+            }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!(
+            "{} taps/phase; {:.1} Msps/s ({:.0}% of a core at 10 MSPS) checksum {:.3}",
+            rs.per_phase,
+            n as f64 / secs / 1e6,
+            100.0 * secs / (n as f64 / fs),
+            acc.re
+        );
     }
 }
