@@ -315,7 +315,8 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                 let id = v["id"].as_i64();
                 if let (Some(id), Some(text)) = (id, v["text"].as_str()) {
                     let model = v["model"].as_str().unwrap_or("whisper");
-                    // Per-talkgroup transcript corrections (e.g. "Rirey" → "Riley").
+                    // Transcript corrections: each call gets the global rules
+                    // plus any rules that name its talkgroup.
                     let corrected = {
                         let guard = state.db.lock().unwrap();
                         let tg = guard.as_ref().and_then(|db| {
@@ -324,14 +325,13 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                                 .flatten()
                                 .map(|r| r.tg)
                         });
-                        let corr = state.tg_corrections.lock().unwrap();
-                        match tg {
-                            Some(tg) => crate::apply_corrections(
-                                corr.get(&tg).map(|v| v.as_slice()).unwrap_or(&[]),
-                                text,
-                            ),
-                            None => text.to_string(),
-                        }
+                        let corr = state.corrections.lock().unwrap();
+                        let rules: Vec<(String, String)> = corr
+                            .iter()
+                            .filter(|(rt, _, _)| *rt == tg || rt.is_none())
+                            .map(|(_, a, b)| (a.clone(), b.clone()))
+                            .collect();
+                        crate::apply_corrections(&rules, text)
                     };
                     let res = {
                         let guard = state.db.lock().unwrap();
