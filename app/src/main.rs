@@ -1877,8 +1877,8 @@ async fn decode_file_analog(
 fn eq_mode(eq: &str) -> EqMode {
     match eq {
         "dfe" => EqMode::Dfe,
-        "bypass" => EqMode::Bypass,
-        _ => EqMode::Enabled,
+        "cma" => EqMode::Enabled,
+        _ => EqMode::Bypass,
     }
 }
 

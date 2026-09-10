@@ -91,7 +91,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases", "#discovery", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
 
 /* ---------- tuning state ---------- */
-let modeSel = "follow", modSel = "cqpsk", eqSel = "cma", decoderSel = "p25", squelchVal = 0.3;
+let modeSel = "follow", modSel = "cqpsk", eqSel = "bypass", decoderSel = "p25", squelchVal = 0.3;
 let measuredPpm = null;
 const ppmVal = () => { const v = parseFloat($("ppm").value); return Number.isFinite(v) ? v : null; };
 function applyMode() {
