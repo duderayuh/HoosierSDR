@@ -187,7 +187,27 @@ pub struct AudioAgc {
     alpha: f32,
     target: f32,
     gain: f32,
+    /// Gain ceiling left behind by [`AudioAgc::frame`]'s peak limiter,
+    /// releasing back toward [`GAIN_MAX`] frame by frame.
+    limit: f32,
 }
+
+/// Largest gain the RMS loop may apply.
+const GAIN_MAX: f32 = 1e4;
+/// Largest normalized magnitude a frame leaves [`AudioAgc::frame`] with. The
+/// gain is capped per frame so this is never exceeded — short of the
+/// per-sample safety clamp, which only fires when a peak lands inside the
+/// few-millisecond ramp below.
+pub const PEAK_CEILING: f32 = 0.9;
+/// Per-frame release of the peak limiter: the ceiling may rise by this factor
+/// (~1 dB) each frame, so a single hot frame does not hold the level down for
+/// long, but it also does not snap back up and pump.
+const LIMIT_RELEASE: f32 = 1.122;
+/// Samples over which a *lowered* ceiling is eased in at the start of a frame,
+/// so the gain does not step at the frame boundary (a step multiplies a
+/// non-zero boundary sample by a different factor than its neighbour — a
+/// click). 4 ms at 8 kHz.
+const LIMIT_RAMP: usize = 32;
 
 impl AudioAgc {
     pub fn new() -> Self {
@@ -218,17 +238,71 @@ impl AudioAgc {
             alpha: 0.001,
             target,
             gain: 1.0,
+            limit: GAIN_MAX,
         }
     }
 
     /// Normalize one audio sample and quantize to i16.
     pub fn sample(&mut self, x: f32) -> i16 {
+        let g = self.track(x);
+        let y = (x * g).clamp(-1.0, 1.0);
+        (y * 32_767.0) as i16
+    }
+
+    /// Advance the power estimate by one sample and return the RMS-loop gain.
+    fn track(&mut self, x: f32) -> f32 {
         self.power += self.alpha * (x * x - self.power);
         if self.power > 1e-9 {
-            self.gain = (self.target / self.power).sqrt().clamp(1e-3, 1e4);
+            self.gain = (self.target / self.power).sqrt().clamp(1e-3, GAIN_MAX);
         }
-        let y = (x * self.gain).clamp(-1.0, 1.0);
-        (y * 32_767.0) as i16
+        self.gain
+    }
+
+    /// Normalize one whole frame of i16 audio in place, with lookahead peak
+    /// limiting.
+    ///
+    /// The slow RMS loop is the same one [`AudioAgc::sample`] runs — the
+    /// power estimate advances sample by sample from the *input*, so release
+    /// and level matching behave exactly as before. What changes is that the
+    /// frame's peak is known before any gain is applied, so the gain is
+    /// capped at whatever keeps that peak under [`PEAK_CEILING`]. The RMS
+    /// loop's 125 ms time constant otherwise lets a frame that arrives
+    /// several times hotter than the running level hard-clip for 20–40 ms
+    /// before the estimate catches up — measured on real calls as ~0.5
+    /// full-scale bursts per second of speech, the "electronic" crackle in
+    /// decoded voice. The cap only ever lowers gain; on audio the RMS loop
+    /// already keeps under the ceiling this is a no-op.
+    pub fn frame(&mut self, pcm: &mut [i16]) {
+        let peak = pcm
+            .iter()
+            .map(|&s| (s as f32 / 32_768.0).abs())
+            .fold(0.0f32, f32::max);
+        let cap = if peak > 0.0 {
+            PEAK_CEILING / peak
+        } else {
+            GAIN_MAX
+        };
+        let start = self.limit;
+        let limit = (self.limit * LIMIT_RELEASE).min(cap).min(GAIN_MAX);
+        for (i, s) in pcm.iter_mut().enumerate() {
+            let x = *s as f32 / 32_768.0;
+            let rms_gain = self.track(x);
+            // Ease a lowered ceiling in over the first few ms; a raised one
+            // applies at once (it is at most ~1 dB above the last frame's).
+            let ceiling = if limit < start {
+                let t = ((i + 1) as f32 / LIMIT_RAMP as f32).min(1.0);
+                start + (limit - start) * t
+            } else {
+                limit
+            };
+            let mut g = rms_gain.min(ceiling);
+            // Hard guarantee for a peak that lands inside the ramp.
+            if x.abs() * g > PEAK_CEILING {
+                g = PEAK_CEILING / x.abs();
+            }
+            *s = (x * g * 32_767.0) as i16;
+        }
+        self.limit = limit;
     }
 }
 
@@ -341,10 +415,99 @@ mod tests {
         let mut agc = AudioAgc::with_target(0.015);
         let loud = 0.5f32; // a typical loud speech sample, normalized
         let first_20: Vec<i16> = (0..20).map(|_| agc.sample(loud)).collect();
-        let clipped = first_20.iter().filter(|&&s| s.unsigned_abs() >= 32_767).count();
+        let clipped = first_20
+            .iter()
+            .filter(|&&s| s.unsigned_abs() >= 32_767)
+            .count();
         assert_eq!(
             clipped, 0,
             "the first 20 samples of a loud onset should not clip: {first_20:?}"
+        );
+    }
+
+    /// One frame of 8 kHz audio: a sine at `amp` (i16 scale), `cycles` per
+    /// frame.
+    fn sine_frame(amp: f32, cycles: f32, frame_idx: usize) -> [i16; 160] {
+        let mut f = [0i16; 160];
+        for (i, s) in f.iter_mut().enumerate() {
+            let n = (frame_idx * 160 + i) as f32;
+            *s = (amp * (n * cycles * std::f32::consts::TAU / 160.0).sin()) as i16;
+        }
+        f
+    }
+
+    /// The failure `frame` exists for: a long quiet stretch lets the RMS
+    /// loop's gain climb, then a frame arrives ~10x hotter. Sample-by-sample
+    /// leveling multiplies its first 20–40 ms by the stale gain and clips
+    /// hard; frame leveling sees the peak coming and caps the gain instead.
+    #[test]
+    fn a_hot_frame_after_quiet_audio_is_limited_not_clipped() {
+        let mut agc = AudioAgc::with_target(0.015);
+        for k in 0..400 {
+            let mut f = sine_frame(600.0, 3.0, k);
+            agc.frame(&mut f);
+        }
+        assert!(
+            agc.gain > 3.0,
+            "gain should have climbed on quiet audio: {}",
+            agc.gain
+        );
+        let mut hot = sine_frame(12_000.0, 3.0, 400);
+        agc.frame(&mut hot);
+        let peak = hot.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(
+            peak as f32 <= PEAK_CEILING * 32_767.0 + 1.0,
+            "hot frame should be held under the ceiling, peaked at {peak}"
+        );
+        assert!(
+            peak > 20_000,
+            "the frame should still be loud, not squashed: {peak}"
+        );
+    }
+
+    /// The limiter is a ceiling, never a change of level: on audio the RMS
+    /// loop already keeps under `PEAK_CEILING`, `frame` must produce exactly
+    /// what `sample` did.
+    #[test]
+    fn frame_leveling_matches_sample_leveling_when_nothing_peaks() {
+        let mut by_sample = AudioAgc::with_target(0.015);
+        let mut by_frame = AudioAgc::with_target(0.015);
+        for k in 0..300 {
+            let input = sine_frame(4_000.0, 5.0, k);
+            let expect: Vec<i16> = input
+                .iter()
+                .map(|&s| by_sample.sample(s as f32 / 32_768.0))
+                .collect();
+            let mut got = input;
+            by_frame.frame(&mut got);
+            assert_eq!(
+                got.to_vec(),
+                expect,
+                "frame {k} diverged from sample-wise leveling"
+            );
+        }
+    }
+
+    /// After a hot frame the ceiling releases gradually (~1 dB a frame), not
+    /// in one jump back to the RMS gain — a jump would pump audibly.
+    #[test]
+    fn the_peak_ceiling_releases_gradually() {
+        let mut agc = AudioAgc::with_target(0.015);
+        for k in 0..400 {
+            agc.frame(&mut sine_frame(600.0, 3.0, k));
+        }
+        let gain_before_hot = agc.gain;
+        agc.frame(&mut sine_frame(12_000.0, 3.0, 400));
+        let after_hot = agc.limit;
+        assert!(
+            after_hot < gain_before_hot,
+            "the hot frame should have lowered the ceiling below the stale gain ({gain_before_hot}): {after_hot}"
+        );
+        agc.frame(&mut sine_frame(600.0, 3.0, 401));
+        let ratio = agc.limit / after_hot;
+        assert!(
+            (ratio - LIMIT_RELEASE).abs() < 1e-3,
+            "ceiling should release by LIMIT_RELEASE per frame, got x{ratio}"
         );
     }
 }

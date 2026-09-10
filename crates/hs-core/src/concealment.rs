@@ -80,9 +80,15 @@ impl Concealer {
         // tracks the actual signal's level, never a concealment artifact,
         // and both `held` and the blend below already start from
         // consistently-leveled audio.
-        for s in pcm.iter_mut() {
-            *s = self.agc.sample(*s as f32 / 32_768.0);
-        }
+        //
+        // Whole-frame leveling, not sample-by-sample: the AGC sees the
+        // frame's peak before applying any gain and caps the gain so the
+        // peak stays under `hs_decoders::frontend::PEAK_CEILING`. With
+        // sample-wise leveling, a frame arriving several times hotter than
+        // the 125 ms running level was hard-clipped for its first 20–40 ms
+        // — measured at ~0.5 full-scale bursts per second of speech on real
+        // calls, the "electronic" crackle mixed into decoded voice.
+        self.agc.frame(pcm);
 
         let score = quality.score();
         if score < CONCEAL_BELOW {
@@ -315,6 +321,34 @@ mod tests {
     /// a synthetic signal with a speech-like crest factor (~5x, periodic
     /// loud bursts over a quiet baseline) fed through many "good" frames —
     /// enough for the slow (alpha=0.001) AGC to settle before measuring —
+    /// A frame far hotter than the speech before it — a stressed syllable, or
+    /// a corrupted IMBE gain field — must come out loud but under the peak
+    /// ceiling, never pinned at full scale: exactly the bursts measured on
+    /// real calls before the AGC leveled whole frames.
+    #[test]
+    fn a_hot_frame_after_quiet_speech_is_limited_not_clipped() {
+        let mut c = Concealer::new();
+        for k in 0..400 {
+            let mut pcm = [0i16; 160];
+            for (i, s) in pcm.iter_mut().enumerate() {
+                *s = (500.0 * ((k * 160 + i) as f32 * 0.12).sin()) as i16;
+            }
+            c.process(&mut pcm, good());
+        }
+        let mut hot = [0i16; 160];
+        for (i, s) in hot.iter_mut().enumerate() {
+            *s = (15_000.0 * (i as f32 * 0.12).sin()) as i16;
+        }
+        c.process(&mut hot, good());
+        let peak = hot.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak < 32_767, "hot frame must not be pinned at full scale");
+        assert!(
+            peak as f32 <= hs_decoders::frontend::PEAK_CEILING * 32_767.0 + 1.0,
+            "hot frame should be held under the ceiling, peaked at {peak}"
+        );
+        assert!(peak > 20_000, "the frame should still be loud: {peak}");
+    }
+
     /// must clip only rarely once settled.
     #[test]
     fn agc_target_leaves_headroom_for_a_speech_like_crest_factor() {
