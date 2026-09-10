@@ -36,16 +36,28 @@
 //!
 //! ## Threading
 //!
-//! `libairspy` delivers blocks on its own USB thread through a C callback.
-//! The callback converts and `try_send`s each block into a bounded channel
-//! and never blocks: if the decoder falls behind, the block is dropped and
-//! counted rather than letting the device's own buffer overflow (the same
-//! policy as the trunk follower's reader thread). Device-side drops the
-//! firmware reports are counted separately.
+//! `libairspy` delivers blocks on its own consumer thread through a C
+//! callback. The callback converts and `try_send`s each block into a bounded
+//! channel and never blocks: if the reader falls behind, the block is dropped
+//! and counted rather than letting the device's own buffer overflow (the same
+//! policy as the trunk follower's reader thread).
+//!
+//! That consumer thread is the fragile link in the capture path. `libairspy`
+//! keeps only 8 USB buffers (65536 complex samples each — ~52 ms of air at
+//! 10 MSPS) between its USB transfer callback and this callback; when the
+//! thread is late collecting them, the USB side discards whole buffers and
+//! reports them on the next transfer as `dropped_samples`. Everything
+//! downstream has seconds of queue; this stage has tens of milliseconds, so
+//! a busy machine (transcription, a browser) starves it first. Two
+//! mitigations: the first callback raises its own thread to real-time
+//! round-robin priority (best effort — `libairspy` does this itself on
+//! Windows only), and the drops it reports are counted in *blocks*, the unit
+//! every other drop counter in the capture path uses, so a lost buffer reads
+//! as 1, not 65536.
 
 use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
@@ -154,10 +166,89 @@ unsafe fn apply_airspy_gain(dev: *mut AirspyDevice, g: &GainSetting) -> Result<(
 /// Shared between the USB callback and the reader.
 struct Shared {
     tx: SyncSender<Vec<f32>>,
-    /// Blocks this side dropped because the decoder was behind.
+    /// Blocks this side dropped because the reader was behind.
     queue_drops: AtomicU64,
-    /// Samples the firmware reported dropping (USB starvation on its side).
+    /// USB buffers `libairspy` discarded because the callback thread was late
+    /// collecting them (see the module notes), counted in blocks of one
+    /// buffer — the same 65536-sample unit as `queue_drops`.
     device_drops: AtomicU64,
+    /// Whether the callback thread's priority has been raised yet (done once,
+    /// from the first callback, since only that thread can do it).
+    boosted: AtomicBool,
+}
+
+/// `libairspy` reports a drop as `dropped_buffers * sample_count` — the
+/// whole USB buffers it discarded, in samples — so the buffer count is that
+/// quotient. Counted this way the figure is in the same unit as every other
+/// drop counter in the capture path (one block ≈ 6.5 ms at 10 MSPS) instead
+/// of 65536 times larger.
+fn device_drop_blocks(dropped_samples: u64, sample_count: i32) -> u64 {
+    if sample_count <= 0 {
+        return 0;
+    }
+    dropped_samples.div_ceil(sample_count as u64)
+}
+
+/// Raise the calling thread to real-time round-robin priority, returning the
+/// priority set. Best effort: on macOS this is allowed for any process (it
+/// is how audio I/O threads keep up); on Linux it needs `CAP_SYS_NICE` or an
+/// rtprio limit and otherwise fails with `EPERM`, which is fine — the
+/// capture just stays as sensitive to load as it always was.
+#[cfg(unix)]
+fn boost_current_thread() -> Result<i32, i32> {
+    // Hand-declared rather than via the `libc` crate: `build.rs` promises
+    // this feature adds no crate dependencies. Layouts checked against
+    // glibc/musl and macOS `<sched.h>`; `SCHED_RR` is 2 on all three.
+    const SCHED_RR: i32 = 2;
+    #[cfg(target_os = "macos")]
+    type PthreadT = *mut c_void;
+    #[cfg(not(target_os = "macos"))]
+    type PthreadT = usize;
+    #[repr(C)]
+    struct SchedParam {
+        sched_priority: i32,
+        #[cfg(target_os = "macos")]
+        _opaque: [u8; 4],
+    }
+    extern "C" {
+        fn pthread_self() -> PthreadT;
+        fn pthread_setschedparam(thread: PthreadT, policy: i32, param: *const SchedParam) -> i32;
+        fn sched_get_priority_max(policy: i32) -> i32;
+        fn sched_get_priority_min(policy: i32) -> i32;
+    }
+    // SAFETY: plain POSIX calls on the calling thread with a fully
+    // initialised, correctly laid-out parameter block.
+    unsafe {
+        let (min, max) = (
+            sched_get_priority_min(SCHED_RR),
+            sched_get_priority_max(SCHED_RR),
+        );
+        if max < 0 || min < 0 {
+            return Err(max.min(min));
+        }
+        // macOS: the top of the round-robin band (47) sits above every normal
+        // thread (31) and below the kernel. Linux: the band runs to 99, where
+        // the kernel's own real-time threads live; stay modest.
+        let want = if cfg!(target_os = "macos") {
+            max
+        } else {
+            50.clamp(min, max)
+        };
+        let param = SchedParam {
+            sched_priority: want,
+            #[cfg(target_os = "macos")]
+            _opaque: [0; 4],
+        };
+        match pthread_setschedparam(pthread_self(), SCHED_RR, &param) {
+            0 => Ok(want),
+            e => Err(e),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn boost_current_thread() -> Result<i32, i32> {
+    Err(-1)
 }
 
 unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
@@ -166,10 +257,19 @@ unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
     // streaming (see `Drop`).
     let t = &*t;
     let shared = &*(t.ctx as *const Shared);
+    if !shared.boosted.swap(true, Ordering::Relaxed) {
+        if let Err(e) = boost_current_thread() {
+            eprintln!(
+                "airspy: could not raise the USB thread's priority (error {e}); \
+                 stream drops under CPU load are more likely"
+            );
+        }
+    }
     if t.dropped_samples > 0 {
-        shared
-            .device_drops
-            .fetch_add(t.dropped_samples, Ordering::Relaxed);
+        shared.device_drops.fetch_add(
+            device_drop_blocks(t.dropped_samples, t.sample_count),
+            Ordering::Relaxed,
+        );
     }
     if t.sample_type != AIRSPY_SAMPLE_INT16_IQ || t.sample_count <= 0 {
         return 0;
@@ -304,12 +404,14 @@ impl AirspySource {
                 return Err(e);
             }
 
-            // ~2 s of queue at 2.5 MSPS (blocks are 65536 complex samples).
+            // ~2.5 s of queue at 2.5 MSPS, ~0.6 s at 10 (blocks are 65536
+            // complex samples).
             let (tx, rx) = sync_channel::<Vec<f32>>(96);
             let shared = Arc::new(Shared {
                 tx,
                 queue_drops: AtomicU64::new(0),
                 device_drops: AtomicU64::new(0),
+                boosted: AtomicBool::new(false),
             });
             let ctx = Arc::as_ptr(&shared) as *mut c_void;
             let r = airspy_start_rx(dev, on_block, ctx);
@@ -362,7 +464,9 @@ impl AirspySource {
         self.shared.queue_drops.load(Ordering::Relaxed)
     }
 
-    /// Samples the device reported dropping on its side of the USB link.
+    /// USB buffers `libairspy` discarded because its callback thread was late
+    /// collecting them, in blocks (one buffer = one block of 65536 complex
+    /// samples, the same unit as [`Self::queue_drops`]).
     pub fn device_drops(&self) -> u64 {
         self.shared.device_drops.load(Ordering::Relaxed)
     }
@@ -426,5 +530,65 @@ impl Drop for AirspySource {
             airspy_stop_rx(self.dev);
             airspy_close(self.dev);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two figures a user saw as "dropped 393216 block(s)" and "dropped
+    /// 2162688 block(s)": libairspy's `dropped_samples` for 6 and 33 lost
+    /// USB buffers of 65536 samples. Counted in blocks they are 6 and 33.
+    #[test]
+    fn device_drops_count_buffers_not_samples() {
+        assert_eq!(device_drop_blocks(393_216, 65_536), 6);
+        assert_eq!(device_drop_blocks(2_162_688, 65_536), 33);
+        assert_eq!(device_drop_blocks(0, 65_536), 0);
+        // Defensive: a partial figure still counts as a lost buffer, and a
+        // transfer with no samples cannot divide by zero.
+        assert_eq!(device_drop_blocks(1, 65_536), 1);
+        assert_eq!(device_drop_blocks(65_536, 0), 0);
+    }
+
+    /// The callback itself, driven with a fake transfer: device drops land
+    /// in blocks, the samples still reach the queue, and a full queue counts
+    /// one block per lost transfer. No radio needed.
+    #[test]
+    fn callback_counts_in_blocks() {
+        let (tx, rx) = sync_channel::<Vec<f32>>(1);
+        let shared = Arc::new(Shared {
+            tx,
+            queue_drops: AtomicU64::new(0),
+            device_drops: AtomicU64::new(0),
+            // Skip the priority change: this is the test runner's thread.
+            boosted: AtomicBool::new(true),
+        });
+        let mut samples = vec![0i16; 65_536 * 2];
+        samples[0] = 16_384;
+        let mut t = AirspyTransfer {
+            device: std::ptr::null_mut(),
+            ctx: Arc::as_ptr(&shared) as *mut c_void,
+            samples: samples.as_mut_ptr() as *mut c_void,
+            sample_count: 65_536,
+            dropped_samples: 2 * 65_536,
+            sample_type: AIRSPY_SAMPLE_INT16_IQ,
+        };
+        // SAFETY: `t` is a fully initialised transfer whose `ctx` is a live
+        // `Shared`, exactly what libairspy would hand over.
+        assert_eq!(unsafe { on_block(&mut t) }, 0);
+        assert_eq!(shared.device_drops.load(Ordering::Relaxed), 2);
+        assert_eq!(shared.queue_drops.load(Ordering::Relaxed), 0);
+        // Queue holds one block; the next one has nowhere to go.
+        t.dropped_samples = 0;
+        assert_eq!(unsafe { on_block(&mut t) }, 0);
+        assert_eq!(shared.queue_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.device_drops.load(Ordering::Relaxed), 2);
+        let block = rx.recv().unwrap();
+        assert_eq!(block.len(), 65_536 * 2);
+        assert!((block[0] - 0.5).abs() < 1e-6);
+        drop(rx);
+        // Reader gone: the callback asks libairspy to stop.
+        assert_eq!(unsafe { on_block(&mut t) }, 1);
     }
 }

@@ -249,6 +249,11 @@ pub struct ExtraRadio {
     pub src: Box<dyn SdrSource + Send>,
 }
 
+/// Complex samples per block on every queue in the live capture path (the
+/// Airspy driver's USB buffers are the same size), so a dropped-block count
+/// from any stage means the same amount of air.
+const BLOCK_PAIRS: usize = 65536;
+
 /// Follow a trunk from `src` until `running` clears or the source ends.
 /// `emit` receives every event in order, on this thread. (The app itself
 /// goes through [`run_with_extras`]; this stays for the headless tests.)
@@ -287,7 +292,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         .map(|e| {
             let n = Normalized::new(e.src);
             let r = n.sample_rate();
-            (e.center_hz, e.label, r, Buffered::new(n, 65536))
+            (e.center_hz, e.label, r, Buffered::new(n, BLOCK_PAIRS))
         })
         .collect();
 
@@ -295,15 +300,15 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     // the multi-second measurement runs — read synchronously, an RTL-SDR's
     // buffer overflows during the sweep and the stream afterwards is holes.
     let mut src = if p.live {
-        Buffered::new(src, 65536)
+        Buffered::new(src, BLOCK_PAIRS)
     } else {
-        Buffered::lossless(src, 65536)
+        Buffered::lossless(src, BLOCK_PAIRS)
     };
 
     // Prime on ~3 s of air and measure where the control channel really is
     // (and which modulation it uses).
     let block = (rate as usize / 10) * 2;
-    let mut buf = vec![0.0f32; 65536 * 2];
+    let mut buf = vec![0.0f32; BLOCK_PAIRS * 2];
     let target = block * 30;
     let mut prime: Vec<f32> = Vec::with_capacity(target);
     while prime.len() < target {
@@ -499,9 +504,9 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             e.discard_queued();
         }
     }
-    let mut extra_buf = vec![0.0f32; 65536 * 2];
+    let mut extra_buf = vec![0.0f32; BLOCK_PAIRS * 2];
     let drop_base = src.dropped();
-    let mut buf = vec![0.0f32; 65536 * 2];
+    let mut buf = vec![0.0f32; BLOCK_PAIRS * 2];
     let start = std::time::Instant::now();
     let mut total_pairs = 0u64;
     let mut blocks = 0u64;
@@ -597,12 +602,20 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             let extra_drops: u64 = extra.iter().map(|(_, _, _, e)| e.dropped()).sum();
             // A drop is a hole in every call being decoded at that moment —
             // heard as a chop — so say when it happens, not just count it.
+            // Every stage that can drop (libairspy's USB buffers, the
+            // Airspy callback's queue, `Buffered`'s queue) loses whole
+            // blocks of `BLOCK_PAIRS` samples, so the count converts to air
+            // time — within a few percent when the radio is resampled. Which
+            // stage starved is not known here; on a loaded machine it is
+            // usually the USB thread, which has ~50 ms of slack against the
+            // decoder's ~2 s.
             let drops_now = src.dropped().saturating_sub(drop_base) + extra_drops;
             if drops_now > drops_seen {
+                let lost = drops_now - drops_seen;
+                let ms = lost as f64 * BLOCK_PAIRS as f64 / rate * 1e3;
                 emit(FollowEvent::Notice {
                     text: format!(
-                        "radio stream dropped {} block(s) — the decoder fell behind; audio decoded just now has holes (check CPU: transcription, other apps)",
-                        drops_now - drops_seen
+                        "radio stream dropped {lost} block(s), ~{ms:.0} ms of air — a capture or decode thread was starved of CPU; calls decoded just now have holes (check CPU: transcription, other apps)"
                     ),
                 });
                 drops_seen = drops_now;
