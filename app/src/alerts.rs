@@ -65,6 +65,11 @@ pub struct Alert {
     /// AI gate: when set, the model decides whether to send.
     pub ai_gate: bool,
     pub ai_prompt: String,
+    /// Let a thinking model reason before answering (Ollama `think: true`).
+    /// Slower, but a model such as qwen3 judges borderline transcripts
+    /// better with the room. Ignored by models without a thinking mode.
+    #[serde(default)]
+    pub ai_think: bool,
 }
 
 impl Default for Alert {
@@ -87,6 +92,7 @@ impl Default for Alert {
             combine_window_secs: 120,
             ai_gate: false,
             ai_prompt: String::new(),
+            ai_think: false,
         }
     }
 }
@@ -392,7 +398,7 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
         };
         let mut ai_note = String::new();
         if a.ai_gate && !a.ai_prompt.trim().is_empty() {
-            match ask_ollama(&ollama, &a.ai_prompt, &f) {
+            match ask_ollama(&ollama, &a.ai_prompt, &f, a.ai_think) {
                 Ok((true, summary)) => ai_note = summary,
                 Ok((false, summary)) => {
                     log_entry(
@@ -490,7 +496,12 @@ fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, ok: bool, detail: String
 // ---------------------------------------------------------------------------
 
 /// Ask the model whether to send. Returns (fire, summary).
-pub fn ask_ollama(o: &Ollama, prompt: &str, f: &CallFacts) -> Result<(bool, String), String> {
+pub fn ask_ollama(
+    o: &Ollama,
+    prompt: &str,
+    f: &CallFacts,
+    think: bool,
+) -> Result<(bool, String), String> {
     if o.model.trim().is_empty() {
         return Err("no Ollama model chosen".into());
     }
@@ -505,9 +516,12 @@ pub fn ask_ollama(o: &Ollama, prompt: &str, f: &CallFacts) -> Result<(bool, Stri
         f.transcript.as_deref().unwrap_or(""),
         prompt.trim()
     );
-    // `think: false` matters: a thinking model (qwen3 and friends) in JSON
-    // mode otherwise spends its output on the thought and returns an empty
-    // response — measured locally. A model that rejects the parameter is
+    // The `think` parameter matters either way: left unset, a thinking model
+    // (qwen3 and friends) in JSON mode spends its output on the thought and
+    // returns an empty response — measured locally — so it is always sent
+    // explicitly: `false` by default, `true` when the alert asks for
+    // reasoning, in which case Ollama returns the thought in `thinking` and
+    // the answer in `response`. A model that rejects the parameter is
     // retried without it.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(
@@ -516,13 +530,13 @@ pub fn ask_ollama(o: &Ollama, prompt: &str, f: &CallFacts) -> Result<(bool, Stri
         .http_status_as_error(false)
         .build()
         .into();
-    let call = |think: bool| -> Result<(u16, String), String> {
+    let call = |send_think: bool| -> Result<(u16, String), String> {
         let mut body = serde_json::json!({
             "model": o.model, "prompt": full, "stream": false, "format": "json",
             "options": { "temperature": 0 }
         });
-        if think {
-            body["think"] = serde_json::Value::Bool(false);
+        if send_think {
+            body["think"] = serde_json::Value::Bool(think);
         }
         let mut r = agent
             .post(&format!("{}/api/generate", o.url.trim_end_matches('/')))
@@ -1155,6 +1169,47 @@ pub async fn ollama_models(url: String) -> Result<Vec<String>, String> {
             .map(|m| {
                 m.iter()
                     .filter_map(|x| x["name"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a model can do, from Ollama's `/api/show` — notably whether it has
+/// a `thinking` mode, so the UI offers reasoning only where it exists.
+#[tauri::command]
+pub async fn ollama_capabilities(url: String, model: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if model.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let body = serde_json::json!({ "model": model.trim() });
+        let mut r = agent
+            .post(&format!("{}/api/show", url.trim_end_matches('/')))
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes())
+            .map_err(|e| format!("ollama: {e}"))?;
+        let status = r.status().as_u16();
+        let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
+        if status != 200 {
+            return Err(format!(
+                "ollama HTTP {status}: {}",
+                text.chars().take(120).collect::<String>()
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Ok(v["capabilities"]
+            .as_array()
+            .map(|c| {
+                c.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
                     .collect()
             })
             .unwrap_or_default())

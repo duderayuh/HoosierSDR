@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="vendor/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -21,6 +22,7 @@
       <button data-v="discovery" aria-pressed="false">Discovery</button>
       <button data-v="alerts" aria-pressed="false">Alerts</button>
       <button data-v="analyzers" aria-pressed="false">Analyzers</button>
+      <button data-v="dispatch" aria-pressed="false">Dispatch</button>
       <button data-v="devices" aria-pressed="false">Devices</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
@@ -398,7 +400,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Radio positions · LRRP</span><button id="surveyToggle" class="btn ghost" aria-pressed="false">Survey: off</button><span class="meta" id="mapMeta"></span></div>
             <div class="body tight">
-              <div class="mapbox"><canvas id="map" width="560" height="360"></canvas><div class="mapattr">© OpenStreetMap contributors © CARTO</div></div>
+              <div class="mapbox"><canvas id="map" width="560" height="360"></canvas><div class="mapattr">© OpenStreetMap contributors</div></div>
               <div id="surveyForm" class="survey-form" style="display:none">
                 <input id="surveyLabel" type="text" placeholder="pin label" spellcheck="false" style="flex:2;min-width:140px" />
                 <input id="surveySecs" type="number" value="60" min="5" max="3600" step="5" style="width:64px" />
@@ -414,7 +416,7 @@
               <div class="tablewrap tgs" style="max-height:20vh;margin-top:8px">
                 <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th><th></th></tr></thead><tbody id="surveyBody"></tbody></table>
               </div>
-              <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from CARTO (OpenStreetMap data) when online.</p>
+              <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from OpenStreetMap when online.</p>
             </div>
           </div>
         </div>
@@ -459,6 +461,7 @@
                 <label class="check" style="margin:0"><input id="akAudio" type="checkbox" checked /> attach audio</label>
                 <label class="check" style="margin:0"><input id="akTone" type="checkbox" checked /> tone in the app</label>
                 <label class="check" style="margin:0"><input id="akAi" type="checkbox" /> AI gate (Ollama)</label>
+                <label class="check" style="margin:0" id="akThinkWrap" title="Let a thinking model reason before it answers. Slower; only offered when the chosen Ollama model has a thinking mode."><input id="akAiThink" type="checkbox" /> reasoning <span class="mono faint" id="akThinkHint"></span></label>
               </div>
               <label class="field" id="akAiField" style="margin-top:8px"><span class="lab">AI prompt <span class="mono faint">the model answers fire / don't fire; its one-line summary fills {ai}</span></span>
                 <textarea id="akAiPrompt" style="min-height:56px" placeholder="Is this a working cardiac arrest happening now — not a patient with a history of cardiac arrest, a training call, or a cancelled response? Fire only if CPR or defibrillation is actively underway."></textarea></label>
@@ -469,7 +472,7 @@
             <div class="head"><span class="eyebrow">Conversations · summarise the back-and-forth</span><span class="meta" id="cvMeta"></span><button class="btn primary sm" id="cvNew">+ New rule</button></div>
             <div class="body tight">
               <div id="cvList" class="list" style="max-height:20vh"></div>
-              <div class="empty small" id="cvEmpty">A rule watches talkgroups where one party is fixed (a hospital) and mobile units call in. Each back-and-forth becomes one incident: when it goes quiet the transcripts are stitched, the local model summarises them, and the summary goes to Telegram with the combined audio. A late transmission revises it (old message deleted, new one sent).</div>
+              <div class="empty small" id="cvEmpty">A rule watches talkgroups where one party is fixed (a hospital) and mobile units call in. Each back-and-forth becomes one incident — two radios taking turns are treated as one exchange even before the hospital's ID is known: when it goes quiet the transcripts are stitched, the local model summarises them, and the summary goes to Telegram with the combined audio. A late transmission revises it (old message deleted, new one sent).</div>
             </div>
           </div>
           <div class="panel" id="cvEditor" style="display:none">
@@ -483,8 +486,9 @@
               <label class="field"><span class="lab">Fixed radio IDs <span class="mono faint">the hospital's consoles · comma-separated · everything else is a mobile unit</span></span>
                 <span class="inline"><input id="cvFixed" type="text" placeholder="900001, 900002" spellcheck="false" /><label class="check" style="margin:0;white-space:nowrap"><input id="cvLearn" type="checkbox" checked /> learn from traffic</label></span></label>
               <div class="mono small" id="cvProposed"></div>
-              <div class="row3">
+              <div class="row2">
                 <label class="field"><span class="lab">Quiet that ends it (s)</span><input id="cvGap" type="text" inputmode="numeric" value="90" /></label>
+                <label class="field"><span class="lab">Reply gap (s) <span class="mono faint">another radio this soon after is the other side</span></span><input id="cvReply" type="text" inputmode="numeric" value="45" /></label>
                 <label class="field"><span class="lab">Late window (s) <span class="mono faint">revise if more arrives</span></span><input id="cvLate" type="text" inputmode="numeric" value="180" /></label>
                 <label class="field"><span class="lab">Max length (s)</span><input id="cvMax" type="text" inputmode="numeric" value="900" /></label>
               </div>
@@ -581,10 +585,10 @@
       <section class="two-col">
         <div class="stack">
           <div class="panel">
-            <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Add a template…</button><button class="btn primary sm" id="azNew">+ New analyzer</button></div>
+            <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Built-in…</button><button class="btn ghost sm" id="azImport">Import…</button><button class="btn ghost sm" id="azExport">Export…</button><button class="btn primary sm" id="azNew">+ New analyzer</button><input id="azImportFile" type="file" accept=".json,application/json" style="display:none" /></div>
             <div class="body tight">
               <div id="azList" class="list" style="max-height:26vh"></div>
-              <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a template — the ECPR candidate screen ships built-in.</div>
+              <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a built-in template (the ECPR candidate screen ships with the app), or import a template file someone shared. Imported analyzers arrive disabled with no chat set, so nothing runs or sends until you have read them.</div>
             </div>
           </div>
           <div class="panel" id="azEditor" style="display:none">
@@ -606,7 +610,7 @@
               <div id="azConds" class="list" style="max-height:18vh"></div>
               <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
               <div class="row3">
-                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select></label>
+                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
                 <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
               </div>
@@ -654,6 +658,101 @@
     </div>
 
     <!-- ===================== DEVICES ===================== -->
+    <!-- ===================== DISPATCH · live incident map ===================== -->
+    <div class="view" id="view-dispatch" style="display:none">
+      <section class="dispatch" id="dpMain">
+        <aside class="stack dpfeed">
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow">Incidents</span><span class="meta" id="dpMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="dpSetupBtn" title="Channels, home location, geocoder, model">⚙ Setup</button></div>
+            <div class="body tight dpfeedbody">
+              <input id="dpSearch" type="search" placeholder="Search call types, streets, units…" spellcheck="false" />
+              <div class="inline dpfilters">
+                <select id="dpChannel"><option value="">All channels</option></select>
+                <div class="seg dpwin" id="dpWindow" role="group" aria-label="Time window">
+                  <button data-v="1">1h</button><button data-v="6" aria-pressed="true">6h</button><button data-v="24">24h</button><button data-v="168">7d</button><button data-v="0">All</button>
+                </div>
+              </div>
+              <div id="dpList" class="dplist"></div>
+              <div class="empty small" id="dpEmpty"><span class="big">No incidents yet</span>Pick your dispatch talkgroups in <b>Setup</b>, make sure transcription is on, and each dispatched call will appear here and on the map as it is heard. <b>Backfill</b> in Setup builds the map from calls already recorded.</div>
+            </div>
+          </div>
+        </aside>
+        <div class="dpmapwrap">
+          <div id="dpMap" class="dpmap" aria-label="Incident map"></div>
+          <div class="dplayers" id="dpLayers">
+            <div class="dplhead" id="dpLayersHead"><span class="eyebrow">Layers &amp; filters</span><span class="caret">▾</span></div>
+            <div class="dplbody" id="dpLayersBody">
+              <label class="check dpltoggle"><input type="checkbox" id="dpShowPins" checked /> Incident pins <span class="badge" id="dpPinCount">0</span></label>
+              <label class="check dpltoggle"><input type="checkbox" id="dpShowLabels" /> Show labels</label>
+              <label class="check dpltoggle"><input type="checkbox" id="dpFollowNew" checked /> Fly to new incidents</label>
+              <div class="lab" style="margin-top:8px">Active call types</div>
+              <div id="dpTypes" class="dptypes"></div>
+              <div class="inline" style="margin-top:6px"><button class="btn ghost sm" id="dpTypesAll">All</button><button class="btn ghost sm" id="dpTypesNone">None</button></div>
+            </div>
+          </div>
+          <div class="dpattr">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors · geocoding by Nominatim</div>
+          <div class="dpempty" id="dpMapEmpty">Waiting for the first dispatched call…</div>
+        </div>
+      </section>
+
+      <section class="two-col" id="dpSetup" style="display:none">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Dispatch channels</span><span class="meta" id="dpChMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="dpBack">← Map</button><button class="btn ghost sm" id="dpChAdd">+ Channel</button></div>
+            <div class="body tight">
+              <div id="dpChannels" class="list" style="max-height:32vh"></div>
+              <p class="help"><b>Dispatch</b> channels open incidents: the model pulls the address, units and call type from each dispatch. <b>Tactical</b> channels (fireground, EMS ops) only update an incident that already involves one of the units heard. A fixed call type overrides the model for a channel that carries one kind of traffic.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Home &amp; geocoding</span><span class="meta" id="dpGeoMeta"></span></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Home latitude</span><input id="dpHomeLat" type="text" inputmode="decimal" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Home longitude</span><input id="dpHomeLon" type="text" inputmode="decimal" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="dpHomeFromMap" style="justify-self:start">Use map centre</button></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Region hint <span class="mono faint">added to every address</span></span><input id="dpRegion" type="text" placeholder="Indianapolis, IN" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Search radius (km) <span class="mono faint">results outside are ignored</span></span><input id="dpRadiusKm" type="text" inputmode="numeric" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Nominatim server</span><input id="dpGeoUrl" type="text" spellcheck="false" placeholder="https://nominatim.openstreetmap.org" /></label>
+                <label class="field"><span class="lab">Contact e-mail <span class="mono faint">asked for by the public server</span></span><input id="dpGeoEmail" type="text" spellcheck="false" /></label>
+              </div>
+              <p class="help">Addresses are looked up on OpenStreetMap's Nominatim, at most one per second with a cache, as their usage policy asks. Point this at your own Nominatim or Photon-compatible server for volume.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Extraction &amp; grouping</span></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Model</span><select id="dpEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (Analyzers → Cloud model)</option></select></label>
+                <label class="field"><span class="lab">Group window (min) <span class="mono faint">how long an incident stays open</span></span><input id="dpWindowMin" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">Group radius (m)</span><input id="dpRadiusM" type="text" inputmode="numeric" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Keep incidents for (days)</span><input id="dpRetention" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">&nbsp;</span></label>
+              </div>
+              <label class="field"><span class="lab">Call types <span class="mono faint">one per line: emoji, then the name</span></span><textarea id="dpTypesText" style="min-height:120px" spellcheck="false"></textarea></label>
+              <label class="field"><span class="lab">Local notes for the model <span class="mono faint">optional · street quirks, unit naming, how your dispatcher talks</span></span><textarea id="dpExtra" style="min-height:56px"></textarea></label>
+              <div class="inline"><button class="btn primary" id="dpSave">Save</button><button class="btn ghost" id="dpTest">Run on latest call</button><span class="inline"><button class="btn ghost" id="dpBackfill">Backfill</button><input id="dpBackfillHours" type="text" inputmode="numeric" value="24" style="width:56px" title="hours" /><span class="help">hours</span></span><span class="help" id="dpBackfillState"></span></div>
+              <p class="help">Uses the Ollama server and model from <b>Alerts → AI gate</b>, or the cloud provider from <b>Analyzers</b>. Transcription must be on (Settings → Transcription).</p>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="dpLogMeta"></span><button class="btn ghost sm" id="dpLogRefresh">↻</button></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:70vh"><table><thead><tr><th>Time</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="dpLog"></tbody></table></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div class="view" id="view-devices" style="display:none">
       <section class="two-col">
         <div class="stack">
@@ -831,7 +930,7 @@
             <div class="body">
               <label class="check"><input id="trEnabled" type="checkbox" /> Transcribe calls automatically as they complete</label>
               <div class="row3">
-                <label class="field"><span class="lab">Engine</span><select id="trEngine"><option value="faster-whisper">faster-whisper</option><option value="openai-whisper">openai-whisper</option></select></label>
+                <label class="field"><span class="lab">Engine</span><select id="trEngine"><option value="faster-whisper">faster-whisper</option><option value="openai-whisper">openai-whisper</option><option value="mlx-whisper">mlx-whisper</option></select></label>
                 <label class="field"><span class="lab">Model</span><select id="trModel">
                   <option value="tiny">tiny</option><option value="base" selected>base</option><option value="small">small</option><option value="medium">medium</option>
                   <option value="large-v3">large-v3</option><option value="distil-large-v3">distil-large-v3</option><option value="turbo">turbo</option></select></label>
@@ -843,7 +942,7 @@
               </div>
               <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly</span></div>
               <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
-              <p class="help" id="trHelp">Runs locally with Python: <code>pip install faster-whisper</code> (fast, CPU-friendly) or <code>openai-whisper</code>. Models download on first use.</p>
+              <p class="help" id="trHelp">Runs locally with Python. On an Apple-silicon Mac use <code>pip install mlx-whisper</code>: it runs on the GPU and leaves the CPU to the radio (a CPU-bound transcription starves the decoder and chops the audio). Elsewhere <code>pip install faster-whisper</code> (CPU, capped at a few cores here) or <code>openai-whisper</code> (CPU, all cores). Models download on first use.</p>
               <div class="lab" style="margin-top:10px">Transcript corrections <span class="mono faint">per talkgroup — "Rirey" → "Riley"</span></div>
               <div id="tcList"></div>
               <div class="row3" style="margin-top:6px">
@@ -1002,6 +1101,7 @@
     <span class="spacer"></span>
     <span title="Time since the app started"><b>UP</b> <span id="sb-up" class="mono">—</span></span>
   </footer>
+  <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

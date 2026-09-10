@@ -20,6 +20,7 @@ mod analyzers;
 mod conversations;
 mod devices;
 mod digest;
+mod dispatch;
 mod dual;
 mod encode;
 mod follow;
@@ -32,6 +33,7 @@ mod rr;
 mod secrets;
 mod stream;
 mod sysstat;
+mod tiles;
 mod transcribe;
 mod units;
 mod upload;
@@ -96,6 +98,8 @@ struct AppState {
     /// Custom prompt analyzers: extract structured fields from a transcript
     /// and send a message when a condition holds (e.g. ECPR candidacy).
     analyzers: analyzers::Shared,
+    /// Dispatch channels → geocoded, grouped incidents on the live map.
+    dispatch: dispatch::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -810,6 +814,32 @@ fn start_capture(
 /// the Airspy serial (hex) or the Seify args that name one RTL-SDR — or
 /// `None` for the first of that kind found. `gain` is the legacy overall
 /// gain (RTL-SDR dB; `None` = AGC) used when no per-device settings exist.
+/// Turn a driver's debug string into something a listener can act on. A
+/// USB timeout or I/O error from an RTL-SDR is not a settings problem: the
+/// dongle has stopped answering on the bus (seen after an I/O error mid-call
+/// on one that then re-enumerated with serial 00000001 — its EEPROM was no
+/// longer readable either) and every open will fail until it is unplugged and
+/// plugged back in. Saying so beats a wall of `rtlsdr_demod_read_reg failed
+/// with -7`.
+pub(crate) fn usb_advice(err: &str) -> String {
+    let e = err.to_string();
+    if e.contains("Usb(Timeout)") || e.contains("Usb(Io)") || e.contains("Usb(Pipe)") {
+        format!(
+            "{e} — the dongle is not answering on USB. Unplug it and plug it back in \
+             (a hung RTL-SDR keeps failing every open, and may show serial 00000001 \
+             until it is power-cycled); prefer a powered hub or a direct port, and \
+             don't enumerate it through Soapy while it is hung — librtlsdr can crash \
+             probing a wedged device."
+        )
+    } else if e.contains("Usb(Busy)") || e.contains("Usb(Access)") {
+        format!("{e} — another program (or another copy of this app) has the radio open.")
+    } else if e.contains("Usb(NoDevice)") || e.contains("NotFound") {
+        format!("{e} — no such radio on the bus; check the picker in Devices.")
+    } else {
+        e
+    }
+}
+
 fn open_device(
     source: &str,
     device: Option<&str>,
@@ -840,7 +870,7 @@ fn open_device_with_gain(
                 .filter(|d| !d.is_empty())
                 .and_then(|d| u64::from_str_radix(d.trim_start_matches("0x"), 16).ok());
             let mut src = AirspySource::open(serial, freq, rate, None)
-                .map_err(|e| format!("open Airspy: {e:?}"))?;
+                .map_err(|e| format!("open Airspy: {}", usb_advice(&format!("{e:?}"))))?;
             if let Some(g) = setting
                 .as_ref()
                 .filter(|g| !matches!(g, GainSetting::Manual(_)))
@@ -860,7 +890,7 @@ fn open_device_with_gain(
                 _ => gain,
             };
             let src = SoapyRtlSource::open(args, freq, rate, db)
-                .map_err(|e| format!("open RTL-SDR (Soapy): {e:?}"))?;
+                .map_err(|e| format!("open RTL-SDR (Soapy): {}", usb_advice(&format!("{e:?}"))))?;
             let h = src.gain_handle();
             (Box::new(src), h)
         }
@@ -872,7 +902,7 @@ fn open_device_with_gain(
                 _ => gain,
             };
             let src = RtlSdrSource::open(args, freq, rate, db)
-                .map_err(|e| format!("open RTL-SDR: {e:?}"))?;
+                .map_err(|e| format!("open RTL-SDR: {}", usb_advice(&format!("{e:?}"))))?;
             let h = src.gain_handle();
             (Box::new(src), h)
         }
@@ -1536,6 +1566,15 @@ fn survey_capture(
         .to_string_lossy()
         .into_owned();
 
+    // The IQ file holds what the capture loop *delivers*, and an Airspy's
+    // 2.5/10 MSPS is normalized to 2.4/9.6 on the way in. Record that rate,
+    // not the requested one: the first survey file was stamped 10 MSPS while
+    // holding 9.6, and decoding it at the stamped rate put every voice
+    // channel 4% too far from centre — the control channel at zero offset
+    // decoded, every granted channel was silent.
+    let delivered_rate = hs_core::dsp::resample::normalize_ratio(spec.rate)
+        .map(|(_, _, r)| r)
+        .unwrap_or(spec.rate);
     let entry = SurveyEntry {
         id: stem.clone(),
         label: spec.label.clone(),
@@ -1544,7 +1583,7 @@ fn survey_capture(
         t,
         seconds: spec.seconds,
         freq: spec.freq,
-        rate: spec.rate,
+        rate: delivered_rate,
         source: spec.source.clone(),
         iq: iq_path.clone(),
         log: log_path.clone(),
@@ -1929,7 +1968,7 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32]) {
 }
 
 fn main() {
-    tauri::Builder::default()
+    tiles::register(tauri::Builder::default())
         .manage(AppState::default())
         .setup(|app| {
             crate::secrets::init(app.handle());
@@ -1973,6 +2012,7 @@ fn main() {
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
+            *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -1983,6 +2023,7 @@ fn main() {
                 match library::open(&lib) {
                     Ok(c) => {
                         upload::ensure_schema(&c);
+                        dispatch::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2049,6 +2090,7 @@ fn main() {
             alerts::bluesky_save,
             alerts::bluesky_test,
             alerts::ollama_models,
+            alerts::ollama_capabilities,
             conversations::conversations_get,
             conversations::conversations_set,
             conversations::conversations_state,
@@ -2062,10 +2104,22 @@ fn main() {
             analyzers::analyzers_set,
             analyzers::analyzers_log,
             analyzers::analyzer_templates,
+            analyzers::analyzer_template_import,
+            analyzers::analyzer_template_export,
             analyzers::analyzer_test,
             analyzers::analyzer_cloud_get,
             analyzers::analyzer_cloud_save,
             analyzers::analyzer_cloud_clear_key,
+            dispatch::dispatch_get,
+            dispatch::dispatch_set,
+            dispatch::dispatch_log,
+            dispatch::dispatch_test,
+            dispatch::dispatch_backfill,
+            dispatch::dispatch_geocode,
+            dispatch::incidents_list,
+            dispatch::incident_get,
+            dispatch::incident_delete,
+            dispatch::incident_locate,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,

@@ -5,6 +5,15 @@
 //! that belong together. A rule names the talkgroups this applies to and the
 //! **fixed** radio IDs (the hospital's consoles); every other radio is a
 //! mobile unit, and a conversation is keyed by (talkgroup, mobile unit). A
+//! second radio keying up within `reply_gap_secs` of a conversation that has
+//! only one mobile party so far is the other side of that exchange — two
+//! radios taking turns on a talkgroup are talking to each other, whichever
+//! of them is really the console — so it joins as a second participant
+//! instead of opening a duplicate incident (which is what happened before
+//! the fixed IDs were known: one summary per radio, each half a
+//! conversation). A third radio, or one arriving after the reply gap,
+//! starts its own incident; a radio that already has a live conversation
+//! stays in it. A
 //! transmission from a fixed ID is attributed to the incident it is part of:
 //! the most recently active conversation on that talkgroup, preferring one
 //! that has not been summarised yet so the hospital's side lands on the live
@@ -45,6 +54,11 @@ pub struct Rule {
     pub learn_fixed: bool,
     /// Silence that ends the conversation.
     pub end_gap_secs: u32,
+    /// A different radio keying up within this long after a conversation's
+    /// last transmission is replying to it (when that conversation has only
+    /// one mobile party so far).
+    #[serde(default = "default_reply_gap")]
+    pub reply_gap_secs: u32,
     /// A transmission within this long after the summary went out reopens
     /// the conversation and revises the summary.
     pub late_window_secs: u32,
@@ -70,6 +84,9 @@ pub struct Rule {
 fn t() -> bool {
     true
 }
+fn default_reply_gap() -> u32 {
+    45
+}
 
 impl Default for Rule {
     fn default() -> Self {
@@ -81,10 +98,11 @@ impl Default for Rule {
             fixed_units: Vec::new(),
             learn_fixed: true,
             end_gap_secs: 90,
+            reply_gap_secs: 45,
             late_window_secs: 180,
             max_secs: 900,
             min_calls: 1,
-            summary_prompt: "Summarise this EMS-to-hospital radio report for a clinician in two or three sentences: unit, patient age/sex, chief complaint, vitals or interventions mentioned, and ETA. Use only what was said; mark anything unclear as unclear.".into(),
+            summary_prompt: "Summarise this EMS-to-hospital radio report as a hand-off note for the receiving clinician: which unit is coming and where, patient age/sex, chief complaint, pertinent findings and vitals, interventions given, ETA, and anything the hospital asked for.".into(),
             message: "🏥 {rule} · {tgname}\n{summary}\n\n{unitnames} · {calls} transmissions · {duration} · {started}{revision}".into(),
             chat_id: String::new(),
             attach_audio: true,
@@ -124,6 +142,10 @@ pub struct Conversation {
     pub tg: u16,
     pub tg_name: String,
     pub mobile_unit: Option<u32>,
+    /// Every mobile (non-fixed) radio in the exchange, in order of first
+    /// appearance; `mobile_unit` is the first of them.
+    #[serde(default)]
+    pub participants: Vec<u32>,
     pub pieces: Vec<Piece>,
     pub first_at: i64,
     pub last_at: i64,
@@ -224,17 +246,26 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
 /// Which open conversation a transmission belongs to (index into `open`), or
 /// `None` to start a new one.
 ///
-/// Incidents stay separate per mobile unit: a mobile unit keys its own
-/// conversation (or, if it hasn't spoken yet, joins a hospital-initiated one
-/// that has no mobile unit). The fixed party (a hospital console) is not an
-/// incident of its own — its transmission attaches to the incident it is part
-/// of, so both sides of the exchange end up in one conversation and one
-/// summary. That is the most recently active conversation on the talkgroup,
-/// but a conversation still awaiting its summary is preferred over one already
-/// sent: hospital traffic for a live incident then lands on that incident
-/// instead of reopening a closed one and triggering a duplicate, still
-/// one-sided, revision. A sent conversation is only reopened (within its late
-/// window) when no live one is open — a genuine late follow-up.
+/// A mobile unit first looks for its own live thread — a conversation it is
+/// already a participant of. Failing that, it may be *replying*: if a
+/// conversation on the talkgroup heard its last transmission within
+/// `reply_gap` and has fewer than two mobile parties, this radio is the other
+/// side of that exchange and joins it (this is what makes an EMS unit and a
+/// hospital console land in one incident before either is known as fixed).
+/// Otherwise it joins a hospital-initiated conversation that has no mobile
+/// unit yet, or opens a new incident — so a third radio, or one keying up
+/// after the reply gap, is its own incident even mid-way through another.
+///
+/// The fixed party (a hospital console) is not an incident of its own — its
+/// transmission attaches to the incident it is part of, so both sides of the
+/// exchange end up in one conversation and one summary. That is the most
+/// recently active conversation on the talkgroup, but a conversation still
+/// awaiting its summary is preferred over one already sent: hospital traffic
+/// for a live incident then lands on that incident instead of reopening a
+/// closed one and triggering a duplicate, still one-sided, revision. A sent
+/// conversation is only reopened (within its late window) when no live one is
+/// open — a genuine late follow-up.
+#[allow(clippy::too_many_arguments)]
 fn attach_index(
     open: &[Conversation],
     rule_id: &str,
@@ -244,35 +275,43 @@ fn attach_index(
     now: i64,
     gap: i64,
     late: i64,
+    reply_gap: i64,
 ) -> Option<usize> {
+    let here = |c: &Conversation| c.rule_id == rule_id && c.tg == tg;
     if !fixed {
+        // Own thread first.
+        let own = open
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                here(c) && c.participants.contains(&unit) && now - c.last_at <= gap + late
+            })
+            .max_by_key(|(_, c)| c.last_at)
+            .map(|(i, _)| i);
+        if own.is_some() {
+            return own;
+        }
+        // A reply to a conversation still waiting for its other side.
+        let reply = open
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| here(c) && c.participants.len() < 2 && now - c.last_at <= reply_gap)
+            .max_by_key(|(_, c)| c.last_at)
+            .map(|(i, _)| i);
+        if reply.is_some() {
+            return reply;
+        }
+        // A hospital-initiated conversation with no mobile unit yet.
         return open
             .iter()
-            .position(|c| {
-                c.rule_id == rule_id
-                    && c.tg == tg
-                    && c.mobile_unit == Some(unit)
-                    && now - c.last_at <= gap + late
-            })
-            .or_else(|| {
-                // A hospital-initiated conversation with no mobile unit yet.
-                open.iter().position(|c| {
-                    c.rule_id == rule_id
-                        && c.tg == tg
-                        && c.mobile_unit.is_none()
-                        && now - c.last_at <= gap
-                })
-            });
+            .position(|c| here(c) && c.participants.is_empty() && now - c.last_at <= gap);
     }
     // The fixed party: the most recently active conversation here, live first.
     let most_recent = |sent: bool| {
         open.iter()
             .enumerate()
             .filter(|(_, c)| {
-                c.rule_id == rule_id
-                    && c.tg == tg
-                    && c.sent_at.is_some() == sent
-                    && now - c.last_at <= gap + late
+                here(c) && c.sent_at.is_some() == sent && now - c.last_at <= gap + late
             })
             .max_by_key(|(_, c)| c.last_at)
             .map(|(i, _)| i)
@@ -309,11 +348,17 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
         };
         let late = r.late_window_secs as i64;
         let gap = r.end_gap_secs as i64;
+        let reply_gap = (r.reply_gap_secs as i64).min(gap);
         // Which open conversation does this belong to?
-        let idx = attach_index(&st.open, &r.id, f.tg, f.unit, fixed, now, gap, late);
+        let idx = attach_index(
+            &st.open, &r.id, f.tg, f.unit, fixed, now, gap, late, reply_gap,
+        );
         match idx {
             Some(i) => {
                 let c = &mut st.open[i];
+                if !fixed && !c.participants.contains(&f.unit) {
+                    c.participants.push(f.unit);
+                }
                 if c.mobile_unit.is_none() && !fixed {
                     c.mobile_unit = Some(f.unit);
                 }
@@ -333,6 +378,7 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
                     tg: f.tg,
                     tg_name: f.tg_name.clone(),
                     mobile_unit: (!fixed).then_some(f.unit),
+                    participants: (!fixed).then_some(f.unit).into_iter().collect(),
                     pieces: vec![piece],
                     first_at: now,
                     last_at: now,
@@ -470,16 +516,29 @@ fn fmt_time(epoch: i64) -> String {
 }
 
 /// The stitched transcript with speaker labels, oldest first.
+///
+/// Labels are radio *slots*, not identities: the fixed party is HOSPITAL and
+/// each mobile radio is RADIO A, RADIO B… in order of first appearance (or
+/// its alias when one is known). A raw radio ID never appears — fed one, the
+/// model wrote "Unit 4917150 is bringing…" instead of reading the unit's
+/// name (Medic 42, Ambulance 7) out of what was actually said.
 pub fn stitched_transcript(c: &Conversation) -> String {
     let mut out = String::new();
+    let mut slots: Vec<u32> = Vec::new();
     for p in &c.pieces {
         let who = if p.fixed {
-            "FIXED (hospital)".to_string()
+            "HOSPITAL".to_string()
+        } else if let Some(name) = p.unit_name.as_deref().filter(|n| !n.trim().is_empty()) {
+            format!("RADIO \"{}\"", name.trim())
         } else {
-            format!(
-                "UNIT {}",
-                p.unit_name.clone().unwrap_or_else(|| p.unit.to_string())
-            )
+            let slot = match slots.iter().position(|u| *u == p.unit) {
+                Some(i) => i,
+                None => {
+                    slots.push(p.unit);
+                    slots.len() - 1
+                }
+            };
+            format!("RADIO {}", (b'A' + (slot % 26) as u8) as char)
         };
         let text = p
             .transcript
@@ -491,6 +550,23 @@ pub fn stitched_transcript(c: &Conversation) -> String {
     }
     out
 }
+
+/// The standing instructions every summary gets, on top of the rule's own
+/// prompt: how to read the labels, what a good clinical hand-off contains,
+/// and what not to do (name radio IDs, grade the transcript, guess).
+pub const SUMMARY_GUIDE: &str = "How to read the transcript: it is machine-generated from radio audio and \
+may contain recognition errors (mis-heard numbers, drug names, street names). Speaker labels are \
+radio slots — HOSPITAL is the fixed party, RADIO A / RADIO B are the mobile radios (a label in quotes \
+is that radio's alias). The labels are NOT unit names: identify the EMS unit from what is said \
+(\"Medic 42\", \"Ambulance 7\", \"Engine 6\"), and if no unit name is spoken say \"the unit\". \
+Never mention radio IDs, label letters, or that the text is a transcript.\n\n\
+What to write: plain text, two or three sentences, no preamble, no headings, no markdown. Lead with \
+the unit and destination if stated, then the patient (age/sex), chief complaint, pertinent findings \
+and vitals, interventions given, and ETA; include any request or instruction from the hospital. \
+Use only what was said — do not infer, and do not pad. Where something matters but was garbled or \
+missing, write \"unclear\" for that item rather than describing the transcript's quality. If almost \
+nothing is intelligible, write one sentence with whatever can be told (e.g. \"Medic 42 inbound with an \
+adult patient, details unclear\").";
 
 pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
     let units: Vec<String> = {
@@ -632,7 +708,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let transcript = stitched_transcript(&c);
     let summary = if has_text {
         let prompt = format!(
-            "{}\n\nTalkgroup: {} (TG {}). Speakers are labelled UNIT (a mobile radio) and FIXED (the fixed party). The transcript is machine-generated from radio audio and may contain recognition errors.\n\nTranscript:\n{}\n\nSummary:",
+            "{}\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
             r.summary_prompt.trim(),
             c.tg_name,
             c.tg,
@@ -922,6 +998,15 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
             tg,
             tg_name: format!("TG {tg}"),
             mobile_unit: pieces.iter().find(|p| !p.fixed).map(|p| p.unit),
+            participants: {
+                let mut v: Vec<u32> = Vec::new();
+                for p in pieces.iter().filter(|p| !p.fixed) {
+                    if !v.contains(&p.unit) {
+                        v.push(p.unit);
+                    }
+                }
+                v
+            },
             first_at: pieces.first().map(|p| p.at).unwrap_or(0),
             last_at: pieces.last().map(|p| p.at).unwrap_or(0),
             pieces,
@@ -1008,6 +1093,7 @@ mod tests {
             tg,
             tg_name: "TG".into(),
             mobile_unit: mobile,
+            participants: mobile.into_iter().collect(),
             pieces: Vec::new(),
             first_at: last_at,
             last_at,
@@ -1026,20 +1112,75 @@ mod tests {
 
     #[test]
     fn a_mobile_unit_stays_in_its_own_incident() {
-        // Two units talking on one talkgroup keep separate conversations.
+        // Two units with their own live threads on one talkgroup.
         let open = vec![
             conv(1, 10202, Some(790065), 100, false),
             conv(2, 10202, Some(790066), 110, false),
         ];
-        // 790065 keys up again → its own conversation, not the newer one.
+        // 790065 keys up again → its own conversation, not the newer one,
+        // even though the newer one is within the reply gap.
         assert_eq!(
-            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180),
+            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180, 45),
             Some(0)
         );
-        // A brand-new unit → no match, opens a fresh incident.
+        // A brand-new unit after the reply gap → opens a fresh incident.
         assert_eq!(
-            attach_index(&open, "r", 10202, 790099, false, 120, 90, 180),
+            attach_index(&open, "r", 10202, 790099, false, 170, 90, 180, 45),
             None
+        );
+    }
+
+    #[test]
+    fn two_radios_taking_turns_share_one_conversation() {
+        // Neither radio is known as fixed yet (the failure mode from the
+        // field: one summary per radio, each half an exchange). 31705 keys
+        // up 12 s after 4917150 → it is the reply, same incident.
+        let open = vec![conv(1, 10202, Some(4917150), 100, false)];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 31705, false, 112, 90, 180, 45),
+            Some(0)
+        );
+        // Now both are participants; each side's later turns stay in it.
+        let mut both = conv(1, 10202, Some(4917150), 112, false);
+        both.participants = vec![4917150, 31705];
+        let open = vec![both];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 4917150, false, 130, 90, 180, 45),
+            Some(0)
+        );
+        assert_eq!(
+            attach_index(&open, "r", 10202, 31705, false, 140, 90, 180, 45),
+            Some(0)
+        );
+        // A third radio keying up right after is a new incident: the
+        // exchange already has both of its sides.
+        assert_eq!(
+            attach_index(&open, "r", 10202, 790099, false, 145, 90, 180, 45),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reply_needs_to_come_quickly() {
+        let open = vec![conv(1, 10202, Some(4917150), 100, false)];
+        // 60 s later is past the 45 s reply gap → a fresh incident.
+        assert_eq!(
+            attach_index(&open, "r", 10202, 31705, false, 160, 90, 180, 45),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reply_lands_on_the_most_recent_waiting_conversation() {
+        // Two one-sided conversations; the reply belongs to the one that
+        // just spoke.
+        let open = vec![
+            conv(1, 10202, Some(790065), 100, false),
+            conv(2, 10202, Some(790066), 118, false),
+        ];
+        assert_eq!(
+            attach_index(&open, "r", 10202, 31705, false, 120, 90, 180, 45),
+            Some(1)
         );
     }
 
@@ -1047,7 +1188,7 @@ mod tests {
     fn a_mobile_unit_joins_a_hospital_initiated_conversation() {
         let open = vec![conv(1, 10202, None, 100, false)];
         assert_eq!(
-            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180),
+            attach_index(&open, "r", 10202, 790065, false, 120, 90, 180, 45),
             Some(0)
         );
     }
@@ -1064,7 +1205,7 @@ mod tests {
             conv(2, 10202, Some(790066), 110, false),
         ];
         assert_eq!(
-            attach_index(&open, "r", 10202, 900001, true, 120, 90, 180),
+            attach_index(&open, "r", 10202, 900001, true, 120, 90, 180, 45),
             Some(1)
         );
     }
@@ -1075,12 +1216,12 @@ mod tests {
         // sent one (within its late window) to revise it.
         let open = vec![conv(1, 10202, Some(790065), 100, true)];
         assert_eq!(
-            attach_index(&open, "r", 10202, 900001, true, 150, 90, 180),
+            attach_index(&open, "r", 10202, 900001, true, 150, 90, 180, 45),
             Some(0)
         );
         // Past the late window: nothing to attach to → a fresh conversation.
         assert_eq!(
-            attach_index(&open, "r", 10202, 900001, true, 400, 90, 180),
+            attach_index(&open, "r", 10202, 900001, true, 400, 90, 180, 45),
             None
         );
     }
@@ -1093,9 +1234,35 @@ mod tests {
             conv(3, 10202, Some(790067), 115, false),
         ];
         assert_eq!(
-            attach_index(&open, "r", 10202, 900001, true, 140, 90, 180),
+            attach_index(&open, "r", 10202, 900001, true, 140, 90, 180, 45),
             Some(1)
         );
+    }
+
+    #[test]
+    fn unnamed_radios_get_slot_letters_never_ids() {
+        let mut c = conv(1, 10202, Some(4917150), 100, false);
+        let piece = |unit: u32, text: &str| Piece {
+            id: None,
+            unit,
+            unit_name: None,
+            fixed: false,
+            at: 100,
+            secs: 3.0,
+            audio: None,
+            transcript: Some(text.into()),
+        };
+        c.pieces = vec![
+            piece(4917150, "Medic 42 to Methodist"),
+            piece(31705, "Go ahead Medic 42"),
+            piece(4917150, "14 year old, ETA 5"),
+        ];
+        let t = stitched_transcript(&c);
+        assert_eq!(
+            t,
+            "RADIO A: Medic 42 to Methodist\nRADIO B: Go ahead Medic 42\nRADIO A: 14 year old, ETA 5\n"
+        );
+        assert!(!t.contains("4917150") && !t.contains("31705"));
     }
 
     #[test]
@@ -1108,6 +1275,7 @@ mod tests {
             tg: 10202,
             tg_name: "Methodist ER".into(),
             mobile_unit: Some(790065),
+            participants: vec![790065],
             pieces: vec![
                 Piece {
                     id: Some(1),
@@ -1154,7 +1322,7 @@ mod tests {
             last_error: None,
         };
         let t = stitched_transcript(&c);
-        assert_eq!(t, "UNIT Medic 3: Medic 3 inbound, 64 year old male chest pain\nFIXED (hospital): Copy, ETA?\nUNIT Medic 3: [no transcript]\n");
+        assert_eq!(t, "RADIO \"Medic 3\": Medic 3 inbound, 64 year old male chest pain\nHOSPITAL: Copy, ETA?\nRADIO \"Medic 3\": [no transcript]\n");
         let m = render(&r, &c, "Chest pain, ETA unknown.");
         assert!(
             m.starts_with("🏥 Hospitals · Methodist ER\nChest pain, ETA unknown."),

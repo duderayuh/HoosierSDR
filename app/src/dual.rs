@@ -276,6 +276,8 @@ fn finish_call(
             syncs_c4fm: 0,
             syncs_cqpsk: 0,
             voice_frame_errors: 0,
+            poor_frames: 0,
+            dropped_blocks: 0,
             talker_alias: None,
             wav: None,
             id: None,

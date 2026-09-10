@@ -476,4 +476,39 @@ mod tests {
         assert_eq!(q.history.len(), 5); // 3, 4, 1, 2, 2(replayed)
                                         // 1, 3, 2, 2(replayed)
     }
+
+    /// The whole speaker path except the audio device: a real 21 s call
+    /// through the queue and the 8 → 48 kHz resampler, checked for the
+    /// sample-to-sample jumps a dropout or a resampler glitch would leave
+    /// (a 3 kHz tone at full scale moves at most 0.4 per 48 kHz sample).
+    /// `HS_PLAYBACK_WAV=path cargo test -- --ignored --nocapture playback_path`.
+    #[test]
+    #[ignore]
+    fn playback_path_is_glitch_free() {
+        let Ok(path) = std::env::var("HS_PLAYBACK_WAV") else {
+            return;
+        };
+        let pcm = read_wav(&path).unwrap();
+        let mut q = Queue::default();
+        q.push(pcm.clone(), 50);
+        let mut it = SincInterp::new(8000.0, 48000.0);
+        let n = pcm.len() * 6 + 48000;
+        let mut prev = 0.0f32;
+        let mut jumps = Vec::new();
+        for i in 0..n {
+            let v = it.next(|| q.next_sample()).clamp(-1.0, 1.0);
+            if (v - prev).abs() > 0.5 {
+                jumps.push(i as f64 / 48000.0);
+            }
+            prev = v;
+        }
+        eprintln!(
+            "{} samples in, {} out, jumps > 0.5: {} {:?}",
+            pcm.len(),
+            n,
+            jumps.len(),
+            &jumps[..jumps.len().min(12)]
+        );
+        assert!(jumps.is_empty(), "playback path produced discontinuities");
+    }
 }

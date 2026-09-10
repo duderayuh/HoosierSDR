@@ -51,6 +51,8 @@ cargo run -p hs-cli -- --demo      # synthesized decode, no hardware needed
 - **Radios** — Airspy R2 (10 MSPS, whole-site), RTL-SDR (2.4 MSPS)
 - **Other protocols** — AM, NBFM, DCS; more on the roadmap
 - **Desktop app** — live decode, spectrum waterfall, record IQ (Tauri v2)
+- **Analyzers** — your own prompts pull structured fields out of each transcript (ECPR candidacy, stroke screen, …) and alert when a condition holds; built-in medical templates ship with the app, and analyzers can be exported as template files and imported from others (imports are size-capped, stripped of hidden characters, and arrive disabled with no chat set)
+- **Dispatch map** — mark your dispatch talkgroups and each dispatched call becomes a live incident: the model extracts the address, units and call type and picks the emoji, the address is geocoded on OpenStreetMap (Nominatim), and calls about the same incident are grouped and updated in place on a Leaflet map
 
 ## Usage
 
