@@ -42,6 +42,9 @@ pass to `--rate` must match the capture and be a multiple of 4800.
 | `derotator_slips` | (CQPSK) times the quarter-turn derotation was re-pinned after first lock — a carrier-bias slip or a re-acquisition on another turn. Each one used to silence the framer until the next hard re-acquire (an 11 s hole on a clean transmission, 2026-09-09); now costs at most one frame |
 | `mean_voice_quality` | mean composite `VoiceQuality` score (0..1) across all voice frames — combines FEC error count, pre-FEC demodulator confidence, and (CQPSK) carrier lock; a fuller picture than `voice_frame_errors` alone, which can miss a frame that passed FEC clean while every symbol sat on a decision boundary the whole time |
 | `voice_frames_low_quality` | voice frames whose composite score fell under 0.5 — a superset of `voice_frames_holding` that also catches the low-confidence-but-FEC-clean case above |
+| `voice_frames_inferred` | voice frames from LDUs whose sync word or NID was lost and that were decoded on the LDU1/LDU2 cadence instead (the framer *coasts* up to two frames mid-voice; see below) |
+| `voice_frames_concealed` | 20 ms slots the channel was on the air for with nothing decodable, filled with held-and-faded audio so the call's timeline stays honest |
+| `ess_valid` / `ess_invalid` | LDU2 Encryption Sync fields that passed / failed their Reed–Solomon check. An invalid field says nothing about encryption; only a valid one can mute a call |
 | `sync_count` | frame-sync detections |
 | `mean_sync_bit_errors` | avg bit errors in the 48-bit sync correlation (↓ better) |
 | `symbol_health.level_counts` | histogram of sliced dibits `[+3,+1,-1,-3]` |
@@ -90,3 +93,31 @@ no sync words for 11 of them — a silent false lock, not a lost one.
 ```sh
 HS_CQPSK_TRACE=1 hoosier-sdr --cqpsk --offset 1325k --rate 9600000 --log out.json capture.cs16 2> trace.txt
 ```
+
+## Voice continuity (added 2026-09-10)
+
+Three policies decide whether a marginal signal sounds choppy, and the fields
+above are how to see them working:
+
+- **Encryption is decided from validated evidence only.** The LDU2
+  Encryption Sync is decoded through its Hamming(10,6) and RS(24,16) layers
+  (`hs_p25::ess`). A field that validates sets the verdict for the
+  transmission in either direction; one that fails changes nothing. (The
+  first version read the raw ALGID and latched "encrypted" on any bit error,
+  which muted the rest of most transmissions on a marginal simulcast
+  channel.) A call started from a clear grant starts out clear. On a busy
+  site expect `ess_valid` to dominate; a large `ess_invalid` share means the
+  channel is barely decodable at all.
+- **A lost sync or NID does not cost the frame.** Mid-voice, on a NAC seen
+  on three clean NIDs, the framer presumes the next frame is there at the
+  protocol cadence and infers LDU1/LDU2 from the alternation, for up to two
+  frames in a row. The nine IMBE frames carry their own FEC, so the vocoder
+  judges them individually. `voice_frames_inferred` counts them.
+- **Missing time is filled, not deleted.** When a real sync arrives after
+  unframed air, the framer reports the gap and the decoder emits one
+  concealment frame per 20 ms slot (up to 0.9 s), so a lost stretch is a
+  fade rather than a jump. `voice_frames_concealed` counts those.
+
+A useful single number for a capture is *slot coverage*:
+`voice_frames / (voice_frames + voice_frames_concealed)` — the share of the
+transmission's 20 ms slots that carried decoded audio.

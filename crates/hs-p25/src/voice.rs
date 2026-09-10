@@ -5,8 +5,6 @@
 //! interleave schedule tables are taken from DSD-FME (`p25p1_const.h`, ISC
 //! license, Copyright (C) 2010 DSD Author — see NOTICE).
 
-use crate::bits::read_bits;
-
 /// IMBE interleave schedule: transmitted dibit i places its MSB at
 /// frame[IW[i]][IX[i]] and LSB at frame[IY[i]][IZ[i]].
 #[rustfmt::skip]
@@ -122,29 +120,6 @@ pub fn extract_imbe_conf(payload_conf: &[u8]) -> Option<[ImbeConf; 9]> {
     Some(out)
 }
 
-/// LDU2 Encryption Sync offsets: ALGID is the 72..80 bit range of the ES
-/// hexbit payload. v1 extracts it without Hamming/RS correction (clear
-/// channel assumption); robust ES decode is Phase 2 work. The gate treats
-/// anything other than 0x80 as encrypted → skip audio.
-pub fn ldu2_algid_raw(payload_bits: &[u8]) -> Option<u8> {
-    // ES hexbits ride in the six 40-bit link-control slots between IMBE
-    // frames 2..8 (offsets 288,472,656,840,1024,1208), 24 hexbits of 10 bits
-    // each (Hamming(10,6)); data hexbit h occupies slot bits h*10..h*10+6.
-    if payload_bits.len() < LDU_PAYLOAD_BITS {
-        return None;
-    }
-    const SLOTS: [usize; 6] = [288, 472, 656, 840, 1024, 1208];
-    let mut hexbits = Vec::with_capacity(24);
-    for &s in &SLOTS {
-        for j in 0..4 {
-            let code = read_bits(payload_bits, s + j * 10, 10);
-            hexbits.push(((code >> 4) & 0x3F) as u8);
-        }
-    }
-    // ALGID = hexbits 12..13 → bits 72..80 of the 96-bit ES payload.
-    Some((hexbits[12] << 2) | (hexbits[13] >> 4))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +153,10 @@ mod tests {
             // Same source index fed both arrays, so the *position* a bit
             // lands at and the *position* its confidence lands at must
             // match exactly.
-            assert_eq!((fr[IW[i]][IX[i]], fr_conf[IW[i]][IX[i]]), (bits[i * 2] & 1, conf[i * 2]));
+            assert_eq!(
+                (fr[IW[i]][IX[i]], fr_conf[IW[i]][IX[i]]),
+                (bits[i * 2] & 1, conf[i * 2])
+            );
         }
     }
 

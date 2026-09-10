@@ -46,10 +46,10 @@ fn interleaved_burst_round_trips_through_the_vocoder() {
     // PCM as decoding the frame directly.
     let mut frame: VoiceFrame = [[0u8; 24]; 4];
     let mut bit = 0u8;
-    for r in 0..4 {
-        for c in 0..24 {
+    for (r, row) in frame.iter_mut().enumerate() {
+        for (c, cell) in row.iter_mut().enumerate() {
             if is_transmitted(r, c) {
-                frame[r][c] = bit & 1;
+                *cell = bit & 1;
                 bit = bit.wrapping_add(1);
             }
         }

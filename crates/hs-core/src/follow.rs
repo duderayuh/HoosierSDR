@@ -328,6 +328,12 @@ pub struct TrunkFollower {
     /// Seconds a call lingers after its terminator before it is retired. Long
     /// enough to bridge the gap to a continuation transmission of the same
     /// conversation; short enough that the call reports promptly.
+    ///
+    /// 1.2 s: a reply in a dispatch exchange follows the previous release by
+    /// well under a second, and at the old 0.3 s every such reply became a
+    /// separate call — a fresh decoder (and, on CQPSK, a fresh blind carrier
+    /// acquisition that ate the start of it) plus an inserted gap on
+    /// playback. This matches what a scanner's hang does.
     hang_secs: f64,
     /// Most calls the channelizer will follow at once.
     max_calls: usize,
@@ -434,7 +440,7 @@ impl TrunkFollower {
             // transmissions (which thin out sharply past ~4s in the same
             // data) — see git history for the full analysis.
             quiet_secs: 3.5,
-            hang_secs: 0.3,
+            hang_secs: 1.2,
             max_calls: 12,
             modulation,
             control_nominal_hz: control_nominal_hz as u64,
@@ -1032,6 +1038,12 @@ impl TrunkFollower {
             };
             call.c4fm.set_uv_quality(self.uv_quality);
             call.cqpsk.set_uv_quality(self.uv_quality);
+            // Encrypted grants never get this far (skipped above), so the
+            // channel's transmissions start out clear: voice flows from the
+            // first LDU, and only an Encryption Sync that validates through
+            // its own error correction can say otherwise.
+            call.c4fm.set_grant_clear(true);
+            call.cqpsk.set_grant_clear(true);
             match which {
                 None => self.band.active.push(call),
                 Some(bi) => self.extra[bi].active.push(call),
