@@ -291,7 +291,28 @@ function applyTheme(name) { document.documentElement.setAttribute("data-theme", 
 /* ---------- text size (UI scale) ---------- */
 const FS_STEPS = [["s", "S"], ["m", "M"], ["l", "L"], ["xl", "XL"]];
 const FS_ZOOM = { s: 0.9, m: 1.0, l: 1.15, xl: 1.3 };
-function applyFs(k) { document.documentElement.style.zoom = FS_ZOOM[k] ?? 1; save("hs.fs", k); }
+// The whole UI scales with CSS zoom. WebKit does not scale vh/vw or media
+// queries with it, and mouse coordinates stay in window pixels, so the
+// zoom is also published as --z (style.css divides vh/vw by it), the
+// width breakpoints are toggled here from innerWidth / zoom, and pointer
+// maths below divide by uiZoom().
+const uiZoom = () => parseFloat(document.documentElement.style.zoom) || 1;
+const UI_BREAKS = [900, 940, 980, 1100, 1250];
+function applyBreaks() {
+  const w = innerWidth / uiZoom();
+  for (const b of UI_BREAKS) document.documentElement.classList.toggle(`lt${b}`, w <= b);
+}
+window.addEventListener("resize", applyBreaks);
+function applyFs(k) {
+  const z = FS_ZOOM[k] ?? 1;
+  document.documentElement.style.zoom = z;
+  document.documentElement.style.setProperty("--z", z);
+  save("hs.fs", k);
+  applyBreaks();
+  // Anything that sized itself to the window (the Leaflet map) sees no
+  // resize event when only the zoom changed.
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+}
 (function initFs() {
   const saved = store("hs.fs", "m");
   applyFs(saved);
@@ -592,7 +613,7 @@ function applyWfHeight() {
 const wfResize = document.getElementById("wfResize");
 let wfDrag = null;
 wfResize.addEventListener("pointerdown", (e) => {
-  wfDrag = { startY: e.clientY, startH: wf.getBoundingClientRect().height, cur: wf.getBoundingClientRect().height };
+  wfDrag = { startY: e.clientY, startH: wf.getBoundingClientRect().height / uiZoom(), cur: wf.getBoundingClientRect().height / uiZoom() };
   wfResize.classList.add("dragging");
   document.body.style.cursor = "ns-resize";
   document.body.style.userSelect = "none";
@@ -600,7 +621,7 @@ wfResize.addEventListener("pointerdown", (e) => {
 });
 window.addEventListener("pointermove", (e) => {
   if (!wfDrag) return;
-  wfDrag.cur = Math.max(60, Math.min(900, Math.round(wfDrag.startH + (e.clientY - wfDrag.startY))));
+  wfDrag.cur = Math.max(60, Math.min(900, Math.round(wfDrag.startH + (e.clientY - wfDrag.startY) / uiZoom())));
   wf.style.height = wfDrag.cur + "px";   // live preview — cheap, scaled by the GPU
 });
 window.addEventListener("pointerup", () => {
@@ -620,10 +641,11 @@ const tip = document.createElement("div");
 tip.className = "tip";
 document.body.appendChild(tip);
 function positionTip(x, y) {
-  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
-  let left = x + pad, top = y + pad;
-  if (left + w > innerWidth - 8) left = Math.max(8, innerWidth - w - 8);
-  if (top + h > innerHeight - 8) top = Math.max(8, innerHeight - h - 8);
+  const z = uiZoom(), pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  const vw = innerWidth / z, vh = innerHeight / z;   // window px → zoomed CSS px
+  let left = x / z + pad, top = y / z + pad;
+  if (left + w > vw - 8) left = Math.max(8, vw - w - 8);
+  if (top + h > vh - 8) top = Math.max(8, vh - h - 8);
   tip.style.left = left + "px";
   tip.style.top = top + "px";
 }
@@ -2695,6 +2717,7 @@ const dpDemo = async (cmd, args) => {
     case "incident_locate": { const i = dpDemoIncidents.find((x) => x.id === args.id); if (i && args.lat != null) { i.lat = args.lat; i.lon = args.lon; i.geocode = "manual"; } return i; }
     case "dispatch_test": return "demo mode — no radio";
     case "dispatch_backfill": return 0;
+    case "dispatch_regeocode": return [0, 0];
     default: return null;
   }
 };
@@ -2730,6 +2753,10 @@ function dpInitMap() {
     dpMap.on("popupopen", (e) => { const el = e.popup.getElement(); if (!el) return; el.querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det)); });
     new MutationObserver(() => { $("dpMap").classList.toggle("light", !dpIsDark()); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     $("dpMap").classList.toggle("light", !dpIsDark());
+    if (typeof ResizeObserver !== "undefined") {
+      let raf = 0;
+      new ResizeObserver(() => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (dpMap && dpShown()) dpMap.invalidateSize({ animate: false }); }); }).observe($("dpMap"));
+    }
   } catch (e) { log(`map init: ${e}`); dpMap = null; }
 }
 
@@ -2914,6 +2941,13 @@ $("dpSave").onclick = async () => { if (await dpSave()) { uiToast("Dispatch sett
 $("dpHomeFromMap").onclick = () => { if (!dpMap) { uiToast("Open the map first"); return; } const c = dpMap.getCenter(); $("dpHomeLat").value = c.lat.toFixed(5); $("dpHomeLon").value = c.lng.toFixed(5); };
 $("dpChAdd").onclick = () => { dpChSync(); dpChBuf.push({ tg: 0, name: "", role: "dispatch", fixed_call_type: "", enabled: true }); dpChRender(); const last = $("dpChannels").querySelector(".row:last-child [data-ctg]"); if (last) last.focus(); };
 $("dpTest").onclick = async () => { if (!(await dpSave())) return; uiToast("Running the extractor on the latest dispatch call…"); try { await uiConfirm(await dpInvoke("dispatch_test", { tg: null }), "OK"); dpLogRefresh(); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
+$("dpRegeocode").onclick = async () => {
+  const b = $("dpRegeocode"), st = $("dpRegeocodeState");
+  b.disabled = true; st.textContent = "retrying — about a second per address…";
+  try { const [tried, placed] = await dpInvoke("dispatch_regeocode"); st.textContent = tried ? `${placed} of ${tried} placed` : "nothing unmapped"; if (placed) dpLoad(); }
+  catch (e) { st.textContent = ""; uiToast(`${e}`, "err"); }
+  finally { b.disabled = false; }
+};
 $("dpBackfill").onclick = async () => { if (!(await dpSave())) return; const hours = Math.max(1, parseInt($("dpBackfillHours").value, 10) || 24); try { const n = await dpInvoke("dispatch_backfill", { hours }); $("dpBackfillState").textContent = n ? `queued ${n} calls…` : "nothing new to process"; uiToast(n ? `Backfilling ${n} calls — one geocode per second, so give it a minute` : "No unprocessed transcribed calls on those channels in that window"); } catch (e) { uiToast(`${e}`, "err"); } };
 dpListen("dispatch_progress", (e) => { const p = e.payload || {}; $("dpBackfillState").textContent = p.finished ? `done · ${p.total} processed` : `${p.done} / ${p.total}…`; });
 async function dpLogRefresh() {

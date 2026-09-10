@@ -243,7 +243,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Cart</span><span class="meta" id="cartMeta">empty</span><button class="btn ghost sm" id="cartClear">Clear</button></div>
             <div class="body tight">
-              <div id="cartList" class="list" style="max-height:40vh"></div>
+              <div id="cartList" class="list" style="max-height:calc(40vh / var(--z))"></div>
               <label class="field" style="margin-top:10px"><span class="lab">Export to folder <span class="mono faint">audio + transcripts + manifest</span></span>
                 <span class="inline"><input id="exportDir" type="text" placeholder="~/Desktop/case-2026-08-20" spellcheck="false" /><button class="btn primary" id="exportBtn">Export</button></span></label>
               <p class="help">The manifest records each file's SHA-256 at capture and at export, the machine transcript and model, any human edit, the exporter and host, and is itself hashed (manifest.sha256).</p>
@@ -275,7 +275,7 @@
                   <span class="inline"><input id="alCheck" type="text" inputmode="numeric" placeholder="20305" spellcheck="false" /><button class="btn ghost sm" id="alCheckGo">Is it loaded?</button></span></label>
                 <span class="mono small" id="alCheckResult" style="flex:2"></span>
               </div>
-              <div class="tablewrap tgs" style="max-height:64vh">
+              <div class="tablewrap tgs" style="max-height:calc(64vh / var(--z))">
                 <table><thead><tr><th><input type="checkbox" id="alTickAll" title="tick shown" /></th><th data-sort="id" class="sortable">TG</th><th data-sort="alias" class="sortable">Alpha tag</th><th data-sort="description" class="sortable">Description</th><th data-sort="tag" class="sortable">Tag</th><th data-sort="category" class="sortable">Category</th><th data-sort="source" class="sortable">Source</th><th class="actions-h" title="Record · Stream · Upload">Rec · Str · Up</th><th class="actions-h">Colour · Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
               </div>
               <div class="xport" style="margin:6px 0 0">
@@ -370,7 +370,7 @@
                 <button class="btn ghost sm" id="dcExportGo">Export CSV</button>
                 <button class="btn ghost sm" id="dcClear">Clear</button>
               </div>
-              <div class="tablewrap tgs" style="max-height:48vh">
+              <div class="tablewrap tgs" style="max-height:calc(48vh / var(--z))">
                 <table><thead><tr><th>TG</th><th>Name</th><th>Grants</th><th>Last channel</th><th>Last radio</th><th>Last heard</th><th class="actions-h">Play · Name it · Pri · Lock</th></tr></thead><tbody id="dcBody"></tbody></table>
               </div>
               <div class="empty small" id="dcEmpty">Every grant the control channel issues is counted here — followed or not, named or not. Unnamed talkgroups are the ones missing from your catalogs.</div>
@@ -379,7 +379,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Channels in use</span><span class="meta" id="dfMeta"></span></div>
             <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:30vh">
+              <div class="tablewrap tgs" style="max-height:calc(30vh / var(--z))">
                 <table><thead><tr><th>Frequency</th><th>Grants</th><th>Talkgroups</th><th>In band</th><th>Last heard</th></tr></thead><tbody id="dfBody"></tbody></table>
               </div>
             </div>
@@ -391,7 +391,7 @@
               <input id="afFilter" type="text" placeholder="filter: radio, talkgroup…" spellcheck="false" />
               <span class="meta" id="afMeta"></span></div>
             <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:36vh">
+              <div class="tablewrap tgs" style="max-height:calc(36vh / var(--z))">
                 <table><thead><tr><th>Radio</th><th>Talkgroup</th><th>Status</th><th>Last heard</th></tr></thead><tbody id="afBody"></tbody></table>
               </div>
               <div class="empty small" id="afEmpty">Radios the control channel has affiliated, registered or released. Nothing yet.</div>
@@ -410,10 +410,10 @@
                 <input id="surveyCorpus" type="text" value="~/hoosier-field/survey" title="corpus directory" spellcheck="false" style="flex:3;min-width:180px" />
                 <div class="faint mono" id="surveyPos" style="flex-basis:100%"></div>
               </div>
-              <div class="tablewrap tgs" style="max-height:22vh;margin-top:8px">
+              <div class="tablewrap tgs" style="max-height:calc(22vh / var(--z));margin-top:8px">
                 <table><thead><tr><th>Radio</th><th>Latitude</th><th>Longitude</th><th>Last fix</th></tr></thead><tbody id="mapBody"></tbody></table>
               </div>
-              <div class="tablewrap tgs" style="max-height:20vh;margin-top:8px">
+              <div class="tablewrap tgs" style="max-height:calc(20vh / var(--z));margin-top:8px">
                 <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th><th></th></tr></thead><tbody id="surveyBody"></tbody></table>
               </div>
               <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from OpenStreetMap when online.</p>
@@ -430,7 +430,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Alerts</span><span class="meta" id="akMeta"></span><button class="btn primary sm" id="akNew">+ New alert</button></div>
             <div class="body tight">
-              <div id="akList" class="list" style="max-height:26vh"></div>
+              <div id="akList" class="list" style="max-height:calc(26vh / var(--z))"></div>
               <div class="empty small" id="akEmpty">No alerts yet. An alert watches talkgroups for keywords in the transcript (or an emergency, any call, or a radio) and sends a Telegram message with the audio.</div>
             </div>
           </div>
@@ -471,7 +471,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Conversations · summarise the back-and-forth</span><span class="meta" id="cvMeta"></span><button class="btn primary sm" id="cvNew">+ New rule</button></div>
             <div class="body tight">
-              <div id="cvList" class="list" style="max-height:20vh"></div>
+              <div id="cvList" class="list" style="max-height:calc(20vh / var(--z))"></div>
               <div class="empty small" id="cvEmpty">A rule watches talkgroups where one party is fixed (a hospital) and mobile units call in. Each back-and-forth becomes one incident — two radios taking turns are treated as one exchange even before the hospital's ID is known: when it goes quiet the transcripts are stitched, the local model summarises them, and the summary goes to Telegram with the combined audio. A late transmission revises it (old message deleted, new one sent).</div>
             </div>
           </div>
@@ -505,9 +505,9 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Digests · periodic "what's happening"</span><span class="meta" id="dgMeta"></span><button class="btn primary sm" id="dgNew">+ New digest</button></div>
             <div class="body tight">
-              <div id="dgList" class="list" style="max-height:16vh"></div>
+              <div id="dgList" class="list" style="max-height:calc(16vh / var(--z))"></div>
               <div class="empty small" id="dgEmpty">A digest rolls up the transcripts on a set of talkgroups every few minutes and sends "what's happening" to Telegram. Set the cadence, the look-back window, and the question the model answers.</div>
-              <div class="tablewrap tgs" style="max-height:16vh;margin-top:6px"><table><thead><tr><th>Time</th><th>Digest</th><th>Result</th></tr></thead><tbody id="dgLog"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:calc(16vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Digest</th><th>Result</th></tr></thead><tbody id="dgLog"></tbody></table></div>
             </div>
           </div>
           <div class="panel" id="dgEditor" style="display:none">
@@ -565,15 +565,15 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Conversations in progress</span><span class="meta" id="cvLiveMeta"></span></div>
             <div class="body tight">
-              <div id="cvLive" class="list" style="max-height:22vh"></div>
+              <div id="cvLive" class="list" style="max-height:calc(22vh / var(--z))"></div>
               <div class="empty small" id="cvLiveEmpty">Nothing open.</div>
-              <div class="tablewrap tgs" style="max-height:18vh;margin-top:6px"><table><thead><tr><th>Time</th><th>Rule</th><th>Units</th><th>Result</th></tr></thead><tbody id="cvLog"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:calc(18vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Rule</th><th>Units</th><th>Result</th></tr></thead><tbody id="cvLog"></tbody></table></div>
             </div>
           </div>
           <div class="panel grow">
             <div class="head"><span class="eyebrow">Fired</span><span class="meta" id="akLogMeta"></span><button class="btn ghost sm" id="akLogRefresh">↻</button></div>
             <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:32vh"><table><thead><tr><th>Time</th><th>Alert</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="akLog"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:calc(32vh / var(--z))"><table><thead><tr><th>Time</th><th>Alert</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="akLog"></tbody></table></div>
             </div>
           </div>
         </div>
@@ -587,7 +587,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Built-in…</button><button class="btn ghost sm" id="azImport">Import…</button><button class="btn ghost sm" id="azExport">Export…</button><button class="btn primary sm" id="azNew">+ New analyzer</button><input id="azImportFile" type="file" accept=".json,application/json" style="display:none" /></div>
             <div class="body tight">
-              <div id="azList" class="list" style="max-height:26vh"></div>
+              <div id="azList" class="list" style="max-height:calc(26vh / var(--z))"></div>
               <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a built-in template (the ECPR candidate screen ships with the app), or import a template file someone shared. Imported analyzers arrive disabled with no chat set, so nothing runs or sends until you have read them.</div>
             </div>
           </div>
@@ -602,12 +602,12 @@
               <label class="field"><span class="lab">Only run when the transcript contains <span class="mono faint">one per line · blank = every transcript</span></span><textarea id="azKeywords" style="min-height:44px" placeholder="cardiac arrest&#10;working arrest&#10;CPR"></textarea></label>
               <label class="field"><span class="lab">Instructions to the model <span class="mono faint">what to look for and how to judge it</span></span><textarea id="azInstructions" style="min-height:120px"></textarea></label>
               <div class="head" style="padding-left:0"><span class="eyebrow">Fields to extract</span><span class="spacer"></span><button class="btn ghost sm" id="azFieldAdd">+ Field</button></div>
-              <div id="azFields" class="list" style="max-height:22vh"></div>
+              <div id="azFields" class="list" style="max-height:calc(22vh / var(--z))"></div>
               <div class="row3">
                 <label class="field"><span class="lab">Send when</span><select id="azMatch"><option value="all">all conditions hold</option><option value="any">any condition holds</option><option value="">always (just extract & notify)</option></select></label>
                 <label class="field" style="grid-column:span 2"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="azCondAdd" style="justify-self:start">+ Condition</button></label>
               </div>
-              <div id="azConds" class="list" style="max-height:18vh"></div>
+              <div id="azConds" class="list" style="max-height:calc(18vh / var(--z))"></div>
               <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
               <div class="row3">
                 <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
@@ -650,7 +650,7 @@
           <div class="panel grow">
             <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="azLogMeta"></span><button class="btn ghost sm" id="azLogRefresh">↻</button></div>
             <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:52vh"><table><thead><tr><th>Time</th><th>Analyzer</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="azLog"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:calc(52vh / var(--z))"><table><thead><tr><th>Time</th><th>Analyzer</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="azLog"></tbody></table></div>
             </div>
           </div>
         </div>
@@ -700,7 +700,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Dispatch channels</span><span class="meta" id="dpChMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="dpBack">← Map</button><button class="btn ghost sm" id="dpChAdd">+ Channel</button></div>
             <div class="body tight">
-              <div id="dpChannels" class="list" style="max-height:32vh"></div>
+              <div id="dpChannels" class="list" style="max-height:calc(32vh / var(--z))"></div>
               <p class="help"><b>Dispatch</b> channels open incidents: the model pulls the address, units and call type from each dispatch. <b>Tactical</b> channels (fireground, EMS ops) only update an incident that already involves one of the units heard. A fixed call type overrides the model for a channel that carries one kind of traffic.</p>
             </div>
           </div>
@@ -737,7 +737,7 @@
               </div>
               <label class="field"><span class="lab">Call types <span class="mono faint">one per line: emoji, then the name</span></span><textarea id="dpTypesText" style="min-height:120px" spellcheck="false"></textarea></label>
               <label class="field"><span class="lab">Local notes for the model <span class="mono faint">optional · street quirks, unit naming, how your dispatcher talks</span></span><textarea id="dpExtra" style="min-height:56px"></textarea></label>
-              <div class="inline"><button class="btn primary" id="dpSave">Save</button><button class="btn ghost" id="dpTest">Run on latest call</button><span class="inline"><button class="btn ghost" id="dpBackfill">Backfill</button><input id="dpBackfillHours" type="text" inputmode="numeric" value="24" style="width:56px" title="hours" /><span class="help">hours</span></span><span class="help" id="dpBackfillState"></span></div>
+              <div class="inline"><button class="btn primary" id="dpSave">Save</button><button class="btn ghost" id="dpTest">Run on latest call</button><span class="inline"><button class="btn ghost" id="dpBackfill">Backfill</button><input id="dpBackfillHours" type="text" inputmode="numeric" value="24" style="width:56px" title="hours" /><span class="help">hours</span></span><span class="help" id="dpBackfillState"></span><button class="btn ghost" id="dpRegeocode" title="Try the geocoder again on every incident it could not place (about a second each)">Retry unmapped</button><span class="help" id="dpRegeocodeState"></span></div>
               <p class="help">Uses the Ollama server and model from <b>Alerts → AI gate</b>, or the cloud provider from <b>Analyzers</b>. Transcription must be on (Settings → Transcription).</p>
             </div>
           </div>
@@ -746,7 +746,7 @@
           <div class="panel grow">
             <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="dpLogMeta"></span><button class="btn ghost sm" id="dpLogRefresh">↻</button></div>
             <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:70vh"><table><thead><tr><th>Time</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="dpLog"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:calc(70vh / var(--z))"><table><thead><tr><th>Time</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="dpLog"></tbody></table></div>
             </div>
           </div>
         </div>
@@ -759,7 +759,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Attached radios</span><span class="meta" id="dvMeta"></span><button class="btn ghost sm" id="dvRescan">Rescan</button></div>
             <div class="body tight">
-              <div id="dvList" class="list" style="max-height:40vh"></div>
+              <div id="dvList" class="list" style="max-height:calc(40vh / var(--z))"></div>
               <div class="empty small" id="dvEmpty">No radio detected. Plug in an Airspy or RTL-SDR and press Rescan.</div>
               <p class="help">The top-bar Radio picker lists these. On start-up the app picks the saved radio if it is attached, otherwise the first Airspy, otherwise the first RTL-SDR.</p>
             </div>

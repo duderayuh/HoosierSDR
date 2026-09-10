@@ -61,7 +61,15 @@ pub struct Job {
     pub start: i64,
     pub secs: f64,
     pub tg: u16,
+    /// Short display name (the catalog alias / RadioReference alpha tag),
+    /// sent as rdio-scanner's `talkgroupLabel`.
     pub tg_name: String,
+    /// Longer description from the catalog, sent as `talkgroupName` (the
+    /// "Name" column in rdio-scanner). Falls back to `tg_name` when empty.
+    pub tg_desc: String,
+    /// Service tag from the catalog (e.g. "Fire Dispatch"), sent as
+    /// `talkgroupTag` when known.
+    pub tg_tag: String,
     pub unit: u32,
     pub unit_name: Option<String>,
     pub freq_hz: u64,
@@ -260,6 +268,31 @@ fn src_list(job: &Job) -> String {
 // services
 // ---------------------------------------------------------------------------
 
+/// What the catalog knows about a talkgroup beyond its alias: the agency /
+/// category (`talkgroupGroup`), the long description (`talkgroupName`) and
+/// the service tag (`talkgroupTag`). Empty strings when the talkgroup is
+/// not in the catalog.
+#[derive(Default, Clone)]
+pub struct TgMeta {
+    pub group: String,
+    pub desc: String,
+    pub tag: String,
+}
+
+pub fn tg_meta(catalog: &std::sync::Mutex<Option<hs_catalog::CsvCatalog>>, tg: u16) -> TgMeta {
+    catalog
+        .lock()
+        .ok()
+        .and_then(|cat| {
+            cat.as_ref().and_then(|c| c.get(tg)).map(|t| TgMeta {
+                group: t.category.clone().unwrap_or_default(),
+                desc: t.description.clone().unwrap_or_default(),
+                tag: t.tag.clone().unwrap_or_default(),
+            })
+        })
+        .unwrap_or_default()
+}
+
 /// rdio-scanner: POST {url}/api/call-upload, multipart; accepts WAV.
 pub fn send_rdio(cfg: &Rdio, job: &Job, base_override: Option<&str>) -> Result<String, String> {
     let base = base_override.unwrap_or(cfg.url.trim_end_matches('/'));
@@ -288,7 +321,14 @@ pub fn send_rdio(cfg: &Rdio, job: &Job, base_override: Option<&str>) -> Result<S
         )
         .text("talkgroup", job.tg)
         .text("talkgroupLabel", &job.tg_name)
-        .text("talkgroupName", &job.tg_name)
+        .text(
+            "talkgroupName",
+            if job.tg_desc.is_empty() {
+                &job.tg_name
+            } else {
+                &job.tg_desc
+            },
+        )
         .text("source", job.unit)
         .text("sources", src_list(job))
         .file("audio", &name, mime_for(&job.audio), &data)
@@ -302,6 +342,9 @@ pub fn send_rdio(cfg: &Rdio, job: &Job, base_override: Option<&str>) -> Result<S
     }
     if !job.group.is_empty() {
         m = m.text("talkgroupGroup", &job.group);
+    }
+    if !job.tg_tag.is_empty() {
+        m = m.text("talkgroupTag", &job.tg_tag);
     }
     let (ctype, body) = m.finish();
     let (status, text) = post(&format!("{base}/api/call-upload"), &ctype, body)?;
@@ -647,16 +690,7 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
             );
         }
     }
-    let group = state
-        .catalog
-        .lock()
-        .ok()
-        .and_then(|cat| {
-            cat.as_ref()
-                .and_then(|c| c.get(row.tg))
-                .and_then(|t| t.category.clone())
-        })
-        .unwrap_or_default();
+    let meta = tg_meta(&state.catalog, row.tg);
     let job = Job {
         id: row.id,
         audio,
@@ -664,6 +698,8 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
         secs: row.secs,
         tg: row.tg,
         tg_name: row.tg_name,
+        tg_desc: meta.desc,
+        tg_tag: meta.tag,
         unit: row.unit,
         unit_name: row.unit_name,
         freq_hz: row.freq_hz,
@@ -671,7 +707,7 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
         patched_with: row.patched_with,
         system: row.system,
         site: None,
-        group,
+        group: meta.group,
         voice_frame_errors: 0,
     };
     let mut guard = state.uploader.lock().unwrap();
@@ -740,6 +776,8 @@ mod tests {
             secs: 1.0,
             tg: 10103,
             tg_name: "Police North".into(),
+            tg_desc: "Police North District Dispatch".into(),
+            tg_tag: "Law Dispatch".into(),
             unit: 4900165,
             unit_name: Some("Car 12".into()),
             freq_hz: 857_387_500,
@@ -777,6 +815,8 @@ mod tests {
             "name=\"frequency\"\r\n\r\n857387500",
             "errorCount\":42",
             "name=\"talkgroupLabel\"\r\n\r\nPolice North",
+            "name=\"talkgroupName\"\r\n\r\nPolice North District Dispatch",
+            "name=\"talkgroupTag\"\r\n\r\nLaw Dispatch",
             "name=\"site\"\r\n\r\n12",
             "name=\"talkgroupGroup\"\r\n\r\nFire",
             "name=\"audio\"; filename=\"u.wav\"",

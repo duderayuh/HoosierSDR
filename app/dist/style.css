@@ -1,4 +1,5 @@
 :root {
+  --z: 1;   /* text-size zoom (set by applyFs); vh/vw below divide by it, see app.js */
   /* Light theme — an instrument bench in daylight. */
   --bg:        #e9eeed;
   --panel:     #f7faf9;
@@ -173,10 +174,10 @@ button { font-family: inherit; }
 
 /* ---------- layout ---------- */
 .wrap { max-width: 1500px; margin: 0 auto; padding: 14px 16px 40px; }
-.monitor { display: grid; grid-template-columns: 340px 1fr; gap: 14px; min-height: calc(100vh - 90px); }
-@media (max-width: 980px) { .monitor { grid-template-columns: 1fr; } }
+.monitor { display: grid; grid-template-columns: 340px 1fr; gap: 14px; min-height: calc(calc(100vh / var(--z)) - 90px); }
+:root.lt980 .monitor { grid-template-columns: 1fr; }
 .two-col { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; }
-@media (max-width: 980px) { .two-col { grid-template-columns: 1fr; } }
+:root.lt980 .two-col { grid-template-columns: 1fr; }
 .stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); display: flex; flex-direction: column; min-width: 0; }
 .panel.grow { flex: 1; min-height: 160px; }
@@ -270,7 +271,7 @@ td.act button.on { color: var(--enc); border-color: var(--enc); }
 
 /* ---------- lists (playlists / finder) ---------- */
 .list { display: flex; flex-direction: column; gap: 5px; max-height: 260px; overflow: auto; }
-.list.tall { max-height: 70vh; }
+.list.tall { max-height: calc(70vh / var(--z)); }
 .list .row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 12.5px; }
 .list .row:hover { border-color: var(--ink-dim); }
 .list .row.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
@@ -308,11 +309,11 @@ td.act button.bell { color: var(--signal); border-color: var(--signal); }
 
 /* library */
 .library { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; }
-@media (max-width: 1100px) { .library { grid-template-columns: 1fr; } }
+:root.lt1100 .library { grid-template-columns: 1fr; }
 .qrow { display: grid; grid-template-columns: 1.1fr 1.1fr .7fr .7fr 2.2fr; gap: 10px; }
 .qrow .check { white-space: nowrap; }
-@media (max-width: 900px) { .qrow { grid-template-columns: 1fr 1fr; } }
-.tablewrap.lib { max-height: 62vh; }
+:root.lt900 .qrow { grid-template-columns: 1fr 1fr; }
+.tablewrap.lib { max-height: calc(62vh / var(--z)); }
 .tablewrap.lib td.tr { max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-dim); }
 .tablewrap.lib tr.sel td { background: color-mix(in srgb, var(--signal) 10%, transparent); }
 .tablewrap.lib tr.playing td { background: color-mix(in srgb, var(--clear) 10%, transparent); }
@@ -371,11 +372,17 @@ td.alias { font-size: 11px; color: var(--signal); }
 #toasts { z-index: 1200; }
 .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 320px; max-width: 520px; box-shadow: var(--shadow); }
 .modal .msg { font-size: 13px; white-space: pre-wrap; }
-.modal.wide { max-width: 720px; width: min(720px, 92vw); max-height: 88vh; overflow: auto; }
+.modal.wide { max-width: 720px; width: min(720px, calc(92vw / var(--z))); max-height: calc(88vh / var(--z)); overflow: auto; }
 .modal .row.check { cursor: pointer; }
 
 /* ======= compact, no-scroll layout (2026-08-21) ======= */
 body { font-size: 12px; line-height: 1.35; }
+/* The window is a column: top bar, the view, and the fixed status bar's
+   strip. The view takes whatever is left, so a wrapped (narrow) top bar or
+   a text-size change never pushes it under the status bar. Under CSS zoom
+   WebKit leaves vh unscaled, hence the division by --z. */
+body { display: flex; flex-direction: column; height: calc(100vh / var(--z)); }
+.topbar { flex: none; flex-wrap: wrap; row-gap: 6px; }   /* controls drop to a second row instead of running off the window */
 .topbar { padding: 5px 12px; gap: 10px; }
 .brand { font-size: 16px; }
 .seg.nav button { padding: 4px 11px; font-size: 11.5px; }
@@ -383,7 +390,7 @@ body { font-size: 12px; line-height: 1.35; }
 .btn { padding: 5px 11px; font-size: 11.5px; }
 .btn.sm { padding: 3px 8px; font-size: 11px; }
 .pill { padding: 3px 9px; font-size: 11px; min-width: 96px; }
-.wrap { max-width: none; padding: 8px 10px 0; height: calc(100vh - 44px - 26px); overflow: hidden; box-sizing: border-box; }
+.wrap { max-width: none; width: 100%; margin: 0 0 calc(26px + 8px); padding: 8px 10px 0; flex: 1 1 auto; min-height: 0; height: auto; overflow: hidden; box-sizing: border-box; }   /* no auto side margins: in a flex column they would shrink it to its content */
 .view { height: 100%; min-height: 0; }
 .view > section { height: 100%; min-height: 0; }
 .monitor { grid-template-columns: 300px 1fr; gap: 8px; min-height: 0; height: 100%; }
@@ -460,7 +467,7 @@ td.act button.off { opacity: .35; text-decoration: line-through; }
 #view-aliases .tablewrap.tgs { max-height: none; flex: 1; }
 #view-aliases .panel:first-child { display: flex; flex-direction: column; height: 100%; }
 #view-aliases .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.wrap { height: calc(100vh - 46px - 24px - 8px); }
+.wrap { margin-bottom: calc(24px + 8px); }   /* the fixed status bar is 24px here */
 #view-aliases .panel:first-child { display: block; height: auto; }
 #view-aliases .panel:first-child > .body { display: block; }
 #view-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
@@ -469,7 +476,7 @@ td.act button.off { opacity: .35; text-decoration: line-through; }
 #view-settings .two-col { display: block; column-count: 3; column-gap: 8px; height: 100%; overflow: auto; }
 #view-settings .two-col > .stack { display: contents; }
 #view-settings .panel, #view-settings .legal { break-inside: avoid; margin-bottom: 8px; }
-@media (max-width: 1250px) { #view-settings .two-col { column-count: 2; } }
+:root.lt1250 #view-settings .two-col { column-count: 2; }
 
 /* accordions + compact now-playing + transcripts in history + group chips */
 .panel.acc > .head { cursor: pointer; user-select: none; }
@@ -497,7 +504,7 @@ td.tg .desc { display: block; font-size: 11px; font-weight: 500; color: var(--si
 .cat { display: inline-block; font-size: 10.5px; font-weight: 500; color: var(--ink-faint); margin-right: 6px; }
 
 /* ---------- transcript tooltip ---------- */
-.tip { position: fixed; z-index: 120; max-width: 520px; max-height: 60vh; overflow: auto; padding: 10px 13px; font-size: 12.5px; line-height: 1.45; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere; display: none; }
+.tip { position: fixed; z-index: 120; max-width: 520px; max-height: calc(60vh / var(--z)); overflow: auto; padding: 10px 13px; font-size: 12.5px; line-height: 1.45; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 8px; box-shadow: var(--shadow); pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere; display: none; }
 .tip code { font-family: var(--mono); font-size: 11.5px; }
 .tip b, .tip i, .tip em { color: inherit; }
 
@@ -506,20 +513,19 @@ button.info { background: none; border: 1px solid var(--line); color: var(--ink-
 button.info:hover, button.info:focus-visible { color: var(--signal); border-color: var(--signal); }
 
 /* ---------- narrow windows: stack the top bar instead of overflowing ---------- */
-@media (max-width: 940px) {
-  .topbar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
-  .brand { order: 1; font-size: 15px; }
-  .themebtn { order: 1; margin-left: auto; }
-  .seg.nav { order: 2; flex-basis: 100%; overflow-x: auto; margin: 0; white-space: nowrap; }
-  .spacer { display: none; }
-  .topbar > .tb, #start, #stop, .pill { order: 3; }
-  .tb span { display: none; }
-  .tb select { min-width: 0; }
-  #playlist { min-width: 150px; max-width: 200px; }
-}
+/* narrow window (was @media max-width 940px; the class is set from innerWidth / zoom) */
+:root.lt940 .topbar { flex-wrap: wrap; row-gap: 6px; padding: 6px 12px; }
+:root.lt940 .brand { order: 1; font-size: 15px; }
+:root.lt940 .themebtn { order: 1; margin-left: auto; }
+:root.lt940 .seg.nav { order: 2; flex-basis: 100%; overflow-x: auto; margin: 0; white-space: nowrap; }
+:root.lt940 .spacer { display: none; }
+:root.lt940 .topbar > .tb, :root.lt940 #start, :root.lt940 #stop, :root.lt940 .pill { order: 3; }
+:root.lt940 .tb span { display: none; }
+:root.lt940 .tb select { min-width: 0; }
+:root.lt940 #playlist { min-width: 150px; max-width: 200px; }
 
 /* ---------- onboarding / setup wizard ---------- */
-.modal.ob { max-width: 620px; width: min(620px, calc(100vw - 40px)); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal.ob { max-width: 620px; width: min(620px, calc(calc(100vw / var(--z)) - 40px)); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
 .obdots { display: flex; gap: 6px; }
 .obdots i { flex: 1; height: 3px; border-radius: 2px; background: var(--line); transition: background .2s; }
 .obdots i.on { background: var(--signal); }
@@ -581,7 +587,7 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .dplbody { padding: 4px 10px 10px; border-top: 1px solid var(--line-soft); }
 .dpltoggle { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 11.5px; }
 .dpltoggle .badge { margin-left: auto; background: color-mix(in srgb, var(--signal) 15%, transparent); color: var(--signal); }
-.dptypes { display: flex; flex-direction: column; gap: 2px; max-height: 38vh; overflow: auto; }
+.dptypes { display: flex; flex-direction: column; gap: 2px; max-height: calc(38vh / var(--z)); overflow: auto; }
 .dptypes label { display: flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 0; cursor: pointer; }
 .dptypes label .n { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
 .dpattr { position: absolute; right: 8px; bottom: 6px; z-index: 500; font-size: 9.5px; color: #cfd8d6; background: rgba(8,11,12,.55); padding: 2px 7px; border-radius: 6px; }
@@ -617,10 +623,10 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .dpdet .k { font-family: var(--display); text-transform: uppercase; letter-spacing: .11em; font-size: 9.5px; color: var(--ink-faint); }
 .dpdet .v { font-size: 12.5px; }
 .dpdet .v.big { font-size: 16px; font-weight: 600; }
-.dpdet .calls { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 32vh; overflow: auto; }
+.dpdet .calls { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: calc(32vh / var(--z)); overflow: auto; }
 .dpdet .call { border: 1px solid var(--line-soft); border-radius: 8px; padding: 6px 9px; font-size: 11.5px; }
 .dpdet .call .ch { display: flex; gap: 8px; align-items: center; font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin-bottom: 3px; }
 .dpdet .call .tr { white-space: pre-wrap; color: var(--ink-dim); }
 .dpdet .fix { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-top: 8px; }
 .dpdet .warn { color: var(--amber); }
-@media (max-width: 980px) { .dispatch { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; } }
+:root.lt980 .dispatch { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }
