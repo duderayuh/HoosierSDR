@@ -105,6 +105,7 @@ setPage("appearance");
 setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
+  if (location.hash === "#discovery") { showView("settings"); setPage("discovery"); return; }
   if (["#playlists", "#library", "#conversations", "#aliases", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1));
 }, 0);
 

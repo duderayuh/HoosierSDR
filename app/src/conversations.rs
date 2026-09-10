@@ -1272,7 +1272,8 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         .filter(|p| !p.fixed)
         .map(|p| p.unit_name.clone().unwrap_or_else(|| p.unit.to_string()))
         .collect();
-    units.dedup();
+    let mut seen = std::collections::HashSet::new();
+    units.retain(|u| seen.insert(u.clone()));
     Ok(Stored {
         id: row.get(0)?,
         conv_id: conv_id(tg, first_at),
