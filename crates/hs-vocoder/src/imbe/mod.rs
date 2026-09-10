@@ -252,11 +252,11 @@ mod soft_fec {
             }
             let mut word = [0u8; 23];
             word[11..23].copy_from_slice(&data);
-            for b in 0..11 {
+            for (b, w) in word.iter_mut().enumerate().take(11) {
                 // `eccbits`/`block_l`'s low 11 bits are `word[0..11]` with
                 // `word[0]` as bit 0 (LSB) — see `mbe_golay2312`'s own
                 // `block` construction.
-                word[b] = ((parity >> b) & 1) as u8;
+                *w = ((parity >> b) & 1) as u8;
             }
             debug_assert!(
                 (0..23).all(|flip| {

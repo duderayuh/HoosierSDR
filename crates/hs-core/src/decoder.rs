@@ -14,10 +14,40 @@ use hs_dsp::decimate::{DecimationPlan, Decimator, TARGET_SPS};
 use hs_dsp::equalizer::RealLmsEq;
 use hs_dsp::receiver::C4fmReceiver;
 use hs_dsp::C32;
+use hs_p25::ess::{EssDecode, ALGID_CLEAR};
+use hs_p25::framer::LDU_WIRE_DIBITS;
 use hs_p25::framer::{Framer, FramerEvent};
 use hs_p25::moto::MotoRegroup;
 use hs_p25::tsbk::Tsbk;
-use hs_p25::{AlgId, Duid};
+use hs_p25::voice::{ImbeConf, ImbeFrame};
+use hs_p25::Duid;
+
+/// What is known about the encryption of the transmission on this channel.
+///
+/// Decided once per transmission from evidence that has passed its own error
+/// correction — a grant's service options on the control channel, or an
+/// LDU2 Encryption Sync that validated through Hamming and Reed–Solomon —
+/// and held until the transmission ends. A damaged field says nothing and
+/// changes nothing. The earlier design re-read a raw, unprotected ALGID on
+/// every LDU2 and latched "encrypted" on any bit error, which on a marginal
+/// simulcast channel muted the rest of most transmissions: literally the
+/// choppy audio this replaces.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EncState {
+    /// No trustworthy evidence yet. Voice plays (an encrypted transmission
+    /// announces itself in every LDU2, so the absence of a verdict is not
+    /// evidence of encryption), and the first repeated Hamming-level ALGID
+    /// reading is accepted in lieu of a validated one.
+    #[default]
+    Unknown,
+    Clear,
+    Encrypted,
+}
+
+/// Longest unframed stretch filled with concealment audio, in 180 ms LDU
+/// slots. Beyond this a loss is a loss; holding a stranger's last syllable
+/// for seconds is worse than a jump.
+const MAX_GAP_SLOTS: u32 = 5;
 use hs_trunk::{Grant, IdenPlan, MobilityEvent, Neighbour, PatchTracker, SiteModel, SystemId};
 use hs_vocoder::imbe::ImbeDecoder;
 use hs_vocoder::Vocoder;
@@ -169,7 +199,18 @@ pub struct ChannelDecoder {
     fsw_levels: Vec<f32>,
     /// Talkgroup of the call currently on this channel (for voice routing).
     active_tg: Option<u16>,
-    active_enc: bool,
+    /// Encryption verdict for the transmission in progress — see [`EncState`].
+    enc: EncState,
+    /// The call was started from a grant whose service options said clear,
+    /// so the transmission starts out `Clear` (a validated ESS can still
+    /// say otherwise) and returns to `Clear` after each terminator.
+    enc_from_grant: bool,
+    /// Hamming-corrected ALGID of the last real LDU2 whose Reed–Solomon check
+    /// failed; two in a row that agree settle an otherwise unknown state.
+    weak_algid: Option<u8>,
+    /// An LDU has been decoded since the last terminator: the channel is
+    /// mid-transmission, so an unframed gap is missing voice, not idle air.
+    voice_active: bool,
     /// Rolling diagnostics for real-signal export (see `diag`).
     diag: crate::diag::Diagnostics,
     /// The last [`SYMBOL_RING`] decision-stage symbols: (I, Q) for CQPSK,
@@ -252,7 +293,10 @@ impl ChannelDecoder {
             raw_hist: Vec::with_capacity(48),
             fsw_levels,
             active_tg: None,
-            active_enc: false,
+            enc: EncState::default(),
+            enc_from_grant: false,
+            weak_algid: None,
+            voice_active: false,
             diag,
             symbols: std::collections::VecDeque::with_capacity(SYMBOL_RING),
             prev_level: 0.0,
@@ -260,6 +304,22 @@ impl ChannelDecoder {
             last_voice_quality: None,
             concealer: crate::concealment::Concealer::new(),
         }
+    }
+
+    /// The control channel granted this channel's call in the clear. Voice
+    /// then flows from the first LDU instead of waiting for a validated
+    /// Encryption Sync, and a damaged one can never mute it; only a
+    /// *validated* ESS naming an algorithm does.
+    pub fn set_grant_clear(&mut self, clear: bool) {
+        self.enc_from_grant = clear;
+        if clear && self.enc == EncState::Unknown {
+            self.enc = EncState::Clear;
+        }
+    }
+
+    /// The encryption verdict in force for the current transmission.
+    pub fn encryption(&self) -> EncState {
+        self.enc
     }
 
     /// Composite quality of the most recently decoded voice frame (see
@@ -558,51 +618,41 @@ impl ChannelDecoder {
                 }
             }
             FramerEvent::Ldu {
-                imbe, conf, algid, duid, ..
+                imbe,
+                conf,
+                ess,
+                inferred,
+                ..
             } => {
-                let encrypted = match duid {
-                    Duid::LogicalLinkDataUnit2 => algid
-                        .map(|a| !AlgId::from(a).is_decodable())
-                        .unwrap_or(false),
-                    _ => self.active_enc,
-                };
-                if encrypted {
-                    if let Some(tg) = self.active_tg {
-                        out.encrypted_skips.push(tg);
-                        self.diag.encrypted_skips.push(tg);
-                    }
-                    self.active_enc = true;
-                    return;
+                self.voice_active = true;
+                if inferred {
+                    self.diag.voice_frames_inferred += 9;
                 }
-                // Clear voice: synthesize audio for all nine IMBE frames,
-                // using the demodulator's per-bit confidence (amplitude
-                // margin from the decision boundary — see hs_p25::soft) to
-                // guide FEC correction ahead of the vocoder, rather than
-                // handing it hard-sliced bits alone.
-                for (frame, frame_conf) in imbe.iter().zip(conf.iter()) {
-                    let mut pcm = self.vocoder.decode_soft(frame, frame_conf);
-                    self.diag.voice_frames += 1;
-                    self.diag.pcm_samples += pcm.len() as u64;
-                    let errs = self.vocoder.last_errs.max(0) as u32;
-                    self.diag.voice_frame_errors += errs as u64;
-                    if errs > 5 {
-                        self.diag.voice_frames_holding += 1;
+                if let Some(e) = ess {
+                    self.observe_ess(e, inferred);
+                }
+                match self.enc {
+                    EncState::Encrypted => {
+                        if let Some(tg) = self.active_tg {
+                            out.encrypted_skips.push(tg);
+                            self.diag.encrypted_skips.push(tg);
+                        }
                     }
-                    if errs > self.diag.voice_error_max {
-                        self.diag.voice_error_max = errs;
+                    EncState::Unknown | EncState::Clear => self.synthesize_ldu(&imbe, &conf, out),
+                }
+            }
+            FramerEvent::Gap { dibits } => {
+                // Air the channel was on, mid-transmission, that decoded to
+                // nothing. Give the listener that time back as held audio
+                // fading out, one 20 ms frame per slot the protocol says a
+                // voice frame occupied — otherwise the call plays shortened,
+                // which is the stutter a lost frame turns into.
+                if self.voice_active && self.enc != EncState::Encrypted {
+                    let slots =
+                        ((dibits + LDU_WIRE_DIBITS / 2) / LDU_WIRE_DIBITS).min(MAX_GAP_SLOTS);
+                    for _ in 0..slots * 9 {
+                        self.conceal_missing_frame(out);
                     }
-                    let quality = VoiceQuality {
-                        confidence: mean_confidence(frame_conf),
-                        fec_errors: errs,
-                        lock: self.cqpsk_lock(),
-                    };
-                    self.diag.record_voice_quality(quality);
-                    self.last_voice_quality = Some(quality);
-                    out.voice_quality.push(quality);
-                    // Concealment/leveling operates on the frame mbelib just
-                    // produced, in place — see `crate::concealment`.
-                    self.concealer.process(&mut pcm, quality);
-                    out.pcm.extend_from_slice(&pcm);
                 }
             }
             FramerEvent::Skipped {
@@ -616,10 +666,113 @@ impl ChannelDecoder {
                 // sooner than a quiet-channel timeout can conclude the same.
                 out.terminators += 1;
                 self.active_tg = None;
-                self.active_enc = false;
+                self.end_of_transmission();
             }
             _ => {}
         }
+    }
+
+    /// Fold one LDU2's Encryption Sync into the transmission's verdict.
+    fn observe_ess(&mut self, e: EssDecode, inferred: bool) {
+        match e.ess {
+            Some(ess) => {
+                // Validated through Hamming and Reed–Solomon: authoritative,
+                // in either direction.
+                self.diag.ess_valid += 1;
+                self.enc = if ess.is_clear() {
+                    EncState::Clear
+                } else {
+                    EncState::Encrypted
+                };
+                self.weak_algid = None;
+            }
+            None => {
+                self.diag.ess_invalid += 1;
+                // A field that failed its check carries no verdict. The one
+                // concession, for a channel decoded with no grant to lean on
+                // and nothing established yet: two consecutive real LDU2s
+                // whose Hamming-corrected ALGIDs agree are taken at their
+                // word, since noise rarely says the same thing twice. A
+                // coasted (inferred) frame's contents are a guess and never
+                // count.
+                if self.enc == EncState::Unknown && !inferred {
+                    if self.weak_algid == Some(e.algid_hamming) {
+                        self.enc = if e.algid_hamming == ALGID_CLEAR {
+                            EncState::Clear
+                        } else {
+                            EncState::Encrypted
+                        };
+                    }
+                    self.weak_algid = Some(e.algid_hamming);
+                }
+            }
+        }
+    }
+
+    /// A terminator: the transmission is over. The next one is judged afresh
+    /// (back to what the grant said, or to unknown), nothing held over is
+    /// played, and the concealer forgets this talker's voice.
+    fn end_of_transmission(&mut self) {
+        self.enc = if self.enc_from_grant {
+            EncState::Clear
+        } else {
+            EncState::Unknown
+        };
+        self.weak_algid = None;
+        self.voice_active = false;
+        self.concealer.end_of_transmission();
+    }
+
+    /// Synthesize the nine voice frames of one clear LDU, through the
+    /// confidence-guided FEC, quality scoring, and concealment/leveling.
+    fn synthesize_ldu(
+        &mut self,
+        imbe: &[ImbeFrame; 9],
+        conf: &[ImbeConf; 9],
+        out: &mut DecodeOutput,
+    ) {
+        for (frame, frame_conf) in imbe.iter().zip(conf.iter()) {
+            let mut pcm = self.vocoder.decode_soft(frame, frame_conf);
+            self.diag.voice_frames += 1;
+            self.diag.pcm_samples += pcm.len() as u64;
+            let errs = self.vocoder.last_errs.max(0) as u32;
+            self.diag.voice_frame_errors += errs as u64;
+            if errs > 5 {
+                self.diag.voice_frames_holding += 1;
+            }
+            if errs > self.diag.voice_error_max {
+                self.diag.voice_error_max = errs;
+            }
+            let quality = VoiceQuality {
+                confidence: mean_confidence(frame_conf),
+                fec_errors: errs,
+                lock: self.cqpsk_lock(),
+            };
+            self.diag.record_voice_quality(quality);
+            self.last_voice_quality = Some(quality);
+            out.voice_quality.push(quality);
+            // Concealment/leveling operates on the frame mbelib just
+            // produced, in place — see `crate::concealment`.
+            self.concealer.process(&mut pcm, quality);
+            out.pcm.extend_from_slice(&pcm);
+        }
+    }
+
+    /// One 20 ms slot with no frame to decode: held audio fading out, with
+    /// a quality entry that says so, keeping `out.pcm` and
+    /// `out.voice_quality` index-aligned.
+    fn conceal_missing_frame(&mut self, out: &mut DecodeOutput) {
+        let quality = VoiceQuality {
+            confidence: 0.0,
+            fec_errors: VoiceQuality::FEC_ERROR_SATURATION as u32,
+            lock: self.cqpsk_lock(),
+        };
+        self.last_voice_quality = Some(quality);
+        out.voice_quality.push(quality);
+        self.concealer
+            .conceal_missing(hs_vocoder::imbe::SAMPLES_PER_FRAME, &mut out.pcm);
+        self.diag.voice_frames_concealed += 1;
+        self.diag.pcm_samples += hs_vocoder::imbe::SAMPLES_PER_FRAME as u64;
     }
 
     fn on_tsbk(&mut self, tsbk: Tsbk, out: &mut DecodeOutput) {
@@ -643,7 +796,11 @@ impl ChannelDecoder {
                             .resolve_grant(supergroup, source_unit, channel, encrypted)
                     {
                         self.active_tg = Some(supergroup);
-                        self.active_enc = encrypted;
+                        self.enc = if encrypted {
+                            EncState::Encrypted
+                        } else {
+                            EncState::Clear
+                        };
                         if encrypted {
                             out.encrypted_skips.push(supergroup);
                         }
@@ -736,7 +893,11 @@ impl ChannelDecoder {
                 let encrypted = opts & 0x40 != 0; // 'E' bit in service options
                 if let Some(g) = self.site.resolve_grant(group, source, channel, encrypted) {
                     self.active_tg = Some(group);
-                    self.active_enc = encrypted;
+                    self.enc = if encrypted {
+                        EncState::Encrypted
+                    } else {
+                        EncState::Clear
+                    };
                     if encrypted {
                         out.encrypted_skips.push(group);
                     }
@@ -858,7 +1019,10 @@ mod voice_quality_tests {
         // lowest possible confidence) — if padding leaked into the mean it
         // would pull this well under 1.0.
         let mut conf = conf_at(CERTAIN);
-        for (row, &width) in conf.iter_mut().zip(hs_p25::voice::IMBE_CODEWORD_WIDTHS.iter()) {
+        for (row, &width) in conf
+            .iter_mut()
+            .zip(hs_p25::voice::IMBE_CODEWORD_WIDTHS.iter())
+        {
             for c in &mut row[width..] {
                 *c = 0;
             }

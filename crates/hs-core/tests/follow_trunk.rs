@@ -186,6 +186,9 @@ fn a_terminator_ends_the_call_without_waiting_for_silence() {
         traffic.extend(build_tdu(0x293));
         traffic.extend(preamble(40));
     }
+    // Then 1.5 s of idle air: past the 1.2 s hang, short of the 2 s quiet
+    // timeout, so only the terminator path can retire the call in time.
+    traffic.extend(preamble(7200));
 
     let mut band = Vec::new();
     add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);

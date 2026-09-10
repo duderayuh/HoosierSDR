@@ -83,9 +83,24 @@ pub fn build_tdu(nac: u16) -> Vec<u8> {
 /// Build a complete LDU1 stream carrying the given nine IMBE frames.
 /// Link-control bits are zeroed (v1 does not decode LC).
 pub fn build_ldu1(nac: u16, imbe: &[ImbeFrame; 9]) -> Vec<u8> {
+    build_ldu(nac, 0x5, imbe, None)
+}
+
+/// An LDU2 carrying `imbe` and a fully coded Encryption Sync (`ess`, or a
+/// clear one when `None`).
+pub fn build_ldu2(nac: u16, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::Ess>) -> Vec<u8> {
+    let ess = ess.unwrap_or(crate::ess::Ess {
+        mi: [0; 9],
+        algid: crate::ess::ALGID_CLEAR,
+        kid: 0,
+    });
+    build_ldu(nac, 0xA, imbe, Some(ess))
+}
+
+fn build_ldu(nac: u16, duid: u8, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::Ess>) -> Vec<u8> {
     let codec = NidCodec::new();
     let mut frame = sync_dibits();
-    let nid = codec.encode(nac, 0x5);
+    let nid = codec.encode(nac, duid);
     frame.extend((0..32).rev().map(|i| ((nid >> (2 * i)) & 3) as u8));
 
     let mut payload = vec![0u8; crate::voice::LDU_PAYLOAD_BITS];
@@ -93,6 +108,9 @@ pub fn build_ldu1(nac: u16, imbe: &[ImbeFrame; 9]) -> Vec<u8> {
         let bits = interleave_imbe(fr);
         let off = crate::voice::IMBE_OFFSETS[k];
         payload[off..off + 144].copy_from_slice(&bits);
+    }
+    if let Some(e) = ess {
+        crate::ess::write_ess(&mut payload, &e);
     }
     frame.extend(bits_to_dibits(&payload));
     insert_status(&frame)

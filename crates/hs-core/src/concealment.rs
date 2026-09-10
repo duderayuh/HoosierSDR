@@ -111,6 +111,31 @@ impl Concealer {
             self.held.extend_from_slice(pcm);
         }
     }
+
+    /// Produce one frame for a slot the channel was on the air for but no
+    /// voice frame was decoded from: the held (last good) audio, fading out
+    /// over the same budget a run of bad frames gets. This is what keeps
+    /// the audio timeline honest — a lost frame becomes 20 ms of held
+    /// sound, not 20 ms deleted from the call.
+    ///
+    /// The AGC is deliberately not run here: it has no new signal to
+    /// measure, and feeding it the fade would starve its estimate so the
+    /// next real frame spiked (the same failure `process` guards against).
+    pub fn conceal_missing(&mut self, frame_len: usize, out: &mut Vec<i16>) {
+        self.held_repeats += 1;
+        let fade = (1.0 - self.held_repeats as f32 / MAX_HELD_REPEATS as f32).clamp(0.0, 1.0);
+        out.extend(
+            (0..frame_len).map(|i| (self.held.get(i).copied().unwrap_or(0) as f32 * fade) as i16),
+        );
+    }
+
+    /// The transmission ended: forget the held audio so the next one never
+    /// conceals with a stranger's voice. The level estimate is kept — the
+    /// channel's loudness is a property of the system, not the talker.
+    pub fn end_of_transmission(&mut self) {
+        self.held.clear();
+        self.held_repeats = 0;
+    }
 }
 
 impl Default for Concealer {
@@ -170,6 +195,41 @@ mod tests {
             bad_pcm.iter().all(|&s| s > 0),
             "a fully-bad frame should be replaced by the held buffer, not the garbled decode: {:?}",
             &bad_pcm[..4]
+        );
+    }
+
+    #[test]
+    fn a_missing_frame_is_the_held_audio_fading_and_leaves_the_agc_alone() {
+        let mut c = Concealer::new();
+        let mut good_pcm = [8_000i16; 160];
+        for _ in 0..50 {
+            good_pcm = [8_000i16; 160];
+            c.process(&mut good_pcm, good());
+        }
+        let level = good_pcm[0];
+        let mut out = Vec::new();
+        c.conceal_missing(160, &mut out);
+        assert_eq!(out.len(), 160);
+        assert!(out[0] > 0 && (out[0] as i32 - level as i32).abs() < level as i32 / 10);
+        for _ in 0..(MAX_HELD_REPEATS + 5) {
+            out.clear();
+            c.conceal_missing(160, &mut out);
+        }
+        assert_eq!(out[0], 0, "faded to silence");
+        // A real frame afterwards lands at the settled level, not a spike.
+        let mut pcm = [8_000i16; 160];
+        c.process(&mut pcm, good());
+        assert!(
+            (pcm[0] as i32 - level as i32).abs() < level as i32 / 5,
+            "{} vs {level}",
+            pcm[0]
+        );
+        c.end_of_transmission();
+        out.clear();
+        c.conceal_missing(160, &mut out);
+        assert!(
+            out.iter().all(|&s| s == 0),
+            "nothing held after a transmission ends"
         );
     }
 
@@ -271,7 +331,11 @@ mod tests {
                 // A short, ~5x-amplitude burst every 50 samples — a crude
                 // stand-in for a syllable peak over quieter speech.
                 let in_burst = (n as i64) % 50 < 5;
-                let burst = if in_burst { 15_000.0 * (n * 0.3).sin() } else { 0.0 };
+                let burst = if in_burst {
+                    15_000.0 * (n * 0.3).sin()
+                } else {
+                    0.0
+                };
                 *s = (base + burst) as i16;
             }
             c.process(&mut pcm, good());

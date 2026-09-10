@@ -161,8 +161,7 @@ impl DualSdrFollower {
         let ended = out.terminators > 0 || self.voice_quiet >= QUIET_SECS;
         let retune = if ended {
             self.voice_freq
-                .map(|freq| map_action(self.scheduler.on_end(freq, self.elapsed_secs)))
-                .flatten()
+                .and_then(|freq| map_action(self.scheduler.on_end(freq, self.elapsed_secs)))
         } else {
             None
         };

@@ -75,33 +75,45 @@ impl Derotator {
     /// unknown, the whole derotated sync word on the push that resolves it,
     /// and one derotated dibit per push thereafter.
     pub fn push(&mut self, raw: u8, out: &mut Vec<u8>) {
-        if let Some(k) = self.rot {
-            // Detected = rotate(true, k), so true = rotate(detected, −k).
-            out.push(rotate_dibit(raw, (4 - k) & 3));
-            return;
-        }
-
         self.recent[self.at] = raw;
         self.at = (self.at + 1) % FSW_DIBITS;
         self.seen += 1;
         self.shift = (self.shift << 2) | raw as u64;
         let window = self.shift & ((1u64 << FRAME_SYNC_BITS) - 1);
 
-        if self.seen < FSW_DIBITS {
-            return;
-        }
-        for k in 0..4u8 {
-            if (window ^ self.patterns[k as usize]).count_ones() <= LOCK_ERR_MAX {
-                self.rot = Some(k);
-                // Replay the sync word, derotated and in order, so the framer
-                // locks on the very frame that revealed the rotation instead
-                // of waiting another 180 ms for the next one.
-                for i in 0..FSW_DIBITS {
-                    let raw = self.recent[(self.at + i) % FSW_DIBITS];
-                    out.push(rotate_dibit(raw, (4 - k) & 3));
+        // The rotation is not fixed for life. The receiver's carrier-bias
+        // estimate can move a quarter turn — a re-acquisition, or the
+        // decision-directed loop settling on the neighbouring solution after
+        // a fade — and from then on every dibit came out permuted under a
+        // rotation resolved for the old bias. Nothing downstream could tell:
+        // no sync words, no frames, silence until the call ended. So the
+        // check runs on every dibit, locked or not, and a sync word seen
+        // under a *different* rotation moves the lock there. A 48-bit match
+        // within one bit error is far too specific for data to fake.
+        if self.seen >= FSW_DIBITS {
+            for k in 0..4u8 {
+                if Some(k) == self.rot {
+                    continue;
                 }
-                return;
+                if (window ^ self.patterns[k as usize]).count_ones() <= LOCK_ERR_MAX {
+                    self.rot = Some(k);
+                    // Replay the sync word, derotated and in order, so the
+                    // framer locks on the very frame that revealed the
+                    // rotation instead of waiting another 180 ms for the next
+                    // one. (On a change of rotation the framer already saw
+                    // this word mangled; the replay is what lets it recover
+                    // on this frame rather than the next.)
+                    for i in 0..FSW_DIBITS {
+                        let raw = self.recent[(self.at + i) % FSW_DIBITS];
+                        out.push(rotate_dibit(raw, (4 - k) & 3));
+                    }
+                    return;
+                }
             }
+        }
+        if let Some(k) = self.rot {
+            // Detected = rotate(true, k), so true = rotate(detected, −k).
+            out.push(rotate_dibit(raw, (4 - k) & 3));
         }
     }
 }
@@ -157,6 +169,42 @@ mod tests {
             sink.clear();
             d.push(rotate_dibit(truth, k), &mut sink);
             assert_eq!(sink, vec![truth], "post-lock derotation");
+        }
+    }
+
+    /// The receiver's bias moves a quarter turn mid-stream: the next sync
+    /// word arrives under a new rotation and the derotator follows it, so
+    /// the dibits after it come out true again.
+    #[test]
+    fn a_change_of_rotation_is_followed_at_the_next_sync_word() {
+        let mut d = Derotator::new();
+        let mut sink = Vec::new();
+        let fsw = hs_p25::synth::sync_dibits();
+        for raw in fsw.iter().map(|&x| rotate_dibit(x, 1)) {
+            d.push(raw, &mut sink);
+        }
+        assert_eq!(d.rotation(), Some(1));
+        // Some payload under rotation 1, then the bias jumps: rotation 3.
+        let data = [0u8, 1, 2, 3, 3, 1, 0, 2];
+        for &t in &data {
+            d.push(rotate_dibit(t, 1), &mut sink);
+        }
+        sink.clear();
+        for raw in fsw.iter().map(|&x| rotate_dibit(x, 3)) {
+            d.push(raw, &mut sink);
+        }
+        assert_eq!(d.rotation(), Some(3), "rotation not followed");
+        // The replayed sync word comes out true …
+        let mut w = 0u64;
+        for &x in sink.iter().rev().take(FSW_DIBITS).rev() {
+            w = (w << 2) | x as u64;
+        }
+        assert_eq!(w, hs_p25::FRAME_SYNC);
+        // … and so does everything after it.
+        for &t in &data {
+            sink.clear();
+            d.push(rotate_dibit(t, 3), &mut sink);
+            assert_eq!(sink, vec![t]);
         }
     }
 

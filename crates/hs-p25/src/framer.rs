@@ -5,12 +5,11 @@
 //! (every 70 bits) counted from the start of the frame sync; the FSW itself
 //! (24 dibits) is never interrupted.
 
+use crate::ess::EssDecode;
 use crate::nid::{Nid, NidCodec};
 use crate::soft::{SoftDibit, CERTAIN};
 use crate::tsbk::{self, TsbkBlock};
-use crate::voice::{
-    extract_imbe_conf, extract_imbe_frames, ldu2_algid_raw, ImbeConf, ImbeFrame, LDU_PAYLOAD_BITS,
-};
+use crate::voice::{extract_imbe_conf, extract_imbe_frames, ImbeConf, ImbeFrame, LDU_PAYLOAD_BITS};
 use crate::{Duid, FRAME_SYNC, FRAME_SYNC_BITS};
 
 /// Max bit errors tolerated in the 48-bit sync correlation.
@@ -60,6 +59,30 @@ const FLYWHEEL_COAST_DIBITS: u32 = FRAME_SYNC_BITS / 2;
 const SYNC_ERR_MAX_COAST: u32 = 6;
 const SYNC_SOFT_MAX_FRACTION_COAST: f32 = 0.35;
 
+/// Consecutive voice frames the framer will *assume* at the protocol cadence
+/// when the sync word or the NID behind it is lost mid-transmission.
+///
+/// P25 voice runs LDU1, LDU2, LDU1, LDU2 … back to back, every frame the
+/// same length, on one NAC. Once that pattern is established, a missed sync
+/// or an uncorrectable NID says nothing about the nine IMBE frames that
+/// follow — each carries its own Golay/Hamming protection and the vocoder
+/// judges them individually. Returning to a cold search instead threw away
+/// 180 ms of audio per miss, on a signal where the miss itself was the only
+/// thing wrong. So the framer coasts: it presumes the frame is there, infers
+/// its type from the alternation, and lets the voice FEC decide.
+///
+/// Bounded, because a coast past the real end of a transmission collects
+/// noise as voice. Two frames (360 ms) bridges the fades that matter; a
+/// longer outage is a genuine loss, and reported as a gap instead.
+const MAX_COAST_FRAMES: u32 = 2;
+
+/// Clean NID decodes on one NAC before it is trusted as the channel's own,
+/// which a coasted frame is then attributed to.
+const NAC_TRACK_MIN: u32 = 3;
+
+/// Dibits per LDU on the wire (sync + NID + payload + status symbols).
+pub const LDU_WIRE_DIBITS: u32 = 864;
+
 #[derive(Debug)]
 pub enum FramerEvent {
     /// FSW just matched — the previous 24 dibits were the known sync word.
@@ -84,8 +107,20 @@ pub enum FramerEvent {
         /// downstream soft-decision FEC pass (see `hs_vocoder::imbe`) use
         /// amplitude information the hard-sliced `imbe` bits alone discard.
         conf: Box<[ImbeConf; 9]>,
-        /// Raw ALGID from LDU2 encryption sync (None for LDU1).
-        algid: Option<u8>,
+        /// The Encryption Sync, decoded through its Hamming and
+        /// Reed–Solomon protection (LDU2 only; `None` for LDU1).
+        ess: Option<EssDecode>,
+        /// The frame's sync word or NID was lost and its type and NAC were
+        /// inferred from the voice cadence (see [`MAX_COAST_FRAMES`]).
+        inferred: bool,
+    },
+    /// A real sync word arrived after a stretch of unframed dibits: the
+    /// channel was on the air but nothing was decoded for `dibits` symbols
+    /// beyond the normal frame spacing. A voice consumer can turn this into
+    /// the time that went missing, which a stream of only decoded frames
+    /// would otherwise silently compress.
+    Gap {
+        dibits: u32,
     },
     /// The undecoded Link Control slot bits from an LDU1, for studying the
     /// codes that protect them.
@@ -112,8 +147,18 @@ pub enum FramerEvent {
 #[derive(Clone, Copy)]
 enum State {
     Search,
-    Nid,
-    Payload { nid: Nid, needed: usize },
+    /// Collecting the NID. `presumed` means no sync word was actually seen:
+    /// the flywheel said one was due and the voice cadence makes it likely.
+    Nid {
+        presumed: bool,
+    },
+    /// Collecting a payload. `inferred` means the NID was lost and the
+    /// frame's identity is a guess from the voice cadence.
+    Payload {
+        nid: Nid,
+        needed: usize,
+        inferred: bool,
+    },
 }
 
 /// Debug-only running dibit count, so HS_TSDU_DEBUG lines carry a timeline.
@@ -136,6 +181,16 @@ pub struct Framer {
     /// an ordinary cold search. Armed whenever `Payload` state exits having
     /// consumed its full declared length — see `arm_flywheel`.
     flywheel: Option<u32>,
+    /// The last frame type decoded, which a coasted frame's type is inferred
+    /// from (LDU1 ↔ LDU2).
+    last_duid: Option<Duid>,
+    /// The NAC seen on recent clean NIDs and how many times in a row; trusted
+    /// once it reaches `NAC_TRACK_MIN`.
+    nac_seen: Option<(u16, u32)>,
+    /// Coast budget remaining before a lost frame becomes a gap.
+    coast_left: u32,
+    /// Raw dibits since the last frame ended, for gap reporting.
+    since_payload: u32,
 }
 
 impl Default for Framer {
@@ -155,7 +210,80 @@ impl Framer {
             conf: [CERTAIN; FRAME_SYNC_BITS as usize],
             pdu: crate::pdu::PduAssembler::new(),
             flywheel: None,
+            last_duid: None,
+            nac_seen: None,
+            coast_left: MAX_COAST_FRAMES,
+            since_payload: 0,
         }
+    }
+
+    /// The channel's NAC, once enough clean NIDs have agreed on it.
+    pub fn tracked_nac(&self) -> Option<u16> {
+        self.nac_seen
+            .filter(|&(_, n)| n >= NAC_TRACK_MIN)
+            .map(|(nac, _)| nac)
+    }
+
+    fn track_nac(&mut self, nac: u16) {
+        self.nac_seen = Some(match self.nac_seen {
+            Some((seen, n)) if seen == nac => (nac, n.saturating_add(1)),
+            _ => (nac, 1),
+        });
+    }
+
+    /// Whether a lost sync or NID may be bridged by assuming the next voice
+    /// frame: only mid-voice, on a known NAC, within the coast budget.
+    fn can_coast(&self) -> bool {
+        matches!(
+            self.last_duid,
+            Some(Duid::LogicalLinkDataUnit1 | Duid::LogicalLinkDataUnit2)
+        ) && self.tracked_nac().is_some()
+            && self.coast_left > 0
+    }
+
+    /// The voice frame that follows `last_duid` in the LDU1/LDU2 cadence.
+    fn next_voice_duid(&self) -> Duid {
+        match self.last_duid {
+            Some(Duid::LogicalLinkDataUnit1) => Duid::LogicalLinkDataUnit2,
+            _ => Duid::LogicalLinkDataUnit1,
+        }
+    }
+
+    /// Note a frame ending: the flywheel is armed for the next sync and the
+    /// gap clock restarts.
+    fn frame_ended(&mut self, duid: Duid) {
+        self.last_duid = Some(duid);
+        self.since_payload = 0;
+        self.arm_flywheel();
+        self.state = State::Search;
+    }
+
+    /// Slide the sync shift register by one dibit.
+    fn shift_in(&mut self, sd: SoftDibit) -> (u64, u32) {
+        self.shift = (self.shift << 2) | sd.bits as u64;
+        self.conf.rotate_left(2);
+        self.conf[FRAME_SYNC_BITS as usize - 2] = sd.conf[0];
+        self.conf[FRAME_SYNC_BITS as usize - 1] = sd.conf[1];
+        let window = self.shift & ((1u64 << FRAME_SYNC_BITS) - 1);
+        (window, (window ^ FRAME_SYNC).count_ones())
+    }
+
+    /// A real sync word just filled the shift register: report any stretch
+    /// that went unframed before it, then start on the NID.
+    fn on_real_sync(&mut self, errs: u32, events: &mut Vec<FramerEvent>) {
+        // The sync word ends `FLYWHEEL_COAST_DIBITS` (plus at most one status
+        // dibit) after the previous frame; anything beyond a status period
+        // more than that was air nothing decoded from.
+        let expected = FLYWHEEL_COAST_DIBITS + 1;
+        if self.since_payload > expected + 36 {
+            events.push(FramerEvent::Gap {
+                dibits: self.since_payload - expected,
+            });
+        }
+        events.push(FramerEvent::Sync { bit_errors: errs });
+        self.since_fs = 24;
+        self.buf.clear();
+        self.state = State::Nid { presumed: false };
     }
 
     /// Decide whether the current window is the Frame Sync Word.
@@ -169,7 +297,13 @@ impl Framer {
         // cold, no-information search sees this position and only this
         // position, so its bail bound must not move just because a
         // *different* caller (`sync_matches_coast`) needs a looser one.
-        self.sync_matches_at(window, errs, SYNC_ERR_MAX, SYNC_SOFT_MAX_FRACTION, FRAME_SYNC_BITS / 6)
+        self.sync_matches_at(
+            window,
+            errs,
+            SYNC_ERR_MAX,
+            SYNC_SOFT_MAX_FRACTION,
+            FRAME_SYNC_BITS / 6,
+        )
     }
 
     /// As [`Framer::sync_matches`], but with the relaxed thresholds used for
@@ -180,7 +314,13 @@ impl Framer {
         // cap the coast path's looser `SYNC_SOFT_MAX_FRACTION_COAST` at the
         // strict path's bound, defeating the point of loosening it.
         let bail = (FRAME_SYNC_BITS as f32 * SYNC_SOFT_MAX_FRACTION_COAST * 1.5) as u32;
-        self.sync_matches_at(window, errs, SYNC_ERR_MAX_COAST, SYNC_SOFT_MAX_FRACTION_COAST, bail)
+        self.sync_matches_at(
+            window,
+            errs,
+            SYNC_ERR_MAX_COAST,
+            SYNC_SOFT_MAX_FRACTION_COAST,
+            bail,
+        )
     }
 
     fn sync_matches_at(
@@ -253,40 +393,41 @@ impl Framer {
     /// Push one dibit with per-bit confidence; may emit events.
     pub fn push_soft(&mut self, sd: SoftDibit, events: &mut Vec<FramerEvent>) {
         DIBIT_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dibit = sd.bits;
         match self.state {
             State::Search => {
-                self.shift = (self.shift << 2) | dibit as u64;
-                self.conf.rotate_left(2);
-                self.conf[FRAME_SYNC_BITS as usize - 2] = sd.conf[0];
-                self.conf[FRAME_SYNC_BITS as usize - 1] = sd.conf[1];
-                let window = self.shift & ((1u64 << FRAME_SYNC_BITS) - 1);
-                let errs = (window ^ FRAME_SYNC).count_ones();
+                self.since_payload = self.since_payload.saturating_add(1);
+                let (window, errs) = self.shift_in(sd);
                 // The flywheel's one predicted-position check, in addition to
                 // (never instead of) the ordinary check below — see
                 // `arm_flywheel`. Single-shot: cleared here whether or not it
                 // matches, so a miss falls through to the ordinary cold
                 // sliding search from the very next dibit, exactly as before
                 // this existed.
-                let coast_hit = match &mut self.flywheel {
+                let (coast_hit, at_predicted) = match &mut self.flywheel {
                     Some(n) if *n > 1 => {
                         *n -= 1;
-                        false
+                        (false, false)
                     }
                     Some(_) => {
                         self.flywheel = None;
-                        self.sync_matches_coast(window, errs)
+                        (self.sync_matches_coast(window, errs), true)
                     }
-                    None => false,
+                    None => (false, false),
                 };
                 if coast_hit || self.sync_matches(window, errs) {
-                    events.push(FramerEvent::Sync { bit_errors: errs });
+                    self.on_real_sync(errs, events);
+                } else if at_predicted && self.can_coast() {
+                    // The sync word was due here and did not show. Mid-voice
+                    // that is far more often a damaged sync than a silent
+                    // channel, so presume it and let the NID (or, failing
+                    // that, the voice FEC) be the judge.
                     self.since_fs = 24;
                     self.buf.clear();
-                    self.state = State::Nid;
+                    self.state = State::Nid { presumed: true };
                 }
             }
-            State::Nid => {
+            State::Nid { presumed } => {
+                self.since_payload = self.since_payload.saturating_add(1);
                 if !self.status_dibit() {
                     self.buf.push(sd);
                 }
@@ -296,12 +437,21 @@ impl Framer {
                         w = (w << 2) | d.bits as u64;
                     }
                     self.buf.clear();
-                    match self.nid_codec.decode(w) {
+                    let decoded = self.nid_codec.decode(w).filter(|(nid, errs)| {
+                        // Behind a presumed sync the NID is the only evidence
+                        // there is a frame at all, so hold it to a higher
+                        // standard: a nearly clean decode, or the NAC this
+                        // channel is known to use.
+                        !presumed || *errs <= 3 || Some(nid.nac) == self.tracked_nac()
+                    });
+                    match decoded {
                         Some((nid, errs)) => {
                             events.push(FramerEvent::Nid {
                                 nid,
                                 bch_errors: errs,
                             });
+                            self.track_nac(nid.nac);
+                            self.coast_left = MAX_COAST_FRAMES;
                             let needed = match nid.duid {
                                 Duid::TrunkSignalBlock => 98, // first block; extended as needed
                                 // Packet data blocks are the same size as a
@@ -316,17 +466,59 @@ impl Framer {
                                         nac: nid.nac,
                                         duid: nid.duid,
                                     });
+                                    self.last_duid = Some(nid.duid);
+                                    self.since_payload = 0;
                                     self.state = State::Search;
                                     return;
                                 }
                             };
-                            self.state = State::Payload { nid, needed };
+                            self.state = State::Payload {
+                                nid,
+                                needed,
+                                inferred: false,
+                            };
+                        }
+                        None if self.can_coast() => {
+                            // Mid-voice, on a known NAC: the frame is almost
+                            // certainly the next LDU in the cadence. Collect
+                            // it as such and let the voice FEC judge it.
+                            self.coast_left -= 1;
+                            let nid = Nid {
+                                nac: self.tracked_nac().unwrap_or(0),
+                                duid: self.next_voice_duid(),
+                            };
+                            self.state = State::Payload {
+                                nid,
+                                needed: LDU_PAYLOAD_BITS / 2,
+                                inferred: true,
+                            };
                         }
                         None => self.state = State::Search,
                     }
                 }
             }
-            State::Payload { nid, needed } => {
+            State::Payload {
+                nid,
+                needed,
+                inferred,
+            } => {
+                self.since_payload = self.since_payload.saturating_add(1);
+                if inferred {
+                    // A guessed frame is abandoned the moment a real sync word
+                    // shows up inside it: the guess was wrong (the
+                    // transmission ended, say) and the sync is what to follow.
+                    // A confirmed frame never does this — its length is
+                    // declared by a decoded NID, and a sync-looking pattern in
+                    // the middle of it is data.
+                    let (window, errs) = self.shift_in(sd);
+                    if self.sync_matches(window, errs) {
+                        self.buf.clear();
+                        events.push(FramerEvent::Sync { bit_errors: errs });
+                        self.since_fs = 24;
+                        self.state = State::Nid { presumed: false };
+                        return;
+                    }
+                }
                 if !self.status_dibit() {
                     self.buf.push(sd);
                 }
@@ -354,8 +546,8 @@ impl Framer {
                             let conf_bits = crate::soft::soft_dibits_to_bit_conf(&self.buf);
                             let conf: [ImbeConf; 9] = extract_imbe_conf(&conf_bits)
                                 .expect("conf and bits are the same length");
-                            let algid = if nid.duid == Duid::LogicalLinkDataUnit2 {
-                                ldu2_algid_raw(&bits)
+                            let ess = if nid.duid == Duid::LogicalLinkDataUnit2 {
+                                crate::ess::decode_ess(&bits)
                             } else {
                                 None
                             };
@@ -364,17 +556,16 @@ impl Framer {
                                 duid: nid.duid,
                                 imbe: Box::new(frames),
                                 conf: Box::new(conf),
-                                algid,
+                                ess,
+                                inferred,
                             });
                         }
                         self.buf.clear();
-                        self.arm_flywheel();
-                        self.state = State::Search;
+                        self.frame_ended(nid.duid);
                     }
                     _ => {
                         self.buf.clear();
-                        self.arm_flywheel();
-                        self.state = State::Search;
+                        self.frame_ended(nid.duid);
                     }
                 }
             }
@@ -409,14 +600,14 @@ impl Framer {
                     packet,
                 });
                 self.buf.clear();
-                self.arm_flywheel();
-                self.state = State::Search;
+                self.frame_ended(nid.duid);
             }
             None if self.pdu.in_progress() => {
                 // Header accepted; keep collecting the blocks it promised.
                 self.state = State::Payload {
                     nid,
                     needed: self.buf.len() + n,
+                    inferred: false,
                 };
             }
             None => {
@@ -427,8 +618,7 @@ impl Framer {
                 // though the content wasn't.
                 self.pdu.reset();
                 self.buf.clear();
-                self.arm_flywheel();
-                self.state = State::Search;
+                self.frame_ended(nid.duid);
             }
         }
     }
@@ -488,12 +678,12 @@ impl Framer {
                 });
             }
             self.buf.clear();
-            self.arm_flywheel();
-            self.state = State::Search;
+            self.frame_ended(nid.duid);
         } else {
             self.state = State::Payload {
                 nid,
                 needed: (n_blocks + 1) * 98,
+                inferred: false,
             };
         }
     }
@@ -526,7 +716,11 @@ mod flywheel_tests {
         // raw gap must be 25 to still land 24 *content* dibits later.
         f.since_fs = 12;
         f.arm_flywheel();
-        assert_eq!(f.flywheel, Some(25), "since_fs=12, straddles a status dibit");
+        assert_eq!(
+            f.flywheel,
+            Some(25),
+            "since_fs=12, straddles a status dibit"
+        );
 
         // since_fs=35 itself is the status position: the very next dibit
         // (s=35) is status and doesn't count, so this also needs 25.

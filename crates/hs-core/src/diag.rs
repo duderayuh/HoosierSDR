@@ -173,6 +173,17 @@ pub struct Diagnostics {
     /// entirely when low confidence didn't happen to produce a correctable
     /// error this particular frame.
     pub voice_frames_low_quality: u64,
+    /// Voice frames whose LDU had its sync word or NID lost and was decoded
+    /// on the LDU1/LDU2 cadence instead (`hs_p25::framer` coasting).
+    pub voice_frames_inferred: u64,
+    /// 20 ms voice slots the channel was on the air for with nothing
+    /// decoded, filled with held-and-faded audio so the call's timeline
+    /// stays honest (a lost frame is silence-ish, never deleted time).
+    pub voice_frames_concealed: u64,
+    /// LDU2 Encryption Sync fields that passed their Reed–Solomon check,
+    /// and ones that did not (and so said nothing about encryption).
+    pub ess_valid: u64,
+    pub ess_invalid: u64,
     pub health: SymbolHealth,
 }
 
@@ -270,6 +281,10 @@ impl Diagnostics {
         s.push_str(&format!(
             "  \"voice_frames_low_quality\": {},\n",
             self.voice_frames_low_quality
+        ));
+        s.push_str(&format!(
+            "  \"voice_frames_inferred\": {},\n  \"voice_frames_concealed\": {},\n  \"ess_valid\": {},\n  \"ess_invalid\": {},\n",
+            self.voice_frames_inferred, self.voice_frames_concealed, self.ess_valid, self.ess_invalid
         ));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
         s.push_str(&format!("  \"tsbks\": {},\n", self.tsbks));

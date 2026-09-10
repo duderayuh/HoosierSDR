@@ -360,6 +360,20 @@ pub struct CqpskReceiver {
     /// Whether this acquisition has already spent its one soft recovery (see
     /// the watchdog in `push_phase`). Cleared on every fresh acquisition.
     soft_trip_used: bool,
+    /// The blind estimator kept running in the background while tracking,
+    /// so a watchdog trip can be answered with a fresh measurement of the
+    /// air instead of a reset — see `push_phase`.
+    bg_acq: C32,
+    bg_n: u32,
+    /// The background estimator's last verdict: the carrier bias, when its
+    /// window was coherent enough to be real signal.
+    bg_est: Option<f32>,
+    /// True once the receiver has ever tracked: a re-acquisition after that
+    /// keeps emitting decisions on the last bias (see `push_phase`).
+    had_lock: bool,
+    /// Watchdog trips answered by adopting the background estimate rather
+    /// than resetting (diagnostic).
+    relocks: u32,
 }
 
 /// Symbols to let the timing loop settle before blind acquisition starts.
@@ -453,9 +467,9 @@ const SOFT_TRIP_MIN_AGE: u32 = 5 * BAD_RUN_LIMIT;
 /// the threshold forever without ever tripping it — is directly unit
 /// testable.
 fn update_bad_run(bad_run: &mut u32, err_ewma: f32) -> bool {
-    // `!(<=)` rather than `>` so a NaN err_ewma (poisoned upstream) counts as
-    // unlocked and re-acquires, instead of comparing false forever.
-    if !(err_ewma <= LOCK_ERR_MAX) {
+    // A NaN err_ewma (poisoned upstream) must count as unlocked and
+    // re-acquire, instead of comparing false forever.
+    if err_ewma.is_nan() || err_ewma > LOCK_ERR_MAX {
         *bad_run += 1;
         *bad_run >= BAD_RUN_LIMIT
     } else {
@@ -537,6 +551,11 @@ impl CqpskReceiver {
             bad_run: 0,
             since_acquired: 0,
             soft_trip_used: false,
+            bg_acq: C32::ZERO,
+            bg_n: 0,
+            bg_est: None,
+            had_lock: false,
+            relocks: 0,
         }
     }
 
@@ -615,6 +634,21 @@ impl CqpskReceiver {
         // `rotate_dibit`); the residual quarter-turn is resolved against the
         // Frame Sync Word downstream.
         if !self.acquired {
+            // A *re*-acquisition keeps deciding on the last known bias while
+            // the estimator works. Going silent here — the earlier behaviour
+            // — cost the framer its clock: it counts dibits, so a hundred
+            // milliseconds with none makes the frame it resumes collecting a
+            // splice of two stretches of air, and the flywheel and coast
+            // logic that keep voice continuous then land in the wrong place.
+            // The decisions may be wrong (the bias may have moved), in which
+            // case the voice FEC discards them, exactly as it would in a
+            // fade; if the bias is still right, nothing was lost at all.
+            let emit = if self.had_lock {
+                let corr = wrap_pi(raw - self.freq_bias);
+                Some((dphase_to_dibit(corr), corr))
+            } else {
+                None
+            };
             if self.settle > SETTLE_SYMS {
                 let a = 4.0 * raw - PI;
                 self.acq = self.acq + C32::new(a.cos(), a.sin());
@@ -633,8 +667,12 @@ impl CqpskReceiver {
                     if coherence > ACQ_COHERENCE_MIN {
                         self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
                         self.acquired = true;
+                        self.had_lock = true;
                         self.since_acquired = 0;
                         self.soft_trip_used = false;
+                        self.bg_acq = C32::ZERO;
+                        self.bg_n = 0;
+                        self.bg_est = None;
                         // The eye is open: gear-shift the DFE feedforward from
                         // the fast acquisition step to the slow tracking step.
                         self.eq.set_step(DFE_FF_TRACK, DFE_FB);
@@ -658,7 +696,7 @@ impl CqpskReceiver {
                     }
                 }
             }
-            return None;
+            return emit;
         }
 
         // Phase 2 — track. Differential phase, minus the carrier bias.
@@ -669,6 +707,21 @@ impl CqpskReceiver {
         let ideal = dibit_to_dphase(dibit);
         let err = wrap_pi(corr - ideal);
         self.freq_bias += self.mu_freq * err;
+
+        // The blind estimator keeps measuring the air in the background, one
+        // window at a time, so that when the decision-directed loop is judged
+        // lost there is already an independent answer to "what is the bias
+        // right now" — the loop can walk off during a fade (steering on wrong
+        // decisions) while the signal itself is fine.
+        let a = 4.0 * raw - PI;
+        self.bg_acq = self.bg_acq + C32::new(a.cos(), a.sin());
+        self.bg_n += 1;
+        if self.bg_n >= ACQ_SYMS {
+            let coherence = self.bg_acq.norm_sq().sqrt() / self.bg_n as f32;
+            self.bg_est = (coherence > ACQ_COHERENCE_MIN).then(|| wrap_pi(self.bg_acq.arg()) / 4.0);
+            self.bg_acq = C32::ZERO;
+            self.bg_n = 0;
+        }
 
         // Watch the lock, and re-acquire if it is not real.
         //
@@ -681,6 +734,19 @@ impl CqpskReceiver {
         self.err_ewma += 0.002 * (err.abs() - self.err_ewma);
         self.since_acquired = self.since_acquired.saturating_add(1);
         if update_bad_run(&mut self.bad_run, self.err_ewma) {
+            // Signal is present and coherent right now, so the loss is the
+            // tracking loop's, not the channel's: take the background
+            // measurement and carry on. Nothing else — equalizer taps, timing,
+            // the dibit stream — is disturbed. (A residual quarter-turn
+            // difference from the old bias shows up as a rotated Frame Sync
+            // Word, which the derotator downstream re-resolves.)
+            if let Some(bias) = self.bg_est.take() {
+                self.freq_bias = bias;
+                self.bad_run = 0;
+                self.err_ewma = 0.0;
+                self.relocks += 1;
+                return Some((dibit, corr));
+            }
             // An acquisition that has demonstrably held for a while (see
             // SOFT_TRIP_MIN_AGE) gets one non-destructive recovery before the
             // full reacquire: reset only the bookkeeping, keep the equalizer
@@ -717,6 +783,8 @@ impl CqpskReceiver {
 
     /// Restart blind acquisition — call after a prolonged loss of sync, when
     /// the tracked bias may have walked onto a neighbouring quarter turn.
+    /// A receiver that has tracked before keeps emitting decisions on its
+    /// last bias meanwhile (see `push_phase`).
     pub fn reacquire(&mut self) {
         self.acq = C32::ZERO;
         self.acq_n = 0;
@@ -726,7 +794,12 @@ impl CqpskReceiver {
         self.bad_run = 0;
         self.since_acquired = 0;
         self.soft_trip_used = false;
-        self.freq_bias = 0.0;
+        self.bg_acq = C32::ZERO;
+        self.bg_n = 0;
+        self.bg_est = None;
+        // The bias is kept: it is the best guess there is until the
+        // estimator says otherwise, and it is what the interim decisions
+        // are made on.
         self.prev_sym = None;
         self.acq_failures = 0;
         // Discard any taps the equalizer walked onto the noise in the window
@@ -746,6 +819,18 @@ impl CqpskReceiver {
     /// noise. Exposed for diagnostics.
     pub fn lock_error(&self) -> f32 {
         self.err_ewma
+    }
+
+    /// Watchdog trips answered from the background estimate instead of a
+    /// reset (diagnostic).
+    pub fn relocks(&self) -> u32 {
+        self.relocks
+    }
+
+    /// The background estimator's latest verdict on the carrier bias, if its
+    /// last window looked like signal (diagnostic / tests).
+    pub fn background_bias(&self) -> Option<f32> {
+        self.bg_est
     }
 
     /// The echo structure the equalizer has learned — the live simulcast-
@@ -848,6 +933,125 @@ mod tests {
         assert_eq!(
             watchdog_action(SOFT_TRIP_MIN_AGE, true),
             WatchdogAction::HardReacquire
+        );
+    }
+
+    /// Random dibits (a periodic pattern is structure the equalizer and
+    /// timing loop would latch onto, which no real voice stream has).
+    fn random_dibits(n: usize, mut seed: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed & 3) as u8
+            })
+            .collect()
+    }
+
+    /// Receiver input: RRC-shaped CQPSK at `sps` under a carrier offset of
+    /// `bias` radians of differential phase per symbol, with mild noise.
+    fn offset_iq(dibits: &[u8], sps: usize, bias: f32) -> Vec<C32> {
+        let iq = modulate_iq(dibits, sps, 0.2);
+        let step = bias / sps as f32;
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed as f32 / u64::MAX as f32 - 0.5) * 0.1
+        };
+        iq.iter()
+            .enumerate()
+            .map(|(n, &x)| {
+                let p = step * n as f32;
+                let r = x * C32::new(p.cos(), p.sin());
+                C32::new(r.re + noise(), r.im + noise())
+            })
+            .collect()
+    }
+
+    /// Symbol error rate of the last `n` of `got` against `sent`, searching
+    /// the unknown delay and the quarter-turn rotation the blind front end
+    /// legitimately leaves for the Frame Sync Word to resolve.
+    fn tail_error(got: &[u8], sent: &[u8], n: usize) -> f64 {
+        let tail = &got[got.len().saturating_sub(n)..];
+        let mut best = 1.0f64;
+        for k in 0..4u8 {
+            let derot: Vec<u8> = tail.iter().map(|&d| rotate_dibit(d, k)).collect();
+            for delay in 0..sent.len().saturating_sub(derot.len()) {
+                let errs = derot
+                    .iter()
+                    .zip(&sent[delay..delay + derot.len()])
+                    .filter(|(a, b)| a != b)
+                    .count();
+                best = best.min(errs as f64 / derot.len() as f64);
+            }
+        }
+        best
+    }
+
+    /// The background estimator sees the carrier bias while the receiver
+    /// tracks, independently of the decision-directed loop.
+    #[test]
+    fn the_background_estimator_measures_the_bias_while_tracking() {
+        let bias = 0.15f32;
+        let dibits = random_dibits(4000, 0x1234_5678);
+        let mut rx = CqpskReceiver::new(10, 0.2);
+        for x in offset_iq(&dibits, 10, bias) {
+            rx.push(x);
+        }
+        assert!(rx.acquired());
+        let bg = rx.background_bias().expect("no background estimate");
+        assert!((bg - bias).abs() < 0.03, "background {bg} vs bias {bias}");
+        assert!((rx.freq_bias() - bias).abs() < 0.03);
+    }
+
+    /// A watchdog false alarm must cost nothing: a receiver told to
+    /// re-acquire keeps deciding on its last bias, and those decisions are
+    /// right, so the framer downstream never sees a hole in the stream.
+    #[test]
+    fn a_reacquiring_receiver_keeps_emitting_correct_dibits() {
+        let bias = 0.1f32;
+        let dibits = random_dibits(6000, 0xFEED_BEEF);
+        let iq = offset_iq(&dibits, 10, bias);
+        let mut rx = CqpskReceiver::new(10, 0.2);
+        let mut out = Vec::new();
+        let cut = 3000 * 10;
+        for &x in &iq[..cut] {
+            if let Some(d) = rx.push(x) {
+                out.push(d);
+            }
+        }
+        assert!(rx.acquired());
+        assert!(
+            tail_error(&out, &dibits, 1500) < 0.02,
+            "not locked before the cut"
+        );
+        rx.reacquire();
+        assert!(!rx.acquired());
+        let mut emitted = 0usize;
+        for &x in &iq[cut..cut + 500 * 10] {
+            if let Some(d) = rx.push(x) {
+                out.push(d);
+                emitted += 1;
+            }
+        }
+        assert!(
+            emitted >= 480,
+            "only {emitted} dibits emitted in 500 symbols of re-acquisition"
+        );
+        assert!(rx.acquired(), "did not re-acquire on clean signal");
+        for &x in &iq[cut + 500 * 10..] {
+            if let Some(d) = rx.push(x) {
+                out.push(d);
+            }
+        }
+        // Everything after the cut, interim decisions included, decodes.
+        let ser = tail_error(&out, &dibits, 2900);
+        assert!(
+            ser < 0.02,
+            "symbol error {ser:.3} across the re-acquisition"
         );
     }
 
