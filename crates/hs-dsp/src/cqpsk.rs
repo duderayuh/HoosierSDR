@@ -23,6 +23,23 @@ use crate::equalizer::{CmaDfe, CmaEqualizer, LmsFse};
 use crate::C32;
 use core::f32::consts::PI;
 
+/// Event trace for receiver debugging, on when `HS_CQPSK_TRACE` is set in the
+/// environment: acquisition windows and their coherence, watchdog trips and
+/// tap resets, each stamped with the receiver's symbol count. Off, this is
+/// one relaxed atomic load per event.
+fn trace_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static ON: AtomicU8 = AtomicU8::new(2);
+    match ON.load(Ordering::Relaxed) {
+        2 => {
+            let v = std::env::var_os("HS_CQPSK_TRACE").is_some();
+            ON.store(u8::from(v), Ordering::Relaxed);
+            v
+        }
+        v => v == 1,
+    }
+}
+
 /// Which pre-detection equalizer the CQPSK receiver runs.
 ///
 /// The thesis A/B is `Cma` vs `None`; `Dfe` adds decision feedback to cancel
@@ -360,6 +377,8 @@ pub struct CqpskReceiver {
     /// Whether this acquisition has already spent its one soft recovery (see
     /// the watchdog in `push_phase`). Cleared on every fresh acquisition.
     soft_trip_used: bool,
+    /// Symbols out of the timing loop so far (trace stamps).
+    symbols: u64,
 }
 
 /// Symbols to let the timing loop settle before blind acquisition starts.
@@ -537,6 +556,7 @@ impl CqpskReceiver {
             bad_run: 0,
             since_acquired: 0,
             soft_trip_used: false,
+            symbols: 0,
         }
     }
 
@@ -574,6 +594,7 @@ impl CqpskReceiver {
         let cleaned = self.agc.push(self.dc.push(iq));
         let filtered = self.mf.push(cleaned)?;
         let sym = self.gardner.push(filtered)?;
+        self.symbols += 1;
         self.settle = self.settle.saturating_add(1);
         // Equalize before differential detection (the thesis). Freeze the
         // taps until the timing loop has settled so it adapts on a real eye.
@@ -602,6 +623,9 @@ impl CqpskReceiver {
         // receiver decode garbage forever with no recovery path. Recover before
         // the poison can spread.
         if !raw.is_finite() {
+            if trace_on() {
+                eprintln!("cqpsk[{}] non-finite phase: reacquire", self.symbols);
+            }
             self.reacquire();
             return None;
         }
@@ -630,6 +654,18 @@ impl CqpskReceiver {
                     // real transmission that follows at chance. Requiring
                     // coherence makes acquisition wait for signal instead.
                     let coherence = self.acq.norm_sq().sqrt() / self.acq_n as f32;
+                    if trace_on() {
+                        eprintln!(
+                            "cqpsk[{}] acq window coherence {:.3} {}",
+                            self.symbols,
+                            coherence,
+                            if coherence > ACQ_COHERENCE_MIN {
+                                "ACQUIRED"
+                            } else {
+                                "fail"
+                            }
+                        );
+                    }
                     if coherence > ACQ_COHERENCE_MIN {
                         self.freq_bias = wrap_pi(self.acq.arg()) / 4.0;
                         self.acquired = true;
@@ -652,6 +688,9 @@ impl CqpskReceiver {
                         // cold start and the reset cannot hurt acquisition.
                         self.acq_failures += 1;
                         if self.acq_failures >= ACQ_FAIL_LIMIT {
+                            if trace_on() {
+                                eprintln!("cqpsk[{}] acq: taps reset to identity", self.symbols);
+                            }
                             self.eq.reset();
                             self.acq_failures = 0;
                         }
@@ -689,6 +728,15 @@ impl CqpskReceiver {
             // moment ago. A wrong acquisition trips this within one
             // BAD_RUN_LIMIT window, long before it could look "established",
             // so it still gets the immediate hard reset below.
+            if trace_on() {
+                eprintln!(
+                    "cqpsk[{}] watchdog trip err_ewma {:.3} since_acquired {} -> {:?}",
+                    self.symbols,
+                    self.err_ewma,
+                    self.since_acquired,
+                    watchdog_action(self.since_acquired, self.soft_trip_used)
+                );
+            }
             match watchdog_action(self.since_acquired, self.soft_trip_used) {
                 WatchdogAction::SoftRecover => {
                     self.soft_trip_used = true;

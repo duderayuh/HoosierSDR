@@ -39,6 +39,7 @@ pass to `--rate` must match the capture and be a multiple of 4800.
 | `voice_frame_errors` | cumulative post-FEC bit-error count across all voice frames (mbelib's `errs2`) |
 | `voice_frames_holding` | voice frames whose `errs2` exceeded 5 — mbelib rejected them as too corrupt and concealed by holding the previous frame |
 | `voice_error_max` | worst single-frame `errs2` seen |
+| `derotator_slips` | (CQPSK) times the quarter-turn derotation was re-pinned after first lock — a carrier-bias slip or a re-acquisition on another turn. Each one used to silence the framer until the next hard re-acquire (an 11 s hole on a clean transmission, 2026-09-09); now costs at most one frame |
 | `mean_voice_quality` | mean composite `VoiceQuality` score (0..1) across all voice frames — combines FEC error count, pre-FEC demodulator confidence, and (CQPSK) carrier lock; a fuller picture than `voice_frame_errors` alone, which can miss a frame that passed FEC clean while every symbol sat on a decision boundary the whole time |
 | `voice_frames_low_quality` | voice frames whose composite score fell under 0.5 — a superset of `voice_frames_holding` that also catches the low-confidence-but-FEC-clean case above |
 | `sync_count` | frame-sync detections |
@@ -74,3 +75,18 @@ alias Link Control words (MFID 0x90, LCO 0x15/0x17), accepted only after the
 same text repeats. The field layout of those words is deliberately *not*
 assumed; `vendor_lc_samples` keeps their raw arguments so a real capture can
 turn this into a proper parser. Empty on every capture in the corpus so far.
+
+## Receiver event trace (`HS_CQPSK_TRACE`, added 2026-09-09)
+
+Set `HS_CQPSK_TRACE=1` in the environment and the CQPSK receiver prints its
+acquisition and recovery events to stderr, each stamped with its symbol
+count (≈ 4800/s): every blind-acquisition window with its coherence
+(`ACQUIRED` or `fail`), tap resets to identity, watchdog trips with the
+smoothed decision error and which recovery they chose, and non-finite-sample
+re-acquires. It is how the 858.9875 MHz dropout was diagnosed: the receiver
+acquired at 5.8 s and reported nothing for the next 24 s while the framer saw
+no sync words for 11 of them — a silent false lock, not a lost one.
+
+```sh
+HS_CQPSK_TRACE=1 hoosier-sdr --cqpsk --offset 1325k --rate 9600000 --log out.json capture.cs16 2> trace.txt
+```

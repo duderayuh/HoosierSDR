@@ -10,9 +10,11 @@ synthetic table with `cargo run -p hs-bench`.
 controlled experiment (see "Thesis experiment" below), and the receiver now
 decodes real off-air P25 (see "First field decode"). The full gate is
 "measurably lower BER and sync-loss than SDRTrunk on real simulcast
-recordings," which still requires (a) the field-IQ corpus, not yet captured,
-and (b) wiring the proven complex equalizer behind live carrier/timing
-recovery on the CQPSK front end. Those are the remaining integration steps.
+recordings," which still requires (a) the field-IQ corpus — the first
+wideband survey capture landed 2026-09-09, see "Survey capture — home" below;
+more locations, especially degraded ones, are still needed — and (b) wiring
+the proven complex equalizer behind live carrier/timing recovery on the CQPSK
+front end. Those are the remaining integration steps.
 
 ## Thesis experiment (complex two-ray channel) — PASSES
 
@@ -121,6 +123,192 @@ FEC was already absorbing the difference. The thesis-deciding capture is
 still the one from a degraded location — deep simulcast overlap between
 towers, where equal-strength multipath makes the detect-first path actually
 drop frames.
+
+## Survey capture — home, 2026-09-09 (first Airspy 10 MSPS field file)
+
+The app's survey mode pinned a location and recorded 60 s of the whole site:
+Airspy R2, band centred on the control channel at 857.6625 MHz, written as
+`home_39.80070_-86.14607_1788971875.cs16` (2.3 GB) with the live control
+diagnostics beside it. NAC 0x261, CQPSK/LSM control, 7 talkgroups active on
+10 voice channels in the minute.
+
+### First lesson: the file is 9.6 MSPS, not 10
+
+The app normalizes an Airspy's 10 MSPS to 9.6 (×24/25) before anything
+downstream sees it — and the survey IQ tap sits downstream of that, while the
+survey metadata recorded the *requested* 10 MSPS. Decoded at the stamped rate
+the file looked bizarre: the control channel at zero offset decoded (760
+syncs, but with 13× the app's sync bit-error rate and a 3 s "dead" head),
+`--follow` found all 52 grants and decoded **0 s of voice** from every one,
+`--scan` reported no P25 anywhere, and a spectrum of the file showed strong
+carriers where no channel had been granted. The tell was in the spectrum:
+every carrier sat 4.0–4.3 % of its offset too far from centre — 856.9375 MHz
+(−725 kHz) appeared at −755 kHz, 858.9875 (+1.325 MHz) at +1.380 — which is
+exactly 25/24. A signal at zero offset is immune to a rate error, so the
+control channel worked and nothing else did.
+
+Fixed in the app (the survey record now carries the delivered rate) and in
+this file's metadata. Everything below was decoded with `--rate 9600000`.
+
+### What the band holds
+
+```sh
+hoosier-sdr --scan --rate 9600000 --freq 857.6625M home_….cs16
+```
+
+Decoding every 12.5 kHz slot for 4 s finds **16 P25 channels across five
+NACs** in the 9.6 MHz around this site's control channel — five of them
+control channels:
+
+| Frequency | Kind | Mod | NAC | Clean NIDs / syncs | Sync bit-err |
+|---:|:--|:--|:--:|:--:|:--:|
+| 857.6625 | control | CQPSK | 0x261 | 52 / 52 | 0.00 |
+| 853.8875 | control | CQPSK | 0x6B7 | 42 / 48 | 0.10 |
+| 859.5375 | control | C4FM | 0x6B6 | 46 / 49 | 0.35 |
+| 859.9625 | control | C4FM | 0x6B5 | 26 / 47 | 0.43 |
+| 857.2125 | P25 | CQPSK | 0x261 | 89 / 97 | 0.21 |
+| 857.7625 | P25 | CQPSK | 0x261 | 87 / 91 | 0.21 |
+| 855.4875 | P25 | CQPSK | 0x261 | 48 / 83 | 0.96 |
+| 858.7625 | P25 | CQPSK | 0x261 | 33 / 45 | 0.36 |
+| 856.9375 | voice | CQPSK | 0x261 | 45 / 45 | 0.02 |
+| 856.7625 | voice | CQPSK | 0x261 | 44 / 44 | 0.00 |
+| 858.9875 | voice | CQPSK | 0x261 | 13 / 14 | 0.07 |
+| 857.3875 | P25 | CQPSK | 0x260 | 78 / 84 | 0.13 |
+| 857.3625 | voice | CQPSK | 0x260 | 44 / 44 | 0.00 |
+| 858.3375 | voice | CQPSK | 0x260 | 37 / 37 | 0.00 |
+| 854.1875 | voice | CQPSK | 0x6B7 | 16 / 16 | 0.00 |
+| 857.9625 | voice | C4FM | 0x6B5 | 7 / 9 | 1.11 |
+
+Two neighbouring sites of the same system (0x260, and 0x261's own alternate
+carriers at 857.2125 / 857.7625 / 855.4875 / 858.7625, which decode NIDs
+without granting) and three others (0x6B5, 0x6B6, 0x6B7) are all audible
+from one rooftop — the overlap that makes this a simulcast problem in the
+first place. At the mislabelled rate the same scan found nothing.
+
+### Control channel (60 s, 798 frames)
+
+| Measure | Equalizer | Bypassed |
+|---|:--:|:--:|
+| Frame syncs | 798 | 798 |
+| Syncs with zero bit errors | **774** | 580 |
+| Mean sync bit errors (of 48) | **0.104** | 0.404 |
+| Clean NIDs | 758 / 798 | 740 / 797 |
+| TSBKs | 2381 | 2381 |
+
+Every sync landed exactly 360 symbols after the last: not one control frame
+was lost in the minute, either way. 374 grants across 7 talkgroups and 10
+voice channels; 10 grants carried the encryption flag and were skipped.
+The control carrier is ~47 dB above the noise floor at this location — still
+a strong-signal site, not the degraded one the thesis needs.
+
+### Trunk-follow: 17 calls, 47.3 s of voice, identical either way
+
+```sh
+hoosier-sdr --follow --control 857.6625M --freq 857.6625M --rate 9600000 [--no-equalizer] home_….cs16
+```
+
+17 calls completed (3 still open when the file ended), 47.3 s of voice, and
+1447 CQPSK syncs on the voice channels — the same 17 calls, seconds and sync
+counts with the equalizer in and out. As on every strong capture so far, the
+call-level outcome does not move.
+
+### Equalizer A/B per channel — the first *voice-frame* difference
+
+Each channel decoded twice from the same file:
+
+```sh
+hoosier-sdr --cqpsk --offset <off> --rate 9600000 [--no-equalizer] --log out.json home_….cs16
+```
+
+| Channel | Syncs eq/no-eq | Zero-error syncs eq/no-eq | Sync bit-err eq/no-eq | Voice frames eq/no-eq | Voice frame errors eq/no-eq |
+|---|:--:|:--:|:--:|:--:|:--:|
+| 857.6625 control | 798 / 798 | **774** / 580 | **0.104** / 0.404 | — | — |
+| 858.9875 (+1325 kHz) | 212 / **325** | 212 / 298 | **0.000** / 0.102 | 513 / **774** | **0** / 112 |
+| 856.9375 (−725 kHz) | 325 / 324 | **292** / 215 | **0.258** / 0.630 | 315 / 315 | **73** / 138 |
+| 856.7625 (−900 kHz) | 207 / 195 | **185** / 136 | 0.594 / **0.451** | 378 / 378 | **93** / 154 |
+| 857.9375 (+275 kHz) | 158 / 160 | **157** / 126 | **0.006** / 0.237 | 297 / 297 | **53** / 148 |
+| 856.2125 (−1450 kHz) | 111 / 105 | **102** / 88 | 0.577 / **0.190** | 126 / 126 | **34** / 77 |
+
+Three things, read honestly:
+
+1. **The equalizer halves voice-frame errors on every voice channel** (73 vs
+   138, 93 vs 154, 53 vs 148, 34 vs 77) with the same number of voice frames
+   decoded. This is the first capture where the equalizer moves a metric
+   downstream of the sync word — the IMBE frames themselves come out cleaner
+   — rather than only the residual sync bit errors. Zero-error syncs go up on
+   all six channels too, and the control channel's residual error drops 4×.
+2. **On 858.9875 MHz the equalized path lost a third of the channel**: 212
+   syncs and 10.3 s of voice against 325 and 15.5 s bypassed — while what it
+   did decode was perfect (0 sync bit errors, 0 voice frame errors). The
+   follower, which runs both demodulators and keeps the cleaner, labelled
+   every call on that channel C4FM. Either that channel is not LSM at all, or
+   the CMA equalizer fails to acquire on some transmissions and drops them
+   whole. This is the one place in the corpus where the equalizer costs
+   decode outcome; it needs its own investigation before the front end is
+   declared done.
+3. Two channels (856.7625, 856.2125) show a *higher* mean sync bit error with
+   the equalizer even though their zero-error count and voice-frame errors are
+   better — a few badly-equalized syncs pulling the mean up. The mean is not
+   the right summary for a bimodal error distribution; the zero-error count
+   and the voice-frame errors are.
+
+### The 858.9875 MHz hole, found and fixed (same day)
+
+The "equalized path lost a third of the channel" above was not the
+equalizer. With `HS_CQPSK_TRACE=1` the receiver reports acquiring at 5.8 s
+and then *nothing* — no watchdog trip — for the next 24 s, while the framer
+saw no sync word from 12.93 s to 24.31 s and the bypassed receiver decoded
+124 clean syncs through the same interval. A silent false lock: the carrier
+bias slipped a quarter turn (invisible to decision-directed tracking, which
+is symmetric under π/2), and the derotator, which resolved the rotation once
+at first lock and then froze it, permuted every dibit after the slip. The
+same thing happens after any hard re-acquire that lands on another quarter
+turn. On a live site the follower's C4FM decoder then wins the call by clean
+NIDs, and the listener hears a C4FM discriminator's rendering of an LSM
+signal — garbled, "choppy, like dropped frames".
+
+The derotator now keeps matching the sync word under all four rotations
+after lock and re-pins on a mismatch, feeding the framer through a 24-dibit
+delay line so the frame that reveals the slip is itself delivered intact.
+Same file, same commands, before → after:
+
+| Channel | Syncs | Zero-error syncs | Voice frames | Voice frame errors | Slips re-pinned |
+|---|:--:|:--:|:--:|:--:|:--:|
+| 858.9875 (+1325 kHz) | 212 → **344** (bypass 325) | 212 → 322 | 513 → **774** (= bypass) | 0 → 1 | 2 |
+| every other channel above | unchanged | unchanged | unchanged | unchanged | 0 |
+| 857.6625 control | 798 → 798 (TSBKs 2381 → 2378: the delay line holds the last 24 dibits at end of file) | 774 → 774 | — | — | 0 |
+
+With that, the equalized path decodes at least as many frames as the bypassed
+one on every channel of this capture, and halves the voice-frame errors on
+each — the A/B table above stands, minus its one bad row.
+
+### Where the CPU goes at 10 MSPS (live app, sampled 2026-09-09)
+
+A 10 s `sample` of the desktop app following this site live from the
+Airspy, by CPU-consuming frame, before and after two inner-loop rewrites:
+
+| Work | Where | Before | After |
+|---|---|:--:|:--:|
+| 24/25 rational resampler (10 → 9.6 MSPS, whole band) | reader thread | ~33 % of a core (41 Msps/s) | ~10 % (100 Msps/s) |
+| Control-channel wideband decimator (8191-tap complex FIR) | decode thread | ~20 % | ~8 % (60 s decode: 10.2 → 4.2 s CPU) |
+| Channelizer FFT (traffic channels, only while calls are up) | decode thread | ~18 % | unchanged |
+| libairspy `iqconverter_int16_process` | USB thread | ~13 % | unchanged (inside the driver) |
+| Everything else (decoders, vocoder, spectrum, UI events) | various | < 5 % | < 5 % |
+
+The two rewrites are the same change: the resampler's polyphase branches
+are stored contiguously and the delay lines split into real/imaginary
+`f32` rings, so each output is a straight dot product with eight partial
+sums — a form the compiler vectorizes, where a single running `f32` sum
+cannot be reordered and never was. Numerics differ by rounding order only;
+every hs-dsp test passes unchanged. The probe-free offline follow of this
+capture went from 33.6 s to 25.8 s of CPU per 60 s of air; the app's total
+should fall from the 90–130 % seen in Activity Monitor toward 50–60 %,
+leaving the channelizer FFT and the driver's own converter as the floor.
+What remains above that is transcription — see the engine measurements in
+`docs/` and prefer `mlx-whisper` on Apple silicon.
+
+Still missing for the gate: a capture from a degraded location, and the
+external-decoder comparison on this file.
 
 ## Soft-decision decoding — measured on the field capture
 
