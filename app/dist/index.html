@@ -494,7 +494,7 @@
                 <label class="field"><span class="lab">Max length (s)</span><input id="cvMax" type="text" inputmode="numeric" value="900" /></label>
               </div>
               <label class="field"><span class="lab">Summary prompt <span class="mono faint">what the model should extract</span></span><textarea id="cvPrompt" style="min-height:64px"></textarea></label>
-              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {tgdesc} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
               <div class="row3">
                 <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Min transmissions</span><input id="cvMin" type="text" inputmode="numeric" value="1" /></label>
@@ -609,7 +609,7 @@
                 <label class="field" style="grid-column:span 2"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="azCondAdd" style="justify-self:start">+ Condition</button></label>
               </div>
               <div id="azConds" class="list" style="max-height:calc(18vh / var(--z))"></div>
-              <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
               <div class="row3">
                 <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
                 <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>

@@ -768,6 +768,7 @@ fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Val
         .replace("{name}", &r.name)
         .replace("{tg}", &f.tg.to_string())
         .replace("{tgname}", &f.tg_name)
+        .replace("{tgdesc}", f.tg_desc.as_deref().unwrap_or(""))
         .replace("{unit}", &f.unit.to_string())
         .replace(
             "{unitname}",

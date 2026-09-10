@@ -141,6 +141,9 @@ pub struct Conversation {
     pub rule_name: String,
     pub tg: u16,
     pub tg_name: String,
+    /// RadioReference "Description"; becomes the `{tgdesc}` token.
+    #[serde(default)]
+    pub tg_desc: Option<String>,
     pub mobile_unit: Option<u32>,
     /// Every mobile (non-fixed) radio in the exchange, in order of first
     /// appearance; `mobile_unit` is the first of them.
@@ -377,6 +380,7 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
                     rule_name: r.name.clone(),
                     tg: f.tg,
                     tg_name: f.tg_name.clone(),
+                    tg_desc: f.tg_desc.clone(),
                     mobile_unit: (!fixed).then_some(f.unit),
                     participants: (!fixed).then_some(f.unit).into_iter().collect(),
                     pieces: vec![piece],
@@ -595,6 +599,7 @@ pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
         .replace("{rule}", &r.name)
         .replace("{tg}", &c.tg.to_string())
         .replace("{tgname}", &c.tg_name)
+        .replace("{tgdesc}", c.tg_desc.as_deref().unwrap_or(""))
         .replace("{units}", &units.join(", "))
         .replace("{unitnames}", &unit_names.join(", "))
         .replace("{calls}", &c.pieces.len().to_string())
@@ -997,6 +1002,7 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
             rule_name: rule.name.clone(),
             tg,
             tg_name: format!("TG {tg}"),
+            tg_desc: None,
             mobile_unit: pieces.iter().find(|p| !p.fixed).map(|p| p.unit),
             participants: {
                 let mut v: Vec<u32> = Vec::new();
@@ -1092,6 +1098,7 @@ mod tests {
             rule_name: "Hospitals".into(),
             tg,
             tg_name: "TG".into(),
+            tg_desc: None,
             mobile_unit: mobile,
             participants: mobile.into_iter().collect(),
             pieces: Vec::new(),
@@ -1274,6 +1281,7 @@ mod tests {
             rule_name: "Hospitals".into(),
             tg: 10202,
             tg_name: "Methodist ER".into(),
+            tg_desc: None,
             mobile_unit: Some(790065),
             participants: vec![790065],
             pieces: vec![
