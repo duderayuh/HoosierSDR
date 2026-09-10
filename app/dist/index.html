@@ -888,8 +888,21 @@
 
     <!-- ===================== SETTINGS ===================== -->
     <div class="view" id="view-settings" style="display:none">
-      <section class="two-col">
-        <div class="stack">
+      <section class="settings-layout">
+        <nav class="settings-nav" id="setNav">
+          <button class="on" data-p="appearance">Appearance</button>
+          <button data-p="scanning">Scanning</button>
+          <button data-p="transcription">Transcription</button>
+          <button data-p="corrections">Corrections</button>
+          <button data-p="audio">Audio &amp; recording</button>
+          <button data-p="library">Library</button>
+          <button data-p="remote">Remote access</button>
+          <button data-p="share">Share calls</button>
+          <button data-p="stream">Live feed</button>
+          <button data-p="hook">Script hook</button>
+        </nav>
+        <div class="settings-pages" id="setPages">
+          <div class="stack settings-page" id="set-appearance">
           <div class="panel">
             <div class="head"><span class="eyebrow">Appearance</span></div>
             <div class="body">
@@ -900,12 +913,8 @@
               <div class="chips" id="fsChips"></div>
             </div>
           </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Radio</span></div>
-            <div class="body">
-              <p class="help">Gain and frequency correction are per radio, in the <b>Devices</b> tab. Radio and sample rate are in the top bar. Airspy at 10 M covers a whole site (±3.84 MHz); 2.5 M covers ±0.96 MHz; RTL-SDR covers ±1.2 MHz. The follower measures and compensates tuner error on its own; the ppm value keeps the radio centred where the band centre says, which matters at the band edges.</p>
-            </div>
-          </div>
+        </div>
+        <div class="stack settings-page" id="set-scanning" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Scanning</span></div>
             <div class="body">
@@ -923,8 +932,11 @@
                 <select id="chanMode"><option value="channelizer">channelizer — one FFT serves every call (handles many calls)</option><option value="classic">classic — one decimator per call (original path; ≤ 6 calls)</option></select></label>
               <label class="check"><input id="autostart" type="checkbox" /> Start the last-used playlist when the app opens</label>
               <label class="check"><input id="tones" type="checkbox" checked /> Alert tones (emergency, and talkgroups marked 🔔)</label>
+              <p class="help" style="margin-top:10px">Gain and frequency correction live in the <b>Devices</b> tab; radio and sample rate are in the top bar. Airspy at 10 M covers a whole site (±3.84 MHz); 2.5 M covers ±0.96 MHz; RTL-SDR covers ±1.2 MHz. The follower measures and compensates tuner error on its own; ppm keeps the radio centred where the band centre says, which matters at the band edges.</p>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-transcription" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Transcription</span><span class="meta" id="trMeta"></span></div>
             <div class="body">
@@ -943,7 +955,14 @@
               <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly</span></div>
               <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
               <p class="help" id="trHelp">Runs locally with Python. On an Apple-silicon Mac use <code>pip install mlx-whisper</code>: it runs on the GPU and leaves the CPU to the radio (a CPU-bound transcription starves the decoder and chops the audio). Elsewhere <code>pip install faster-whisper</code> (CPU, capped at a few cores here) or <code>openai-whisper</code> (CPU, all cores). Models download on first use.</p>
-              <div class="lab" style="margin-top:10px">Transcript corrections <span class="mono faint">per talkgroup — "Rirey" → "Riley"</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="stack settings-page" id="set-corrections" style="display:none">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Transcript corrections</span></div>
+            <div class="body">
+              <p class="help">Per-talkgroup phrase fixes — <span class="mono">"Rirey" → "Riley"</span>. Applied to a call's transcript the moment one lands.</p>
               <div id="tcList"></div>
               <div class="row3" style="margin-top:6px">
                 <label class="field"><span class="lab">TG</span><input id="tcTg" type="text" inputmode="numeric" placeholder="10147" spellcheck="false" /></label>
@@ -953,6 +972,8 @@
               <button class="btn ghost sm" id="tcAdd" style="margin-top:4px">Add correction</button>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-library" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Library</span><span class="meta" id="libStats"></span></div>
             <div class="body">
@@ -963,6 +984,8 @@
               </div>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-audio" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Audio &amp; recording</span><span class="meta" id="fmtMeta"></span></div>
             <div class="body">
@@ -1005,7 +1028,7 @@
             </div>
           </div>
         </div>
-        <div class="stack">
+        <div class="stack settings-page" id="set-remote" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Remote access · phone over Tailscale</span><span class="meta" id="webMeta"></span></div>
             <div class="body">
@@ -1016,6 +1039,8 @@
               <p class="help">From a phone on your tailnet, open the address and enter the token — the same live feed, calls, and audio as the desktop.</p>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-share" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Share calls · rdio-scanner / OpenMHz / Broadcastify Calls</span><span class="meta" id="upMeta"></span></div>
             <div class="body">
@@ -1044,6 +1069,8 @@
               <p class="help">Each call is sent once per service after it completes (WAV to rdio-scanner; M4A/MP3 via ffmpeg to OpenMHz and Broadcastify). Outcomes are kept per call; re-send from a call's detail in the Library.</p>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-hook" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Script hook · run a program after each call</span><span class="meta" id="hkMeta"></span></div>
             <div class="body">
@@ -1059,6 +1086,8 @@
               <p class="help">The call arrives as environment variables — <code>HS_TG</code>, <code>HS_TG_NAME</code>, <code>HS_UNIT</code>, <code>HS_UNIT_NAME</code>, <code>HS_FREQ_HZ</code>, <code>HS_SECS</code>, <code>HS_EMERGENCY</code>, <code>HS_AUDIO</code>, <code>HS_JSON</code>, <code>HS_SYSTEM</code>, <code>HS_TALKER_ALIAS</code> — and as one JSON object on standard input. Runs off the decode thread, one at a time.</p>
             </div>
           </div>
+        </div>
+        <div class="stack settings-page" id="set-stream" style="display:none">
           <div class="panel">
             <div class="head"><span class="eyebrow">Live feed · Icecast / Broadcastify</span><span class="meta" id="stMeta"></span></div>
             <div class="body">
@@ -1085,8 +1114,9 @@
               <p class="help">Broadcastify feeds: use the host, port, mount and source password from your feed's "Feed Technical Details" page. Encoding and connection are done by ffmpeg.</p>
             </div>
           </div>
-          <span class="legal" title="Decodes unencrypted P25 only. Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. Use only where authorized under applicable law.">ⓘ&nbsp;legal</span>
         </div>
+        </div>
+        <span class="legal" title="Decodes unencrypted P25 only. Encrypted talkgroups are detected by ALGID and skipped by architecture — never decrypted. Use only where authorized under applicable law.">ⓘ&nbsp;legal</span>
       </section>
     </div>
   </main>

@@ -472,11 +472,17 @@ td.act button.off { opacity: .35; text-decoration: line-through; }
 #view-aliases .panel:first-child > .body { display: block; }
 #view-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
 #view-aliases .stack:first-child > .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* Settings: flow the panels into three columns so the page fits one screen */
-#view-settings .two-col { display: block; column-count: 3; column-gap: 8px; height: 100%; overflow: auto; }
-#view-settings .two-col > .stack { display: contents; }
-#view-settings .panel, #view-settings .legal { break-inside: avoid; margin-bottom: 8px; }
-:root.lt1250 #view-settings .two-col { column-count: 2; }
+/* Settings: left sidebar + one page per topic (multicol removed) */
+#view-settings .settings-layout { display: flex; gap: 10px; height: 100%; }
+#view-settings .settings-nav { width: 160px; flex: 0 0 auto; padding: 2px 0; }
+#view-settings .settings-nav button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--ink-dim); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; cursor: pointer; }
+#view-settings .settings-nav button:hover { color: var(--ink); background: var(--panel-2); }
+#view-settings .settings-nav button.on { background: var(--signal); color: #05100e; font-weight: 600; }
+#view-settings .settings-pages { flex: 1; min-width: 0; overflow: auto; }
+#view-settings .settings-page { display: block; }
+#view-settings .settings-page .panel { margin-bottom: 0; height: auto; }
+#view-settings .legal { margin-left: 4px; }
+#view-settings #set-appearance { max-width: 480px; }
 
 /* accordions + compact now-playing + transcripts in history + group chips */
 .panel.acc > .head { cursor: pointer; user-select: none; }

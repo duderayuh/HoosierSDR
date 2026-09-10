@@ -88,7 +88,22 @@ function showView(v) {
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
-setTimeout(() => { if (["#playlists", "#settings", "#library", "#aliases", "#discovery", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1)); }, 0);
+
+/* ---------- settings sidebar (left-bar pages) ---------- */
+function setPage(p) {
+  const nav = $("setNav");
+  if (!nav) return;
+  nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.p === p));
+  document.querySelectorAll("#setPages .settings-page").forEach((pg) => pg.style.display = pg.id === "set-" + p ? "" : "none");
+}
+$("setNav").querySelectorAll("button").forEach((b) => b.onclick = () => setPage(b.dataset.p));
+setPage("appearance");
+
+setTimeout(() => {
+  const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
+  if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
+  if (["#playlists", "#library", "#aliases", "#discovery", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1));
+}, 0);
 
 /* ---------- tuning state ---------- */
 let modeSel = "follow", modSel = "cqpsk", eqSel = "bypass", decoderSel = "p25", squelchVal = 0.3;
