@@ -1059,11 +1059,16 @@ impl TrunkFollower {
                         s.end.poor_cq,
                     )
                 };
-                // Either decoder's validated Encryption Sync is the channel's
-                // own word (noise does not pass Reed–Solomon), and it covers
-                // the whole transmission: the LDU1 decoded before it is
-                // scrambled voice, heard as a chirp.
-                let encrypted = s.end.enc_c4 > s.start.enc_c4 || s.end.enc_cq > s.start.enc_cq;
+                // A validated Encryption Sync covers the whole transmission:
+                // the LDU1 decoded before it is scrambled voice, heard as a
+                // chirp. Only the kept decoder's verdict counts — the other
+                // one frames garbage at full rate, and now and then garbage
+                // passes Reed–Solomon and names an algorithm.
+                let encrypted = if pick_c4fm {
+                    s.end.enc_c4 > s.start.enc_c4
+                } else {
+                    s.end.enc_cq > s.start.enc_cq
+                };
                 let has_audio = !s.pcm_c4fm.is_empty() || !s.pcm_cqpsk.is_empty();
                 let (modulation, pcm) = if !has_audio || encrypted {
                     (None, Vec::new())
