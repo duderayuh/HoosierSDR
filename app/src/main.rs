@@ -126,6 +126,10 @@ struct AppState {
     /// Broadcast of web frames (app events + live audio) to SSE clients.
     /// Initialised once by `web::spawn`; read by the follow loops to tap audio.
     web_frames: std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::web::Frame>>,
+    /// How the current run was started (mode, radio, frequencies, playlist
+    /// names), so a remote desktop page joining mid-run can show the same
+    /// controls as the local one. Cleared when the run ends.
+    last_start: Mutex<Option<serde_json::Value>>,
 }
 
 impl AppState {
@@ -777,6 +781,10 @@ fn start_capture(
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already capturing".into());
     }
+    *state.last_start.lock().unwrap() = Some(serde_json::json!({
+        "mode": "capture", "source": source, "device": device, "rate": rate, "freq": freq,
+        "gain": gain, "ppm": ppm, "cqpsk": cqpsk, "eq": eq,
+    }));
     let running = Arc::new(AtomicBool::new(true));
     *state.run_flag.lock().unwrap() = Some(running.clone());
     let catalog = state.catalog.clone();
@@ -949,6 +957,11 @@ fn start_follow(
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already running".into());
     }
+    *state.last_start.lock().unwrap() = Some(serde_json::json!({
+        "mode": "follow", "source": source, "device": device, "rate": rate, "freq": freq,
+        "control": control, "gain": gain, "ppm": ppm, "modulation": modulation, "play": play,
+        "hang_ms": hang_ms, "system_name": system_name, "site_name": site_name,
+    }));
     let running = Arc::new(AtomicBool::new(true));
     *state.run_flag.lock().unwrap() = Some(running.clone());
     let max_calls = state.max_calls.load(Ordering::SeqCst).clamp(1, 24);
@@ -1259,6 +1272,7 @@ fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
     }
     if state.run_gen.load(Ordering::SeqCst) == my_gen {
         state.running.store(false, Ordering::SeqCst);
+        *state.last_start.lock().unwrap() = None;
         *state.hold.lock().unwrap() = None;
         state.archive_mode.store(false, Ordering::SeqCst);
         let _ = app.emit("stopped", ());

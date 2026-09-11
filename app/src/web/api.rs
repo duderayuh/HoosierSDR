@@ -13,9 +13,58 @@ use tauri::{AppHandle, Manager};
 use crate::{AppState, ExtraSpec};
 
 /// Pull one named argument out of the JSON args object (missing → `null`).
+/// One argument by its Rust (snake_case) name. The desktop page sends the
+/// camelCase names Tauri's IPC would convert (`callsDir`), so that spelling
+/// is accepted too.
 fn arg<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
-    let v = args.get(key).cloned().unwrap_or(Value::Null);
+    let v = args
+        .get(key)
+        .or_else(|| args.get(camel(key)))
+        .cloned()
+        .unwrap_or(Value::Null);
     serde_json::from_value(v).map_err(|e| format!("{key}: {e}"))
+}
+
+fn camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut up = false;
+    for c in key.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.extend(c.to_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Every top-level key of `args` in snake_case, so a struct of arguments
+/// deserialises whichever spelling the client used.
+fn snake_args(args: &Value) -> Value {
+    match args.as_object() {
+        Some(m) => Value::Object(
+            m.iter()
+                .map(|(k, v)| (snake(k), v.clone()))
+                .collect(),
+        ),
+        None => args.clone(),
+    }
+}
+
+fn snake(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 4);
+    for c in key.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn jv<T: serde::Serialize>(v: T) -> Result<Value, String> {
@@ -98,7 +147,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
 
         // ---- control ----
         "start_follow" => {
-            let a: StartArgs = serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+            let a: StartArgs = serde_json::from_value(snake_args(args)).map_err(|e| e.to_string())?;
             crate::start_follow(
                 app.clone(),
                 state,
@@ -341,6 +390,248 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             Ok(Value::Null)
         }
 
+
+        // ---- the rest of the desktop's commands, so the remote desktop page
+        // can do everything the local one can ----
+        "telegram_save" => jv(crate::alerts::telegram_save(arg(args, "token")?)?),
+        "bluesky_save" => jv(crate::alerts::bluesky_save(arg(args, "password")?)?),
+        "bluesky_test" => jv(crate::alerts::bluesky_test(state).await?),
+        "alerts_test" => jv(crate::alerts::alerts_test(app.clone(), arg(args, "id")?).await?),
+        "ollama_models" => jv(crate::alerts::ollama_models(arg(args, "url")?).await?),
+        "analyzer_cloud_get" => jv(crate::analyzers::analyzer_cloud_get(state)),
+        "analyzer_cloud_save" => jv(crate::analyzers::analyzer_cloud_save(
+            app.clone(),
+            state,
+            arg(args, "cloud")?,
+            arg(args, "key")?,
+        )?),
+        "analyzer_cloud_clear_key" => jv(crate::analyzers::analyzer_cloud_clear_key()?),
+        "analyzer_test" => {
+            jv(crate::analyzers::analyzer_test(app.clone(), state, arg(args, "id")?).await?)
+        }
+        "conversation_test" => {
+            jv(crate::conversations::conversation_test(app.clone(), arg(args, "id")?).await?)
+        }
+        "conversation_resend" => jv(crate::conversations::conversation_resend(
+            app.clone(),
+            state,
+            arg(args, "key")?,
+        )?),
+        "devices_set" => jv(crate::devices::devices_set(
+            app.clone(),
+            arg(args, "id")?,
+            arg(args, "settings")?,
+        )?),
+        "digest_test" => jv(crate::digest::digest_test(app.clone(), state, arg(args, "id")?).await?),
+        "dispatch_set" => jv(crate::dispatch::dispatch_set(app.clone(), state, arg(args, "settings")?)?),
+        "incident_delete" => jv(crate::dispatch::incident_delete(app.clone(), state, arg(args, "id")?)?),
+        "incident_locate" => jv(crate::dispatch::incident_locate(
+            app.clone(),
+            state,
+            arg(args, "id")?,
+            arg(args, "address")?,
+            arg(args, "lat")?,
+            arg(args, "lon")?,
+        )
+        .await?),
+        "dispatch_regeocode" => jv(crate::dispatch::dispatch_regeocode(app.clone(), state).await?),
+        "dispatch_geocode" => jv(crate::dispatch::dispatch_geocode(state, arg(args, "q")?).await?),
+        "dispatch_test" => jv(crate::dispatch::dispatch_test(app.clone(), state, arg(args, "tg")?).await?),
+        "dispatch_backfill" => jv(crate::dispatch::dispatch_backfill(app.clone(), state, arg(args, "hours")?)?),
+        "dual_start" => {
+            let a: DualArgs = serde_json::from_value(snake_args(args)).map_err(|e| e.to_string())?;
+            crate::dual::dual_start(
+                app.clone(),
+                state,
+                a.control_source,
+                a.control_device,
+                a.control_rate,
+                a.voice_source,
+                a.voice_device,
+                a.voice_rate,
+                a.gain,
+                a.control,
+                a.cqpsk,
+                a.play,
+            )?;
+            Ok(Value::Null)
+        }
+        "hook_test" => jv(crate::hook::hook_test(arg(args, "settings")?).await?),
+        "corrections_get" => jv(crate::corrections_get(state)),
+        "corrections_set" => jv(crate::corrections_set(app.clone(), state, arg(args, "entries")?)),
+        "ui_log" => jv(crate::ui_log(arg(args, "msg")?)),
+        "library_reencode" => jv(crate::library_reencode(app.clone(), state)?),
+        "library_set_edited" => jv(crate::library_set_edited(state, arg(args, "id")?, arg(args, "text")?)?),
+        "library_export" => jv(crate::library_export(
+            app.clone(),
+            state,
+            arg(args, "ids")?,
+            arg(args, "dest")?,
+        )?),
+        "play_wav" => jv(crate::play_wav(app.clone(), arg(args, "path")?).await?),
+        "load_catalog" => jv(crate::load_catalog(app.clone(), arg(args, "path")?, state)?),
+        "start_capture" => {
+            let a: CaptureArgs = serde_json::from_value(snake_args(args)).map_err(|e| e.to_string())?;
+            crate::start_capture(
+                app.clone(),
+                state,
+                a.source,
+                a.freq,
+                a.rate,
+                a.gain,
+                a.cqpsk,
+                a.eq,
+                a.record_iq,
+                a.record_log,
+                a.ppm,
+                a.device,
+            )?;
+            Ok(Value::Null)
+        }
+        "survey_capture" => jv(crate::survey_capture(app.clone(), state, arg(args, "spec")?)?),
+        "survey_delete" => jv(crate::survey_delete(arg(args, "spec")?)?),
+        "decode_file" => jv(crate::decode_file(
+            app.clone(),
+            arg(args, "path")?,
+            arg(args, "rate")?,
+            arg(args, "cqpsk")?,
+            arg(args, "eq")?,
+        )
+        .await?),
+        "decode_file_analog" => jv(crate::decode_file_analog(
+            app.clone(),
+            arg(args, "path")?,
+            arg(args, "rate")?,
+            arg(args, "decoder")?,
+            arg(args, "squelch")?,
+        )
+        .await?),
+        "playlist_save" => jv(crate::playlists::playlist_save(app.clone(), arg(args, "playlist")?)?),
+        "playlist_delete" => jv(crate::playlists::playlist_delete(app.clone(), arg(args, "id")?)?),
+        "remote_token_set" => jv(crate::remotes::remote_token_set(
+            arg(args, "dns")?,
+            arg(args, "token")?,
+        )?),
+        // A remote page navigates to the other instance itself (see shim.js);
+        // opening a window here would put it on the far machine's screen.
+        "remote_open" => Err("open remote instances from the desktop".into()),
+        "catalogs_list" => jv(crate::rr::catalogs_list(app.clone())),
+        "catalog_lookup" => jv(crate::rr::catalog_lookup(app.clone(), arg(args, "tg")?)),
+        "catalog_remove" => jv(crate::rr::catalog_remove(app.clone(), state, arg(args, "name")?)?),
+        "catalog_user_set" => jv(crate::rr::catalog_user_set(
+            app.clone(),
+            state,
+            arg(args, "tg")?,
+            arg(args, "alias")?,
+            arg(args, "category")?,
+        )?),
+        "save_text" => jv(crate::rr::save_text(arg(args, "path")?, arg(args, "text")?)?),
+        "rr_save" => jv(crate::rr::rr_save(
+            app.clone(),
+            arg(args, "username")?,
+            arg(args, "password")?,
+            arg(args, "sid")?,
+        )?),
+        "rr_download" => jv(crate::rr::rr_download(app.clone(), arg(args, "sid")?).await?),
+        "rr_states" => jv(crate::rr::rr_states(app.clone(), arg(args, "refresh")?).await?),
+        "rr_state" => jv(crate::rr::rr_state(app.clone(), arg(args, "stid")?, arg(args, "refresh")?).await?),
+        "rr_county" => jv(crate::rr::rr_county(app.clone(), arg(args, "ctid")?, arg(args, "refresh")?).await?),
+        "rr_zip" => jv(crate::rr::rr_zip(app.clone(), arg(args, "zip")?).await?),
+        "transcribe_download" => jv(crate::transcribe::transcribe_download(
+            app.clone(),
+            arg(args, "engine")?,
+            arg(args, "model")?,
+        )?),
+        "transcribe_call" => jv(crate::transcribe::transcribe_call(app.clone(), state, arg(args, "id")?)?),
+        "unit_rules_list" => jv(crate::units::unit_rules_list(state)),
+        "unit_rules_set" => jv(crate::units::unit_rules_set(app.clone(), state, arg(args, "rules")?)?),
+        "unit_resolve" => jv(crate::units::unit_resolve(state, arg(args, "id")?)),
+        "unit_set" => jv(crate::units::unit_set(app.clone(), state, arg(args, "id")?, arg(args, "name")?)?),
+        "units_import" => jv(crate::units::units_import(app.clone(), state, arg(args, "path")?)?),
+        "uploads_test" => jv(crate::upload::uploads_test(arg(args, "service")?, arg(args, "settings")?).await?),
+        "upload_call" => jv(crate::upload::upload_call(app.clone(), state, arg(args, "id")?)?),
+        "web_access_get" => jv(crate::web::web_access_get(app.clone())),
+
         other => Err(format!("unknown command: {other}")),
+    }
+}
+
+/// Arguments for `dual_start`.
+#[derive(Deserialize)]
+struct DualArgs {
+    control_source: String,
+    #[serde(default)]
+    control_device: Option<String>,
+    control_rate: f64,
+    voice_source: String,
+    #[serde(default)]
+    voice_device: Option<String>,
+    voice_rate: f64,
+    #[serde(default)]
+    gain: Option<f64>,
+    control: f64,
+    #[serde(default)]
+    cqpsk: bool,
+    #[serde(default)]
+    play: bool,
+}
+
+/// Arguments for `start_capture`.
+#[derive(Deserialize)]
+struct CaptureArgs {
+    source: String,
+    freq: f64,
+    rate: f64,
+    #[serde(default)]
+    gain: Option<f64>,
+    #[serde(default)]
+    cqpsk: bool,
+    #[serde(default)]
+    eq: String,
+    #[serde(default)]
+    record_iq: Option<String>,
+    #[serde(default)]
+    record_log: Option<String>,
+    #[serde(default)]
+    ppm: Option<f64>,
+    #[serde(default)]
+    device: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command the desktop registers has an arm here, so the remote
+    /// desktop page can do everything the local one can.
+    #[test]
+    fn every_desktop_command_is_mirrored() {
+        let main = include_str!("../main.rs");
+        let start = main.find("generate_handler![").expect("generate_handler");
+        let end = main[start..].find("])").expect("end of handler list") + start;
+        let registered: Vec<&str> = main[start + "generate_handler![".len()..end]
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.rsplit("::").next().unwrap())
+            .collect();
+        assert!(registered.len() > 100, "parsed {} commands", registered.len());
+        let me = include_str!("api.rs");
+        let missing: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|c| !me.contains(&format!("\"{c}\"")))
+            .collect();
+        assert!(missing.is_empty(), "commands without a web mirror: {missing:?}");
+    }
+
+    #[test]
+    fn argument_names_accept_both_spellings() {
+        let a = serde_json::json!({ "hangMs": 250, "calls_dir": "x" });
+        assert_eq!(arg::<u32>(&a, "hang_ms").unwrap(), 250);
+        assert_eq!(arg::<String>(&a, "calls_dir").unwrap(), "x");
+        assert_eq!(snake_args(&a)["hang_ms"], 250);
+        assert_eq!(camel("system_name"), "systemName");
+        assert_eq!(snake("systemName"), "system_name");
     }
 }

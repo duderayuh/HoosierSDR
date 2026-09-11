@@ -308,6 +308,11 @@ pub fn dual_start(
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already running".into());
     }
+    *state.last_start.lock().unwrap() = Some(serde_json::json!({
+        "mode": "dual", "source": control_source, "device": control_device, "rate": control_rate,
+        "voice_source": voice_source, "voice_device": voice_device, "freq": control, "control": control,
+        "gain": gain, "cqpsk": cqpsk, "play": play,
+    }));
     if control <= 0.0 {
         state.running.store(false, Ordering::SeqCst);
         return Err("control channel frequency is required".into());

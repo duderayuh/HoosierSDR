@@ -548,7 +548,7 @@ pub fn remote_open(app: AppHandle, dns: String, url: String, host: String) -> Re
         return Ok(());
     }
     let mut target = url.trim_end_matches('/').to_string();
-    target.push('/');
+    target.push_str("/desktop/");
     if let Some(t) = crate::secrets::get(&token_key(&dns)) {
         target.push_str("?token=");
         target.push_str(&t);

@@ -263,7 +263,7 @@ function addCall(g) {
   tr.className = "new";
   const len = g.secs != null ? `${g.secs.toFixed(1)}s` : "";
   tr.innerHTML =
-    `<td class="time">${now()}</td>` +
+    `<td class="time">${g.at ? new Date(g.at * 1000).toLocaleTimeString("en-US", { hour12: false }) : now()}</td>` +
     `<td class="tg">${esc(g.name)}<span class="num">TG ${g.tg}${g.site_name ? ` · ${esc(g.site_name)}` : ""}</span>${g.service ? `<span class="svc">${esc(g.service)}</span>` : ""}${g.category ? `<span class="cat">${esc(g.category)}</span>` : ""}${g.desc ? `<span class="desc">${esc(g.desc)}</span>` : ""}</td>` +
     `<td class="src">${g.unit_name ? `${esc(g.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">${g.source}</span>` : (g.source ? g.source : "—")}${g.talker_alias ? `<span class="alias" style="display:block" title="alias broadcast over the air">“${esc(g.talker_alias)}”</span>` : ""}</td>` +
     `<td class="tr" data-trid="${g.id != null ? g.id : ""}" title="${esc(g.transcript || "")}">${g.transcript ? esc(g.transcript) : `<span class="faint">${g.id != null ? "…" : ""}</span>`}</td>` +
@@ -899,13 +899,13 @@ function handleFollow(ev) {
       activeEnd(ev);
       { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
       if (!ev.encrypted) followVoice += ev.secs;
-      if (ev.emergency) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
-      addCall({ tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,
+      if (ev.emergency && !ev.replayed) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
+      addCall({ at: ev.replayed ? ev.start : null, tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,
                 secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk, system: ev.system, site_name: ev.site_name });
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
       // Say when a call's audio has holes, and why: stream drops mean the
       // decoder fell behind (CPU/USB); poor frames mean the signal itself.
-      if (ev.secs > 0 && (ev.dropped_blocks > 0 || ev.poor_frames > ev.secs * 50 * 0.05)) logEvent(`${ev.name} ${ev.secs.toFixed(1)}s: ${ev.dropped_blocks ? ev.dropped_blocks + " stream drop(s)" : ""}${ev.dropped_blocks && ev.poor_frames ? ", " : ""}${ev.poor_frames ? ev.poor_frames + " of " + Math.round(ev.secs * 50) + " frames concealed" : ""} — audio has holes`, "warn");
+      if (!ev.replayed && ev.secs > 0 && (ev.dropped_blocks > 0 || ev.poor_frames > ev.secs * 50 * 0.05)) logEvent(`${ev.name} ${ev.secs.toFixed(1)}s: ${ev.dropped_blocks ? ev.dropped_blocks + " stream drop(s)" : ""}${ev.dropped_blocks && ev.poor_frames ? ", " : ""}${ev.poor_frames ? ev.poor_frames + " of " + Math.round(ev.secs * 50) + " frames concealed" : ""} — audio has holes`, "warn");
       if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);
       $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
       break;
@@ -1101,7 +1101,7 @@ const lon2x = (lon, z) => (lon + 180) / 360 * Math.pow(2, z);
 const lat2y = (lat, z) => (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z);
 const x2lon = (x, z) => x / Math.pow(2, z) * 360 - 180;
 const y2lat = (y, z) => { const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); };
-const tileBase = () => TAURI ? (navigator.userAgent.includes("Windows") ? "http://tiles.localhost" : "tiles://localhost") : "https://tile.openstreetmap.org";
+const tileBase = () => window.__HS_REMOTE__ ? "/tiles" : TAURI ? (navigator.userAgent.includes("Windows") ? "http://tiles.localhost" : "tiles://localhost") : "https://tile.openstreetmap.org";
 function tile(z, x, y) {
   const n = Math.pow(2, z); x = ((x % n) + n) % n; if (y < 0 || y >= n) return null;
   const k = `${z}/${x}/${y}`; let im = tiles.get(k);
@@ -1276,6 +1276,29 @@ if (TAURI) {
     if (d.audio) replay(d.audio);
   });
   listen("stopped", () => { setState("standby"); holdTg = null; updateHoldBtn(); invoke("set_hold", { tg: null }).catch(() => {}); });
+  // A remote desktop page opening mid-run: show the same controls and state
+  // as the local one (the shim then replays the run's key frames).
+  window.applySnapshot = (snap) => {
+    const st = snap && snap.start;
+    if (st) {
+      const key = `${st.source}|${st.device || ""}`;
+      const vals = [...$("source").options].map((o) => o.value);
+      if (vals.includes(key)) $("source").value = key; else if (vals.includes(st.source)) $("source").value = st.source;
+      if (st.rate) $("rate").value = String(st.rate);
+      if (st.freq) $("center").value = (st.freq / 1e6).toFixed(4) + "M";
+      if (st.control) $("freq").value = (st.control / 1e6).toFixed(4) + "M"; else if (st.freq) $("freq").value = (st.freq / 1e6).toFixed(4) + "M";
+      if (st.modulation && $("tmod")) $("tmod").value = st.modulation;
+      if (typeof st.play === "boolean") $("play").checked = st.play;
+      if (st.hang_ms) $("hangMs").value = st.hang_ms;
+      modeSel = st.mode === "capture" ? "capture" : st.mode === "dual" ? "dual" : "follow";
+      setSeg($("modeSeg"), modeSel); applyMode();
+      if (st.system_name) invoke("playlists_list").then((list) => {
+        const pl = (list || []).find((p) => p.system_name === st.system_name && p.site_name === st.site_name);
+        if (pl) { $("playlist").value = pl.id; $("followMeta").textContent = `playlist: ${pl.name} · ${pl.tgs.length ? pl.tgs.length + " talkgroups" : "all talkgroups"}`; }
+      }).catch(() => {});
+    }
+    setState(snap && snap.running ? (st && st.mode === "capture" ? "capturing" : "following") : "standby");
+  };
   listen("error", (e) => { log(`backend error: ${e.payload}`); setState("standby"); alert("Capture error:\n" + e.payload); });
   listen("follow", (e) => handleFollow(e.payload));
 

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{ConnectInfo, FromRequestParts, State},
-    http::{request::Parts, StatusCode},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
@@ -33,26 +33,56 @@ const DEFAULT_PORT: u16 = 8042;
 const MOBILE_HTML: &str = include_str!("mobile.html");
 /// How many frames the SSE broadcast buffers per lagging client before it
 /// starts dropping the oldest (audio frames are large, so keep this modest).
-const FRAME_BUFFER: usize = 64;
+/// Frames a slow client may fall behind before it starts losing the oldest.
+/// Spectrum frames are throttled before they enter the ring (see
+/// `spawn`), so at this depth a remote desktop on a slow link loses
+/// waterfall frames long before it loses audio.
+const FRAME_BUFFER: usize = 512;
+
+/// Waterfall/constellation frames forwarded to web clients per second, at
+/// most. The desktop draws ~12/s locally; remote viewers get a calmer one.
+const HEAVY_FPS: f64 = 5.0;
+
+/// Which `follow` frames are heavy enough to be worth dropping for a client
+/// that did not ask for them (a phone) or that is falling behind.
+fn is_heavy(frame: &Frame) -> bool {
+    frame.event == "follow"
+        && matches!(
+            frame.data.get("kind").and_then(|k| k.as_str()),
+            Some("spectrum") | Some("constellation")
+        )
+}
 /// Every event name the app emits — forwarded verbatim to SSE clients so a
 /// phone sees the same live feed the desktop window does.
 const APP_EVENTS: &[&str] = &[
     "follow",
+    "grant",
+    "status",
+    "spectrum",
     "error",
     "stopped",
     "hook_error",
+    "alert",
     "alert_error",
+    "analyzer",
     "analyzers",
     "conversations",
     "decoderevent",
+    "decoderdone",
     "digests",
     "dispatch",
     "dispatch_progress",
     "incident",
     "incident_deleted",
+    "reencode_done",
+    "reencode_error",
+    "reencode_progress",
+    "rr_progress",
     "survey_done",
+    "transcribe_download",
     "transcribe_error",
     "transcribe_ready",
+    "transcript",
 ];
 
 pub fn port() -> u16 {
@@ -99,6 +129,79 @@ pub struct WebState {
     pub app: AppHandle,
     pub token: String,
     pub frames: tokio::sync::broadcast::Sender<Frame>,
+    pub snap: std::sync::Mutex<Snap>,
+}
+
+/// What a page joining mid-run needs to catch up: the last `measured` and
+/// `site` frames (tuning and site panels), the last `status` (counters),
+/// and the recent notices (the events log). Replayed to a new remote
+/// desktop page ahead of the live feed.
+#[derive(Default)]
+pub struct Snap {
+    measured: Option<serde_json::Value>,
+    site: Option<serde_json::Value>,
+    status: Option<serde_json::Value>,
+    notices: std::collections::VecDeque<serde_json::Value>,
+    /// Recent completed calls, for the call history. Marked `replayed` so
+    /// the page adds the rows without re-sounding emergency tones.
+    calls: std::collections::VecDeque<serde_json::Value>,
+}
+
+const SNAP_NOTICES: usize = 40;
+const SNAP_CALLS: usize = 60;
+
+impl Snap {
+    fn note(&mut self, frame: &Frame) {
+        match frame.event.as_str() {
+            "follow" => match frame.data.get("kind").and_then(|k| k.as_str()) {
+                Some("measured") => {
+                    self.measured = Some(frame.data.clone());
+                    self.site = None;
+                    self.notices.clear();
+                }
+                Some("site") => self.site = Some(frame.data.clone()),
+                Some("status") => self.status = Some(frame.data.clone()),
+                Some("notice") => {
+                    if self.notices.len() >= SNAP_NOTICES {
+                        self.notices.pop_front();
+                    }
+                    self.notices.push_back(frame.data.clone());
+                }
+                Some("call") => {
+                    if self.calls.len() >= SNAP_CALLS {
+                        self.calls.pop_front();
+                    }
+                    let mut d = frame.data.clone();
+                    d["replayed"] = serde_json::Value::Bool(true);
+                    self.calls.push_back(d);
+                }
+                _ => {}
+            },
+            "stopped" | "error" => {
+                self.measured = None;
+                self.site = None;
+                self.status = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn events(&self) -> Vec<Frame> {
+        let mut out = Vec::new();
+        let f = |d: &serde_json::Value| Frame::event("follow", d.clone());
+        if let Some(m) = &self.measured {
+            out.push(f(m));
+        }
+        if let Some(s) = &self.site {
+            out.push(f(s));
+        }
+        out.extend(self.notices.iter().map(f));
+        out.extend(self.calls.iter().map(f));
+        if let Some(s) = &self.status {
+            out.push(f(s));
+        }
+        out
+    }
 }
 
 fn generate_token() -> String {
@@ -194,24 +297,65 @@ pub fn spawn(app: AppHandle) {
     // Forward every app event to SSE clients. `listen_any` registers on the
     // Tauri event bus and fires synchronously on the emitting thread, so frame
     // order matches emit order (audio tap → Call event).
+    let heavy_gate = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, std::time::Instant>::new()));
     for name in APP_EVENTS {
         let tx = frames.clone();
         let n = name.to_string();
+        let gate = heavy_gate.clone();
         app.listen_any(*name, move |ev| {
             let data = serde_json::from_str(ev.payload())
                 .unwrap_or_else(|_| serde_json::Value::String(ev.payload().to_string()));
-            let _ = tx.send(Frame::event(&n, data));
+            let frame = Frame::event(&n, data);
+            if is_heavy(&frame) {
+                // Throttle per kind so a burst of spectrum frames cannot
+                // push audio out of the ring for a lagging client.
+                let kind = frame.data["kind"].as_str().unwrap_or("").to_string();
+                let mut g = gate.lock().unwrap();
+                let now = std::time::Instant::now();
+                if let Some(last) = g.get(&kind) {
+                    if now.duration_since(*last).as_secs_f64() < 1.0 / HEAVY_FPS {
+                        return;
+                    }
+                }
+                g.insert(kind, now);
+            }
+            let _ = tx.send(frame);
         });
     }
 
-    let state = Arc::new(WebState { app, token, frames });
+    let state = Arc::new(WebState {
+        app,
+        token,
+        frames,
+        snap: std::sync::Mutex::new(Snap::default()),
+    });
+    // The tap above runs before `state` exists; feed the snapshot from a
+    // subscriber of the same channel instead, so it sees every frame.
+    {
+        let st = state.clone();
+        let mut rx = st.frames.subscribe();
+        std::thread::spawn(move || loop {
+            match rx.blocking_recv() {
+                Ok(frame) => st.snap.lock().unwrap().note(&frame),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        });
+    }
 
     let router = Router::new()
         .route("/", get(mobile_page))
+        .route("/desktop", get(desktop_redirect))
+        .route("/desktop/", get(desktop_index))
+        .route("/desktop/{*path}", get(desktop_asset))
+        .route("/tiles/{*path}", get(tile))
         .route("/api/health", get(health))
         .route("/api/status", get(status))
+        .route("/api/snapshot", get(snapshot))
         .route("/api/events", get(events))
         .route("/api/command", post(command))
+        .route("/api/audio/{id}", get(audio_clip))
+        .route("/api/file", get(audio_file))
         .with_state(state);
 
     std::thread::spawn(move || {
@@ -248,6 +392,170 @@ pub fn spawn(app: AppHandle) {
 
 async fn mobile_page() -> impl IntoResponse {
     axum::response::Html(MOBILE_HTML)
+}
+
+// ---------------------------------------------------------------------------
+// The desktop page itself, served for remote use. `shim.js` stands in for
+// Tauri's IPC: `invoke` becomes `/api/command`, `listen` the SSE feed, and
+// audio plays in the browser. In a debug build the files are read from the
+// source tree so edits show up without a rebuild; release builds carry them.
+
+const SHIM_JS: &str = include_str!("shim.js");
+
+const DIST: &[(&str, &str, &str)] = &[
+    ("index.html", "text/html; charset=utf-8", include_str!("../../dist/index.html")),
+    ("app.js", "text/javascript; charset=utf-8", include_str!("../../dist/app.js")),
+    ("style.css", "text/css; charset=utf-8", include_str!("../../dist/style.css")),
+    ("vendor/leaflet.js", "text/javascript; charset=utf-8", include_str!("../../dist/vendor/leaflet.js")),
+    ("vendor/leaflet.css", "text/css; charset=utf-8", include_str!("../../dist/vendor/leaflet.css")),
+];
+
+fn dist_file(name: &str) -> Option<(String, &'static str)> {
+    let (_, mime, embedded) = DIST.iter().find(|(n, _, _)| *n == name)?;
+    #[cfg(debug_assertions)]
+    {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dist").join(name);
+        if let Ok(t) = std::fs::read_to_string(p) {
+            return Some((t, mime));
+        }
+    }
+    Some((embedded.to_string(), mime))
+}
+
+/// The desktop page with the IPC shim loaded ahead of the app script.
+pub fn desktop_html() -> String {
+    let (html, _) = dist_file("index.html").unwrap_or_default();
+    let tag = "<script src=\"vendor/leaflet.js\"></script>";
+    match html.find(tag) {
+        Some(i) => format!("{}<script src=\"shim.js\"></script>\n  {}", &html[..i], &html[i..]),
+        None => html.replace("<script src=\"app.js\"></script>", "<script src=\"shim.js\"></script><script src=\"app.js\"></script>"),
+    }
+}
+
+async fn desktop_redirect() -> impl IntoResponse {
+    axum::response::Redirect::permanent("/desktop/")
+}
+
+async fn desktop_index() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], desktop_html())
+}
+
+async fn desktop_asset(Path(path): Path<String>) -> axum::response::Response {
+    if path == "shim.js" {
+        return ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], SHIM_JS).into_response();
+    }
+    if path == "index.html" {
+        return desktop_index().await.into_response();
+    }
+    match dist_file(&path) {
+        Some((body, mime)) => ([(header::CONTENT_TYPE, mime)], body).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such asset").into_response(),
+    }
+}
+
+/// Map tiles for the remote desktop, from the same on-disk cache the
+/// `tiles://` scheme uses. Tiles are public data, so no token is needed.
+async fn tile(State(st): State<Arc<WebState>>, Path(path): Path<String>) -> axum::response::Response {
+    let app = st.app.clone();
+    match tokio::task::spawn_blocking(move || crate::tiles::fetch(&app, &path)).await {
+        Ok(Ok(png)) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=604800"),
+            ],
+            png,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+fn audio_mime(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("wav") => "audio/wav",
+        Some("m4a") | Some("mp4") => "audio/mp4",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") | Some("opus") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_audio(path: std::path::PathBuf) -> axum::response::Response {
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, audio_mime(&path))], bytes).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, format!("{}: {e}", path.display())).into_response(),
+    }
+}
+
+/// A library call's audio file, so the remote page can play it locally
+/// (the desktop's `library_play` plays through the far machine's speakers).
+async fn audio_clip(State(st): State<Arc<WebState>>, _auth: Auth, Path(id): Path<i64>) -> axum::response::Response {
+    let app = st.app.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::with_db(&state, |c| crate::library::get(c, id))
+    })
+    .await;
+    match found {
+        Ok(Ok(Some(row))) => match row.audio {
+            Some(p) => serve_audio(std::path::PathBuf::from(p)).await,
+            None => (StatusCode::NOT_FOUND, "no audio for that call").into_response(),
+        },
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "no such call").into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// Whether `path` is somewhere the app writes audio: the library folder or
+/// the app's own data/cache/config directories. Anything else is refused,
+/// so the token cannot be used to read arbitrary files.
+fn audio_path_allowed(app: &AppHandle, path: &std::path::Path) -> bool {
+    let Ok(real) = path.canonicalize() else {
+        return false;
+    };
+    let state = app.state::<AppState>();
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = state.library_dir.lock().unwrap().clone() {
+        roots.push(d);
+    }
+    for d in [
+        app.path().app_data_dir().ok(),
+        app.path().app_cache_dir().ok(),
+        app.path().app_config_dir().ok(),
+        app.path().app_local_data_dir().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        roots.push(d);
+    }
+    roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .any(|r| real.starts_with(&r))
+}
+
+/// An audio file by path (what the desktop's `play_wav` takes), limited to
+/// the app's own folders.
+async fn audio_file(State(st): State<Arc<WebState>>, _auth: Auth, Query(q): Query<FileQuery>) -> axum::response::Response {
+    let path = std::path::PathBuf::from(crate::shellexpand_home(&q.path));
+    let app = st.app.clone();
+    let p = path.clone();
+    let ok = tokio::task::spawn_blocking(move || audio_path_allowed(&app, &p))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return (StatusCode::FORBIDDEN, "not an app audio file").into_response();
+    }
+    serve_audio(path).await
 }
 
 /// Unauthenticated identity, so another instance can tell this is
@@ -294,19 +602,52 @@ async fn status(State(st): State<Arc<WebState>>, _auth: Auth) -> Json<Status> {
     })
 }
 
+/// The run in progress, for a page that opens mid-run: whether anything is
+/// running, how it was started, and the frames that rebuild the tuning,
+/// site, events and status panels. The page applies these before it starts
+/// reading the live feed.
+async fn snapshot(State(st): State<Arc<WebState>>, _auth: Auth) -> Json<serde_json::Value> {
+    let s = st.app.state::<AppState>();
+    let running = s.running.load(std::sync::atomic::Ordering::SeqCst);
+    let start = s.last_start.lock().unwrap().clone();
+    let events: Vec<serde_json::Value> = if running {
+        st.snap
+            .lock()
+            .unwrap()
+            .events()
+            .into_iter()
+            .map(|f| serde_json::json!({ "event": f.event, "data": f.data }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Json(serde_json::json!({ "running": running, "start": start, "events": events }))
+}
+
 /// Server-Sent Events: the live feed (grants, calls, notices, status, …) plus
 /// `audio` frames carrying each completed call's PCM. One long-lived
 /// connection the mobile UI opens and leaves open.
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// Send waterfall/constellation frames (`1`). Off by default: a phone
+    /// never draws them and they are most of the bytes.
+    #[serde(default)]
+    spectrum: u8,
+}
+
 async fn events(
     State(st): State<Arc<WebState>>,
     _auth: Auth,
+    Query(q): Query<EventsQuery>,
 ) -> Sse<impl futures::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
     let rx = st.frames.subscribe();
+    let heavy = q.spectrum != 0;
     // `BroadcastStream` yields `Ok(frame)` per frame and `Err(Lagged)` when a
     // client falls behind; it ends on its own when the channel closes. We
     // surface a lag as a frame so the client knows it missed audio.
-    let stream = BroadcastStream::new(rx).filter_map(|item| async move {
+    let stream = BroadcastStream::new(rx).filter_map(move |item| async move {
         match item {
+            Ok(frame) if !heavy && is_heavy(&frame) => None,
             Ok(frame) => match SseEvent::default().event(frame.event).json_data(frame.data) {
                 Ok(ev) => Some(Ok::<_, std::convert::Infallible>(ev)),
                 Err(_) => Some(Ok::<_, std::convert::Infallible>(
