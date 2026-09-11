@@ -707,8 +707,99 @@ const STOP: &[&str] = &[
     "received",
 ];
 
-/// A tripwire drafted from one call: its talkgroup (and system), and its
-/// rarest words as the phrases, ready for the editor.
+/// Words that say where or who, not what: street types, compass points,
+/// apparatus and dispatch boilerplate. A tripwire on "road" or "medic" fires
+/// on everything.
+const PLACE_AND_UNIT: &[&str] = &[
+    "road",
+    "street",
+    "avenue",
+    "drive",
+    "lane",
+    "court",
+    "way",
+    "place",
+    "boulevard",
+    "highway",
+    "parkway",
+    "circle",
+    "trail",
+    "pike",
+    "terrace",
+    "north",
+    "south",
+    "east",
+    "west",
+    "apartment",
+    "apt",
+    "suite",
+    "block",
+    "hundred",
+    "thousand",
+    "engine",
+    "medic",
+    "ladder",
+    "squad",
+    "ambulance",
+    "battalion",
+    "truck",
+    "rescue",
+    "tower",
+    "chief",
+    "car",
+    "ems",
+    "edo",
+    "hours",
+    "hour",
+    "location",
+    "room",
+    "floor",
+    "respond",
+    "responding",
+    "route",
+    "scene",
+    "dispatch",
+    "channel",
+    "district",
+    "station",
+    "sector",
+    "zone",
+    "cross",
+    "between",
+    "near",
+    "block",
+    "unit",
+    "time",
+    "number",
+    "code",
+    "priority",
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo",
+];
+
+/// The phrase dispatch already named this call's incident with, when the
+/// transcript says it ("Cardiac Arrest").
+fn incident_type(c: &Connection, call: i64, text: &str) -> Option<String> {
+    let t: String = c
+        .query_row(
+            "SELECT i.call_type FROM incident_calls ic JOIN incidents i ON i.id = ic.incident WHERE ic.call = ?1 LIMIT 1",
+            [call],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let t = t.trim().to_string();
+    (!t.is_empty()
+        && t != "Unknown"
+        && !crate::alerts::matched_keywords(&[t.clone()], text).is_empty())
+    .then_some(t.to_lowercase())
+}
+
+/// A tripwire drafted from one call: its talkgroup (and system), and the
+/// phrase that says what happened — the incident's call type when dispatch
+/// knows it, else the call's most specific run of content words.
 #[tauri::command]
 pub fn tripwire_draft(app: AppHandle, id: i64) -> Result<Draft, String> {
     let state = app.state::<AppState>();
@@ -720,37 +811,69 @@ pub fn tripwire_draft(app: AppHandle, id: i64) -> Result<Draft, String> {
         .ok_or("the call library is not open")?;
     let c = db.lock().unwrap();
     let r = crate::library::get(&c, id)?.ok_or("that call is no longer in the library")?;
+    Ok(draft_from(&c, &r))
+}
+
+/// The pure half of `tripwire_draft`.
+pub fn draft_from(c: &Connection, r: &crate::library::CallRow) -> Draft {
+    let id = r.id;
     let text = r
         .transcript_edited
         .clone()
         .filter(|t| !t.trim().is_empty())
         .or(r.transcript.clone())
         .unwrap_or_default();
-    let vocab: HashMap<String, u32> = vocabulary(&c).into_iter().collect();
+    let vocab: HashMap<String, u32> = vocabulary(c).into_iter().collect();
+    let content = |w: &str| {
+        w.len() >= 3
+            && !STOP.contains(&w)
+            && !PLACE_AND_UNIT.contains(&w)
+            && !w.chars().any(|c| c.is_ascii_digit())
+    };
+    let toks: Vec<String> = normalize(&text).split(' ').map(str::to_string).collect();
     let mut words: Vec<(String, u32)> = Vec::new();
-    for w in normalize(&text).split(' ') {
-        if w.len() < 3 || STOP.contains(&w) || w.chars().all(|c| c.is_ascii_digit()) {
-            continue;
+    for w in &toks {
+        if content(w) && !words.iter().any(|(x, _)| x == w) {
+            words.push((w.clone(), vocab.get(w.as_str()).copied().unwrap_or(1)));
         }
-        if words.iter().any(|(x, _)| x == w) {
-            continue;
-        }
-        words.push((w.to_string(), vocab.get(w).copied().unwrap_or(1)));
     }
     words.sort_by_key(|(_, n)| *n);
-    // The rarest words heard more than once are the tell; one-offs are
-    // usually the transcriber's mistakes.
-    let phrases: Vec<String> = words
-        .iter()
-        .filter(|(_, n)| *n >= 2)
-        .take(2)
-        .map(|(w, _)| w.clone())
-        .collect();
+    // Two content words side by side ("cardiac arrest") say more than one;
+    // among them, the ones heard before but not everywhere.
+    let mut pairs: Vec<(String, u32)> = Vec::new();
+    for w in toks.windows(2) {
+        if content(&w[0]) && content(&w[1]) {
+            let p = format!("{} {}", w[0], w[1]);
+            if !pairs.iter().any(|(x, _)| *x == p) {
+                let n = count_phrase(c, &p, 0);
+                pairs.push((p, n));
+            }
+        }
+    }
+    pairs.sort_by_key(|(_, n)| (u32::from(*n < 2), *n));
+    let phrases: Vec<String> = if let Some(t) = incident_type(c, id, &text) {
+        vec![t]
+    } else if let Some((p, _)) = pairs.first() {
+        vec![p.clone()]
+    } else {
+        words
+            .iter()
+            .filter(|(_, n)| *n >= 2)
+            .take(2)
+            .map(|(w, _)| w.clone())
+            .collect()
+    };
     let mut t = Tripwire {
         name: if phrases.is_empty() {
             format!("Like this on {}", r.tg_name)
         } else {
-            format!("{} on {}", phrases.join(" / "), r.tg_name)
+            let p = phrases.join(" / ");
+            let mut cs = p.chars();
+            let cap = cs
+                .next()
+                .map(|f| f.to_uppercase().collect::<String>() + cs.as_str())
+                .unwrap_or_default();
+            format!("{cap} on {}", r.tg_name)
         },
         recipe: "from-call".into(),
         ..Default::default()
@@ -760,11 +883,14 @@ pub fn tripwire_draft(app: AppHandle, id: i64) -> Result<Draft, String> {
     t.when.phrases = phrases;
     t.when.emergency = r.emergency && t.when.phrases.is_empty();
     t.send.follow = "radio".into();
-    Ok(Draft {
+    // Offer the pairs as well as the single words.
+    let mut offer: Vec<(String, u32)> = pairs.into_iter().take(6).collect();
+    offer.extend(words);
+    Draft {
         tripwire: t,
-        words,
+        words: offer,
         transcript: text,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -881,6 +1007,49 @@ mod tests {
         }
         let got = suggest(&c, "lucas", 0, &vocabulary(&c));
         assert_eq!(got.first().map(|s| s.text.as_str()), Some("lucus"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_draft_listens_for_what_happened_not_where() {
+        let (c, d) = lib();
+        crate::dispatch::ensure_schema(&c);
+        let id = call(
+            &c,
+            100,
+            3,
+            1,
+            "Engine 74, Medic 74, EDO 70, 5609 Furnace Road, cardiac arrest.",
+        );
+        call(&c, 50, 3, 2, "Medic 12, 300 West Road, cardiac arrest.");
+        call(&c, 60, 3, 2, "Engine 9, 12 West Road, smoke investigation.");
+        let r = crate::library::get(&c, id).unwrap().unwrap();
+        let dr = draft_from(&c, &r);
+        assert_eq!(dr.tripwire.when.phrases, vec!["cardiac arrest"]);
+        assert_eq!(dr.tripwire.when.tgs, vec![3]);
+        assert!(dr.words.iter().all(|(w, _)| w != "road" && w != "medic"));
+        // Dispatch's own call type wins when the call says it.
+        c.execute("INSERT INTO incidents (id, created, updated, tg, call_type) VALUES (1, 0, 0, 3, 'Furnace Road Fire')", []).unwrap();
+        c.execute(
+            "INSERT INTO incident_calls (incident, call, at, tg) VALUES (1, ?1, 0, 3)",
+            [id],
+        )
+        .unwrap();
+        assert_eq!(
+            draft_from(&c, &r).tripwire.when.phrases,
+            vec!["cardiac arrest"],
+            "not said in the call"
+        );
+        c.execute("UPDATE incidents SET call_type = 'Cardiac Arrest'", [])
+            .unwrap();
+        assert_eq!(
+            draft_from(&c, &r).tripwire.when.phrases,
+            vec!["cardiac arrest"]
+        );
+        assert!(draft_from(&c, &r)
+            .tripwire
+            .name
+            .starts_with("Cardiac arrest on"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

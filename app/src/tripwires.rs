@@ -1010,8 +1010,34 @@ pub fn resolve_dest(al: &crate::alerts::Settings, s: &Send) -> Result<String, St
     }
 }
 
-/// Destinations removed from Connections: tripwires that sent there keep
-/// sending there, by raw chat id.
+/// Point tripwires at destinations again after Connections changed: one
+/// that sent to a removed destination keeps sending to its chat, by raw id;
+/// one that sent to a raw chat that now has a name sends by the name.
+/// Returns whether anything changed.
+pub fn relink(
+    list: &mut [Tripwire],
+    gone: &[&crate::connections::Destination],
+    now: &[crate::connections::Destination],
+) -> bool {
+    let mut changed = false;
+    for t in list.iter_mut() {
+        if let Some(d) = gone.iter().find(|d| d.id == t.send.dest) {
+            t.send.dest = "custom".into();
+            t.send.chat = d.target();
+            changed = true;
+        }
+        if t.send.dest == "custom" {
+            if let Some(d) = now.iter().find(|d| d.target() == t.send.chat.trim()) {
+                t.send.dest = d.id.clone();
+                t.send.chat.clear();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Destinations changed on Connections: relink the tripwires, recompile.
 pub fn destinations_changed(
     app: &AppHandle,
     before: &[crate::connections::Destination],
@@ -1022,17 +1048,9 @@ pub fn destinations_changed(
         .filter(|d| !after.iter().any(|a| a.id == d.id))
         .collect();
     let state = app.state::<AppState>();
-    if !gone.is_empty() {
+    {
         let mut st = state.tripwires.lock().unwrap();
-        let mut changed = false;
-        for t in &mut st.settings.tripwires {
-            if let Some(d) = gone.iter().find(|d| d.id == t.send.dest) {
-                t.send.dest = "custom".into();
-                t.send.chat = d.target();
-                changed = true;
-            }
-        }
-        if changed {
+        if relink(&mut st.settings.tripwires, &gone, after) {
             let _ = store(app, &st.settings);
         }
     }
@@ -1223,10 +1241,13 @@ fn run_check(state: &AppState, t: &Tripwire, f: &CallFacts) -> Verdict {
                 let mut r = as_analyzer(
                     t,
                     vec![
+                        // Not "fire": on fire/EMS radio a model reads that
+                        // key as "is there a fire?" and answers the wrong
+                        // question.
                         Field {
-                            key: "fire".into(),
+                            key: "send".into(),
                             kind: "bool".into(),
-                            desc: "true if the listener's instruction says to send this alert"
+                            desc: "true if, by the listener's instruction, they should be alerted about this call"
                                 .into(),
                         },
                         Field {
@@ -1241,8 +1262,8 @@ fn run_check(state: &AppState, t: &Tripwire, f: &CallFacts) -> Verdict {
                     t.check.prompt.trim()
                 );
                 crate::analyzers::run_extract(state, &r, f).map(|v| {
-                    let fire = matches!(&v["fire"], serde_json::Value::Bool(true))
-                        || v["fire"].as_str().is_some_and(|s| {
+                    let fire = matches!(&v["send"], serde_json::Value::Bool(true))
+                        || v["send"].as_str().is_some_and(|s| {
                             s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
                         });
                     (fire, v["summary"].as_str().unwrap_or("").to_string())
@@ -2410,6 +2431,33 @@ mod tests {
         s.dest = "custom".into();
         s.chat = "123".into();
         assert_eq!(resolve_dest(&al, &s).unwrap(), "123");
+    }
+
+    #[test]
+    fn removed_destinations_keep_sending_and_named_chats_link_up() {
+        let d1 = crate::connections::Destination {
+            id: "d1".into(),
+            name: "Team".into(),
+            chat_id: "-100".into(),
+            topic_id: "5".into(),
+        };
+        let mut a = Tripwire::default();
+        a.send.dest = "d1".into();
+        let mut b = Tripwire::default();
+        b.send.dest = "custom".into();
+        b.send.chat = "777".into();
+        let mut list = vec![a, b];
+        assert!(relink(&mut list, &[&d1], &[]));
+        assert_eq!((list[0].send.dest.as_str(), list[0].send.chat.as_str()), ("custom", "-100:5"));
+        let named = crate::connections::Destination {
+            id: "d2".into(),
+            name: "Me".into(),
+            chat_id: "777".into(),
+            topic_id: String::new(),
+        };
+        assert!(relink(&mut list, &[], &[named]));
+        assert_eq!((list[1].send.dest.as_str(), list[1].send.chat.as_str()), ("d2", ""));
+        assert!(!relink(&mut list, &[], &[]));
     }
 
     #[test]

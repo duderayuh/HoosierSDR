@@ -81,12 +81,13 @@ function wireSeg(el, onPick) {
 function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === v))); }
 
 /* ---------- views ---------- */
-const VIEWS = ["monitor", "library", "conversations", "dispatch", "settings"];
+const VIEWS = ["monitor", "library", "tripwires", "conversations", "dispatch", "settings"];
 function showView(v) {
   VIEWS.forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
   if (v === "conversations" && typeof conversationsOnShow === "function") conversationsOnShow();
+  if (v === "tripwires" && typeof window.tripwiresOnShow === "function") window.tripwiresOnShow();
   // Coming back to Settings refreshes whichever page was left open.
   if (v === "settings") setPage(curPage);
   setSeg($("navSeg"), v);
@@ -94,10 +95,10 @@ function showView(v) {
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
 
 /* ---------- settings sidebar (left-bar pages) ---------- */
-// Pages that load something when shown. Playlists, Aliases, Alerts,
-// Analyzers, Devices and Discovery were top-level tabs once; their code
+// Pages that load something when shown. Playlists, Aliases, Devices and
+// Discovery were top-level tabs once; their code
 // still refreshes only while on screen, via settingsPageVisible().
-const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", library: "libraryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
+const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", library: "libraryOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
 let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
@@ -117,7 +118,9 @@ setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
   const page = location.hash.slice(1);
-  if (["discovery", "playlists", "aliases", "connections", "alerts", "analyzers", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
+  if (["discovery", "playlists", "aliases", "connections", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
+  // The old Alerts and Analyzers pages are Tripwires now.
+  if (["alerts", "analyzers", "tripwires"].includes(page)) { showView("tripwires"); return; }
   if (["library", "conversations", "dispatch"].includes(page)) showView(page);
 }, 0);
 
@@ -1058,10 +1061,11 @@ function handleFollow(ev) {
   }
 }
 function alertFired(p) {
-  logEvent(`ALERT ${p.name}: ${p.message.split("\n")[0]}`, "alarm");
-  uiToast(`🚨 ${p.name} — ${p.message.split("\n").slice(0, 2).join(" · ")}`);
+  const first = String(p.message || "").split("\n");
+  logEvent(`${p.follow ? "FOLLOW-UP" : "TRIPWIRE"} ${p.name}: ${first[0]}`, p.follow ? "" : "alarm");
+  if (!p.follow) uiToast(`🚨 ${p.name} — ${first.slice(0, 2).join(" · ")}`);
   if (p.tone) tone("emergency");
-  markFired(p.call, { rule_name: p.name, status: "sent", source: "alert", at: Math.floor(Date.now() / 1000) });
+  markFired(p.call, { rule_name: p.name, status: "sent", source: "tripwire", at: Math.floor(Date.now() / 1000) });
 }
 /* ---------- tripwire badges: which rules fired about a call ---------- */
 // `fired` rows come from the tripwire history (Rust `events::Fired`). Sent is
@@ -1779,66 +1783,26 @@ if (TAURI) {
   $("source").addEventListener("change", () => setTimeout(coveragePlan, 0));
   $("rate").addEventListener("change", () => setTimeout(coveragePlan, 0));
 
-  /* ---------- alerts: editor, Telegram, Ollama, log ---------- */
+  /* ---------- shared rule settings: Telegram, destinations, Ollama, cloud ---------- */
+  // Rules are tripwires now (tripwires.js). What they share — the bot's
+  // defaults, named destinations, discovered chats and the local model —
+  // lives in the alerts settings object held here; the Connections page
+  // (connections.js) edits it through alertsSettings() / alertsPersist().
   listen("alert", (e) => alertFired(e.payload));
-  listen("alert_error", (e) => { logEvent(`alert failed: ${e.payload}`, "warn"); uiToast(`Alert failed: ${e.payload}`, "err"); });
-  let akSettings = null, akSel = null, akView = null;
-  const akKindLabel = { keywords: "keywords", emergency: "emergency", talkgroup: "any call", unit: "radio" };
-  function akRenderList() {
-    const list = akSettings ? akSettings.alerts : [];
-    $("akEmpty").style.display = list.length ? "none" : "";
-    $("akMeta").textContent = list.length ? `${list.filter((a) => a.enabled).length} of ${list.length} enabled` : "";
-    $("akList").innerHTML = list.map((a) => `<div class="row ${akSel === a.id ? "on" : ""}" data-ak="${esc(a.id)}"><span class="grow"><b>${esc(a.name)}</b> ${a.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>${akKindLabel[a.trigger.kind] || a.trigger.kind}${a.trigger.keywords.length ? ": " + esc(a.trigger.keywords.slice(0, 4).join(", ")) + (a.trigger.keywords.length > 4 ? "…" : "") : ""} · TG ${a.trigger.tgs.length ? a.trigger.tgs.join(",") : "any"}${a.telegram ? " · Telegram" : ""}${a.ai_gate ? " · AI" : ""}</small></span><label class="check" style="margin:0" title="enabled"><input type="checkbox" data-aken="${esc(a.id)}" ${a.enabled ? "checked" : ""}></label></div>`).join("");
-    $("akList").querySelectorAll(".row[data-ak]").forEach((r) => r.onclick = (e) => { if (e.target.closest("input")) return; akEdit(r.dataset.ak); });
-    $("akList").querySelectorAll("input[data-aken]").forEach((c) => c.onchange = async () => { const a = akSettings.alerts.find((x) => x.id === c.dataset.aken); a.enabled = c.checked; await akPersist(); });
-  }
-  function akEdit(id) {
-    const a = akSettings.alerts.find((x) => x.id === id); if (!a) return;
-    akSel = id; akRenderList(); $("akEditor").style.display = "";
-    $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
-    $("akTgs").value = a.trigger.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("akTgs"); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
-    $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akTopic").value = a.topic_id || ""; if (window.destBind) destBind("akDest", "akChat", "akTopic"); $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
-    $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
-    akKindUi();
-  }
-  function akKindUi() { const k = $("akKind").value; $("akKwField").style.display = k === "keywords" ? "" : "none"; $("akUnitField").style.display = k === "unit" ? "" : "none"; $("akAiField").style.display = $("akAi").checked ? "" : "none"; }
-  $("akKind").onchange = akKindUi; $("akAi").onchange = akKindUi;
-  const nums = (v) => v.split(/[\s,;]+/).map((x) => parseInt(x, 10)).filter(Number.isFinite);
-  function akRead() {
-    const a = akSettings.alerts.find((x) => x.id === akSel); if (!a) return null;
-    a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
-    a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
-    a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.chat_id = $("akChat").value.trim(); a.topic_id = $("akTopic").value.trim(); a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
-    return a;
-  }
-  // The Telegram defaults, destinations and discovered chats live in the
-  // same settings object; the Connections page (connections.js) edits them
-  // through alertsSettings() / alertsPersist() so there is one copy.
+  listen("alert_error", (e) => { logEvent(`tripwire failed: ${e.payload}`, "warn"); uiToast(`Tripwire failed: ${e.payload}`, "err"); });
+  let akSettings = null, akView = null;
   async function akPersist() {
+    if (!akSettings) return false;
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
-    try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
+    try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akView = v; return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save: ${e}`, "err"); return false; }
   }
-  $("akNew").onclick = () => {
-    const id = `a${Date.now()}`;
-    akSettings.alerts.push({ id, name: "New alert", enabled: true, trigger: { kind: "keywords", keywords: [], tgs: [], units: [] }, message: "🚨 {alert}\n{tgname} (TG {tg}) · {unitname} · {time}\n{transcript}", cooldown_secs: 300, telegram: true, tone: true, attach_audio: true, combine_prev: 0, combine_window_secs: 120, ai_gate: false, ai_prompt: "" });
-    akRenderList(); akEdit(id);
-  };
-  $("akSave").onclick = async () => { const a = akRead(); if (!a) return; if (await akPersist()) { uiToast("Alert saved"); akEdit(akSel); if (a.trigger.kind === "keywords" && !$("trEnabled").checked) uiToast("Keyword alerts need transcription — enable it in Settings → Transcription", "err"); } };
-  $("akDelete").onclick = async () => { if (!(await uiConfirm("Delete this alert?", "Delete"))) return; akSettings.alerts = akSettings.alerts.filter((x) => x.id !== akSel); akSel = null; $("akEditor").style.display = "none"; await akPersist(); };
-  $("akTest").onclick = async () => { if (!akRead()) return; if (!(await akPersist())) return; try { uiToast(await invoke("alerts_test", { id: akSel })); setTimeout(akLogRefresh, 4000); setTimeout(akLogRefresh, 15000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
-  async function akLogRefresh() {
-    try { const rows = await invoke("alerts_log"); $("akLogMeta").textContent = rows.length ? `${rows.length} recent` : "nothing fired yet"; $("akLog").innerHTML = rows.map((r) => `<tr><td class="mono">${new Date(r.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(r.alert)}</td><td>${esc(r.tg_name)} <span class="faint mono">${r.tg}</span></td><td>${r.status === "quiet" ? '<span class="badge">quiet</span>' : r.status === "held" ? '<span class="badge enc">held</span>' : `<span class="badge ${r.ok ? "clear" : "enc"}">${r.ok ? "sent" : "failed"}</span>`} <small>${esc(r.detail)}</small></td></tr>`).join(""); } catch (e) { log(`alerts_log: ${e}`); }
-  }
-  $("akLogRefresh").onclick = akLogRefresh;
   async function akRefresh() {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings; akView = v;
       if (typeof window.connectionsRender === "function") window.connectionsRender();
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;
-      akRenderList(); akLogRefresh(); olRefresh(true);
+      olRefresh(true);
     } catch (e) { log(`alerts_get: ${e}`); }
   }
   /* Reasoning ("think") is only offered for a model that has a thinking mode,
@@ -1857,7 +1821,7 @@ if (TAURI) {
     const model = $("olModel").value;
     const caps = await olCapsOf(model);
     const can = caps.includes("thinking");
-    for (const [box, hint] of [["akAiThink", "akThinkHint"], ["azThink", "azThinkHint"]]) {
+    for (const [box, hint] of [["twThink", "twThinkHint"]]) {
       const b = $(box), h = $(hint); if (!b) continue;
       b.disabled = !can;
       h.textContent = !model ? "pick an Ollama model" : can ? "" : `${model} has no thinking mode`;
@@ -1865,7 +1829,7 @@ if (TAURI) {
   }
   window.olThinkUi = olThinkUi;
   async function olRefresh(quiet) {
-    try { const models = await invoke("ollama_models", { url: $("olUrl").value.trim() || "http://localhost:11434" }); const cur = akSettings.ollama.model || $("olModel").value; $("olModel").innerHTML = '<option value="">—</option>' + models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join(""); $("olModel").value = models.includes(cur) ? cur : ""; $("olMeta").textContent = `${models.length} models`; }
+    try { const models = await invoke("ollama_models", { url: $("olUrl").value.trim() || "http://localhost:11434" }); const cur = (akSettings && akSettings.ollama.model) || $("olModel").value; $("olModel").innerHTML = '<option value="">—</option>' + models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join(""); $("olModel").value = models.includes(cur) ? cur : ""; $("olMeta").textContent = `${models.length} models`; }
     catch (e) { $("olMeta").textContent = "not reachable"; if (!quiet) uiToast(`Ollama: ${e}`, "err"); }
   }
   $("olRefresh").onclick = () => olRefresh(false);
@@ -1875,263 +1839,9 @@ if (TAURI) {
   window.alertsView = () => akView;
   window.alertsPersist = akPersist;
   window.alertsReload = akRefresh;
-  window.alertsOnShow = () => { if (!akSettings) akRefresh(); else akLogRefresh(); cvRefresh(); cvStateRefresh(); };
   akRefresh();
 
-  /* ---------- conversation rules: stitch, summarise, send ---------- */
-  let cvView = null, cvSel = null;
-  const CV_DEFAULT = { id: "", name: "", enabled: true, tgs: [], fixed_units: [], learn_fixed: true, end_gap_secs: 90, reply_gap_secs: 45, late_window_secs: 180, max_secs: 900, min_calls: 1,
-    summary_prompt: "Summarise this EMS-to-hospital radio report as a hand-off note for the receiving clinician: which unit is coming and where, patient age/sex, chief complaint, pertinent findings and vitals, interventions given, ETA, and anything the hospital asked for.",
-    message: "🏥 {rule} · {tgname}\n{summary}\n\n{unitnames} · {calls} transmissions · {duration} · {started}{revision}", chat_id: "", attach_audio: true, send_without_transcript: false };
-  function cvRenderList() {
-    const rules = cvView ? cvView.settings.rules : [];
-    $("cvEmpty").style.display = rules.length ? "none" : ""; $("cvMeta").textContent = rules.length ? `${rules.filter((r) => r.enabled).length} of ${rules.length} enabled` : "";
-    $("cvList").innerHTML = rules.map((r) => `<div class="row ${cvSel === r.id ? "on" : ""}" data-cv="${esc(r.id)}"><span class="grow"><b>${esc(r.name)}</b> ${r.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>TG ${r.tgs.join(",") || "—"} · fixed ${r.fixed_units.length ? r.fixed_units.join(",") : (r.learn_fixed ? "learned" : "none")} · quiet ${r.end_gap_secs}s</small></span><label class="check" style="margin:0"><input type="checkbox" data-cven="${esc(r.id)}" ${r.enabled ? "checked" : ""}></label></div>`).join("");
-    $("cvList").querySelectorAll(".row[data-cv]").forEach((row) => row.onclick = (e) => { if (e.target.closest("input")) return; cvEdit(row.dataset.cv); });
-    $("cvList").querySelectorAll("input[data-cven]").forEach((c) => c.onchange = async () => { const r = cvView.settings.rules.find((x) => x.id === c.dataset.cven); r.enabled = c.checked; await cvPersist(); });
-  }
-  function cvEdit(id) {
-    const r = cvView.settings.rules.find((x) => x.id === id); if (!r) return;
-    cvSel = id; cvRenderList(); $("cvEditor").style.display = "";
-    $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("cvTgs"); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
-    $("cvGap").value = r.end_gap_secs; $("cvReply").value = r.reply_gap_secs ?? 45; $("cvLate").value = r.late_window_secs; $("cvMax").value = r.max_secs; $("cvPrompt").value = r.summary_prompt; $("cvMessage").value = r.message;
-    $("cvChat").value = r.chat_id; if (window.destBind) destBind("cvDest", "cvChat"); $("cvMin").value = r.min_calls; $("cvAudio").checked = r.attach_audio; $("cvNoTr").checked = r.send_without_transcript;
-    const proposed = Object.entries(cvView.proposed_fixed || {}).filter(([k]) => k.startsWith(id + ":")).flatMap(([k, units]) => units.map((u) => ({ tg: k.split(":")[1], u })));
-    $("cvProposed").innerHTML = proposed.length ? "learned fixed IDs: " + proposed.map((p) => `<button class="btn ghost sm" data-cvadopt="${p.u}" title="TG ${p.tg}">${p.u} ✔ adopt</button>`).join(" ") : "";
-    $("cvProposed").querySelectorAll("[data-cvadopt]").forEach((b) => b.onclick = () => { const set = new Set(nums($("cvFixed").value)); set.add(+b.dataset.cvadopt); $("cvFixed").value = [...set].join(", "); });
-    $("cvEdMeta").textContent = `${r.tgs.length} talkgroups`;
-  }
-  function cvRead() {
-    const r = cvView.settings.rules.find((x) => x.id === cvSel); if (!r) return null;
-    r.name = $("cvName").value.trim(); r.tgs = nums($("cvTgs").value); r.enabled = $("cvEnabled").checked; r.fixed_units = nums($("cvFixed").value); r.learn_fixed = $("cvLearn").checked;
-    r.end_gap_secs = parseInt($("cvGap").value, 10) || 90; r.reply_gap_secs = Math.max(0, parseInt($("cvReply").value, 10) || 0); r.late_window_secs = parseInt($("cvLate").value, 10) || 0; r.max_secs = parseInt($("cvMax").value, 10) || 900; r.summary_prompt = $("cvPrompt").value; r.message = $("cvMessage").value;
-    r.chat_id = $("cvChat").value.trim(); r.min_calls = parseInt($("cvMin").value, 10) || 1; r.attach_audio = $("cvAudio").checked; r.send_without_transcript = $("cvNoTr").checked;
-    return r;
-  }
-  async function cvPersist() {
-    if (!cvView) { uiToast("Conversation rules did not load — reopen the Alerts tab", "err"); return false; }
-    try { await invoke("conversations_set", { rules: cvView.settings.rules }); }
-    catch (e) { log(`conversations_set failed: ${e} · payload ${JSON.stringify(cvView.settings.rules).slice(0, 300)}`); uiToast(`Could not save the conversation rule: ${e}`, "err"); return false; }
-    try { cvView = await invoke("conversations_get"); } catch (e) { log(`conversations_get failed: ${e}`); }
-    cvRenderList(); return true;
-  }
-  async function cvRefresh() { try { cvView = await invoke("conversations_get"); cvRenderList(); } catch (e) { log(`conversations_get: ${e}`); } }
-  async function cvStateRefresh() {
-    try {
-      const st = await invoke("conversations_state");
-      $("cvLiveEmpty").style.display = st.open.length ? "none" : ""; $("cvLiveMeta").textContent = st.open.length ? `${st.open.length} open` : "";
-      $("cvLive").innerHTML = st.open.map((c) => { const units = [...new Set(c.pieces.filter((p) => !p.fixed).map((p) => p.unit_name || p.unit))].join(", "); const age = Math.max(0, Math.round(Date.now() / 1000 - c.last_at)); return `<div class="row"><span class="grow"><b>${esc(c.rule_name)}</b> · ${esc(c.tg_name)} <small>${esc(units) || "fixed party only"}</small><br><small>${c.pieces.length} transmissions · quiet ${age}s · ${c.busy ? "summarising…" : c.sent_at ? (c.dirty ? "reopened — will revise" : `sent${c.revision ? " (rev " + c.revision + ")" : ""}`) : "open"}${c.last_error ? ` · <span style="color:var(--enc)">${esc(c.last_error)}</span>` : ""}</small>${c.last_summary ? `<br><small>${esc(c.last_summary.slice(0, 160))}</small>` : ""}</span>${c.sent_at && !c.busy ? `<button class="btn ghost sm" data-cvresend="${c.key}" title="Summarise again and replace the Telegram message">resend</button>` : ""}</div>`; }).join("");
-      $("cvLive").querySelectorAll("[data-cvresend]").forEach((b) => b.onclick = async () => { try { await invoke("conversation_resend", { key: +b.dataset.cvresend }); uiToast("Re-summarising…"); } catch (e) { uiToast(`${e}`, "err"); } });
-      $("cvLog").innerHTML = st.log.map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)}<br><small>${esc(l.tg_name)}</small></td><td>${esc(l.units)} <small>· ${l.calls}${l.revision ? " · rev " + l.revision : ""}</small></td><td><span class="badge ${l.ok ? "clear" : "enc"}">${l.ok ? "sent" : "failed"}</span> <small title="${esc(l.summary)}">${esc(l.detail)}</small></td></tr>`).join("");
-    } catch (e) { log(`conversations_state: ${e}`); }
-  }
-  listen("conversations", () => { if (settingsPageVisible("alerts")) cvStateRefresh(); });
-  setInterval(() => { if (settingsPageVisible("alerts")) cvStateRefresh(); }, 10000);
-  $("cvNew").onclick = () => { const id = `c${Date.now()}`; cvView.settings.rules.push({ ...CV_DEFAULT, id, name: "Hospitals" }); cvRenderList(); cvEdit(id); };
-  $("cvSave").onclick = async () => { if (!cvRead()) return; if (await cvPersist()) { uiToast("Conversation rule saved"); cvEdit(cvSel); if (!$("trEnabled").checked) uiToast("Summaries need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections for the summaries", "err"); } };
-  $("cvDelete").onclick = async () => { if (!(await uiConfirm("Delete this conversation rule?", "Delete"))) return; cvView.settings.rules = cvView.settings.rules.filter((x) => x.id !== cvSel); cvSel = null; $("cvEditor").style.display = "none"; await cvPersist(); };
-  $("cvTest").onclick = async () => { if (!cvRead()) return; if (!(await cvPersist())) return; try { uiToast(await invoke("conversation_test", { id: cvSel })); setTimeout(cvStateRefresh, 5000); setTimeout(cvStateRefresh, 30000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
-  cvRefresh();
-
-  /* ---------- periodic digests: "what's happening" roll-ups ---------- */
-  let dgView = null, dgSel = null;
-  const DG_DEFAULT = { id: "", name: "", enabled: true, tgs: [], interval_secs: 900, window_secs: 900,
-    prompt: "Summarise what is happening on these radio channels right now. Group by talkgroup; list the units involved and any notable events (emergencies, fires, pursuits, medical calls, road closures, weather). Stick to what was actually said; mark anything unclear as unclear.",
-    message: "📡 {name}\n{summary}\n\n{count} transmissions in the last {window} · {time}", chat_id: "" };
-  function dgRenderList() {
-    const rules = dgView ? dgView.rules : [];
-    $("dgEmpty").style.display = rules.length ? "none" : ""; $("dgMeta").textContent = rules.length ? `${rules.filter((r) => r.enabled).length} of ${rules.length} enabled` : "";
-    $("dgList").innerHTML = rules.map((r) => `<div class="row ${dgSel === r.id ? "on" : ""}" data-dg="${esc(r.id)}"><span class="grow"><b>${esc(r.name)}</b> ${r.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>TG ${r.tgs.join(",") || "—"} · every ${Math.round(r.interval_secs / 60)} min · last ${Math.round(r.window_secs / 60)} min</small></span><label class="check" style="margin:0"><input type="checkbox" data-dgen="${esc(r.id)}" ${r.enabled ? "checked" : ""}></label></div>`).join("");
-    $("dgList").querySelectorAll(".row[data-dg]").forEach((row) => row.onclick = (e) => { if (e.target.closest("input")) return; dgEdit(row.dataset.dg); });
-    $("dgList").querySelectorAll("input[data-dgen]").forEach((c) => c.onchange = async () => { const r = dgView.rules.find((x) => x.id === c.dataset.dgen); r.enabled = c.checked; await dgPersist(); });
-  }
-  function dgEdit(id) {
-    const r = dgView.rules.find((x) => x.id === id); if (!r) return;
-    dgSel = id; dgRenderList(); $("dgEditor").style.display = "";
-    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("dgTgs"); $("dgEnabled").checked = r.enabled;
-    $("dgInterval").value = Math.round(r.interval_secs / 60); $("dgWindow").value = Math.round(r.window_secs / 60);
-    $("dgPrompt").value = r.prompt; $("dgMessage").value = r.message; $("dgChat").value = r.chat_id; if (window.destBind) destBind("dgDest", "dgChat");
-    $("dgEdMeta").textContent = `${r.tgs.length} talkgroups`;
-  }
-  function dgRead() {
-    const r = dgView.rules.find((x) => x.id === dgSel); if (!r) return null;
-    r.name = $("dgName").value.trim(); r.tgs = nums($("dgTgs").value); r.enabled = $("dgEnabled").checked;
-    r.interval_secs = Math.max(1, parseInt($("dgInterval").value, 10) || 15) * 60;
-    r.window_secs = Math.max(1, parseInt($("dgWindow").value, 10) || 15) * 60;
-    r.prompt = $("dgPrompt").value; r.message = $("dgMessage").value; r.chat_id = $("dgChat").value.trim();
-    return r;
-  }
-  async function dgPersist() {
-    if (!dgView) { uiToast("Digests did not load — reopen the Alerts tab", "err"); return false; }
-    try { await invoke("digests_set", { rules: dgView.rules }); }
-    catch (e) { log(`digests_set failed: ${e}`); uiToast(`Could not save the digest: ${e}`, "err"); return false; }
-    try { dgView = await invoke("digests_get"); } catch (e) { log(`digests_get failed: ${e}`); }
-    dgRenderList(); return true;
-  }
-  async function dgRefresh() { try { dgView = await invoke("digests_get"); dgRenderList(); } catch (e) { log(`digests_get: ${e}`); } }
-  async function dgLogRefresh() {
-    try {
-      const log = await invoke("digests_log");
-      $("dgLog").innerHTML = log.map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)} <small>· ${l.calls} transmissions</small></td><td><span class="badge ${l.ok ? "clear" : "enc"}">${l.ok ? "sent" : "failed"}</span> <small title="${esc(l.summary)}">${esc(l.detail)}</small></td></tr>`).join("");
-    } catch (e) { log(`digests_log: ${e}`); }
-  }
-  listen("digests", () => { if (settingsPageVisible("alerts")) dgLogRefresh(); });
-  setInterval(() => { if (settingsPageVisible("alerts")) dgLogRefresh(); }, 15000);
-  $("dgNew").onclick = () => { if (!dgView) return; const id = `d${Date.now()}`; dgView.rules.push({ ...DG_DEFAULT, id, name: "Digest" }); dgRenderList(); dgEdit(id); };
-  $("dgSave").onclick = async () => { if (!dgRead()) return; if (await dgPersist()) { uiToast("Digest saved"); dgEdit(dgSel); if (!$("trEnabled").checked) uiToast("Digests need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections for the summaries", "err"); } };
-  $("dgDelete").onclick = async () => { if (!(await uiConfirm("Delete this digest?", "Delete"))) return; dgView.rules = dgView.rules.filter((x) => x.id !== dgSel); dgSel = null; $("dgEditor").style.display = "none"; await dgPersist(); };
-  $("dgTest").onclick = async () => { if (!dgRead()) return; if (!(await dgPersist())) return; try { uiToast(await invoke("digest_test", { id: dgSel })); setTimeout(dgLogRefresh, 3000); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
-  dgRefresh(); dgLogRefresh();
-
-  /* ---------- analyzers: custom prompts that extract structured data ---------- */
-  let azView = null, azSel = null, azFieldsBuf = [], azCondsBuf = [];
-  const AZ_OPS = ["==", "!=", ">", ">=", "<", "<=", "contains"];
-  const AZ_KINDS = ["string", "number", "bool"];
-  const azKw = (v) => v.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
-  function azRenderList() {
-    const rules = azView ? azView.rules : [];
-    $("azEmpty").style.display = rules.length ? "none" : "";
-    $("azMeta").textContent = rules.length ? `${rules.filter((r) => r.enabled).length} of ${rules.length} enabled` : "";
-    $("azList").innerHTML = rules.map((r) => `<div class="row ${azSel === r.id ? "on" : ""}" data-az="${esc(r.id)}"><span class="grow"><b>${esc(r.name)}</b> ${r.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>TG ${r.tgs.join(",") || "any"} · ${r.fields.length} field${r.fields.length === 1 ? "" : "s"} · ${r.conditions.length ? (r.match_mode === "any" ? "any of " : "all of ") + r.conditions.length + " cond" : "always sends"}</small></span><label class="check" style="margin:0"><input type="checkbox" data-azen="${esc(r.id)}" ${r.enabled ? "checked" : ""}></label></div>`).join("");
-    $("azList").querySelectorAll(".row[data-az]").forEach((row) => row.onclick = (e) => { if (e.target.closest("input")) return; azEdit(row.dataset.az); });
-    $("azList").querySelectorAll("input[data-azen]").forEach((c) => c.onchange = async () => { const r = azView.rules.find((x) => x.id === c.dataset.azen); r.enabled = c.checked; await azPersist(); });
-  }
-  function azSyncBuffers() {
-    azFieldsBuf = [...$("azFields").querySelectorAll(".azf")].map((r) => ({ key: r.querySelector("[data-fk]").value.trim(), kind: r.querySelector("[data-fkind]").value, desc: r.querySelector("[data-fd]").value.trim() }));
-    azCondsBuf = [...$("azConds").querySelectorAll(".azc")].map((r) => ({ field: r.querySelector("[data-cf]").value.trim(), op: r.querySelector("[data-cop]").value, value: r.querySelector("[data-cv]").value.trim() }));
-  }
-  function azRenderFields() {
-    $("azFields").innerHTML = azFieldsBuf.map((f, i) => `<div class="row azf" data-i="${i}"><span class="grow inline" style="gap:6px"><input data-fk placeholder="key" style="width:130px" value="${esc(f.key)}"><select data-fkind>${AZ_KINDS.map((k) => `<option ${k === f.kind ? "selected" : ""}>${k}</option>`).join("")}</select><input data-fd placeholder="how the model should fill it" class="grow" value="${esc(f.desc)}"></span><button class="btn ghost sm" data-fdel="${i}" title="remove">✕</button></div>`).join("");
-    $("azFields").querySelectorAll("[data-fdel]").forEach((b) => b.onclick = () => { azSyncBuffers(); azFieldsBuf.splice(+b.dataset.fdel, 1); azRenderFields(); });
-  }
-  function azRenderConds() {
-    $("azConds").innerHTML = azCondsBuf.map((c, i) => `<div class="row azc" data-i="${i}"><span class="grow inline" style="gap:6px"><input data-cf placeholder="field" style="width:130px" value="${esc(c.field)}"><select data-cop>${AZ_OPS.map((o) => `<option ${o === c.op ? "selected" : ""}>${o}</option>`).join("")}</select><input data-cv placeholder="value" class="grow" value="${esc(c.value)}"></span><button class="btn ghost sm" data-cdel="${i}" title="remove">✕</button></div>`).join("");
-    $("azConds").querySelectorAll("[data-cdel]").forEach((b) => b.onclick = () => { azSyncBuffers(); azCondsBuf.splice(+b.dataset.cdel, 1); azRenderConds(); });
-  }
-  function azEdit(id) {
-    const r = azView.rules.find((x) => x.id === id); if (!r) return;
-    azSel = id; azRenderList(); $("azEditor").style.display = "";
-    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("azTgs"); $("azEnabled").checked = r.enabled;
-    $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
-    $("azEngine").value = r.engine || "ollama"; $("azThink").checked = !!r.think; if (typeof olThinkUi === "function") olThinkUi(); $("azTelegram").checked = r.telegram !== false;
-    $("azMatch").value = r.conditions.length ? r.match_mode : "";
-    $("azMessage").value = r.message; $("azChat").value = r.chat_id; if (window.destBind) destBind("azDest", "azChat"); $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
-    azFieldsBuf = r.fields.map((f) => ({ ...f })); azCondsBuf = r.conditions.map((c) => ({ ...c }));
-    azRenderFields(); azRenderConds();
-    $("azEdMeta").textContent = `${r.fields.length} fields · ${r.conditions.length} conditions`;
-  }
-  function azRead() {
-    const r = azView.rules.find((x) => x.id === azSel); if (!r) return null;
-    azSyncBuffers();
-    r.name = $("azName").value.trim(); r.tgs = nums($("azTgs").value); r.enabled = $("azEnabled").checked;
-    r.keywords = azKw($("azKeywords").value); r.instructions = $("azInstructions").value;
-    r.engine = $("azEngine").value; r.think = $("azThink").checked; r.telegram = $("azTelegram").checked;
-    r.fields = azFieldsBuf.filter((f) => f.key);
-    const mm = $("azMatch").value;
-    r.conditions = mm ? azCondsBuf.filter((c) => c.field) : [];
-    r.match_mode = mm || "all";
-    r.message = $("azMessage").value; r.chat_id = $("azChat").value.trim();
-    r.cooldown_secs = Math.max(0, parseInt($("azCooldown").value, 10) || 0); r.attach_audio = $("azAudio").checked;
-    return r;
-  }
-  async function azPersist() {
-    if (!azView) { uiToast("Analyzers did not load — reopen the Analyzers tab", "err"); return false; }
-    try { await invoke("analyzers_set", { rules: azView.rules }); }
-    catch (e) { log(`analyzers_set failed: ${e}`); uiToast(`Could not save the analyzer: ${e}`, "err"); return false; }
-    try { azView = await invoke("analyzers_get"); } catch (e) { log(`analyzers_get failed: ${e}`); }
-    azRenderList(); return true;
-  }
-  async function azRefresh() { try { azView = await invoke("analyzers_get"); azRenderList(); } catch (e) { log(`analyzers_get: ${e}`); } }
-  async function azLogRefresh() {
-    try {
-      const rows = await invoke("analyzers_log");
-      $("azLogMeta").textContent = rows.length ? `${rows.length} recent` : "";
-      $("azLog").innerHTML = rows.map((l) => { const badge = !l.matched ? '<span class="badge">quiet</span>' : (l.ok ? '<span class="badge clear">sent</span>' : '<span class="badge enc">failed</span>'); return `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)}</td><td><small>${esc(l.tg_name)} <span class="mono">${l.tg}</span></small></td><td>${badge} <small title="${esc(l.extracted)}">${esc(l.detail)}</small></td></tr>`; }).join("");
-    } catch (e) { log(`analyzers_log: ${e}`); }
-  }
-  $("azFieldAdd").onclick = () => { azSyncBuffers(); azFieldsBuf.push({ key: "", kind: "string", desc: "" }); azRenderFields(); };
-  $("azCondAdd").onclick = () => { if (!$("azMatch").value) $("azMatch").value = "all"; azSyncBuffers(); azCondsBuf.push({ field: "", op: "==", value: "" }); azRenderConds(); };
-  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", think: false, tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
-  $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections", "err"); } };
-  $("azDelete").onclick = async () => { if (!(await uiConfirm("Delete this analyzer?", "Delete"))) return; azView.rules = azView.rules.filter((x) => x.id !== azSel); azSel = null; $("azEditor").style.display = "none"; await azPersist(); };
-  $("azTest").onclick = async () => { if (!azRead()) return; if (!(await azPersist())) return; uiToast("Running the analyzer on a recent call…"); try { const out = await invoke("analyzer_test", { id: azSel }); await uiConfirm(out, "OK"); setTimeout(azLogRefresh, 500); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
-  $("azLogRefresh").onclick = azLogRefresh;
-  $("azTemplates").onclick = async () => {
-    if (!azView) return;
-    try {
-      const tpls = await invoke("analyzer_templates");
-      const names = tpls.map((t) => t.name).join(", ");
-      if (!(await uiConfirm(`Add starter analyzers: ${names}? They arrive disabled — review each, pick talkgroups, then enable.`, "Add"))) return;
-      for (const t of tpls) { t.id = `z${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; t.enabled = false; azView.rules.push(t); }
-      if (await azPersist()) { uiToast("Templates added — review and enable them"); azEdit(azView.rules[azView.rules.length - tpls.length].id); }
-    } catch (e) { uiToast(`Could not load templates: ${e}`, "err"); }
-  };
-  /* ---- shareable template files: import (hardened in Rust) and export ---- */
-  const azSlug = (t) => (t || "analyzers").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "analyzers";
-  async function azImportText(text, m) {
-    text = String(text || "").trim();
-    if (!text) { uiToast("Choose a template file or paste its JSON first", "err"); return; }
-    let t;
-    try { t = await invoke("analyzer_template_import", { text }); }
-    catch (e) { uiToast(`Template refused: ${e}`, "err"); return; }
-    if (m) m.close();
-    const list = t.rules.map((r) => `<div class="row"><span class="grow"><b>${esc(r.name)}</b><br><small>${r.tgs.length ? "TG " + r.tgs.join(",") : "any talkgroup"} · ${r.fields.length} field${r.fields.length === 1 ? "" : "s"} · ${r.conditions.length ? r.conditions.length + " condition" + (r.conditions.length === 1 ? "" : "s") : "always sends"} · ${esc(r.engine)}</small></span></div>`).join("");
-    const rv = uiModal(`<div class="eyebrow">Review imported template</div>
-      <p class="msg" style="margin:8px 0 2px"><b>${esc(t.name || "Untitled template")}</b>${t.author ? ` <small class="faint">by ${esc(t.author)}</small>` : ""}</p>
-      ${t.description ? `<p class="help" style="white-space:pre-wrap">${esc(t.description)}</p>` : ""}
-      <div class="list" style="margin:10px 0;max-height:36vh">${list}</div>
-      <p class="help">These arrive <b>disabled</b>, with no Telegram chat. Read each prompt before enabling it — a prompt decides what gets extracted and sent.</p>
-      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Add ${t.rules.length} analyzer${t.rules.length === 1 ? "" : "s"}</button></div>`, { wide: true });
-    rv.querySelector("[data-no]").onclick = rv.close;
-    rv.querySelector("[data-yes]").onclick = async () => {
-      rv.close();
-      for (const r of t.rules) azView.rules.push(r);
-      if (await azPersist()) { uiToast(`Added ${t.rules.length} analyzer${t.rules.length === 1 ? "" : "s"} — review and enable them`); azEdit(t.rules[0].id); }
-      else azView.rules = azView.rules.filter((r) => !t.rules.includes(r));
-    };
-  }
-  $("azImport").onclick = () => {
-    if (!azView) return;
-    const m = uiModal(`<div class="eyebrow">Import analyzer template</div>
-      <p class="help">A template is a <span class="mono">.json</span> file exported from another HoosierSDR. It is checked in the app before anything is added: sizes and field names are limited, hidden characters are stripped, and every imported analyzer is quarantined (disabled, no chat).</p>
-      <div class="inline" style="margin:10px 0"><button class="btn ghost" data-pick>Choose file…</button><span class="help" data-fname></span></div>
-      <label class="field"><span class="lab">or paste the template JSON</span><textarea data-paste style="min-height:120px" spellcheck="false"></textarea></label>
-      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Review…</button></div>`, { wide: true });
-    const fileIn = $("azImportFile"); fileIn.value = "";
-    m.querySelector("[data-pick]").onclick = () => fileIn.click();
-    fileIn.onchange = () => {
-      const f = fileIn.files && fileIn.files[0]; if (!f) return;
-      m.querySelector("[data-fname]").textContent = `${f.name} · ${Math.ceil(f.size / 1024)} KB`;
-      if (f.size > 512 * 1024) { uiToast("That file is over 512 KB — not a template", "err"); return; }
-      const rd = new FileReader(); rd.onload = () => { m.querySelector("[data-paste]").value = String(rd.result || ""); }; rd.readAsText(f);
-    };
-    m.querySelector("[data-no]").onclick = m.close;
-    m.querySelector("[data-yes]").onclick = () => azImportText(m.querySelector("[data-paste]").value, m);
-  };
-  $("azExport").onclick = () => {
-    if (!azView || !azView.rules.length) { uiToast("Nothing to export yet"); return; }
-    const rows = azView.rules.map((r) => `<label class="row check" style="margin:0"><input type="checkbox" data-xid="${esc(r.id)}" ${azSel === r.id || !azSel ? "checked" : ""}> <span class="grow"><b>${esc(r.name)}</b> <small>${r.tgs.length ? "TG " + r.tgs.join(",") : "any"}</small></span></label>`).join("");
-    const m = uiModal(`<div class="eyebrow">Export analyzer template</div>
-      <div class="row2" style="margin-top:8px"><label class="field"><span class="lab">Template name</span><input data-xname type="text" placeholder="EMS medical screens" spellcheck="false"></label><label class="field"><span class="lab">Author <span class="mono faint">optional</span></span><input data-xauthor type="text" spellcheck="false"></label></div>
-      <label class="field"><span class="lab">Description <span class="mono faint">optional · what it watches for and which model it was tuned on</span></span><textarea data-xdesc style="min-height:56px"></textarea></label>
-      <div class="lab">Analyzers to include</div><div class="list" style="max-height:30vh;margin-bottom:8px">${rows}</div>
-      <label class="field"><span class="lab">Save to</span><input data-xpath type="text" spellcheck="false"></label>
-      <p class="help">Your Telegram chat id and the enabled flag are left out of the file. Prompts and messages are included as written.</p>
-      <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn ghost" data-copy>Copy JSON</button><button class="btn primary" data-save>Save file</button></div>`, { wide: true });
-    const nameIn = m.querySelector("[data-xname]"), pathIn = m.querySelector("[data-xpath]");
-    const syncPath = () => { if (!pathIn.dataset.touched) pathIn.value = `~/Downloads/${azSlug(nameIn.value)}.hoosier-analyzers.json`; };
-    nameIn.oninput = syncPath; pathIn.oninput = () => { pathIn.dataset.touched = "1"; }; syncPath();
-    const build = async () => {
-      const ids = [...m.querySelectorAll("input[data-xid]:checked")].map((c) => c.dataset.xid);
-      if (!ids.length) { uiToast("Tick at least one analyzer", "err"); return null; }
-      try { return await invoke("analyzer_template_export", { ids, name: nameIn.value.trim(), author: m.querySelector("[data-xauthor]").value.trim(), description: m.querySelector("[data-xdesc]").value.trim() }); }
-      catch (e) { uiToast(`Export failed: ${e}`, "err"); return null; }
-    };
-    m.querySelector("[data-no]").onclick = m.close;
-    m.querySelector("[data-copy]").onclick = async () => { const t = await build(); if (!t) return; try { await navigator.clipboard.writeText(t); uiToast("Template JSON copied"); } catch (_) { uiConfirm(t, "OK"); } };
-    m.querySelector("[data-save]").onclick = async () => { const t = await build(); if (!t) return; try { const p = await invoke("save_text", { path: pathIn.value.trim(), text: t }); uiToast(`Saved ${p}`); m.close(); } catch (e) { uiToast(`Could not save: ${e}`, "err"); } };
-  };
-  /* cloud model settings (shared by analyzers set to "Cloud") */
+  /* cloud model settings (for tripwires whose check runs on the cloud model) */
   async function azcLoad() {
     try {
       const [cloud, hasKey] = await invoke("analyzer_cloud_get");
@@ -2148,11 +1858,7 @@ if (TAURI) {
     catch (e) { uiToast(`Could not save: ${e}`, "err"); }
   };
   $("azcClear").onclick = async () => { if (!(await uiConfirm("Forget the saved cloud API key?", "Forget"))) return; try { await invoke("analyzer_cloud_clear_key"); $("azcKey").value = ""; uiToast("Key forgotten"); azcLoad(); } catch (e) { uiToast(`${e}`, "err"); } };
-  listen("analyzers", () => { if (settingsPageVisible("analyzers")) azLogRefresh(); });
-  listen("analyzer", (e) => { const p = e.payload; logEvent(`ANALYZER ${p.name}: ${String(p.message).split("\n")[0]}`, "alarm"); });
-  setInterval(() => { if (settingsPageVisible("analyzers")) azLogRefresh(); }, 15000);
-  window.analyzersOnShow = () => { if (!azView) { azRefresh(); azcLoad(); } else azLogRefresh(); };
-  azRefresh(); azLogRefresh(); azcLoad();
+  azcLoad();
 
   /* ---------- file name template ---------- */
   async function fnRefresh() {
@@ -3315,19 +3021,46 @@ function editTranscriptCell(td, id, current, onSaved) {
   ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); finish(true); } else if (e.key === "Escape") { e.preventDefault(); finish(false); } };
   ta.onblur = () => finish(true);
 }
+// A small menu at the pointer: [[label, fn], …].
+function uiMenu(x, y, items) {
+  document.querySelectorAll(".ctxmenu").forEach((m) => m.remove());
+  const m = document.createElement("div"); m.className = "ctxmenu";
+  m.innerHTML = items.map(([label], i) => `<button data-i="${i}">${esc(label)}</button>`).join("");
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.min(x, innerWidth - r.width - 6)}px`; m.style.top = `${Math.min(y, innerHeight - r.height - 6)}px`;
+  const close = () => { m.remove(); document.removeEventListener("mousedown", away, true); document.removeEventListener("keydown", esc_, true); };
+  const away = (e) => { if (!m.contains(e.target)) close(); };
+  const esc_ = (e) => { if (e.key === "Escape") close(); };
+  m.querySelectorAll("[data-i]").forEach((b) => b.onclick = () => { close(); items[+b.dataset.i][1](); });
+  setTimeout(() => { document.addEventListener("mousedown", away, true); document.addEventListener("keydown", esc_, true); }, 0);
+}
+// Right-click a call (in the live list or the library): edit its
+// transcript, or start a tripwire from it.
 document.addEventListener("contextmenu", (e) => {
-  const td = e.target.closest && e.target.closest("td.tr");
-  if (!td) return;
-  const tr = td.closest("tr");
-  const id = td.dataset.trid !== undefined ? td.dataset.trid : (tr && tr.dataset.id);
+  if (!e.target.closest) return;
+  const td = e.target.closest("td.tr");
+  const tr = e.target.closest("tr");
+  const libRow = tr && tr.closest("#libBody") ? tr : null;
+  const cell = td || (tr && tr.querySelector("td.tr[data-trid]"));
+  let id = null;
+  if (td) id = td.dataset.trid !== undefined ? td.dataset.trid : (tr && tr.dataset.id);
+  else if (libRow) id = libRow.dataset.id;
+  else if (cell) id = cell.dataset.trid;
+  if (!td && !id) return;
   e.preventDefault();
   if (!TAURI) return;
   if (!id) { uiToast("This call was not stored, so its transcript cannot be edited", "err"); return; }
-  const current = (td.getAttribute("title") || "").trim();
-  editTranscriptCell(td, +id, current, (text) => {
-    if (typeof window.libRefreshRow === "function" && tr && tr.dataset.id) window.libRefreshRow(+id);
-    if (Array.isArray(history)) { const h = history.find((x) => x.el === tr); if (h) { h.text += " " + text.toLowerCase(); } }
-  });
+  const items = [];
+  if (td) items.push(["✎ Edit the transcript", () => {
+    const current = (td.getAttribute("title") || "").trim();
+    editTranscriptCell(td, +id, current, (text) => {
+      if (typeof window.libRefreshRow === "function" && tr && tr.dataset.id) window.libRefreshRow(+id);
+      if (Array.isArray(history)) { const h = history.find((x) => x.el === tr); if (h) { h.text += " " + text.toLowerCase(); } }
+    });
+  }]);
+  items.push(["⚡ Tell me when something like this happens…", () => { if (typeof window.tripwireFromCall === "function") window.tripwireFromCall(+id); }]);
+  uiMenu(e.clientX, e.clientY, items);
 });
 
 /* ================= onboarding / setup wizard ================= */
