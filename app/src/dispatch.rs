@@ -427,6 +427,8 @@ pub struct IncidentCall {
 pub struct IncidentDetail {
     pub incident: Incident,
     pub calls: Vec<IncidentCall>,
+    /// Hospital reports joined to this run.
+    pub reports: Vec<crate::link::LinkedReport>,
 }
 
 const INC_COLS: &str = "id, created, updated, tg, tg_name, call_type, emoji, address, validated, lat, lon, geocode, units, summary, confidence, calls, revision, address_key";
@@ -1851,7 +1853,15 @@ pub fn incident_get(state: State<AppState>, id: i64) -> Result<Option<IncidentDe
             transcript: row.and_then(|r| r.transcript_edited.or(r.transcript)),
         });
     }
-    Ok(Some(IncidentDetail { incident, calls }))
+    // The hospital reports this run turned into, if a crew was heard
+    // reading one.
+    let places = state.places.lock().unwrap().settings.clone();
+    let reports = crate::link::reports_for(&c, id, &places);
+    Ok(Some(IncidentDetail {
+        incident,
+        calls,
+        reports,
+    }))
 }
 
 #[tauri::command]

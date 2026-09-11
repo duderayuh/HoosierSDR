@@ -373,6 +373,40 @@ fn normalize(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Ask the model whether to send. Returns (fire, summary).
+/// Ask the local model one question and hand back what it said.
+///
+/// The screening and extraction paths both wrap their own prompt around the
+/// listener's words; this is for the places that have written the whole
+/// prompt already — the incident tie-break, for one.
+pub fn ollama_json(o: &Ollama, prompt: &str) -> Result<String, String> {
+    if o.model.trim().is_empty() {
+        return Err("no Ollama model chosen".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(
+            o.timeout_secs.max(5) as u64
+        )))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let body = serde_json::json!({
+        "model": o.model, "prompt": prompt, "stream": false, "format": "json",
+        "think": false, "options": { "temperature": 0 }
+    });
+    let mut r = agent
+        .post(&format!("{}/api/generate", o.url.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send(body.to_string().as_bytes())
+        .map_err(|e| format!("ollama: {e}"))?;
+    let status = r.status().as_u16();
+    let text = r.body_mut().read_to_string().unwrap_or_default();
+    if status != 200 {
+        return Err(format!("ollama HTTP {status}: {}", text.trim()));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(v["response"].as_str().unwrap_or_default().to_string())
+}
+
 pub fn ask_ollama(
     o: &Ollama,
     prompt: &str,

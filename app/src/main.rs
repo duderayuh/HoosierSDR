@@ -30,6 +30,7 @@ mod events;
 mod follow;
 mod hook;
 mod library;
+mod link;
 mod models;
 mod names;
 mod places;
@@ -2284,6 +2285,7 @@ fn main() {
                         conversations::ensure_schema(&c);
                         events::ensure_schema(&c);
                         backtest::ensure_schema(&c);
+                        link::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2394,6 +2396,7 @@ fn main() {
             dispatch::dispatch_geocode,
             dispatch::dispatch_regeocode,
             dispatch::dispatch_calibrate,
+            link::incidents_relink,
             places::places_get,
             places::places_set,
             places::places_suggest,
