@@ -395,8 +395,13 @@ button { font-family: inherit; }
 
 /* ---------- top bar ---------- */
 .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: var(--shadow); }
-.brand { font-family: var(--display); font-weight: 700; font-size: 18px; letter-spacing: .02em; margin-right: 4px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font-family: var(--display); font-weight: 700; font-size: 18px; letter-spacing: .02em; margin-right: 4px; }
 .brand b { color: var(--signal); }
+/* The mark: a QPSK constellation locked inside a scanning ring. Takes its
+   colours from the theme, so it follows light/dark with everything else. */
+.brandmark { width: 21px; height: 21px; flex: none; }
+.brandmark .bm-ring, .brandmark .bm-dia { fill: none; stroke: var(--signal); }
+.brandmark .bm-core { fill: var(--amber); }
 .spacer { flex: 1; }
 .tb { display: flex; flex-direction: column; gap: 1px; }
 .tb span { font-family: var(--display); text-transform: uppercase; letter-spacing: .12em; font-size: 9.5px; color: var(--ink-faint); }
@@ -626,7 +631,8 @@ body { font-size: 12px; line-height: 1.35; }
 body { display: flex; flex-direction: column; height: calc(100vh / var(--z)); }
 .topbar { flex: none; flex-wrap: wrap; row-gap: 6px; }   /* controls drop to a second row instead of running off the window */
 .topbar { padding: 5px 12px; gap: 10px; }
-.brand { font-size: 16px; }
+.brand { font-size: 16px; gap: 7px; }
+.brandmark { width: 19px; height: 19px; }
 .seg.nav button { padding: 4px 11px; font-size: 11.5px; }
 .tb select { padding: 3px 24px 3px 7px; font-size: 11.5px; min-width: 100px; }
 .btn { padding: 5px 11px; font-size: 11.5px; }

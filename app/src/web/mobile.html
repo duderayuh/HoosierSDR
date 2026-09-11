@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#080b0c" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4IiByb2xlPSJpbWciIGFyaWEtbGFiZWw9Ikhvb3NpZXJTRFIiPgogIDx0aXRsZT5Ib29zaWVyU0RSPC90aXRsZT4KICA8IS0tIEEgUVBTSyBjb25zdGVsbGF0aW9uIGxvY2tlZCBpbnNpZGUgYSBzY2FubmluZyByaW5nOiB0aGUgZm91ciByaW5nIGFyY3MKICAgICAgIGJyZWFrIGF0IHRoZSBkaWFtb25kJ3MgcG9pbnRzLCB0aGUgYW1iZXIgY29yZSBpcyB0aGUgY2FycmllciBpbiBsb2NrLiAtLT4KICA8c3R5bGU+CiAgICAucmluZywgLmRpYSB7IGZpbGw6IG5vbmU7IHN0cm9rZTogIzBiOTg4YzsgfQogICAgLmNvcmUgeyBmaWxsOiAjYTk2YTA2OyB9CiAgICBAbWVkaWEgKHByZWZlcnMtY29sb3Itc2NoZW1lOiBkYXJrKSB7CiAgICAgIC5yaW5nLCAuZGlhIHsgc3Ryb2tlOiAjMzRlMGNmOyB9CiAgICAgIC5jb3JlIHsgZmlsbDogI2Y1YjU0NDsgfQogICAgfQogIDwvc3R5bGU+CiAgPGcgY2xhc3M9InJpbmciIHN0cm9rZS13aWR0aD0iNyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj4KICAgIDxwYXRoIGQ9Ik0xMTcuMTggNzMuMzhBNTQgNTQgMCAwIDEgNzMuMzggMTE3LjE4Ii8+CiAgICA8cGF0aCBkPSJNNTQuNjIgMTE3LjE4QTU0IDU0IDAgMCAxIDEwLjgyIDczLjM4Ii8+CiAgICA8cGF0aCBkPSJNMTAuODIgNTQuNjJBNTQgNTQgMCAwIDEgNTQuNjIgMTAuODIiLz4KICAgIDxwYXRoIGQ9Ik03My4zOCAxMC44MkE1NCA1NCAwIDAgMSAxMTcuMTggNTQuNjIiLz4KICA8L2c+CiAgPHBhdGggY2xhc3M9ImRpYSIgZD0iTTY0IDMwIDk4IDY0IDY0IDk4IDMwIDY0WiIgc3Ryb2tlLXdpZHRoPSIxMCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogIDxwYXRoIGNsYXNzPSJjb3JlIiBkPSJNNjQgNTEgNzcgNjQgNjQgNzcgNTEgNjRaIi8+Cjwvc3ZnPgo=" />
 <title>HoosierSDR</title>
 <style>
   :root {
@@ -19,8 +20,11 @@
     font-size:16px; line-height:1.45; -webkit-font-smoothing:antialiased;
   }
   .wrap { max-width:520px; margin:0 auto; padding:20px 16px 40px; }
-  .brand { font-weight:700; font-size:20px; letter-spacing:.02em; margin-bottom:12px; }
+  .brand { display:flex; align-items:center; gap:9px; font-weight:700; font-size:20px; letter-spacing:.02em; margin-bottom:12px; }
   .brand b { color:var(--signal); }
+  .brandmark { width:23px; height:23px; flex:none; }
+  .brandmark .bm-ring, .brandmark .bm-dia { fill:none; stroke:var(--signal); }
+  .brandmark .bm-core { fill:var(--amber); }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; }
   .card h1 { font-size:13px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
   .card p { color:var(--dim); margin:0 0 12px; font-size:14px; }
@@ -94,7 +98,16 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="brand">Hoosier<b>SDR</b></div>
+    <div class="brand"><svg class="brandmark" viewBox="0 0 128 128" aria-hidden="true" focusable="false">
+      <g class="bm-ring" stroke-width="7" stroke-linecap="round">
+        <path d="M117.18 73.38A54 54 0 0 1 73.38 117.18"/>
+        <path d="M54.62 117.18A54 54 0 0 1 10.82 73.38"/>
+        <path d="M10.82 54.62A54 54 0 0 1 54.62 10.82"/>
+        <path d="M73.38 10.82A54 54 0 0 1 117.18 54.62"/>
+      </g>
+      <path class="bm-dia" d="M64 30 98 64 64 98 30 64Z" stroke-width="10" stroke-linejoin="round"/>
+      <path class="bm-core" d="M64 51 77 64 64 77 51 64Z"/>
+    </svg><span>Hoosier<b>SDR</b></span></div>
 
     <!-- login -->
     <div class="card" id="login">

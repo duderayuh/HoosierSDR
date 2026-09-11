@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="HoosierSDR">
+  <title>HoosierSDR</title>
+  <!-- A QPSK constellation locked inside a scanning ring: the four ring arcs
+       break at the diamond's points, the amber core is the carrier in lock. -->
+  <style>
+    .ring, .dia { fill: none; stroke: #0b988c; }
+    .core { fill: #a96a06; }
+    @media (prefers-color-scheme: dark) {
+      .ring, .dia { stroke: #34e0cf; }
+      .core { fill: #f5b544; }
+    }
+  </style>
+  <g class="ring" stroke-width="7" stroke-linecap="round">
+    <path d="M117.18 73.38A54 54 0 0 1 73.38 117.18"/>
+    <path d="M54.62 117.18A54 54 0 0 1 10.82 73.38"/>
+    <path d="M10.82 54.62A54 54 0 0 1 54.62 10.82"/>
+    <path d="M73.38 10.82A54 54 0 0 1 117.18 54.62"/>
+  </g>
+  <path class="dia" d="M64 30 98 64 64 98 30 64Z" stroke-width="10" stroke-linejoin="round"/>
+  <path class="core" d="M64 51 77 64 64 77 51 64Z"/>
+</svg>

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>HoosierSDR</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600&display=swap" />
@@ -13,7 +14,17 @@
 <body>
   <!-- ===== top bar: the things you touch while listening ===== -->
   <header class="topbar">
-    <div class="brand">Hoosier<b>SDR</b></div>
+    <div class="brand">
+    <svg class="brandmark" viewBox="0 0 128 128" aria-hidden="true" focusable="false">
+      <g class="bm-ring" stroke-width="7" stroke-linecap="round">
+        <path d="M117.18 73.38A54 54 0 0 1 73.38 117.18"/>
+        <path d="M54.62 117.18A54 54 0 0 1 10.82 73.38"/>
+        <path d="M10.82 54.62A54 54 0 0 1 54.62 10.82"/>
+        <path d="M73.38 10.82A54 54 0 0 1 117.18 54.62"/>
+      </g>
+      <path class="bm-dia" d="M64 30 98 64 64 98 30 64Z" stroke-width="10" stroke-linejoin="round"/>
+      <path class="bm-core" d="M64 51 77 64 64 77 51 64Z"/>
+    </svg><span>Hoosier<b>SDR</b></span></div>
     <div class="seg nav" id="navSeg" role="tablist">
       <button data-v="monitor" aria-pressed="true">Monitor</button>
       <button data-v="library" aria-pressed="false">Library</button>

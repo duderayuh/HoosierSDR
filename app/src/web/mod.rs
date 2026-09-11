@@ -430,6 +430,7 @@ const DIST: &[(&str, &str, &str)] = &[
     ("index.html", "text/html; charset=utf-8", include_str!("../../dist/index.html")),
     ("app.js", "text/javascript; charset=utf-8", include_str!("../../dist/app.js")),
     ("style.css", "text/css; charset=utf-8", include_str!("../../dist/style.css")),
+    ("favicon.svg", "image/svg+xml", include_str!("../../dist/favicon.svg")),
     ("vendor/leaflet.js", "text/javascript; charset=utf-8", include_str!("../../dist/vendor/leaflet.js")),
     ("vendor/leaflet.css", "text/css; charset=utf-8", include_str!("../../dist/vendor/leaflet.css")),
 ];

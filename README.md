@@ -1,4 +1,9 @@
-# HoosierSDR
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.png" />
+    <img src="docs/brand/lockup-light.png" alt="HoosierSDR — P25 Phase I trunked radio receiver" width="415" />
+  </picture>
+</p>
 
 **P25 Phase I trunked-radio receiver in Rust.** Equalizes the channel *before* differential detection — the difference that matters on simulcast systems.
 
