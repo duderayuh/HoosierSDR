@@ -16,11 +16,16 @@
 //!
 //! All HTTP happens here in Rust: the webview's CSP blocks it, and the bot
 //! token belongs in the keyring, not in the page.
+//!
+//! Rules now live in `tripwires`; this module keeps what they share — the
+//! Telegram bot, destinations, the Ollama settings, and the send and AI
+//! helpers. The `alerts` array in `alerts.json` is kept as it was for an
+//! older build to find (tripwires were built from it once); it is no longer
+//! run.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
@@ -223,28 +228,9 @@ impl Default for Settings {
     }
 }
 
-/// One firing, for the in-app log.
-#[derive(Serialize, Clone, Debug)]
-pub struct LogEntry {
-    pub at: i64,
-    pub alert: String,
-    pub tg: u16,
-    pub tg_name: String,
-    pub message: String,
-    pub ok: bool,
-    /// `sent` | `failed` | `quiet` (the AI check said no — working as
-    /// intended, not an error) | `held` (the AI check could not be reached
-    /// and the alert fails closed).
-    pub status: String,
-    pub detail: String,
-}
-
 #[derive(Default)]
 pub struct AlertState {
     pub settings: Settings,
-    /// (alert id, talkgroup) → when it last fired (epoch seconds).
-    last_fired: HashMap<(String, u16), i64>,
-    pub log: VecDeque<LogEntry>,
 }
 
 pub type Shared = Mutex<AlertState>;
@@ -269,7 +255,6 @@ pub struct CallFacts {
     pub transcript: Option<String>,
     /// The system the call was heard on (its RadioReference name), so a
     /// rule can tell TG 10202 on one system from TG 10202 on another.
-    #[allow(dead_code)] // read by the Tripwires rule engine
     pub system: String,
 }
 
@@ -381,271 +366,6 @@ fn normalize(s: &str) -> String {
         }
     }
     out.trim().to_string()
-}
-
-/// Does this alert's trigger apply to the call? Returns the keywords that
-/// matched (empty for non-keyword triggers).
-pub fn matches(a: &Alert, f: &CallFacts) -> Option<Vec<String>> {
-    if !a.enabled {
-        return None;
-    }
-    let t = &a.trigger;
-    if !t.tgs.is_empty() && !t.tgs.contains(&f.tg) {
-        return None;
-    }
-    if !t.units.is_empty() && !t.units.contains(&f.unit) {
-        return None;
-    }
-    match t.kind.as_str() {
-        "keywords" => {
-            let text = f.transcript.as_deref()?;
-            let m = matched_keywords(&t.keywords, text);
-            (!m.is_empty()).then_some(m)
-        }
-        "emergency" => f.emergency.then(Vec::new),
-        "talkgroup" => (!t.tgs.is_empty()).then(Vec::new),
-        "unit" => (!t.units.is_empty()).then(Vec::new),
-        _ => None,
-    }
-}
-
-pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai: &str) -> String {
-    let time = crate::library::local_hms(if f.start > 0 {
-        f.start
-    } else {
-        crate::library::now()
-    });
-    template
-        .replace("{alert}", &a.name)
-        .replace("{tg}", &f.tg.to_string())
-        .replace("{tgname}", &f.tg_name)
-        .replace("{tgdesc}", f.tg_desc.as_deref().unwrap_or(""))
-        .replace("{unit}", &f.unit.to_string())
-        .replace(
-            "{unitname}",
-            f.unit_name.as_deref().unwrap_or(&f.unit.to_string()),
-        )
-        .replace("{time}", &time)
-        .replace("{secs}", &format!("{:.0}", f.secs))
-        .replace("{transcript}", f.transcript.as_deref().unwrap_or(""))
-        .replace("{keywords}", &keywords.join(", "))
-        .replace("{ai}", ai)
-        .trim()
-        .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// firing
-// ---------------------------------------------------------------------------
-
-/// A completed call (before its transcript exists).
-pub fn on_call(app: &AppHandle, f: &CallFacts) {
-    let state = app.state::<AppState>();
-    let alerts: Vec<Alert> = state
-        .alerts
-        .lock()
-        .unwrap()
-        .settings
-        .alerts
-        .iter()
-        .filter(|a| a.trigger.kind != "keywords")
-        .cloned()
-        .collect();
-    for a in alerts {
-        if let Some(kw) = matches(&a, f) {
-            fire(app.clone(), a, f.clone(), kw);
-        }
-    }
-}
-
-/// A transcript landed for library call `id`.
-pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
-    let state = app.state::<AppState>();
-    let alerts: Vec<Alert> = state
-        .alerts
-        .lock()
-        .unwrap()
-        .settings
-        .alerts
-        .iter()
-        .filter(|a| a.trigger.kind == "keywords" && a.enabled)
-        .cloned()
-        .collect();
-    if alerts.is_empty() {
-        return;
-    }
-    let Some(db) = state.db.lock().unwrap().clone() else {
-        return;
-    };
-    let row = {
-        let c = db.lock().unwrap();
-        crate::library::get(&c, id).ok().flatten()
-    };
-    let Some(r) = row else { return };
-    let f = facts_from_row(app, r, Some(text.to_string()));
-    for a in alerts {
-        if let Some(kw) = matches(&a, &f) {
-            fire(app.clone(), a, f.clone(), kw);
-        }
-    }
-}
-
-/// Run the alert on its own thread: cooldown, AI gate, actions, log.
-fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
-    std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let now = crate::library::now();
-        let key = (a.id.clone(), f.tg);
-        {
-            let st = state.alerts.lock().unwrap();
-            if let Some(last) = st.last_fired.get(&key) {
-                if now - last < a.cooldown_secs as i64 {
-                    return;
-                }
-            }
-        }
-        // The cooldown is armed only once something was actually delivered
-        // (below): an AI "no" or a failed send must not throttle the retry.
-        let (tg_settings, ollama) = {
-            let st = state.alerts.lock().unwrap();
-            (st.settings.telegram.clone(), st.settings.ollama.clone())
-        };
-        // The alert's own chat and topic, where it names them.
-        let tg_settings = Telegram {
-            chat_id: if a.chat_id.trim().is_empty() {
-                tg_settings.chat_id
-            } else {
-                a.chat_id.trim().to_string()
-            },
-            topic_id: if a.topic_id.trim().is_empty() {
-                tg_settings.topic_id
-            } else {
-                a.topic_id.trim().to_string()
-            },
-            ..tg_settings
-        };
-        let mut ai_note = String::new();
-        if a.ai_gate && !a.ai_prompt.trim().is_empty() {
-            match ask_ollama(&ollama, &a.ai_prompt, &f, a.ai_think) {
-                Ok((true, summary)) => ai_note = summary,
-                Ok((false, summary)) => {
-                    // The check doing its job: logged, but not an error.
-                    log_entry(
-                        &app,
-                        &a,
-                        &f,
-                        "quiet",
-                        format!("AI check said no: {summary}"),
-                        String::new(),
-                        &keywords,
-                        (String::new(), Vec::new()),
-                    );
-                    return;
-                }
-                Err(e) => {
-                    if !ollama.fail_open {
-                        log_entry(
-                            &app,
-                            &a,
-                            &f,
-                            "held",
-                            format!("AI check unavailable, alert held: {e}"),
-                            String::new(),
-                            &keywords,
-                            (String::new(), Vec::new()),
-                        );
-                        return;
-                    }
-                    ai_note = format!("(AI check unavailable: {e})");
-                }
-            }
-        }
-        let message = render(&a.message, &a, &f, &keywords, &ai_note);
-        let _ = app.emit(
-            "alert",
-            serde_json::json!({ "name": a.name, "tg": f.tg, "message": message, "tone": a.tone, "call": f.id }),
-        );
-        let mut ok = true;
-        let mut detail = String::new();
-        let mut sent_ids: Vec<i64> = Vec::new();
-        if a.telegram {
-            match send_telegram(&tg_settings, &a, &f, &message, &state) {
-                Ok((d, ids)) => {
-                    detail = d;
-                    sent_ids = ids;
-                }
-                Err(e) => {
-                    ok = false;
-                    detail = e;
-                }
-            }
-        }
-        if ok {
-            state.alerts.lock().unwrap().last_fired.insert(key, now);
-        }
-        let chat = if a.telegram { tg_settings.destination() } else { String::new() };
-        log_entry(
-            &app,
-            &a,
-            &f,
-            if ok { "sent" } else { "failed" },
-            detail,
-            message,
-            &keywords,
-            (chat, sent_ids),
-        );
-    });
-}
-
-/// Record one outcome — in the in-app log and the tripwire history. Only a
-/// failed send or a held alert is an error the listener is told about; a
-/// quiet AI verdict is the check working.
-#[allow(clippy::too_many_arguments)]
-fn log_entry(
-    app: &AppHandle,
-    a: &Alert,
-    f: &CallFacts,
-    status: &str,
-    detail: String,
-    message: String,
-    keywords: &[String],
-    (chat, message_ids): (String, Vec<i64>),
-) {
-    let state = app.state::<AppState>();
-    let mut st = state.alerts.lock().unwrap();
-    st.log.push_front(LogEntry {
-        at: crate::library::now(),
-        alert: a.name.clone(),
-        tg: f.tg,
-        tg_name: f.tg_name.clone(),
-        message: message.clone(),
-        ok: status == "sent",
-        status: status.to_string(),
-        detail: detail.clone(),
-    });
-    st.log.truncate(200);
-    drop(st);
-    crate::events::record(
-        app,
-        crate::events::NewEvent {
-            source: "alert",
-            rule_id: a.id.clone(),
-            rule_name: a.name.clone(),
-            tg: f.tg,
-            tg_name: f.tg_name.clone(),
-            status: status.to_string(),
-            detail: detail.clone(),
-            message,
-            chat,
-            message_ids,
-            data: serde_json::json!({ "keywords": keywords }).to_string(),
-            calls: f.id.into_iter().collect(),
-            ..Default::default()
-        },
-    );
-    if status == "failed" || status == "held" {
-        let _ = app.emit("alert_error", format!("{}: {detail}", a.name));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -775,58 +495,6 @@ pub fn send_text(dest: &str, text: &str, timeout_secs: u64) -> Result<String, St
     check(status, &out)
 }
 
-/// The audio to attach: the call, with up to `combine_prev` earlier calls on
-/// the same talkgroup within the window, concatenated oldest first. Encoded
-/// to MP3 when ffmpeg is present (what Telegram's `sendAudio` wants), else
-/// WAV as a document.
-fn clip_for(
-    a: &Alert,
-    f: &CallFacts,
-    state: &AppState,
-) -> Result<Option<(std::path::PathBuf, bool)>, String> {
-    let Some(audio) = f.audio.as_ref() else {
-        return Ok(None);
-    };
-    let mut files = vec![audio.clone()];
-    if a.combine_prev > 0 {
-        if let (Some(db), Some(id)) = (state.db.lock().unwrap().clone(), f.id) {
-            let c = db.lock().unwrap();
-            let prev = crate::library::previous_on_talkgroup(
-                &c,
-                id,
-                f.tg,
-                a.combine_prev as usize,
-                a.combine_window_secs as i64,
-            )?;
-            for p in prev.into_iter().rev() {
-                files.insert(0, p);
-            }
-        }
-    }
-    let mut pcm: Vec<i16> = Vec::new();
-    for (i, p) in files.iter().enumerate() {
-        let part = read_audio(p)?;
-        if i > 0 {
-            pcm.extend(std::iter::repeat_n(0i16, 4000)); // half a second between calls
-        }
-        pcm.extend(part);
-    }
-    let dir = std::env::temp_dir().join("hoosier-alerts");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let wav = dir.join(format!("alert_{}_{}.wav", f.tg, crate::library::now()));
-    hs_core::wav::write_wav(wav.to_str().ok_or("temp path")?, 8000, &pcm)
-        .map_err(|e| e.to_string())?;
-    if crate::encode::ffmpeg_available().is_some() {
-        let fmt: crate::encode::Format =
-            serde_json::from_str(r#"{"codec":"mp3","bitrate_kbps":48,"mode":"cbr"}"#).unwrap();
-        if let Ok(mp3) = crate::encode::transcode(&wav, &fmt) {
-            let _ = std::fs::remove_file(&wav);
-            return Ok(Some((mp3, true)));
-        }
-    }
-    Ok(Some((wav, false)))
-}
-
 /// Concatenate audio files (half a second of silence between) into one
 /// clip: MP3 via ffmpeg when available (Telegram's `sendAudio`), else WAV.
 /// Returns the path and whether it is MP3.
@@ -873,12 +541,31 @@ fn message_id(text: &str) -> Option<i64> {
     v["result"]["message_id"].as_i64()
 }
 
+/// `reply_parameters` for a reply to `id` that still sends if the message
+/// it answers was deleted.
+fn reply_json(id: i64) -> serde_json::Value {
+    serde_json::json!({ "message_id": id, "allow_sending_without_reply": true })
+}
+
 /// Send text; returns the Telegram message id (for later deletion).
 pub(crate) fn send_text_id(chat_id: &str, text: &str) -> Result<i64, String> {
+    send_text_reply(chat_id, text, None)
+}
+
+/// Send text, as a reply to `reply_to` when set (in a forum the topic comes
+/// from the destination, as for any send). Returns the message id.
+pub(crate) fn send_text_reply(
+    chat_id: &str,
+    text: &str,
+    reply_to: Option<i64>,
+) -> Result<i64, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body = text_body(chat_id, text);
+    let mut body = text_body(chat_id, text);
+    if let Some(id) = reply_to {
+        body["reply_parameters"] = reply_json(id);
+    }
     let (status, out) = crate::upload::post(
         &telegram_api("sendMessage")?,
         "application/json",
@@ -899,13 +586,26 @@ pub(crate) fn send_audio_id(
     title: &str,
     performer: &str,
 ) -> Result<Vec<i64>, String> {
+    send_audio_reply(chat_id, path, is_mp3, caption, title, performer, None)
+}
+
+/// `send_audio_id`, as a reply to `reply_to` when set.
+pub(crate) fn send_audio_reply(
+    chat_id: &str,
+    path: &std::path::Path,
+    is_mp3: bool,
+    caption: &str,
+    title: &str,
+    performer: &str,
+    reply_to: Option<i64>,
+) -> Result<Vec<i64>, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
     let mut ids = Vec::new();
     let mut cap = caption.to_string();
     if caption.chars().count() > 1000 {
-        ids.push(send_text_id(chat_id, caption)?);
+        ids.push(send_text_reply(chat_id, caption, reply_to)?);
         cap = caption
             .lines()
             .next()
@@ -930,11 +630,46 @@ pub(crate) fn send_audio_id(
     if is_mp3 {
         m = m.text("title", title).text("performer", performer);
     }
+    if let Some(id) = reply_to {
+        // Multipart fields are strings; Telegram parses this one as JSON.
+        m = m.text("reply_parameters", &reply_json(id).to_string());
+    }
     let (ctype, body) = m.finish();
     let (status, out) = crate::upload::post(&telegram_api(method)?, &ctype, body)?;
     check(status, &out)?;
     ids.push(message_id(&out).ok_or("Telegram reply had no message id")?);
     Ok(ids)
+}
+
+/// The audio for a call: the call itself, after up to `earlier` earlier
+/// calls on its talkgroup heard within `window_secs`, oldest first, as one
+/// clip (MP3 when ffmpeg is there). `None` when the call has no audio.
+pub(crate) fn clip_for_call(
+    f: &CallFacts,
+    earlier: u32,
+    window_secs: u32,
+    state: &AppState,
+) -> Result<Option<(std::path::PathBuf, bool)>, String> {
+    let Some(audio) = f.audio.as_ref().filter(|a| !a.is_empty()) else {
+        return Ok(None);
+    };
+    let mut files = Vec::new();
+    if earlier > 0 {
+        if let (Some(db), Some(id)) = (state.db.lock().unwrap().clone(), f.id) {
+            let c = db.lock().unwrap();
+            let mut prev = crate::library::previous_on_talkgroup(
+                &c,
+                id,
+                f.tg,
+                earlier as usize,
+                window_secs as i64,
+            )?;
+            prev.reverse();
+            files.extend(prev);
+        }
+    }
+    files.push(audio.clone());
+    combine_clips(&files, &format!("tw_{}", f.tg)).map(Some)
 }
 
 /// Delete a message the bot sent (Telegram allows this for 48 hours).
@@ -1017,41 +752,6 @@ fn read_audio(path: &str) -> Result<Vec<i16>, String> {
     }
 }
 
-/// Send the alert — with its audio when asked — and return what happened
-/// and the Telegram message ids (a follow-up replies to them).
-fn send_telegram(
-    tg: &Telegram,
-    a: &Alert,
-    f: &CallFacts,
-    message: &str,
-    state: &AppState,
-) -> Result<(String, Vec<i64>), String> {
-    if tg.chat_id.trim().is_empty() {
-        return Err("no Telegram chat id".into());
-    }
-    let dest = tg.destination();
-    let clip = if a.attach_audio {
-        clip_for(a, f, state)?
-    } else {
-        None
-    };
-    match clip {
-        None => send_text_id(&dest, message).map(|id| ("sent".to_string(), vec![id])),
-        Some((path, is_mp3)) => {
-            // A message too long for a caption goes first as text, and the
-            // audio follows with its first line.
-            let res = send_audio_id(&dest, &path, is_mp3, message, &a.name, &f.tg_name);
-            let _ = std::fs::remove_file(&path);
-            res.map(|ids| {
-                (
-                    format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }),
-                    ids,
-                )
-            })
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
@@ -1098,14 +798,20 @@ pub fn alerts_set(
     let t = &mut settings.telegram;
     t.announce_chat = t.announce_chat.trim().chars().take(80).collect();
     crate::connections::sanitize_destinations(&mut settings.destinations)?;
-    let mut st = state.alerts.lock().unwrap();
-    // Discovered chats are the backend's to keep: a page that loaded before
-    // the last discovery must not wind them back.
-    let mut known = st.settings.known_chats.clone();
-    crate::connections::merge_chats(&mut known, std::mem::take(&mut settings.known_chats));
-    settings.known_chats = known;
-    store(&app, &settings)?;
-    st.settings = settings;
+    let before = {
+        let mut st = state.alerts.lock().unwrap();
+        // Discovered chats are the backend's to keep: a page that loaded
+        // before the last discovery must not wind them back.
+        let mut known = st.settings.known_chats.clone();
+        crate::connections::merge_chats(&mut known, std::mem::take(&mut settings.known_chats));
+        settings.known_chats = known;
+        store(&app, &settings)?;
+        std::mem::replace(&mut st.settings, settings).destinations
+    };
+    // Tripwires name destinations by id; conversation and digest rules hold
+    // the chat itself, so they are rebuilt.
+    let after = state.alerts.lock().unwrap().settings.destinations.clone();
+    crate::tripwires::destinations_changed(&app, &before, &after);
     Ok(())
 }
 
@@ -1128,78 +834,6 @@ pub fn telegram_save(token: String) -> Result<(), String> {
     } else {
         crate::secrets::set(TOKEN_USER, token.trim())
     }
-}
-
-#[tauri::command]
-pub fn alerts_log(state: State<AppState>) -> Vec<LogEntry> {
-    state.alerts.lock().unwrap().log.iter().cloned().collect()
-}
-
-/// Fire an alert by hand, against the most recent library call on one of
-/// its talkgroups (or any call), skipping the cooldown — so the whole path,
-/// Telegram and AI gate included, can be seen working.
-#[tauri::command]
-pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let a = state
-            .alerts
-            .lock()
-            .unwrap()
-            .settings
-            .alerts
-            .iter()
-            .find(|a| a.id == id)
-            .cloned()
-            .ok_or("no such alert")?;
-        let row = {
-            let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
-            let c = db.lock().unwrap();
-            crate::library::latest_call(&c, &a.trigger.tgs)?
-        };
-        let f = match row {
-            Some(r) => {
-                let mut f = facts_from_row(&app, r, None);
-                if f.transcript.is_none() {
-                    f.transcript = Some("(no transcript yet)".into());
-                }
-                f
-            }
-            None => CallFacts {
-                start: crate::library::now(),
-                tg: a.trigger.tgs.first().copied().unwrap_or(0),
-                tg_name: "Test talkgroup".into(),
-                transcript: Some("test message — no calls in the library yet".into()),
-                ..Default::default()
-            },
-        };
-        let keywords = f
-            .transcript
-            .as_deref()
-            .map(|t| matched_keywords(&a.trigger.keywords, t))
-            .unwrap_or_default();
-        state
-            .alerts
-            .lock()
-            .unwrap()
-            .last_fired
-            .remove(&(a.id.clone(), f.tg));
-        let mut test = a.clone();
-        test.enabled = true;
-        fire(app.clone(), test, f.clone(), keywords);
-        Ok(format!(
-            "firing “{}” against {} (TG {}){}",
-            a.name,
-            f.tg_name,
-            f.tg,
-            f.audio
-                .as_ref()
-                .map(|_| " with audio")
-                .unwrap_or(" — no audio on that call")
-        ))
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 /// The models the local Ollama offers.
@@ -1274,23 +908,6 @@ pub async fn ollama_capabilities(url: String, model: String) -> Result<Vec<Strin
 mod tests {
     use super::*;
 
-    fn facts(text: &str) -> CallFacts {
-        CallFacts {
-            id: Some(1),
-            start: 0,
-            tg: 20308,
-            tg_name: "Medic 3".into(),
-            tg_desc: None,
-            unit: 790065,
-            unit_name: Some("Medic 3".into()),
-            secs: 6.0,
-            emergency: false,
-            audio: None,
-            transcript: Some(text.into()),
-            system: String::new(),
-        }
-    }
-
     #[test]
     fn keywords_match_whole_phrases_case_insensitively() {
         let kws = vec![
@@ -1308,56 +925,6 @@ mod tests {
         assert_eq!(
             matched_keywords(&kws, "it's a working-arrest"),
             vec!["working arrest"]
-        );
-    }
-
-    #[test]
-    fn triggers_respect_talkgroup_and_kind() {
-        let mut a = Alert {
-            name: "Arrest".into(),
-            ..Default::default()
-        };
-        a.trigger.keywords = vec!["cardiac arrest".into()];
-        a.trigger.tgs = vec![20308];
-        assert_eq!(
-            matches(&a, &facts("confirmed cardiac arrest")),
-            Some(vec!["cardiac arrest".into()])
-        );
-        let mut other = facts("confirmed cardiac arrest");
-        other.tg = 1;
-        assert_eq!(matches(&a, &other), None, "other talkgroup");
-        a.enabled = false;
-        assert_eq!(matches(&a, &facts("cardiac arrest")), None, "disabled");
-        let mut e = Alert::default();
-        e.trigger.kind = "emergency".into();
-        let mut f = facts("");
-        assert_eq!(matches(&e, &f), None);
-        f.emergency = true;
-        assert_eq!(matches(&e, &f), Some(vec![]));
-        let mut u = Alert::default();
-        u.trigger.kind = "unit".into();
-        u.trigger.units = vec![790065];
-        assert_eq!(matches(&u, &f), Some(vec![]));
-        u.trigger.units = vec![1];
-        assert_eq!(matches(&u, &f), None);
-    }
-
-    #[test]
-    fn message_template_renders_tokens() {
-        let a = Alert {
-            name: "Arrest".into(),
-            ..Default::default()
-        };
-        let m = render(
-            "{alert}: {tgname}/{tg} by {unitname} — {keywords} — {transcript} {ai}",
-            &a,
-            &facts("starting CPR"),
-            &["CPR".into()],
-            "likely real",
-        );
-        assert_eq!(
-            m,
-            "Arrest: Medic 3/20308 by Medic 3 — CPR — starting CPR likely real"
         );
     }
 

@@ -6,15 +6,17 @@
 //! summarises when it goes quiet), a digest is a timer: on a fixed cadence it
 //! gathers everything since the last run and answers "what is happening on
 //! these channels right now".
+//!
+//! The rules are the digest tripwires, compiled here by `tripwires`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::AppState;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct DigestRule {
     pub id: String,
     pub name: String,
@@ -59,20 +61,9 @@ pub struct Settings {
     pub last_run: HashMap<String, i64>,
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub struct LogEntry {
-    pub at: i64,
-    pub rule: String,
-    pub calls: usize,
-    pub ok: bool,
-    pub detail: String,
-    pub summary: String,
-}
-
 #[derive(Default)]
 pub struct DigestState {
     pub settings: Settings,
-    pub log: VecDeque<LogEntry>,
 }
 
 pub type Shared = Mutex<DigestState>;
@@ -212,15 +203,13 @@ fn run_digest(app: AppHandle, r: DigestRule) -> Result<String, String> {
     let (detail, ids) = match crate::alerts::send_text_id(&chat, message.trim()) {
         Ok(id) => ("sent".to_string(), vec![id]),
         Err(e) => {
-            log_it(&app, &r, n, false, e.clone(), summary.clone());
             record(&app, &r, "failed", &e, &message, &chat, Vec::new());
-            let _ = app.emit("digests", ());
+            let _ = app.emit("tripwires", ());
             return Err(e);
         }
     };
-    log_it(&app, &r, n, true, detail.clone(), summary.clone());
     record(&app, &r, "sent", &detail, &message, &chat, ids);
-    let _ = app.emit("digests", ());
+    let _ = app.emit("tripwires", ());
     Ok(summary)
 }
 
@@ -277,77 +266,32 @@ fn fmt_time(epoch: i64) -> String {
     crate::library::local_hm(epoch)
 }
 
-fn log_it(
-    app: &AppHandle,
-    r: &DigestRule,
-    calls: usize,
-    ok: bool,
-    detail: String,
-    summary: String,
-) {
+// ---------------------------------------------------------------------------
+// rules come from the tripwires
+// ---------------------------------------------------------------------------
+
+/// The rules, as compiled from the digest tripwires. Last-run times are kept
+/// for the rules that remain.
+pub fn set_rules(app: &AppHandle, rules: Vec<DigestRule>) {
     let state = app.state::<AppState>();
-    let mut st = state.digests.lock().unwrap();
-    st.log.push_front(LogEntry {
-        at: crate::library::now(),
-        rule: r.name.clone(),
-        calls,
-        ok,
-        detail,
-        summary,
-    });
-    st.log.truncate(100);
-}
-
-// ---------------------------------------------------------------------------
-// commands
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn digests_get(state: State<AppState>) -> Settings {
-    state.digests.lock().unwrap().settings.clone()
-}
-
-#[tauri::command]
-pub fn digests_set(
-    app: AppHandle,
-    state: State<AppState>,
-    rules: Vec<DigestRule>,
-) -> Result<(), String> {
-    let mut rules = rules;
-    for (i, r) in rules.iter_mut().enumerate() {
-        if r.id.trim().is_empty() {
-            r.id = format!("d{}-{i}", crate::library::now());
-        }
-        if r.name.trim().is_empty() {
-            r.name = format!("Digest {}", i + 1);
-        }
-        r.interval_secs = r.interval_secs.clamp(60, 86_400);
-        r.window_secs = r.window_secs.clamp(60, 86_400);
-        r.tgs.sort_unstable();
-        r.tgs.dedup();
-    }
     let mut st = state.digests.lock().unwrap();
     let keep: HashSet<&str> = rules.iter().map(|r| r.id.as_str()).collect();
     st.settings
         .last_run
         .retain(|k, _| keep.contains(k.as_str()));
+    if st.settings.rules == rules {
+        return;
+    }
     st.settings.rules = rules;
-    store(&app, &st.settings)
+    if let Err(e) = store(app, &st.settings) {
+        eprintln!("digests: {e}");
+    }
 }
 
-#[tauri::command]
-pub fn digests_log(state: State<AppState>) -> Vec<LogEntry> {
-    state.digests.lock().unwrap().log.iter().cloned().collect()
-}
-
-/// Run one digest now, against the recent calls, so the rule can be seen working.
-#[tauri::command]
-pub async fn digest_test(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<String, String> {
-    let r = state
+/// Run one digest now, against the recent calls, so it can be seen working.
+pub fn run_now(app: AppHandle, id: &str) -> Result<String, String> {
+    let r = app
+        .state::<AppState>()
         .digests
         .lock()
         .unwrap()
@@ -356,8 +300,6 @@ pub async fn digest_test(
         .iter()
         .find(|r| r.id == id)
         .cloned()
-        .ok_or("no such digest rule")?;
-    tauri::async_runtime::spawn_blocking(move || run_digest(app, r))
-        .await
-        .map_err(|e| e.to_string())?
+        .ok_or("no such digest")?;
+    run_digest(app, r)
 }

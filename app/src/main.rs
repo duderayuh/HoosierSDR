@@ -35,6 +35,7 @@ mod player;
 mod playlists;
 mod remotes;
 mod retention;
+mod tripwires;
 mod rr;
 mod secrets;
 mod status;
@@ -108,6 +109,9 @@ struct AppState {
     /// Custom prompt analyzers: extract structured fields from a transcript
     /// and send a message when a condition holds (e.g. ECPR candidacy).
     analyzers: analyzers::Shared,
+    /// Tripwires: every rule that watches traffic and sends (alerts,
+    /// analyzers, conversation summaries and digests, as one kind of rule).
+    tripwires: tripwires::Shared,
     /// Dispatch channels → geocoded, grouped incidents on the live map.
     dispatch: dispatch::Shared,
     /// Filename template for stored calls.
@@ -1377,7 +1381,7 @@ fn start_follow(
                             system: params.system_name.clone(),
                         },
                     );
-                    alerts::on_call(
+                    tripwires::on_call(
                         &app,
                         &alerts::CallFacts {
                             id: *id,
@@ -2254,6 +2258,9 @@ fn main() {
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
+            // After the four engines above: the first run builds tripwires
+            // from their rule files, and every run compiles them back.
+            tripwires::init(app.handle());
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
             *state.retention.lock().unwrap() = retention::load(app.handle());
             retention::spawn_ticker(app.handle().clone());
@@ -2334,8 +2341,6 @@ fn main() {
             devices::gain_live,
             alerts::alerts_get,
             alerts::alerts_set,
-            alerts::alerts_test,
-            alerts::alerts_log,
             alerts::telegram_save,
             alerts::ollama_models,
             alerts::ollama_capabilities,
@@ -2343,7 +2348,6 @@ fn main() {
             connections::telegram_discover,
             connections::telegram_test_destination,
             conversations::conversations_get,
-            conversations::conversations_set,
             conversations::conversations_state,
             conversations::conversation_test,
             conversations::conversation_resend,
@@ -2351,18 +2355,13 @@ fn main() {
             conversations::conversation_get,
             conversations::conversation_delete,
             conversations::conversations_stats,
-            digest::digests_get,
-            digest::digests_set,
-            digest::digests_log,
-            digest::digest_test,
-            analyzers::analyzers_get,
-            analyzers::analyzers_set,
-            analyzers::analyzers_log,
-            analyzers::analyzer_templates,
-            analyzers::analyzer_template_import,
-            analyzers::analyzer_template_export,
-            analyzers::analyzer_test,
             analyzers::analyzer_cloud_get,
+            tripwires::tripwires_get,
+            tripwires::tripwires_set,
+            tripwires::tripwire_recipes,
+            tripwires::tripwire_test,
+            tripwires::tripwires_import,
+            tripwires::tripwires_export,
             analyzers::analyzer_cloud_save,
             analyzers::analyzer_cloud_clear_key,
             dispatch::dispatch_get,
