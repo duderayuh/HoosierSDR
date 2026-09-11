@@ -51,6 +51,9 @@ pub struct Worker {
     /// Jobs handed to the current worker process; its first also pays for
     /// loading (or, on first use, downloading) the model.
     jobs_started: u32,
+    /// A worker has answered a job this run, so the model is on disk and a
+    /// replacement only has to load it.
+    model_ready: bool,
 }
 
 /// One call handed to the worker, and how long it may take.
@@ -60,9 +63,13 @@ struct Job {
     limit: std::time::Duration,
 }
 
-/// Time allowed for a worker's first job: loading the model, or fetching it
-/// on first use, comes before the transcription itself.
+/// Time allowed for the first job of the run: loading the model, or fetching
+/// it on first use, comes before the transcription itself.
 const FIRST_JOB_SECS: u64 = 600;
+/// A replacement worker's first job: the weights are cached by then, so
+/// loading takes seconds — without this, a restart after a stall followed by
+/// another garbled clip stalled the queue for the full first-use allowance.
+const RELOAD_JOB_SECS: u64 = 120;
 /// Past the worker's own limit, how long before the app stops waiting and
 /// replaces a worker that has gone silent.
 const BACKSTOP_GRACE_SECS: u64 = 30;
@@ -71,11 +78,12 @@ const BACKSTOP_GRACE_SECS: u64 = 30;
 /// time (mlx-whisper ~0.3 s for a 21 s call, faster-whisper on the CPU ~5 s),
 /// so this only ends a job that has stopped making progress — which Whisper
 /// can do on a garbled clip, and which stalled the whole queue behind it.
-fn job_timeout_secs(first: bool, clip_secs: f64) -> u64 {
-    if first {
-        FIRST_JOB_SECS
-    } else {
-        30 + (clip_secs.max(0.0) * 4.0).ceil() as u64
+fn job_timeout_secs(first: bool, model_ready: bool, clip_secs: f64) -> u64 {
+    let run = 30 + (clip_secs.max(0.0) * 4.0).ceil() as u64;
+    match (first, model_ready) {
+        (false, _) => run,
+        (true, true) => run.max(RELOAD_JOB_SECS),
+        (true, false) => run.max(FIRST_JOB_SECS),
     }
 }
 
@@ -413,6 +421,9 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                 if w.generation == my_gen {
                     w.job = None;
                 }
+                if id.is_some() {
+                    w.model_ready = true;
+                }
                 w.busy.store(false, Ordering::SeqCst);
             }
             // Worker ended — but only tear down if it is still ours; a
@@ -431,7 +442,7 @@ fn submit(shared: &Shared, id: i64, path: &str, clip_secs: f64) -> bool {
     if w.busy.load(Ordering::SeqCst) {
         return false;
     }
-    let timeout = job_timeout_secs(w.jobs_started == 0, clip_secs);
+    let timeout = job_timeout_secs(w.jobs_started == 0, w.model_ready, clip_secs);
     let Some(stdin) = w.stdin.as_mut() else {
         return false;
     };
@@ -654,4 +665,18 @@ pub fn spawn_pump(app: AppHandle) {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replacement_worker_does_not_get_the_first_download_allowance() {
+        assert_eq!(job_timeout_secs(true, false, 2.0), FIRST_JOB_SECS);
+        assert_eq!(job_timeout_secs(true, true, 2.0), RELOAD_JOB_SECS);
+        assert_eq!(job_timeout_secs(false, true, 0.9), 34);
+        // A long call keeps its proportional allowance even on a first job.
+        assert_eq!(job_timeout_secs(true, true, 60.0), 270);
+    }
 }
