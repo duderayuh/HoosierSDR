@@ -32,6 +32,7 @@ mod playlists;
 mod remotes;
 mod rr;
 mod secrets;
+mod status;
 mod stream;
 mod sysstat;
 mod tiles;
@@ -2261,6 +2262,7 @@ fn main() {
             }
             transcribe::spawn_pump(app.handle().clone());
             stream::autostart(app.handle());
+            status::on_start(app.handle());
             let up = upload::load_settings(app.handle());
             if up.rdio.enabled || up.openmhz.enabled || up.broadcastify.enabled {
                 *state.uploader.lock().unwrap() = Some(upload::start(app.handle().clone(), up));
@@ -2412,8 +2414,13 @@ fn main() {
             runs_list,
             stop_run
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running HoosierSDR");
+        .build(tauri::generate_context!())
+        .expect("error while running HoosierSDR")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                status::on_exit(app);
+            }
+        });
 }
 
 #[cfg(test)]

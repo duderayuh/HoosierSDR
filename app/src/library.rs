@@ -599,7 +599,7 @@ pub fn export(
     Ok(path)
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()
