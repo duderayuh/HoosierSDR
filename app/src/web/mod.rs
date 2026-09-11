@@ -538,13 +538,11 @@ struct FileQuery {
     path: String,
 }
 
-/// Whether `path` is somewhere the app writes audio: the library folder or
-/// the app's own data/cache/config directories. Anything else is refused,
+/// Resolve `path` if it is somewhere the app writes audio: the library folder
+/// or the app's own data/cache/config directories. Anything else is refused,
 /// so the token cannot be used to read arbitrary files.
-fn audio_path_allowed(app: &AppHandle, path: &std::path::Path) -> bool {
-    let Ok(real) = path.canonicalize() else {
-        return false;
-    };
+fn resolve_allowed_audio_path(app: &AppHandle, path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let real = path.canonicalize().ok()?;
     let state = app.state::<AppState>();
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Some(d) = state.library_dir.lock().unwrap().clone() {
@@ -561,10 +559,13 @@ fn audio_path_allowed(app: &AppHandle, path: &std::path::Path) -> bool {
     {
         roots.push(d);
     }
-    roots
+
+    let allowed = roots
         .iter()
         .filter_map(|r| r.canonicalize().ok())
-        .any(|r| real.starts_with(&r))
+        .any(|r| real.starts_with(&r));
+
+    if allowed { Some(real) } else { None }
 }
 
 /// An audio file by path (what the desktop's `play_wav` takes), limited to
@@ -573,12 +574,13 @@ async fn audio_file(State(st): State<Arc<WebState>>, _auth: Auth, Query(q): Quer
     let path = std::path::PathBuf::from(crate::shellexpand_home(&q.path));
     let app = st.app.clone();
     let p = path.clone();
-    let ok = tokio::task::spawn_blocking(move || audio_path_allowed(&app, &p))
+    let resolved = tokio::task::spawn_blocking(move || resolve_allowed_audio_path(&app, &p))
         .await
-        .unwrap_or(false);
-    if !ok {
+        .ok()
+        .flatten();
+    let Some(path) = resolved else {
         return (StatusCode::FORBIDDEN, "not an app audio file").into_response();
-    }
+    };
     serve_audio(path).await
 }
 
