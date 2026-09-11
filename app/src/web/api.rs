@@ -301,6 +301,13 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::alerts::alerts_set(app.clone(), state, settings)?;
             Ok(Value::Null)
         }
+        "remotes_get" => jv(crate::remotes::remotes_get(app.clone()).await),
+        "remotes_set" => {
+            let settings: crate::remotes::Settings = arg(args, "settings")?;
+            crate::remotes::remotes_set(app.clone(), settings)?;
+            Ok(Value::Null)
+        }
+        "remotes_scan" => jv(crate::remotes::remotes_scan(app.clone()).await?),
         "conversations_get" => jv(crate::conversations::conversations_get(state)),
         "conversations_set" => {
             let rules: Vec<crate::conversations::Rule> = arg(args, "rules")?;

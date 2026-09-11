@@ -29,6 +29,7 @@ mod library;
 mod names;
 mod player;
 mod playlists;
+mod remotes;
 mod rr;
 mod secrets;
 mod stream;
@@ -120,6 +121,8 @@ struct AppState {
     streamer: stream::Shared,
     /// Per-call uploads (rdio-scanner / OpenMHz / Broadcastify Calls).
     uploader: upload::Shared,
+    /// Tailnet trust for the web server (other instances on the account).
+    remotes: remotes::Shared,
     /// Broadcast of web frames (app events + live audio) to SSE clients.
     /// Initialised once by `web::spawn`; read by the follow loops to tap audio.
     web_frames: std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::web::Frame>>,
@@ -2024,6 +2027,7 @@ fn main() {
             state.uv_quality.store(16, Ordering::SeqCst);
             *state.alerts.lock().unwrap() = alerts::load(app.handle());
             *state.conversations.lock().unwrap() = conversations::load(app.handle());
+            *state.remotes.lock().unwrap() = remotes::load(app.handle());
             conversations::spawn_ticker(app.handle().clone());
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
@@ -2199,7 +2203,12 @@ fn main() {
             playlists::playlist_save,
             playlists::playlist_delete,
             playlists::playlist_activate,
-            web::web_access_get
+            web::web_access_get,
+            remotes::remotes_get,
+            remotes::remotes_set,
+            remotes::remotes_scan,
+            remotes::remote_token_set,
+            remotes::remote_open
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

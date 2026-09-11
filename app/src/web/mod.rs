@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{FromRequestParts, State},
+    extract::{ConnectInfo, FromRequestParts, State},
     http::{request::Parts, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -55,7 +55,7 @@ const APP_EVENTS: &[&str] = &[
     "transcribe_ready",
 ];
 
-fn port() -> u16 {
+pub fn port() -> u16 {
     std::env::var("HS_WEB_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -232,7 +232,14 @@ pub fn spawn(app: AppHandle) {
                 }
             };
             eprintln!("[web] listening on http://{addr} (and on your Tailscale IP)");
-            if let Err(e) = axum::serve(listener, router).await {
+            // Connect-info gives the auth extractor the caller's address, which
+            // the same-account tailnet trust path needs.
+            if let Err(e) = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
                 eprintln!("[web] server error: {e}");
             }
         });
@@ -243,8 +250,26 @@ async fn mobile_page() -> impl IntoResponse {
     axum::response::Html(MOBILE_HTML)
 }
 
-async fn health() -> &'static str {
-    "ok"
+/// Unauthenticated identity, so another instance can tell this is
+/// HoosierSDR (and not some other program on the port) before it has a
+/// token. Nothing about the radio system is disclosed here.
+async fn health(State(st): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "app": "HoosierSDR",
+        "version": env!("CARGO_PKG_VERSION"),
+        "host": hostname(),
+        "trust_tailnet": crate::remotes::trust_enabled(&st.app),
+    }))
+}
+
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -352,9 +377,25 @@ impl FromRequestParts<Arc<WebState>> for Auth {
         parts: &mut Parts,
         state: &Arc<WebState>,
     ) -> Result<Self, Self::Rejection> {
-        match extract_token(parts) {
-            Some(t) if t == state.token => Ok(Auth),
-            _ => Err((StatusCode::UNAUTHORIZED, "invalid or missing token")),
+        if matches!(extract_token(parts), Some(t) if t == state.token) {
+            return Ok(Auth);
         }
+        // No (or wrong) token: a device on this Tailscale account may still
+        // be let in when the user has turned that on. Loopback and LAN
+        // addresses never qualify — see `remotes::peer_trusted`.
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        if let Some(ip) = ip {
+            let app = state.app.clone();
+            let trusted = tokio::task::spawn_blocking(move || crate::remotes::peer_trusted(&app, ip))
+                .await
+                .unwrap_or(false);
+            if trusted {
+                return Ok(Auth);
+            }
+        }
+        Err((StatusCode::UNAUTHORIZED, "invalid or missing token"))
     }
 }

@@ -603,6 +603,19 @@
               <label class="field"><span class="lab">Access token <span class="mono faint">type this in on the phone</span></span>
                 <span class="inline"><input id="webToken" type="password" readonly spellcheck="false" /><button class="btn ghost sm" id="webTokenShow">Show</button><button class="btn ghost sm" id="webTokenCopy">Copy</button></span></label>
               <p class="help">From a phone on your tailnet, open the address and enter the token — the same live feed, calls, and audio as the desktop.</p>
+              <label class="check"><input id="tnTrust" type="checkbox" /> <b>Trust devices on my Tailscale account</b></label>
+              <p class="help">Lets your other devices (and other copies of HoosierSDR) open this one without typing the token — verified with <span class="mono">tailscale whois</span>, only for Tailscale addresses. Turn it on at both ends, or paste the other instance's token below.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Instances on your tailnet · other copies of HoosierSDR</span><span class="meta" id="tnMeta"></span></div>
+            <div class="body">
+              <div class="inline" style="justify-content:space-between">
+                <span class="help" id="tnAccount" style="margin:0">Checking Tailscale…</span>
+                <button class="btn ghost sm" id="tnScan">Scan</button>
+              </div>
+              <div class="tn-list" id="tnList"></div>
+              <p class="help">Every online device on the account is checked for a running HoosierSDR. <b>Open</b> shows that instance live in its own window — its feed, calls, and audio as they happen. It needs a token from that machine's Remote access page unless it trusts this account.</p>
             </div>
           </div>
         </div>

@@ -921,6 +921,7 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 #cvStBody td:last-child { text-align: right; font-family: var(--mono); }
 #cvStBody tr { cursor: pointer; }
 
+<<<<<<< HEAD
 /* ---------- draggable top tabs ---------- */
 .seg.nav button.dragging { opacity: .35; }
 
@@ -931,3 +932,18 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 td.tr.editing { padding: 2px 4px; white-space: normal; }
 .tr-edit { width: 100%; min-width: 240px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.4; background: var(--panel-2); color: var(--ink); border: 1px solid var(--signal); border-radius: 6px; padding: 4px 6px; resize: vertical; }
 td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
+=======
+/* instances on the tailnet (Settings → Remote access) */
+.tn-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 6px; }
+.tn-empty { color: var(--ink-faint); font-size: 12px; padding: 8px 2px; }
+.tn-row { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.tn-row.found { border-color: color-mix(in srgb, var(--clear) 45%, var(--line)); }
+.tn-name { font-weight: 600; font-size: 13px; }
+.tn-state { display: inline-block; padding: 2px 8px; border-radius: 999px; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); border: 1px solid var(--line); }
+.tn-state.on { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
+.tn-state.on.ok { color: var(--clear); border-color: color-mix(in srgb, var(--clear) 45%, var(--line)); }
+.tn-state.err { color: var(--enc); }
+.tn-act { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.tn-act .tn-token { width: 150px; }
+@media (max-width: 760px) { .tn-row { grid-template-columns: 1fr; } .tn-act { justify-content: flex-start; } }
+>>>>>>> d0dea7a (Find and open other HoosierSDR instances on the Tailscale account)
