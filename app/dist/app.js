@@ -1949,9 +1949,10 @@ if (TAURI) {
     if (r.error) return `<span class="tn-state err" title="${esc(r.error)}">error</span>`;
     return `<span class="tn-state">${r.online ? "no HoosierSDR" : "offline"}</span>`;
   }
+  let tnScanned = false;
   function tnRender() {
     const el = $("tnList");
-    if (!tnRows.length) { el.innerHTML = `<div class="tn-empty">No online devices found. Click Scan to look again.</div>`; return; }
+    if (!tnRows.length) { el.innerHTML = `<div class="tn-empty">${tnScanned ? "No online devices found. Click Scan to look again." : "Not scanned yet."}</div>`; return; }
     el.innerHTML = tnRows.map((r, i) => `
       <div class="tn-row${r.found ? " found" : ""}" data-i="${i}">
         <div class="tn-who">
@@ -1967,7 +1968,7 @@ if (TAURI) {
       </div>`).join("");
   }
   async function tnScan() {
-    const btn = $("tnScan"); btn.disabled = true; btn.textContent = "Scanning…";
+    const btn = $("tnScan"); btn.disabled = true; btn.textContent = "Scanning…"; tnScanned = true;
     $("tnMeta").textContent = "scanning";
     try {
       const rows = await invoke("remotes_scan");
@@ -1979,8 +1980,7 @@ if (TAURI) {
     btn.disabled = false; btn.textContent = "Scan";
   }
   $("tnScan").onclick = tnScan;
-  let tnScanned = false;
-  window.remoteOnShow = () => { tnRefresh(); if (!tnScanned) { tnScanned = true; tnScan(); } };
+  window.remoteOnShow = () => { tnRefresh(); if (!tnScanned) tnScan(); };
   $("tnList").onclick = async (e) => {
     const b = e.target.closest("button"); if (!b) return;
     const row = b.closest(".tn-row"); const r = row && tnRows[parseInt(row.dataset.i, 10)]; if (!r) return;
