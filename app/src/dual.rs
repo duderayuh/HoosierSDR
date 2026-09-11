@@ -324,8 +324,7 @@ pub fn dual_start(
         cats: state.catalog.clone(),
         sid: crate::playlists::sid_for_control(&app, control),
     };
-    let priorities = state.priorities.clone();
-    let priority_ranges = state.priority_ranges.clone();
+    let filters = crate::playlists::filters_for(&app, &state, None);
 
     let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let prev = crate::take_previous(&state);
@@ -367,12 +366,15 @@ pub fn dual_start(
                         prio.set_base(tg.id, p);
                     }
                 }
-                for (tg, p) in priorities.lock().unwrap().iter() {
-                    prio.set_override(*tg, *p);
-                }
-                for (lo, hi, p) in priority_ranges.lock().unwrap().iter() {
-                    for tg in *lo..=*hi {
-                        prio.set_override(tg, *p);
+                {
+                    let fl = filters.lock().unwrap();
+                    for (tg, p) in fl.priorities.iter() {
+                        prio.set_override(*tg, *p);
+                    }
+                    for (lo, hi, p) in fl.priority_ranges.iter() {
+                        for tg in *lo..=*hi {
+                            prio.set_override(tg, *p);
+                        }
                     }
                 }
 

@@ -76,17 +76,9 @@ struct AppState {
     start_lock: Mutex<()>,
     /// Talkgroup names, kept apart per RadioReference system.
     catalog: Arc<Mutex<rr::Catalogs>>,
-    /// Talkgroups the listener has locked out; read by the follower live.
-    lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
-    /// The active playlist's talkgroups (`None` = follow everything).
-    allowlist: Arc<Mutex<Option<std::collections::HashSet<u16>>>>,
-    /// Hold: follow only this talkgroup until released.
-    hold: Arc<Mutex<Option<u16>>>,
-    /// Talkgroup priorities (1 high … 99 low; unlisted 50).
-    priorities: Arc<Mutex<std::collections::HashMap<u16, u8>>>,
-    /// Locked-out and prioritised talkgroup ranges (inclusive).
-    lockout_ranges: Arc<Mutex<Vec<(u16, u16)>>>,
-    priority_ranges: Arc<Mutex<Vec<(u16, u16, u8)>>>,
+    /// Live lockout / allowlist / hold / priorities per playlist (`""` for
+    /// runs without one); sites sharing a playlist share the entry.
+    filters: playlists::FilterTable,
     /// Transcript corrections: (tg, wrong, right); `tg` None = applies to every
     /// talkgroup (global rule — say "Rirey" on any channel → "Riley").
     corrections: Arc<Mutex<Vec<(Option<u16>, String, String)>>>,
@@ -276,18 +268,6 @@ fn set_policies(state: State<AppState>, record: Policy, stream: Policy, upload: 
     *state.upload_policy.lock().unwrap() = upload;
 }
 
-/// Locked-out talkgroup ranges (inclusive), alongside the explicit lockout.
-#[tauri::command]
-fn set_lockout_ranges(ranges: Vec<(u16, u16)>, state: State<AppState>) {
-    *state.lockout_ranges.lock().unwrap() = ranges;
-}
-
-/// Priority ranges (inclusive, 1 high … 99 low); explicit entries win.
-#[tauri::command]
-fn set_priority_ranges(ranges: Vec<(u16, u16, u8)>, state: State<AppState>) {
-    *state.priority_ranges.lock().unwrap() = ranges;
-}
-
 /// Apply per-talkgroup transcript corrections: each `(wrong, right)` pair is a
 /// case-insensitive, whole-word substitution (so "rirey"/"RIREY" → "Riley" but
 /// "shirey" is left alone). Applied before a transcript is stored or acted on.
@@ -428,18 +408,6 @@ fn ppm_tune(freq: f64, ppm: Option<f64>) -> f64 {
     }
 }
 
-/// Hold on one talkgroup (`None` releases). Overrides the playlist while set.
-#[tauri::command]
-fn set_hold(tg: Option<u16>, state: State<AppState>) {
-    *state.hold.lock().unwrap() = tg;
-}
-
-/// Replace the talkgroup priority table.
-#[tauri::command]
-fn set_priorities(entries: Vec<(u16, u8)>, state: State<AppState>) {
-    *state.priorities.lock().unwrap() = entries.into_iter().collect();
-}
-
 /// Stop the call being played and move to the next queued one.
 #[tauri::command]
 fn skip_call(state: State<AppState>) {
@@ -496,19 +464,6 @@ fn replay_last(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 fn ui_log(msg: String) {
     eprintln!("[ui] {msg}");
-}
-
-/// Replace the locked-out talkgroup set. Takes effect on the follower's next
-/// block — a call of a newly locked talkgroup already up is dropped.
-#[tauri::command]
-fn set_lockout(tgs: Vec<u16>, state: State<AppState>) {
-    *state.lockout.lock().unwrap() = tgs.into_iter().collect();
-}
-
-/// Restrict the follower to a playlist's talkgroups (`None` clears it).
-#[tauri::command]
-fn set_allowlist(tgs: Option<Vec<u16>>, state: State<AppState>) {
-    *state.allowlist.lock().unwrap() = tgs.map(|t| t.into_iter().collect());
 }
 
 // ---------------- audio format + spectrum ----------------
@@ -1123,23 +1078,25 @@ fn start_follow(
             ));
         }
     }
-    let (pl_allow, pl_name, pl_sid) = match playlist.as_deref().filter(|s| !s.is_empty()) {
+    let playlist = playlist.filter(|s| !s.is_empty());
+    let (pl_name, pl_sid) = match playlist.as_deref() {
         Some(id) => {
             let p = playlists::load(&app)
                 .into_iter()
                 .find(|p| p.id == id)
                 .ok_or("no such playlist")?;
-            let tgs: Option<std::collections::HashSet<u16>> =
-                (!p.tgs.is_empty()).then(|| p.tgs.iter().copied().collect());
-            (Some(Arc::new(Mutex::new(tgs))), Some(p.name), Some(p.sid))
+            (Some(p.name), Some(p.sid))
         }
-        None => (None, None, None),
+        None => (None, None),
     };
-    // Which system's names apply: the playlist's, else whichever playlist
+    // Which system's names apply: the playlist's, else whichever saved site
     // uses this control channel. Without one, every loaded catalog merged.
     let sid = pl_sid.or_else(|| playlists::sid_for_control(&app, control));
-    let label = pl_name
-        .or_else(|| site_name.clone().filter(|s| !s.is_empty()))
+    // The chip label: the site's name (several sites can share a playlist).
+    let label = site_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or(pl_name)
         .or_else(|| system_name.clone().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| format!("{:.4} MHz", control / 1e6));
     let running = Arc::new(AtomicBool::new(true));
@@ -1161,12 +1118,7 @@ fn start_follow(
     let channelizer = state.use_channelizer.load(Ordering::SeqCst);
     let uv_quality = state.uv_quality.load(Ordering::SeqCst).clamp(1, 64);
     let catalog = state.catalog.clone();
-    let lockout = state.lockout.clone();
-    let allowlist = pl_allow.unwrap_or_else(|| state.allowlist.clone());
-    let hold = state.hold.clone();
-    let priorities = state.priorities.clone();
-    let lockout_ranges = state.lockout_ranges.clone();
-    let priority_ranges = state.priority_ranges.clone();
+    let filters = playlists::filters_for(&app, &state, playlist.as_deref());
     let units = state.units.clone();
     let unit_rules = state.unit_rules.clone();
     let learn_aliases = state.learn_aliases.clone();
@@ -1307,12 +1259,7 @@ fn start_follow(
             // looked frozen.
             let db_conn = db.lock().unwrap().clone();
             let live = follow::Live {
-                lockout: &lockout,
-                allowlist: &allowlist,
-                hold: &hold,
-                priorities: &priorities,
-                lockout_ranges: &lockout_ranges,
-                priority_ranges: &priority_ranges,
+                filters: &filters,
                 units: &units,
                 unit_rules: &unit_rules,
                 record: &record_policy,
@@ -1492,7 +1439,7 @@ fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
     if state.run_gen.load(Ordering::SeqCst) == my_gen {
         state.running.store(false, Ordering::SeqCst);
         *state.last_start.lock().unwrap() = None;
-        *state.hold.lock().unwrap() = None;
+        playlists::clear_holds(&state);
         state.archive_mode.store(false, Ordering::SeqCst);
         let _ = app.emit("stopped", ());
     }
@@ -1505,15 +1452,23 @@ fn finish_follow_run(app: &AppHandle, run_id: u64, res: Result<(), String>) {
     if let Err(e) = res {
         let _ = app.emit("error", e);
     }
-    let remaining = {
+    let (remaining, orphaned) = {
         let mut runs = state.runs.lock().unwrap();
+        let mine = runs.iter().find(|r| r.id == run_id).and_then(|r| r.playlist.clone());
         runs.retain(|r| r.id != run_id);
-        runs.len()
+        let still_used = runs.iter().any(|r| r.playlist == mine);
+        (runs.len(), if still_used { None } else { Some(mine) })
     };
+    // A hold dies with the last run of its playlist.
+    if let Some(pl) = orphaned {
+        if let Some(f) = state.filters.lock().unwrap().get(pl.as_deref().unwrap_or("")) {
+            f.lock().unwrap().hold = None;
+        }
+    }
     emit_runs(app);
     if remaining == 0 {
         state.running.store(false, Ordering::SeqCst);
-        *state.hold.lock().unwrap() = None;
+        playlists::clear_holds(&state);
         state.archive_mode.store(false, Ordering::SeqCst);
         let _ = app.emit("stopped", ());
     }
@@ -2322,12 +2277,15 @@ fn main() {
             decode_file_analog,
             start_follow,
             dual::dual_start,
-            set_lockout,
-            set_allowlist,
-            set_hold,
-            set_priorities,
-            set_lockout_ranges,
-            set_priority_ranges,
+            playlists::set_lockout,
+            playlists::set_allowlist,
+            playlists::set_hold,
+            playlists::set_priorities,
+            playlists::set_lockout_ranges,
+            playlists::set_priority_ranges,
+            playlists::sites_list,
+            playlists::site_save,
+            playlists::site_delete,
             corrections_get,
             corrections_set,
             set_volume,
@@ -2445,7 +2403,6 @@ fn main() {
             playlists::playlists_list,
             playlists::playlist_save,
             playlists::playlist_delete,
-            playlists::playlist_activate,
             web::web_access_get,
             remotes::remotes_get,
             remotes::remotes_set,

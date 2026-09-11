@@ -176,7 +176,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             Ok(Value::Null)
         }
         "set_hold" => {
-            crate::set_hold(arg::<Option<u16>>(args, "tg")?, state);
+            crate::playlists::set_hold(app.clone(), state, arg::<Option<u16>>(args, "tg")?, arg(args, "playlist")?);
             Ok(Value::Null)
         }
         "skip_call" => {
@@ -196,23 +196,23 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         }
         "get_volume" => jv(crate::get_volume(state)),
         "set_allowlist" => {
-            crate::set_allowlist(arg::<Option<Vec<u16>>>(args, "tgs")?, state);
+            crate::playlists::set_allowlist(app.clone(), state, arg::<Option<Vec<u16>>>(args, "tgs")?, arg(args, "playlist")?);
             Ok(Value::Null)
         }
         "set_lockout" => {
-            crate::set_lockout(arg::<Vec<u16>>(args, "tgs")?, state);
+            crate::playlists::set_lockout(app.clone(), state, arg::<Vec<u16>>(args, "tgs")?, arg(args, "playlist")?, arg(args, "extra")?)?;
             Ok(Value::Null)
         }
         "set_priorities" => {
-            crate::set_priorities(arg::<Vec<(u16, u8)>>(args, "entries")?, state);
+            crate::playlists::set_priorities(app.clone(), state, arg::<Vec<(u16, u8)>>(args, "entries")?, arg(args, "playlist")?)?;
             Ok(Value::Null)
         }
         "set_lockout_ranges" => {
-            crate::set_lockout_ranges(arg::<Vec<(u16, u16)>>(args, "ranges")?, state);
+            crate::playlists::set_lockout_ranges(app.clone(), state, arg::<Vec<(u16, u16)>>(args, "ranges")?);
             Ok(Value::Null)
         }
         "set_priority_ranges" => {
-            crate::set_priority_ranges(arg::<Vec<(u16, u16, u8)>>(args, "ranges")?, state);
+            crate::playlists::set_priority_ranges(app.clone(), state, arg::<Vec<(u16, u16, u8)>>(args, "ranges")?);
             Ok(Value::Null)
         }
         "set_max_calls" => {
@@ -234,12 +234,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "spectrum_set" => {
             crate::spectrum_set(state, arg(args, "fft")?, arg(args, "average")?);
             Ok(Value::Null)
-        }
-        "playlist_activate" => {
-            let id = arg::<Option<String>>(args, "id")?;
-            crate::playlists::playlist_activate(app.clone(), state, id)
-                .map(|p| jv(p).unwrap_or(Value::Null))
-                .map_err(|e| e)
         }
 
         // ---- devices / live gain ----
@@ -508,8 +502,11 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "squelch")?,
         )
         .await?),
-        "playlist_save" => jv(crate::playlists::playlist_save(app.clone(), arg(args, "playlist")?)?),
-        "playlist_delete" => jv(crate::playlists::playlist_delete(app.clone(), arg(args, "id")?)?),
+        "playlist_save" => jv(crate::playlists::playlist_save(app.clone(), state, arg(args, "playlist")?)?),
+        "playlist_delete" => jv(crate::playlists::playlist_delete(app.clone(), state, arg(args, "id")?)?),
+        "sites_list" => jv(crate::playlists::sites_list(app.clone())),
+        "site_save" => jv(crate::playlists::site_save(app.clone(), arg(args, "site")?)?),
+        "site_delete" => jv(crate::playlists::site_delete(app.clone(), arg(args, "id")?)?),
         "remote_token_set" => jv(crate::remotes::remote_token_set(
             arg(args, "dns")?,
             arg(args, "token")?,
