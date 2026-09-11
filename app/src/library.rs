@@ -44,6 +44,10 @@ pub struct CallRow {
     pub poor_frames: u64,
     /// Radio-stream blocks dropped while the call was up (holes in it).
     pub dropped_blocks: u64,
+    /// Tripwires that fired about this call (filled when rows are handed to
+    /// the UI, from the tripwire history).
+    #[serde(default)]
+    pub fired: Vec<crate::events::Fired>,
 }
 
 pub fn open(dir: &Path) -> Result<Connection, String> {
@@ -229,6 +233,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         encrypted: r.get::<_, i64>(22)? != 0,
         poor_frames: r.get::<_, i64>(23)? as u64,
         dropped_blocks: r.get::<_, i64>(24)? as u64,
+        fired: Vec::new(),
     })
 }
 

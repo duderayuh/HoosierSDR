@@ -717,6 +717,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                 prompt: "",
                 chat: &chat,
                 revision: c.revision,
+                message_ids: &[],
             },
         );
         finish(&app, c.key, n_pieces, |cc| {
@@ -842,6 +843,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                     prompt: &prompt,
                     chat: &chat,
                     revision,
+                    message_ids: &ids,
                 },
             );
             finish(&app, c.key, n_pieces, |cc| {
@@ -868,6 +870,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                     prompt: &prompt,
                     chat: &chat,
                     revision: c.revision,
+                    message_ids: &[],
                 },
             );
             finish(&app, c.key, n_pieces, |cc| {
@@ -1165,6 +1168,8 @@ struct Outcome<'a> {
     prompt: &'a str,
     chat: &'a str,
     revision: u32,
+    /// Telegram message ids of what went out (for the tripwire history).
+    message_ids: &'a [i64],
 }
 
 /// The display identity of a stored conversation: talkgroup and start time
@@ -1185,6 +1190,28 @@ fn store_outcome(app: &AppHandle, r: &Rule, c: &Conversation, o: &Outcome) {
     let source = if c.key == 0 { "test" } else { "live" };
     if let Err(e) = store_row(&db, r, c, o, source) {
         eprintln!("conversation store: {e}");
+    }
+    let ev = crate::events::NewEvent {
+        source: "conversation",
+        rule_id: r.id.clone(),
+        rule_name: r.name.clone(),
+        tg: c.tg,
+        tg_name: c.tg_name.clone(),
+        status: o.status.to_string(),
+        detail: if source == "test" {
+            format!("test run · {}", o.detail)
+        } else {
+            o.detail.to_string()
+        },
+        message: o.message.to_string(),
+        chat: o.chat.to_string(),
+        message_ids: o.message_ids.to_vec(),
+        data: serde_json::json!({ "summary": o.summary, "revision": o.revision }).to_string(),
+        calls: c.pieces.iter().filter_map(|p| p.id).collect(),
+        ..Default::default()
+    };
+    if let Err(e) = crate::events::insert(&db, &ev, crate::library::now()) {
+        eprintln!("conversation event: {e}");
     }
 }
 
@@ -1506,6 +1533,7 @@ mod tests {
             prompt: "Summarise…",
             chat: "123",
             revision: 0,
+            message_ids: &[7],
         };
         store_row(&db, &r, &c, &o, "live").unwrap();
         let rows = list_rows(&db, None, None, None, None).unwrap();

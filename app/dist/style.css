@@ -504,6 +504,12 @@ td.act button.on { color: var(--enc); border-color: var(--enc); }
 .badge { display: inline-block; font-family: var(--mono); font-size: 10.5px; padding: 2px 7px; border-radius: 999px; }
 .badge.clear { color: var(--clear); background: color-mix(in srgb, var(--clear) 15%, transparent); }
 .badge.enc { color: var(--enc); background: color-mix(in srgb, var(--enc) 15%, transparent); }
+/* tripwire badges on calls: sent, failed, or looked-and-stayed-quiet */
+.twbox { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.badge.tw { color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.badge.tw.failed, .badge.tw.held { color: var(--enc); background: color-mix(in srgb, var(--enc) 15%, transparent); }
+.badge.tw.quiet, .badge.tw.skipped { color: var(--ink-faint); background: transparent; border: 1px dashed color-mix(in srgb, var(--ink-faint) 45%, transparent); }
+.twlist { display: grid; gap: 4px; margin: 2px 0 8px; }
 .empty { padding: 30px 16px; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
 .empty .big { display: block; font-family: var(--display); font-size: 15px; color: var(--ink-dim); margin-bottom: 3px; }
 .empty.small { padding: 14px 8px; }

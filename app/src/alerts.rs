@@ -536,6 +536,8 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
                         "quiet",
                         format!("AI check said no: {summary}"),
                         String::new(),
+                        &keywords,
+                        (String::new(), Vec::new()),
                     );
                     return;
                 }
@@ -548,6 +550,8 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
                             "held",
                             format!("AI check unavailable, alert held: {e}"),
                             String::new(),
+                            &keywords,
+                            (String::new(), Vec::new()),
                         );
                         return;
                     }
@@ -558,13 +562,17 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
         let message = render(&a.message, &a, &f, &keywords, &ai_note);
         let _ = app.emit(
             "alert",
-            serde_json::json!({ "name": a.name, "tg": f.tg, "message": message, "tone": a.tone }),
+            serde_json::json!({ "name": a.name, "tg": f.tg, "message": message, "tone": a.tone, "call": f.id }),
         );
         let mut ok = true;
         let mut detail = String::new();
+        let mut sent_ids: Vec<i64> = Vec::new();
         if a.telegram {
             match send_telegram(&tg_settings, &a, &f, &message, &state) {
-                Ok(d) => detail = d,
+                Ok((d, ids)) => {
+                    detail = d;
+                    sent_ids = ids;
+                }
                 Err(e) => {
                     ok = false;
                     detail = e;
@@ -597,13 +605,34 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
         if ok {
             state.alerts.lock().unwrap().last_fired.insert(key, now);
         }
-        log_entry(&app, &a, &f, if ok { "sent" } else { "failed" }, detail, message);
+        let chat = if a.telegram { tg_settings.destination() } else { String::new() };
+        log_entry(
+            &app,
+            &a,
+            &f,
+            if ok { "sent" } else { "failed" },
+            detail,
+            message,
+            &keywords,
+            (chat, sent_ids),
+        );
     });
 }
 
-/// Record one outcome. Only a failed send or a held alert is an error the
-/// listener is told about; a quiet AI verdict is the check working.
-fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, status: &str, detail: String, message: String) {
+/// Record one outcome — in the in-app log and the tripwire history. Only a
+/// failed send or a held alert is an error the listener is told about; a
+/// quiet AI verdict is the check working.
+#[allow(clippy::too_many_arguments)]
+fn log_entry(
+    app: &AppHandle,
+    a: &Alert,
+    f: &CallFacts,
+    status: &str,
+    detail: String,
+    message: String,
+    keywords: &[String],
+    (chat, message_ids): (String, Vec<i64>),
+) {
     let state = app.state::<AppState>();
     let mut st = state.alerts.lock().unwrap();
     st.log.push_front(LogEntry {
@@ -611,13 +640,31 @@ fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, status: &str, detail: St
         alert: a.name.clone(),
         tg: f.tg,
         tg_name: f.tg_name.clone(),
-        message,
+        message: message.clone(),
         ok: status == "sent",
         status: status.to_string(),
         detail: detail.clone(),
     });
     st.log.truncate(200);
     drop(st);
+    crate::events::record(
+        app,
+        crate::events::NewEvent {
+            source: "alert",
+            rule_id: a.id.clone(),
+            rule_name: a.name.clone(),
+            tg: f.tg,
+            tg_name: f.tg_name.clone(),
+            status: status.to_string(),
+            detail: detail.clone(),
+            message,
+            chat,
+            message_ids,
+            data: serde_json::json!({ "keywords": keywords }).to_string(),
+            calls: f.id.into_iter().collect(),
+            ..Default::default()
+        },
+    );
     if status == "failed" || status == "held" {
         let _ = app.emit("alert_error", format!("{}: {detail}", a.name));
     }
@@ -735,13 +782,6 @@ fn check(status: u16, text: &str) -> Result<String, String> {
             v["description"].as_str().unwrap_or(text.trim())
         ))
     }
-}
-
-pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
-    if tg.chat_id.trim().is_empty() {
-        return Err("no Telegram chat id".into());
-    }
-    send_text(&tg.destination(), text, 60)
 }
 
 /// A plain text message to `dest` (`chat` or `chat:topic`), giving up after
@@ -999,46 +1039,37 @@ fn read_audio(path: &str) -> Result<Vec<i16>, String> {
     }
 }
 
+/// Send the alert — with its audio when asked — and return what happened
+/// and the Telegram message ids (a follow-up replies to them).
 fn send_telegram(
     tg: &Telegram,
     a: &Alert,
     f: &CallFacts,
     message: &str,
     state: &AppState,
-) -> Result<String, String> {
+) -> Result<(String, Vec<i64>), String> {
+    if tg.chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let dest = tg.destination();
     let clip = if a.attach_audio {
         clip_for(a, f, state)?
     } else {
         None
     };
     match clip {
-        None => send_message(tg, message),
+        None => send_text_id(&dest, message).map(|id| ("sent".to_string(), vec![id])),
         Some((path, is_mp3)) => {
-            let data = std::fs::read(&path).map_err(|e| e.to_string())?;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "call.mp3".into());
-            let caption: String = message.chars().take(1000).collect();
-            let (method, field, mime) = if is_mp3 {
-                ("sendAudio", "audio", "audio/mpeg")
-            } else {
-                ("sendDocument", "document", "audio/wav")
-            };
-            let mut m = multipart_for(&tg.destination())
-                .text("caption", &caption)
-                .file(field, &name, mime, &data);
-            if is_mp3 {
-                m = m.text("title", &a.name).text("performer", &f.tg_name);
-            }
-            let (ctype, body) = m.finish();
-            let (status, out) = crate::upload::post(&telegram_api(method)?, &ctype, body)?;
+            // A message too long for a caption goes first as text, and the
+            // audio follows with its first line.
+            let res = send_audio_id(&dest, &path, is_mp3, message, &a.name, &f.tg_name);
             let _ = std::fs::remove_file(&path);
-            // A long message does not fit a caption; send the rest as text.
-            if message.chars().count() > 1000 {
-                let _ = send_message(tg, message);
-            }
-            check(status, &out).map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }))
+            res.map(|ids| {
+                (
+                    format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }),
+                    ids,
+                )
+            })
         }
     }
 }

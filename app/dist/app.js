@@ -1061,6 +1061,22 @@ function alertFired(p) {
   logEvent(`ALERT ${p.name}: ${p.message.split("\n")[0]}`, "alarm");
   uiToast(`🚨 ${p.name} — ${p.message.split("\n").slice(0, 2).join(" · ")}`);
   if (p.tone) tone("emergency");
+  markFired(p.call, { rule_name: p.name, status: "sent", source: "alert", at: Math.floor(Date.now() / 1000) });
+}
+/* ---------- tripwire badges: which rules fired about a call ---------- */
+// `fired` rows come from the tripwire history (Rust `events::Fired`). Sent is
+// the signal colour, failed red, quiet (looked, stayed quiet) faint.
+function firedBadges(list) {
+  return (list || []).map((f) => `<span class="badge tw ${esc(f.status)}" title="${esc(`${f.rule_name} · ${f.status === "quiet" ? "looked, stayed quiet" : f.status}${f.at ? " · " + new Date(f.at * 1000).toLocaleTimeString("en-US", { hour12: false }) : ""}`)}">⚡ ${esc(f.rule_name)}</span>`).join("");
+}
+// A live call just fired a rule: badge its row in the Monitor history.
+function markFired(id, f) {
+  if (id == null) return;
+  const h = history.find((x) => x.id === id); if (!h) return;
+  const cell = h.el.querySelector("td.tg"); if (!cell) return;
+  let box = cell.querySelector(".twbox"); if (!box) { box = document.createElement("span"); box.className = "twbox"; cell.appendChild(box); }
+  box.insertAdjacentHTML("beforeend", firedBadges([f]));
+  if (typeof window.libMarkFired === "function") window.libMarkFired(id, f);
 }
 
 /* ---------- constellation (control channel symbols) ---------- */
@@ -2234,7 +2250,7 @@ if (TAURI) {
     // every header sat one column left of its data.
     return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
       `<td class="time">${esc(fmtT(r.start))}</td>` +
-      `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}</td>` +
+      `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}${(r.fired || []).length ? `<span class="twbox">${firedBadges(r.fired)}</span>` : ""}</td>` +
       `<td class="desc">${esc(r.tg_desc || "")}</td>` +
       `<td class="src">${r.unit_name ? `${esc(r.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : (r.unit ? `UID ${r.unit}` : "—")}</td><td class="len">${r.secs.toFixed(1)} s</td>` +
       `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
@@ -2296,6 +2312,7 @@ if (TAURI) {
       $("detBody").innerHTML = `<div class="det">
         <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        ${(r.fired || []).length ? `<div class="k">Tripwires</div><div class="twlist">${r.fired.map((f) => `<div>${firedBadges([f])} <span class="faint">${esc(f.status === "quiet" ? "looked, stayed quiet" : f.status)} · ${esc(fmtT(f.at))}</span></div>`).join("")}</div>` : ""}
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
         <div class="machine">${esc(r.transcript || "—")}</div>
@@ -2315,6 +2332,12 @@ if (TAURI) {
     } catch (e) { alert(e); }
   }
   window.libRefreshRow = (id) => libSearchRefreshRow(id);
+  // A rule fired about a call on screen: badge it without a reload.
+  window.libMarkFired = (id, f) => {
+    const r = libRows.find((x) => x.id === id); if (!r) return;
+    r.fired = [f, ...(r.fired || []).filter((x) => x.rule_name !== f.rule_name)];
+    const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.outerHTML = libRowHtml(r); wireLibRows(); }
+  };
   async function libSearchRefreshRow(id) {
     const r = await invoke("library_get", { id }); const i = libRows.findIndex((x) => x.id === id);
     if (r && i >= 0) { libRows[i] = r; const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.outerHTML = libRowHtml(r); wireLibRows(); } }

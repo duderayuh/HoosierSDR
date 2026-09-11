@@ -23,6 +23,7 @@ mod digest;
 mod dispatch;
 mod dual;
 mod encode;
+mod events;
 mod follow;
 mod hook;
 mod library;
@@ -606,7 +607,15 @@ fn library_search(
     state: State<AppState>,
     query: library::Query,
 ) -> Result<Vec<library::CallRow>, String> {
-    let mut rows = with_db(&state, |c| library::search(c, &query))?;
+    let mut rows = with_db(&state, |c| {
+        let mut rows = library::search(c, &query)?;
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        let mut fired = events::fired_for(c, &ids);
+        for r in rows.iter_mut() {
+            r.fired = fired.remove(&r.id).unwrap_or_default();
+        }
+        Ok(rows)
+    })?;
     let sids = playlists::sids_by_system_name(&app);
     for r in rows.iter_mut() {
         r.tg_desc = upload::tg_meta(&state.catalog, sids.get(&r.system).copied(), r.tg).desc;
@@ -620,7 +629,13 @@ fn library_get(
     state: State<AppState>,
     id: i64,
 ) -> Result<Option<library::CallRow>, String> {
-    let mut row = with_db(&state, |c| library::get(c, id))?;
+    let mut row = with_db(&state, |c| {
+        let mut row = library::get(c, id)?;
+        if let Some(r) = row.as_mut() {
+            r.fired = events::fired_for(c, &[r.id]).remove(&r.id).unwrap_or_default();
+        }
+        Ok(row)
+    })?;
     if let Some(r) = row.as_mut() {
         let sid = playlists::sids_by_system_name(&app).get(&r.system).copied();
         r.tg_desc = upload::tg_meta(&state.catalog, sid, r.tg).desc;
@@ -2246,6 +2261,7 @@ fn main() {
                         upload::ensure_schema(&c);
                         dispatch::ensure_schema(&c);
                         conversations::ensure_schema(&c);
+                        events::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2351,6 +2367,8 @@ fn main() {
             dispatch::incident_get,
             dispatch::incident_delete,
             dispatch::incident_locate,
+            events::events_list,
+            events::events_stats,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,

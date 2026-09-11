@@ -144,6 +144,14 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "limit")?,
         )?),
         "incident_get" => jv(crate::dispatch::incident_get(state, arg(args, "id")?)?),
+        "events_list" => jv(crate::events::events_list(
+            state,
+            arg::<Option<crate::events::EventQuery>>(args, "query")?.unwrap_or_default(),
+        )?),
+        "events_stats" => jv(crate::events::events_stats(
+            state,
+            arg::<Option<i64>>(args, "since")?.unwrap_or(0),
+        )?),
         "units_list" => jv(crate::units::units_list(state)),
         "rr_settings" => jv(crate::rr::rr_settings(app.clone(), state)),
 

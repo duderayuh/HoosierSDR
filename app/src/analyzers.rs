@@ -305,6 +305,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
                 false,
                 format!("extraction failed: {e}"),
                 String::new(),
+                Sent::default(),
             );
             return;
         }
@@ -320,6 +321,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
             true,
             "condition not met".into(),
             extracted,
+            Sent::default(),
         );
         return;
     }
@@ -327,18 +329,31 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
     let message = render(&r.message, &r, &f, &obj);
     let _ = app.emit(
         "analyzer",
-        serde_json::json!({ "name": r.name, "tg": f.tg, "message": message }),
+        serde_json::json!({ "name": r.name, "tg": f.tg, "message": message, "call": f.id }),
     );
     let chat = if r.chat_id.trim().is_empty() {
         tg_settings.destination()
     } else {
         r.chat_id.clone()
     };
-    let (ok, detail) = deliver(&state, &chat, &r, &f, &message);
+    let (ok, detail, ids) = deliver(&state, &chat, &r, &f, &message);
     if ok {
         state.analyzers.lock().unwrap().last_fired.insert(key, now);
     }
-    log_it(&app, &r, &f, true, ok, detail, extracted);
+    let sent = Sent {
+        message,
+        chat: if r.telegram { chat } else { String::new() },
+        ids,
+    };
+    log_it(&app, &r, &f, true, ok, detail, extracted, sent);
+}
+
+/// What went out, for the tripwire history.
+#[derive(Default)]
+struct Sent {
+    message: String,
+    chat: String,
+    ids: Vec<i64>,
 }
 
 /// Pick the extraction engine (local Ollama or the shared cloud model) and run it.
@@ -358,19 +373,23 @@ pub(crate) fn run_extract(
 }
 
 /// Send the rendered message to the analyzer's chosen destinations. Returns
-/// (all-ok, joined detail).
+/// (all-ok, joined detail, Telegram message ids).
 fn deliver(
     state: &AppState,
     chat: &str,
     r: &AnalyzerRule,
     f: &CallFacts,
     message: &str,
-) -> (bool, String) {
+) -> (bool, String, Vec<i64>) {
     let mut ok = true;
     let mut parts: Vec<String> = Vec::new();
+    let mut ids = Vec::new();
     if r.telegram {
         match send_telegram(chat, r, f, message) {
-            Ok(d) => parts.push(d),
+            Ok((d, sent)) => {
+                parts.push(d);
+                ids = sent;
+            }
             Err(e) => {
                 ok = false;
                 parts.push(format!("telegram: {e}"));
@@ -389,7 +408,7 @@ fn deliver(
     if parts.is_empty() {
         parts.push("no destination selected".into());
     }
-    (ok, parts.join("; "))
+    (ok, parts.join("; "), ids)
 }
 
 fn send_telegram(
@@ -397,26 +416,27 @@ fn send_telegram(
     r: &AnalyzerRule,
     f: &CallFacts,
     message: &str,
-) -> Result<String, String> {
+) -> Result<(String, Vec<i64>), String> {
     let clip = if r.attach_audio {
         f.audio.as_deref().filter(|p| !p.is_empty())
     } else {
         None
     };
     match clip {
-        None => crate::alerts::send_text_id(chat, message).map(|_| "sent".into()),
+        None => crate::alerts::send_text_id(chat, message).map(|id| ("sent".into(), vec![id])),
         Some(path) => {
             // Through the same encoder as alerts: a stored WAV (or Opus/M4A)
             // becomes the MP3 Telegram plays inline, not a file to download.
             let (tmp, is_mp3) = crate::alerts::combine_clips(&[path.to_string()], &format!("az_{}", f.tg))?;
             let res = crate::alerts::send_audio_id(chat, &tmp, is_mp3, message, &r.name, &f.tg_name)
-                .map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }));
+                .map(|ids| (format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }), ids));
             let _ = std::fs::remove_file(&tmp);
             res
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_it(
     app: &AppHandle,
     r: &AnalyzerRule,
@@ -425,6 +445,7 @@ fn log_it(
     ok: bool,
     detail: String,
     extracted: String,
+    sent: Sent,
 ) {
     let state = app.state::<AppState>();
     let mut st = state.analyzers.lock().unwrap();
@@ -436,9 +457,33 @@ fn log_it(
         matched,
         ok,
         detail: detail.clone(),
-        extracted,
+        extracted: extracted.clone(),
     });
     st.log.truncate(200);
+    drop(st);
+    crate::events::record(
+        app,
+        crate::events::NewEvent {
+            source: "analyzer",
+            rule_id: r.id.clone(),
+            rule_name: r.name.clone(),
+            tg: f.tg,
+            tg_name: f.tg_name.clone(),
+            status: match (matched, ok) {
+                (true, true) => "sent",
+                (false, true) => "quiet",
+                _ => "failed",
+            }
+            .into(),
+            detail: detail.clone(),
+            message: sent.message,
+            chat: sent.chat,
+            message_ids: sent.ids,
+            data: extracted,
+            calls: f.id.into_iter().collect(),
+            ..Default::default()
+        },
+    );
     if matched && !ok {
         let _ = app.emit("alert_error", format!("{}: {detail}", r.name));
     }
