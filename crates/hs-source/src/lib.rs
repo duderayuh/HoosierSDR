@@ -134,9 +134,17 @@ pub trait SdrSource {
     /// Fill `buf` with interleaved I/Q f32 samples. Returns samples written
     /// (pairs count as 2), or `Err(Eof)` when the stream ends.
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError>;
-    /// Samples or blocks lost so far on the way from the hardware (device-side
-    /// USB starvation, or a consumer that fell behind). A file never drops.
+    /// Blocks lost so far on the way from the hardware, wherever they went
+    /// missing: inside the driver (see [`driver_dropped`](Self::driver_dropped))
+    /// or in a queue whose consumer fell behind. A file never drops.
     fn dropped(&self) -> u64 {
+        0
+    }
+    /// The part of [`dropped`](Self::dropped) lost *inside the driver*, before
+    /// this crate's first queue: the driver's own thread was starved, which
+    /// says nothing about the decoder's load. Zero for drivers that cannot
+    /// tell.
+    fn driver_dropped(&self) -> u64 {
         0
     }
     /// A handle that retunes this radio while it streams. Radios that support
@@ -160,6 +168,9 @@ impl<T: SdrSource + ?Sized> SdrSource for Box<T> {
     }
     fn dropped(&self) -> u64 {
         (**self).dropped()
+    }
+    fn driver_dropped(&self) -> u64 {
+        (**self).driver_dropped()
     }
     fn freq_handle(&self) -> FreqHandle {
         (**self).freq_handle()

@@ -504,6 +504,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     }
     let mut extra_buf = vec![0.0f32; 65536 * 2];
     let drop_base = src.dropped();
+    let driver_drop_base = src.driver_dropped();
     let mut buf = vec![0.0f32; 65536 * 2];
     let start = std::time::Instant::now();
     let mut total_pairs = 0u64;
@@ -520,6 +521,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     let mut clip_win = 0u64;
     let mut clip_total = 0u64;
     let mut drops_seen = 0u64;
+    let mut driver_drops_seen = 0u64;
 
     while running.load(Ordering::SeqCst) {
         let n = match src.read(&mut buf) {
@@ -598,17 +600,35 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
             last_status = std::time::Instant::now();
             let secs = start.elapsed().as_secs_f64().max(1e-3);
             let extra_drops: u64 = extra.iter().map(|(_, _, _, e)| e.dropped()).sum();
+            let extra_driver: u64 = extra.iter().map(|(_, _, _, e)| e.driver_dropped()).sum();
             // A drop is a hole in every call being decoded at that moment —
-            // heard as a chop — so say when it happens, not just count it.
+            // heard as a chop — so say when it happens, not just count it,
+            // and say where: a block lost inside the radio driver means its
+            // own thread was starved for a few tens of ms (the Airspy's ring
+            // is ~52 ms at 10 MSPS), which happens on an idle-looking machine
+            // and is not the decoder being slow.
             let drops_now = src.dropped().saturating_sub(drop_base) + extra_drops;
+            let driver_now = src.driver_dropped().saturating_sub(driver_drop_base) + extra_driver;
             if drops_now > drops_seen {
-                emit(FollowEvent::Notice {
-                    text: format!(
-                        "radio stream dropped {} block(s) — the decoder fell behind; audio decoded just now has holes (check CPU: transcription, other apps)",
-                        drops_now - drops_seen
-                    ),
-                });
+                let new = drops_now - drops_seen;
+                let in_driver = driver_now.saturating_sub(driver_drops_seen).min(new);
+                let text = if in_driver == new {
+                    format!(
+                        "radio driver dropped {new} USB block(s) — its conversion thread was starved longer than the driver's ring holds (~50 ms at 10 MSPS; scheduling, not decoder load); audio decoded just now has holes"
+                    )
+                } else if in_driver > 0 {
+                    format!(
+                        "radio stream dropped {new} block(s): {in_driver} inside the driver (its thread was starved) and {} in the decoder queue (the decoder fell behind; check CPU: transcription, other apps); audio decoded just now has holes",
+                        new - in_driver
+                    )
+                } else {
+                    format!(
+                        "radio stream dropped {new} block(s) — the decoder fell behind; audio decoded just now has holes (check CPU: transcription, other apps)"
+                    )
+                };
+                emit(FollowEvent::Notice { text });
                 drops_seen = drops_now;
+                driver_drops_seen = driver_now;
             }
             let clip_pct = if clip_total > 0 {
                 100.0 * clip_win as f32 / clip_total as f32

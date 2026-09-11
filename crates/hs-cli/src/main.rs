@@ -1111,6 +1111,9 @@ impl<S: hs_source::SdrSource> hs_source::SdrSource for Timed<S> {
     fn dropped(&self) -> u64 {
         self.inner.dropped()
     }
+    fn driver_dropped(&self) -> u64 {
+        self.inner.driver_dropped()
+    }
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, hs_source::SourceError> {
         if self
             .deadline
@@ -1164,6 +1167,9 @@ impl<S: hs_source::SdrSource> hs_source::SdrSource for Recorded<S> {
     }
     fn dropped(&self) -> u64 {
         self.inner.dropped()
+    }
+    fn driver_dropped(&self) -> u64 {
+        self.inner.driver_dropped()
     }
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, hs_source::SourceError> {
         let n = self.inner.read(buf)?;

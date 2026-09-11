@@ -36,18 +36,39 @@
 //!
 //! ## Threading
 //!
-//! `libairspy` delivers blocks on its own USB thread through a C callback.
-//! The callback converts and `try_send`s each block into a bounded channel
-//! and never blocks: if the decoder falls behind, the block is dropped and
-//! counted rather than letting the device's own buffer overflow (the same
-//! policy as the trunk follower's reader thread). Device-side drops the
-//! firmware reports are counted separately.
+//! `libairspy` delivers blocks on its own conversion thread through a C
+//! callback. The callback converts and `try_send`s each block into a bounded
+//! channel and never blocks: if the decoder falls behind, the block is
+//! dropped and counted rather than letting the device's own buffer overflow
+//! (the same policy as the trunk follower's reader thread).
+//!
+//! Upstream of that channel, `libairspy` keeps its own ring of only
+//! `RAW_BUFFER_COUNT` (8) raw USB transfers between the libusb event thread
+//! and the conversion thread that runs the 12-bit → int16 IQ converter and
+//! then this callback. At 10 MSPS a transfer is 65536 complex samples
+//! (~6.5 ms), so that ring holds ~52 ms: if the conversion thread is
+//! descheduled longer than that — a whisper burst, a WebKit paint, anything
+//! with more priority — libusb overwrites the oldest transfer and reports it
+//! as `dropped_samples` on the next callback (a per-transfer delta, in
+//! samples). Those are the "65536 stream drop(s)" a lightly loaded machine
+//! still shows: one transfer, not 65536 blocks, and nothing to do with the
+//! decoder's own queue. They are counted here in *blocks* as
+//! [`AirspySource::device_drops`]. Since the pthread `libairspy` spawns runs
+//! at default QoS, the first callback promotes it (macOS): user-interactive
+//! QoS, then the Mach time-constraint (real-time) policy with one transfer
+//! period as the deadline, which runs ahead of every timeshare thread
+//! (user-interactive alone still lost 21 transfers in one ~190 ms gap). The
+//! callback also fills recycled blocks rather than allocating 512 KB per
+//! transfer, and when a transfer is lost it prints how long since the
+//! callback last ran and how long its own body took, so a stall inside the
+//! callback and a starved thread can be told apart.
 
 use crate::{FreqHandle, GainHandle, GainSetting, SdrSource, SourceError};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[repr(C)]
 struct AirspyDevice {
@@ -156,8 +177,115 @@ struct Shared {
     tx: SyncSender<Vec<f32>>,
     /// Blocks this side dropped because the decoder was behind.
     queue_drops: AtomicU64,
-    /// Samples the firmware reported dropping (USB starvation on its side).
+    /// Blocks (USB transfers) `libairspy`'s own ring dropped because its
+    /// conversion thread — the one that calls `on_block` — was starved.
     device_drops: AtomicU64,
+    /// Whether `on_block` has already raised its thread's scheduling class.
+    promoted: AtomicBool,
+    /// Sample rate, for turning a transfer into a time.
+    rate: f64,
+    /// Blocks the reader has finished with, reused by `on_block` so the
+    /// callback never asks the allocator for another 512 KB (a `vm_allocate`
+    /// per transfer, contended with everything else in the process that maps
+    /// or frees memory).
+    pool: Mutex<Vec<Vec<f32>>>,
+    /// Diagnostics for a starved callback: when it last ran (ns since
+    /// `epoch`), how long the last body took and the worst body so far (µs).
+    epoch: Instant,
+    last_call_ns: AtomicU64,
+    last_body_us: AtomicU64,
+    max_body_us: AtomicU64,
+}
+
+/// Blocks the pool keeps at most (≈ the channel depth plus what the reader
+/// holds); anything beyond is simply freed.
+const POOL_MAX: usize = 128;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// `QOS_CLASS_USER_INTERACTIVE` from `<sys/qos.h>`.
+#[cfg(target_os = "macos")]
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+/// `thread_time_constraint_policy` from `<mach/thread_policy.h>`.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ThreadTimeConstraintPolicy {
+    period: u32,
+    computation: u32,
+    constraint: u32,
+    preemptible: u32,
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn mach_thread_self() -> u32;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+    fn thread_policy_set(thread: u32, flavor: u32, policy: *const u32, count: u32) -> i32;
+    fn mach_port_deallocate(task: u32, name: u32) -> i32;
+    static mach_task_self_: u32;
+}
+
+#[cfg(target_os = "macos")]
+const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
+
+/// Promote the calling thread (libairspy's conversion thread) so a
+/// scheduling gap under ordinary desktop load stops costing a USB transfer.
+/// Two steps, each best effort: user-interactive QoS (a better timeshare
+/// class, P-core placement), then the Mach time-constraint policy CoreAudio
+/// uses — a real-time band that runs ahead of every timeshare thread, with a
+/// deadline of one transfer period. `period_ms` is how often a transfer
+/// arrives.
+fn promote_current_thread(period_ms: f64) {
+    #[cfg(target_os = "macos")]
+    // SAFETY: plain Mach/libc calls on the current thread; the policy struct
+    // is passed by pointer with its exact word count, and the thread port
+    // from `mach_thread_self` is released again.
+    unsafe {
+        let r = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        if r != 0 {
+            eprintln!("airspy: could not raise conversion thread QoS ({r})");
+        }
+        let mut tb = MachTimebaseInfo { numer: 1, denom: 1 };
+        mach_timebase_info(&mut tb);
+        let abs = |ms: f64| (ms * 1e6 * tb.denom as f64 / tb.numer as f64) as u32;
+        // Budget half the period for the converter plus this callback (they
+        // use well under a fifth), and require the work to finish within the
+        // period so the ring can never fill.
+        let policy = ThreadTimeConstraintPolicy {
+            period: abs(period_ms),
+            computation: abs(period_ms * 0.5),
+            constraint: abs(period_ms * 0.9),
+            preemptible: 1,
+        };
+        let port = mach_thread_self();
+        let r = thread_policy_set(
+            port,
+            THREAD_TIME_CONSTRAINT_POLICY,
+            &policy as *const ThreadTimeConstraintPolicy as *const u32,
+            (std::mem::size_of::<ThreadTimeConstraintPolicy>() / 4) as u32,
+        );
+        mach_port_deallocate(mach_task_self_, port);
+        if r == 0 {
+            eprintln!(
+                "airspy: conversion thread promoted (user-interactive QoS + real-time policy, period {period_ms:.1} ms)"
+            );
+        } else {
+            eprintln!("airspy: real-time policy refused ({r}); conversion thread stays at user-interactive QoS");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = period_ms;
 }
 
 unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
@@ -166,10 +294,37 @@ unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
     // streaming (see `Drop`).
     let t = &*t;
     let shared = &*(t.ctx as *const Shared);
-    if t.dropped_samples > 0 {
-        shared
-            .device_drops
-            .fetch_add(t.dropped_samples, Ordering::Relaxed);
+    let t0 = Instant::now();
+    let block_ms = if t.sample_count > 0 && shared.rate > 0.0 {
+        t.sample_count as f64 * 1e3 / shared.rate
+    } else {
+        6.5
+    };
+    if !shared.promoted.swap(true, Ordering::Relaxed) {
+        promote_current_thread(block_ms);
+    }
+    // How long since we last ran: a gap longer than the driver's ring is the
+    // starvation that loses transfers, and whether *our* body was the slow
+    // part is the question the diagnostic answers.
+    let now_ns = t0.duration_since(shared.epoch).as_nanos() as u64;
+    let prev_ns = shared.last_call_ns.swap(now_ns, Ordering::Relaxed);
+    // `dropped_samples` is transfers lost since the previous callback, times
+    // this transfer's `sample_count`; count them as blocks, the unit every
+    // other drop counter uses.
+    if t.dropped_samples > 0 && t.sample_count > 0 {
+        let lost = t.dropped_samples.div_ceil(t.sample_count as u64);
+        shared.device_drops.fetch_add(lost, Ordering::Relaxed);
+        let gap_ms = if prev_ns == 0 {
+            0.0
+        } else {
+            (now_ns - prev_ns) as f64 / 1e6
+        };
+        eprintln!(
+            "airspy: driver dropped {lost} transfer(s): {gap_ms:.1} ms since our callback last ran (ring holds ~{:.0} ms); our previous callback body took {} µs, worst so far {} µs",
+            block_ms * 8.0,
+            shared.last_body_us.load(Ordering::Relaxed),
+            shared.max_body_us.load(Ordering::Relaxed)
+        );
     }
     if t.sample_type != AIRSPY_SAMPLE_INT16_IQ || t.sample_count <= 0 {
         return 0;
@@ -178,16 +333,40 @@ unsafe extern "C" fn on_block(t: *mut AirspyTransfer) -> i32 {
     // interleaved I,Q int16 pairs.
     let n = t.sample_count as usize;
     let raw = std::slice::from_raw_parts(t.samples as *const i16, n * 2);
-    let block: Vec<f32> = raw.iter().map(|&s| s as f32 / 32768.0).collect();
-    match shared.tx.try_send(block) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
+    let mut block = shared
+        .pool
+        .lock()
+        .map(|mut p| p.pop().unwrap_or_default())
+        .unwrap_or_default();
+    block.clear();
+    block.reserve(n * 2);
+    block.extend(raw.iter().map(|&s| s as f32 / 32768.0));
+    let ret = match shared.tx.try_send(block) {
+        Ok(()) => 0,
+        Err(TrySendError::Full(block)) => {
             shared.queue_drops.fetch_add(1, Ordering::Relaxed);
+            recycle(shared, block);
+            0
         }
         // Reader gone: returning non-zero stops streaming.
-        Err(TrySendError::Disconnected(_)) => return 1,
+        Err(TrySendError::Disconnected(_)) => 1,
+    };
+    let body_us = t0.elapsed().as_micros() as u64;
+    shared.last_body_us.store(body_us, Ordering::Relaxed);
+    shared.max_body_us.fetch_max(body_us, Ordering::Relaxed);
+    ret
+}
+
+/// Hand a finished block back for `on_block` to fill again.
+fn recycle(shared: &Shared, block: Vec<f32>) {
+    if block.capacity() == 0 {
+        return;
     }
-    0
+    if let Ok(mut p) = shared.pool.lock() {
+        if p.len() < POOL_MAX {
+            p.push(block);
+        }
+    }
 }
 
 /// A live Airspy source. Owns the device and its RX stream.
@@ -310,6 +489,13 @@ impl AirspySource {
                 tx,
                 queue_drops: AtomicU64::new(0),
                 device_drops: AtomicU64::new(0),
+                promoted: AtomicBool::new(false),
+                rate: sample_rate,
+                pool: Mutex::new(Vec::new()),
+                epoch: Instant::now(),
+                last_call_ns: AtomicU64::new(0),
+                last_body_us: AtomicU64::new(0),
+                max_body_us: AtomicU64::new(0),
             });
             let ctx = Arc::as_ptr(&shared) as *mut c_void;
             let r = airspy_start_rx(dev, on_block, ctx);
@@ -362,7 +548,8 @@ impl AirspySource {
         self.shared.queue_drops.load(Ordering::Relaxed)
     }
 
-    /// Samples the device reported dropping on its side of the USB link.
+    /// Blocks `libairspy` dropped inside its own USB ring because its
+    /// conversion thread was starved (see the module notes on threading).
     pub fn device_drops(&self) -> u64 {
         self.shared.device_drops.load(Ordering::Relaxed)
     }
@@ -385,6 +572,10 @@ impl SdrSource for AirspySource {
         self.queue_drops() + self.device_drops()
     }
 
+    fn driver_dropped(&self) -> u64 {
+        self.device_drops()
+    }
+
     fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
         if let Some(g) = self.gain.take() {
             if let Err(e) = self.set_gain(&g) {
@@ -402,10 +593,11 @@ impl SdrSource for AirspySource {
             }
         }
         if self.pending_pos >= self.pending.len() {
-            self.pending = match self.rx.recv() {
+            let next = match self.rx.recv() {
                 Ok(b) => b,
                 Err(_) => return Err(SourceError::Eof),
             };
+            recycle(&self.shared, std::mem::replace(&mut self.pending, next));
             self.pending_pos = 0;
         }
         let avail = &self.pending[self.pending_pos..];
