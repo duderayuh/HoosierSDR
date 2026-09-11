@@ -302,7 +302,7 @@
       <section class="two-col" id="dpSetup" style="display:none">
         <div class="stack">
           <div class="panel">
-            <div class="head"><span class="eyebrow">Dispatch channels</span><span class="meta" id="dpChMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="dpBack">← Map</button><button class="btn ghost sm" id="dpChAdd">+ Channel</button></div>
+            <div class="head"><span class="eyebrow">Dispatch channels</span><span class="meta" id="dpChMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="dpBack">← Map</button><button class="btn ghost sm" id="dpChPick">Choose channels…</button><button class="btn ghost sm" id="dpChAdd">+ Channel</button></div>
             <div class="body tight">
               <div id="dpChannels" class="list" style="max-height:calc(32vh / var(--z))"></div>
               <p class="help"><b>Dispatch</b> channels open incidents: the model pulls the address, units and call type from each dispatch. <b>Tactical</b> channels (fireground, EMS ops) only update an incident that already involves one of the units heard. A fixed call type overrides the model for a channel that carries one kind of traffic.</p>
@@ -1034,8 +1034,7 @@
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="akEnabled" type="checkbox" checked /> enabled</label></label>
               </div>
               <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated; empty = any</span></span>
-                <span class="inline"><input id="akTgs" type="text" placeholder="20305, 20308" spellcheck="false" /><button class="btn ghost sm" id="akPickTg" title="Pick from loaded aliases">pick…</button></span></label>
-              <div id="akTgPick" class="chips" style="display:none;max-height:120px;overflow:auto"></div>
+                <span class="inline"><input id="akTgs" type="text" placeholder="20305, 20308" spellcheck="false" /><button class="btn ghost sm" id="akPickTg" title="Search, browse by group, or pick from what was heard">Choose…</button></span></label>
               <label class="field" id="akKwField"><span class="lab">Keywords <span class="mono faint">one per line or comma-separated · any matches · whole words, case-insensitive</span></span>
                 <textarea id="akKeywords" style="min-height:70px" placeholder="ventricular tachycardia&#10;ventricular fibrillation&#10;cardiac arrest&#10;CPR&#10;working arrest"></textarea></label>
               <label class="field" id="akUnitField"><span class="lab">Radio IDs <span class="mono faint">comma-separated; empty = any</span></span><input id="akUnits" type="text" placeholder="790065" spellcheck="false" /></label>
@@ -1075,7 +1074,7 @@
             <div class="body tight">
               <div class="row3">
                 <label class="field"><span class="lab">Name</span><input id="cvName" type="text" placeholder="Hospitals" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="cvTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups</span><span class="inline"><input id="cvTgs" type="text" placeholder="10202, 10244" spellcheck="false" /><button class="btn ghost sm" id="cvPickTg">Choose…</button></span></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="cvEnabled" type="checkbox" checked /> enabled</label></label>
               </div>
               <label class="field"><span class="lab">Fixed radio IDs <span class="mono faint">the hospital's consoles · comma-separated · everything else is a mobile unit</span></span>
@@ -1110,7 +1109,7 @@
             <div class="body tight">
               <div class="row3">
                 <label class="field"><span class="lab">Name</span><input id="dgName" type="text" placeholder="Southeast" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="dgTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups</span><span class="inline"><input id="dgTgs" type="text" placeholder="10202, 10244" spellcheck="false" /><button class="btn ghost sm" id="dgPickTg">Choose…</button></span></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="dgEnabled" type="checkbox" checked /> enabled</label></label>
               </div>
               <div class="row3">
@@ -1157,7 +1156,7 @@
             <div class="body tight">
               <div class="row3">
                 <label class="field"><span class="lab">Name</span><input id="azName" type="text" placeholder="ECPR candidate" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated · blank = any</span></span><input id="azTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">blank = any</span></span><span class="inline"><input id="azTgs" type="text" placeholder="10202, 10244" spellcheck="false" /><button class="btn ghost sm" id="azPickTg">Choose…</button></span></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azEnabled" type="checkbox" checked /> enabled</label></label>
               </div>
               <label class="field"><span class="lab">Only run when the transcript contains <span class="mono faint">one per line · blank = every transcript</span></span><textarea id="azKeywords" style="min-height:44px" placeholder="cardiac arrest&#10;working arrest&#10;CPR"></textarea></label>
@@ -1286,6 +1285,7 @@
   </footer>
   <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
+  <script src="picker.js"></script>
   <script src="connections.js"></script>
 </body>
 </html>

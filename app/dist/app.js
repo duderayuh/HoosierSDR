@@ -1698,7 +1698,7 @@ if (TAURI) {
     const a = akSettings.alerts.find((x) => x.id === id); if (!a) return;
     akSel = id; akRenderList(); $("akEditor").style.display = "";
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
-    $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
+    $("akTgs").value = a.trigger.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("akTgs"); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
     $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akTopic").value = a.topic_id || ""; if (window.destBind) destBind("akDest", "akChat", "akTopic"); $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
@@ -1730,7 +1730,6 @@ if (TAURI) {
   $("akSave").onclick = async () => { const a = akRead(); if (!a) return; if (await akPersist()) { uiToast("Alert saved"); akEdit(akSel); if (a.trigger.kind === "keywords" && !$("trEnabled").checked) uiToast("Keyword alerts need transcription — enable it in Settings → Transcription", "err"); } };
   $("akDelete").onclick = async () => { if (!(await uiConfirm("Delete this alert?", "Delete"))) return; akSettings.alerts = akSettings.alerts.filter((x) => x.id !== akSel); akSel = null; $("akEditor").style.display = "none"; await akPersist(); };
   $("akTest").onclick = async () => { if (!akRead()) return; if (!(await akPersist())) return; try { uiToast(await invoke("alerts_test", { id: akSel })); setTimeout(akLogRefresh, 4000); setTimeout(akLogRefresh, 15000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
-  $("akPickTg").onclick = () => { const box = $("akTgPick"); if (box.style.display === "none") { const cur = new Set(nums($("akTgs").value)); box.innerHTML = alRows.length ? alRows.slice(0, 1500).map((r) => `<span class="chip ${cur.has(r.id) ? "on" : ""}" data-tg="${r.id}" title="${esc(r.description)}">${r.id} ${esc(r.alias)}</span>`).join("") : '<span class="faint">load a catalog first</span>'; box.querySelectorAll(".chip").forEach((c) => c.onclick = () => { const set = new Set(nums($("akTgs").value)); set.has(+c.dataset.tg) ? set.delete(+c.dataset.tg) : set.add(+c.dataset.tg); $("akTgs").value = [...set].sort((a, b) => a - b).join(", "); c.classList.toggle("on"); }); box.style.display = ""; } else box.style.display = "none"; };
   async function akLogRefresh() {
     try { const rows = await invoke("alerts_log"); $("akLogMeta").textContent = rows.length ? `${rows.length} recent` : "nothing fired yet"; $("akLog").innerHTML = rows.map((r) => `<tr><td class="mono">${new Date(r.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(r.alert)}</td><td>${esc(r.tg_name)} <span class="faint mono">${r.tg}</span></td><td>${r.status === "quiet" ? '<span class="badge">quiet</span>' : r.status === "held" ? '<span class="badge enc">held</span>' : `<span class="badge ${r.ok ? "clear" : "enc"}">${r.ok ? "sent" : "failed"}</span>`} <small>${esc(r.detail)}</small></td></tr>`).join(""); } catch (e) { log(`alerts_log: ${e}`); }
   }
@@ -1796,7 +1795,7 @@ if (TAURI) {
   function cvEdit(id) {
     const r = cvView.settings.rules.find((x) => x.id === id); if (!r) return;
     cvSel = id; cvRenderList(); $("cvEditor").style.display = "";
-    $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
+    $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("cvTgs"); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
     $("cvGap").value = r.end_gap_secs; $("cvReply").value = r.reply_gap_secs ?? 45; $("cvLate").value = r.late_window_secs; $("cvMax").value = r.max_secs; $("cvPrompt").value = r.summary_prompt; $("cvMessage").value = r.message;
     $("cvChat").value = r.chat_id; if (window.destBind) destBind("cvDest", "cvChat"); $("cvMin").value = r.min_calls; $("cvAudio").checked = r.attach_audio; $("cvNoTr").checked = r.send_without_transcript;
     const proposed = Object.entries(cvView.proposed_fixed || {}).filter(([k]) => k.startsWith(id + ":")).flatMap(([k, units]) => units.map((u) => ({ tg: k.split(":")[1], u })));
@@ -1851,7 +1850,7 @@ if (TAURI) {
   function dgEdit(id) {
     const r = dgView.rules.find((x) => x.id === id); if (!r) return;
     dgSel = id; dgRenderList(); $("dgEditor").style.display = "";
-    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); $("dgEnabled").checked = r.enabled;
+    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("dgTgs"); $("dgEnabled").checked = r.enabled;
     $("dgInterval").value = Math.round(r.interval_secs / 60); $("dgWindow").value = Math.round(r.window_secs / 60);
     $("dgPrompt").value = r.prompt; $("dgMessage").value = r.message; $("dgChat").value = r.chat_id; if (window.destBind) destBind("dgDest", "dgChat");
     $("dgEdMeta").textContent = `${r.tgs.length} talkgroups`;
@@ -1914,7 +1913,7 @@ if (TAURI) {
   function azEdit(id) {
     const r = azView.rules.find((x) => x.id === id); if (!r) return;
     azSel = id; azRenderList(); $("azEditor").style.display = "";
-    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); $("azEnabled").checked = r.enabled;
+    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("azTgs"); $("azEnabled").checked = r.enabled;
     $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
     $("azEngine").value = r.engine || "ollama"; $("azThink").checked = !!r.think; if (typeof olThinkUi === "function") olThinkUi(); $("azTelegram").checked = r.telegram !== false;
     $("azMatch").value = r.conditions.length ? r.match_mode : "";
@@ -3622,6 +3621,15 @@ async function dpSave() {
 }
 $("dpSave").onclick = async () => { if (await dpSave()) { uiToast("Dispatch settings saved"); if (!$("trEnabled").checked) uiToast("The dispatch map needs transcription — enable it in Settings → Transcription", "err"); if (dpSettings.engine === "ollama" && !$("olModel").value) uiToast("Pick a local model in Settings → Connections", "err"); } };
 $("dpHomeFromMap").onclick = () => { if (!dpMap) { uiToast("Open the map first"); return; } const c = dpMap.getCenter(); $("dpHomeLat").value = c.lat.toFixed(5); $("dpHomeLon").value = c.lng.toFixed(5); };
+$("dpChPick").onclick = async () => {
+  if (typeof pickChannels !== "function") return;
+  dpChSync();
+  const got = await pickChannels({ title: "Dispatch and tactical channels", selected: dpChBuf.map((c) => c.tg).filter(Boolean) });
+  if (!got) return;
+  const keep = dpChBuf.filter((c) => got.includes(c.tg));
+  for (const tg of got) if (!keep.some((c) => c.tg === tg)) keep.push({ tg, name: channelSummary([tg], 1), role: "dispatch", fixed_call_type: "", enabled: true });
+  dpChBuf = keep; dpChRender();
+};
 $("dpChAdd").onclick = () => { dpChSync(); dpChBuf.push({ tg: 0, name: "", role: "dispatch", fixed_call_type: "", enabled: true }); dpChRender(); const last = $("dpChannels").querySelector(".row:last-child [data-ctg]"); if (last) last.focus(); };
 $("dpTest").onclick = async () => { if (!(await dpSave())) return; uiToast("Running the extractor on the latest dispatch call…"); try { await uiConfirm(await dpInvoke("dispatch_test", { tg: null }), "OK"); dpLogRefresh(); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
 $("dpRegeocode").onclick = async () => {

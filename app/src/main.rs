@@ -17,6 +17,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod alerts;
 mod analyzers;
+mod channels;
 mod connections;
 mod conversations;
 mod devices;
@@ -2371,6 +2372,9 @@ fn main() {
             dispatch::incident_locate,
             events::events_list,
             events::events_stats,
+            channels::channel_activity,
+            channels::channel_sets_get,
+            channels::channel_sets_set,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,
