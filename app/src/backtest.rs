@@ -110,6 +110,7 @@ pub struct Preview {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone)]
 struct Row {
     id: i64,
     start: i64,
@@ -168,17 +169,26 @@ fn scope_where(
     (sql, args)
 }
 
+/// `with_text` decides whether the transcripts come along: a scan that only
+/// counts (every call on a channel, a conversation's traffic) must not drag
+/// tens of thousands of transcripts through the library lock.
 fn scope_rows(
     c: &Connection,
     t: &Tripwire,
     since: i64,
     fts: Option<&str>,
     limit: u32,
+    with_text: bool,
 ) -> Result<Vec<Row>, String> {
     let (wh, args) = scope_where(t, since, fts);
+    let text_col = if with_text {
+        "COALESCE(NULLIF(transcript_edited, ''), transcript)"
+    } else {
+        "NULL"
+    };
     let sql = format!(
         "SELECT id, start, secs, tg, tg_name, unit, unit_name, emergency, system, audio IS NOT NULL,
-                COALESCE(NULLIF(transcript_edited, ''), transcript)
+                {text_col}
          FROM calls WHERE {wh} ORDER BY start ASC LIMIT {limit}"
     );
     let mut st = c.prepare(&sql).map_err(|e| format!("preview: {e}"))?;
@@ -353,12 +363,10 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
     };
     match t.when.kind.as_str() {
         "conversation" | "digest" => {
-            let rows = scope_rows(c, t, since, None, 50_000)?;
-            p.scanned = rows.len() as u32;
-            p.transcribed = rows
-                .iter()
-                .filter(|r| r.text.as_deref().is_some_and(|x| !x.trim().is_empty()))
-                .count() as u32;
+            // Only the timing matters here, so leave the transcripts in the
+            // library rather than dragging them all through the lock.
+            let rows = scope_rows(c, t, since, None, 20_000, false)?;
+            (p.scanned, p.transcribed) = scope_count(c, t, since);
             if t.when.kind == "digest" {
                 p.messages = days * 1440 / t.when.digest.every_mins.max(1);
                 p.matches = p.scanned;
@@ -380,15 +388,24 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
                 }
                 p.matches = p.messages;
             }
-            for r in rows.iter().rev().take(12) {
-                p.samples.push(sample(r, Vec::new()));
+            for r in with_text(c, rows.iter().rev().take(12)) {
+                p.samples.push(sample(&r, Vec::new()));
             }
         }
         _ => {
+            (p.scanned, p.transcribed) = scope_count(c, t, since);
+            if !tripwires::is_narrowed(t) {
+                // It would fire on everything; do not scan everything to
+                // say so.
+                p.warnings.push("Nothing narrows this down yet — pick talkgroups, radios or phrases, or it would fire on every call.".into());
+                p.per_day = buckets.into_iter().map(|(_, l, n)| (l, n)).collect();
+                return Ok(p);
+            }
             let mut probe = t.clone();
             probe.enabled = true;
             let fts = fts_any(&t.when.phrases);
-            let rows = scope_rows(c, t, since, fts.as_deref(), 50_000)?;
+            // The transcripts are only needed where the words matter.
+            let rows = scope_rows(c, t, since, fts.as_deref(), 20_000, tripwires::needs_transcript(t))?;
             let mut last: HashMap<u16, i64> = HashMap::new();
             let mut hits: Vec<(Row, Vec<String>)> = Vec::new();
             let mut per_phrase: HashMap<String, u32> = HashMap::new();
@@ -423,10 +440,10 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
                     }
                 }
             }
-            // How much there is to look at, for the "0 of N" line.
-            (p.scanned, p.transcribed) = scope_count(c, t, since);
-            for (r, kw) in hits.iter().rev().take(25) {
-                p.samples.push(sample(r, kw.clone()));
+            let newest: Vec<&(Row, Vec<String>)> = hits.iter().rev().take(25).collect();
+            let texts = with_text(c, newest.iter().map(|(r, _)| r));
+            for (r, (_, kw)) in texts.into_iter().zip(newest) {
+                p.samples.push(sample(&r, kw.clone()));
             }
             let vocab = if t
                 .when
@@ -453,9 +470,6 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
                     suggestions,
                 });
             }
-            if !tripwires::is_narrowed(t) {
-                p.warnings.push("Nothing narrows this down yet — pick talkgroups, radios or phrases, or it would fire on every call.".into());
-            }
         }
     }
     p.per_day = buckets.into_iter().map(|(_, l, n)| (l, n)).collect();
@@ -467,6 +481,25 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
         ));
     }
     Ok(p)
+}
+
+/// Fetch the transcripts of these rows (the scans that count do not carry
+/// them), newest first.
+fn with_text<'a>(c: &Connection, rows: impl Iterator<Item = &'a Row>) -> Vec<Row> {
+    let mut out: Vec<Row> = rows.cloned().collect();
+    for r in out.iter_mut() {
+        if r.text.is_none() {
+            r.text = c
+                .query_row(
+                    "SELECT COALESCE(NULLIF(transcript_edited, ''), transcript) FROM calls WHERE id = ?1",
+                    [r.id],
+                    |x| x.get(0),
+                )
+                .ok()
+                .flatten();
+        }
+    }
+    out
 }
 
 fn sample(r: &Row, keywords: Vec<String>) -> Sample {
@@ -935,6 +968,28 @@ mod tests {
             "{transcript transcript_edited} : (\"v fib\" OR \"say hi\")"
         );
         assert!(fts_any(&["  ".into()]).is_none());
+    }
+
+    #[test]
+    fn a_wide_open_call_tripwire_is_answered_without_reading_the_library() {
+        let (c, d) = lib();
+        let now = 10 * 86_400;
+        for i in 0..5 {
+            call(&c, now - 60 * i, 1, 7, "routine traffic");
+        }
+        // The recipe gallery opens an editor like this before the channel
+        // picker; it must not drag every transcript through the lock.
+        let t = Tripwire {
+            id: "t1".into(),
+            name: "Anything".into(),
+            ..Default::default()
+        };
+        let p = preview(&c, &t, 7, now).unwrap();
+        assert_eq!(p.scanned, 5, "it still says how much there is");
+        assert_eq!(p.matches, 0);
+        assert!(p.samples.is_empty());
+        assert!(p.warnings.iter().any(|w| w.contains("Nothing narrows")));
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
