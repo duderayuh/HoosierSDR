@@ -364,32 +364,6 @@ pub fn previous_on_talkgroup(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-/// The newest call on any of `tgs` (or on any talkgroup when empty).
-pub fn latest_call(c: &Connection, tgs: &[u16]) -> Result<Option<CallRow>, String> {
-    if tgs.is_empty() {
-        return c
-            .query_row(
-                &format!("SELECT {COLS} FROM calls ORDER BY id DESC LIMIT 1"),
-                [],
-                row,
-            )
-            .optional()
-            .map_err(|e| format!("latest: {e}"));
-    }
-    let list = tgs
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    c.query_row(
-        &format!("SELECT {COLS} FROM calls WHERE tg IN ({list}) ORDER BY id DESC LIMIT 1"),
-        [],
-        row,
-    )
-    .optional()
-    .map_err(|e| format!("latest: {e}"))
-}
-
 pub fn set_transcript(c: &Connection, id: i64, text: &str, model: &str) -> Result<(), String> {
     c.execute(
         "UPDATE calls SET transcript = ?2, transcript_model = ?3, transcribed_at = ?4 WHERE id = ?1",

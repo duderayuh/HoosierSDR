@@ -936,27 +936,18 @@ pub fn conversations_get(state: State<AppState>) -> View {
     }
 }
 
-#[tauri::command]
-pub fn conversations_set(
-    app: AppHandle,
-    state: State<AppState>,
-    rules: Vec<Rule>,
-) -> Result<(), String> {
-    let mut rules = rules;
-    for (i, r) in rules.iter_mut().enumerate() {
-        if r.id.trim().is_empty() {
-            r.id = format!("c{}-{i}", crate::library::now());
-        }
-        if r.name.trim().is_empty() {
-            r.name = format!("Conversation rule {}", i + 1);
-        }
-        r.end_gap_secs = r.end_gap_secs.clamp(10, 3600);
-        r.late_window_secs = r.late_window_secs.min(3600);
-        r.max_secs = r.max_secs.clamp(60, 7200);
-    }
+/// The rules, as compiled from the conversation tripwires. Learned consoles
+/// and conversation counts are keyed by rule id and carry over.
+pub fn set_rules(app: &AppHandle, rules: Vec<Rule>) {
+    let state = app.state::<AppState>();
     let mut st = state.conversations.lock().unwrap();
+    if st.settings.rules == rules {
+        return;
+    }
     st.settings.rules = rules;
-    store(&app, &st.settings)
+    if let Err(e) = store(app, &st.settings) {
+        eprintln!("conversations: {e}");
+    }
 }
 
 #[derive(Serialize)]

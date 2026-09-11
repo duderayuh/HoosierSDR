@@ -116,7 +116,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "playlists_list" => jv(crate::playlists::playlists_list(app.clone())),
         "devices_get" => jv(crate::devices::devices_get(app.clone())),
         "alerts_get" => jv(crate::alerts::alerts_get(state)),
-        "alerts_log" => jv(crate::alerts::alerts_log(state)),
         "conversations_state" => jv(crate::conversations::conversations_state(state)),
         "conversations_list" => jv(crate::conversations::conversations_list(
             state,
@@ -134,8 +133,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             Ok(Value::Null)
         }
         "conversations_stats" => jv(crate::conversations::conversations_stats(state)?),
-        "digests_log" => jv(crate::digest::digests_log(state)),
-        "analyzers_log" => jv(crate::analyzers::analyzers_log(state)),
         "dispatch_get" => jv(crate::dispatch::dispatch_get(state)),
         "dispatch_log" => jv(crate::dispatch::dispatch_log(state)),
         "incidents_list" => jv(crate::dispatch::incidents_list(
@@ -372,38 +369,21 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         }
         "remotes_scan" => jv(crate::remotes::remotes_scan(app.clone()).await?),
         "conversations_get" => jv(crate::conversations::conversations_get(state)),
-        "conversations_set" => {
-            let rules: Vec<crate::conversations::Rule> = arg(args, "rules")?;
-            crate::conversations::conversations_set(app.clone(), state, rules)?;
-            Ok(Value::Null)
-        }
-        "digests_get" => jv(crate::digest::digests_get(state)),
-        "digests_set" => {
-            let rules: Vec<crate::digest::DigestRule> = arg(args, "rules")?;
-            crate::digest::digests_set(app.clone(), state, rules)?;
-            Ok(Value::Null)
-        }
-        "analyzers_get" => jv(crate::analyzers::analyzers_get(state)),
-        "analyzer_templates" => jv(crate::analyzers::analyzer_templates()),
-        "ollama_capabilities" => {
-            jv(crate::alerts::ollama_capabilities(arg(args, "url")?, arg(args, "model")?).await?)
-        }
-        "analyzer_template_import" => jv(crate::analyzers::analyzer_template_import(arg(
-            args, "text",
-        )?)?),
-        "analyzer_template_export" => jv(crate::analyzers::analyzer_template_export(
+        "tripwires_get" => jv(crate::tripwires::tripwires_get(state)),
+        "tripwires_set" => jv(crate::tripwires::tripwires_set(app.clone(), state, arg(args, "tripwires")?)?),
+        "tripwire_recipes" => jv(crate::tripwires::tripwire_recipes()),
+        "tripwire_test" => jv(crate::tripwires::tripwire_test(app.clone(), arg(args, "id")?).await?),
+        "tripwires_import" => jv(crate::tripwires::tripwires_import(arg(args, "text")?)?),
+        "tripwires_export" => jv(crate::tripwires::tripwires_export(
             state,
             arg::<Option<Vec<String>>>(args, "ids")?.unwrap_or_default(),
             arg::<Option<String>>(args, "name")?.unwrap_or_default(),
             arg::<Option<String>>(args, "author")?.unwrap_or_default(),
             arg::<Option<String>>(args, "description")?.unwrap_or_default(),
         )?),
-        "analyzers_set" => {
-            let rules: Vec<crate::analyzers::AnalyzerRule> = arg(args, "rules")?;
-            crate::analyzers::analyzers_set(app.clone(), state, rules)?;
-            Ok(Value::Null)
+        "ollama_capabilities" => {
+            jv(crate::alerts::ollama_capabilities(arg(args, "url")?, arg(args, "model")?).await?)
         }
-
 
         // ---- the rest of the desktop's commands, so the remote desktop page
         // can do everything the local one can ----
@@ -411,7 +391,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "telegram_verify" => jv(crate::connections::telegram_verify().await?),
         "telegram_discover" => jv(crate::connections::telegram_discover(app.clone()).await?),
         "telegram_test_destination" => jv(crate::connections::telegram_test_destination(arg(args, "destination")?).await?),
-        "alerts_test" => jv(crate::alerts::alerts_test(app.clone(), arg(args, "id")?).await?),
         "ollama_models" => jv(crate::alerts::ollama_models(arg(args, "url")?).await?),
         "analyzer_cloud_get" => jv(crate::analyzers::analyzer_cloud_get(state)),
         "analyzer_cloud_save" => jv(crate::analyzers::analyzer_cloud_save(
@@ -421,9 +400,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "key")?,
         )?),
         "analyzer_cloud_clear_key" => jv(crate::analyzers::analyzer_cloud_clear_key()?),
-        "analyzer_test" => {
-            jv(crate::analyzers::analyzer_test(app.clone(), state, arg(args, "id")?).await?)
-        }
         "conversation_test" => {
             jv(crate::conversations::conversation_test(app.clone(), arg(args, "id")?).await?)
         }
@@ -437,7 +413,6 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "id")?,
             arg(args, "settings")?,
         )?),
-        "digest_test" => jv(crate::digest::digest_test(app.clone(), state, arg(args, "id")?).await?),
         "dispatch_set" => jv(crate::dispatch::dispatch_set(app.clone(), state, arg(args, "settings")?)?),
         "incident_delete" => jv(crate::dispatch::incident_delete(app.clone(), state, arg(args, "id")?)?),
         "incident_locate" => jv(crate::dispatch::incident_locate(

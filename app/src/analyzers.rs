@@ -16,11 +16,16 @@
 //!
 //! It reuses the alerts module's Ollama config and Telegram send helpers, so
 //! the bot token stays in the keyring and all HTTP happens in Rust.
+//!
+//! Analyzers are now tripwires with an *extract* check (`tripwires`); this
+//! module keeps the extraction itself, the cloud-model settings, and the
+//! template format. The `rules` in `analyzers.json` are kept as they were
+//! for an older build to find; they are no longer run.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::alerts::CallFacts;
 use crate::AppState;
@@ -168,26 +173,9 @@ pub struct Settings {
     pub cloud: Cloud,
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub struct LogEntry {
-    pub at: i64,
-    pub rule: String,
-    pub tg: u16,
-    pub tg_name: String,
-    /// Did the condition hold (and so a message was attempted)?
-    pub matched: bool,
-    pub ok: bool,
-    pub detail: String,
-    /// Pretty-printed extracted JSON, for the log view.
-    pub extracted: String,
-}
-
 #[derive(Default)]
 pub struct AnalyzerState {
     pub settings: Settings,
-    pub log: VecDeque<LogEntry>,
-    /// (rule id, tg) → epoch seconds last delivered, for the cooldown.
-    pub last_fired: HashMap<(String, u16), i64>,
 }
 
 pub type Shared = Mutex<AnalyzerState>;
@@ -229,129 +217,6 @@ fn store(app: &AppHandle, s: &Settings) -> Result<(), String> {
 // firing
 // ---------------------------------------------------------------------------
 
-/// A transcript landed for library call `id`: run every analyzer it matches.
-pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
-    let state = app.state::<AppState>();
-    let rules: Vec<AnalyzerRule> = state
-        .analyzers
-        .lock()
-        .unwrap()
-        .settings
-        .rules
-        .iter()
-        .filter(|r| r.enabled && !r.instructions.trim().is_empty())
-        .cloned()
-        .collect();
-    if rules.is_empty() {
-        return;
-    }
-    let Some(db) = state.db.lock().unwrap().clone() else {
-        return;
-    };
-    let row = {
-        let c = db.lock().unwrap();
-        crate::library::get(&c, id).ok().flatten()
-    };
-    let Some(r) = row else { return };
-    let f = crate::alerts::facts_from_row(app, r, Some(text.to_string()));
-    for rule in rules {
-        if pre_filter(&rule, &f) {
-            let app = app.clone();
-            let f = f.clone();
-            std::thread::spawn(move || run(app, rule, f));
-        }
-    }
-}
-
-/// Cheap gate before the model: talkgroup and optional keywords.
-fn pre_filter(r: &AnalyzerRule, f: &CallFacts) -> bool {
-    if !r.tgs.is_empty() && !r.tgs.contains(&f.tg) {
-        return false;
-    }
-    if r.keywords.is_empty() {
-        return true;
-    }
-    let text = f.transcript.as_deref().unwrap_or("");
-    !crate::alerts::matched_keywords(&r.keywords, text).is_empty()
-}
-
-/// Extract, test, send. Runs on its own thread.
-fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
-    let state = app.state::<AppState>();
-    let now = crate::library::now();
-    let key = (r.id.clone(), f.tg);
-    {
-        let st = state.analyzers.lock().unwrap();
-        if let Some(last) = st.last_fired.get(&key) {
-            if now - last < r.cooldown_secs as i64 {
-                return;
-            }
-        }
-    }
-    let tg_settings = crate::alerts::shared_settings(&state).0;
-
-    let obj = match run_extract(&state, &r, &f) {
-        Ok(v) => v,
-        Err(e) => {
-            log_it(
-                &app,
-                &r,
-                &f,
-                false,
-                false,
-                format!("extraction failed: {e}"),
-                String::new(),
-                Sent::default(),
-            );
-            return;
-        }
-    };
-    let extracted = serde_json::to_string_pretty(&obj).unwrap_or_default();
-    let matched = evaluate(&r, &obj);
-    if !matched {
-        log_it(
-            &app,
-            &r,
-            &f,
-            false,
-            true,
-            "condition not met".into(),
-            extracted,
-            Sent::default(),
-        );
-        return;
-    }
-
-    let message = render(&r.message, &r, &f, &obj);
-    let _ = app.emit(
-        "analyzer",
-        serde_json::json!({ "name": r.name, "tg": f.tg, "message": message, "call": f.id }),
-    );
-    let chat = if r.chat_id.trim().is_empty() {
-        tg_settings.destination()
-    } else {
-        r.chat_id.clone()
-    };
-    let (ok, detail, ids) = deliver(&chat, &r, &f, &message);
-    if ok {
-        state.analyzers.lock().unwrap().last_fired.insert(key, now);
-    }
-    let sent = Sent {
-        message,
-        chat: if r.telegram { chat } else { String::new() },
-        ids,
-    };
-    log_it(&app, &r, &f, true, ok, detail, extracted, sent);
-}
-
-/// What went out, for the tripwire history.
-#[derive(Default)]
-struct Sent {
-    message: String,
-    chat: String,
-    ids: Vec<i64>,
-}
-
 /// Pick the extraction engine (local Ollama or the shared cloud model) and run it.
 pub(crate) fn run_extract(
     state: &AppState,
@@ -366,114 +231,6 @@ pub(crate) fn run_extract(
         let ollama = crate::alerts::shared_settings(state).1;
         ollama_extract(&ollama, r, f)
     }
-}
-
-/// Send the rendered message to the analyzer's chosen destinations. Returns
-/// (all-ok, joined detail, Telegram message ids).
-fn deliver(
-    chat: &str,
-    r: &AnalyzerRule,
-    f: &CallFacts,
-    message: &str,
-) -> (bool, String, Vec<i64>) {
-    let mut ok = true;
-    let mut parts: Vec<String> = Vec::new();
-    let mut ids = Vec::new();
-    if r.telegram {
-        match send_telegram(chat, r, f, message) {
-            Ok((d, sent)) => {
-                parts.push(d);
-                ids = sent;
-            }
-            Err(e) => {
-                ok = false;
-                parts.push(format!("telegram: {e}"));
-            }
-        }
-    }
-    if parts.is_empty() {
-        parts.push("no destination selected".into());
-    }
-    (ok, parts.join("; "), ids)
-}
-
-fn send_telegram(
-    chat: &str,
-    r: &AnalyzerRule,
-    f: &CallFacts,
-    message: &str,
-) -> Result<(String, Vec<i64>), String> {
-    let clip = if r.attach_audio {
-        f.audio.as_deref().filter(|p| !p.is_empty())
-    } else {
-        None
-    };
-    match clip {
-        None => crate::alerts::send_text_id(chat, message).map(|id| ("sent".into(), vec![id])),
-        Some(path) => {
-            // Through the same encoder as alerts: a stored WAV (or Opus/M4A)
-            // becomes the MP3 Telegram plays inline, not a file to download.
-            let (tmp, is_mp3) = crate::alerts::combine_clips(&[path.to_string()], &format!("az_{}", f.tg))?;
-            let res = crate::alerts::send_audio_id(chat, &tmp, is_mp3, message, &r.name, &f.tg_name)
-                .map(|ids| (format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }), ids));
-            let _ = std::fs::remove_file(&tmp);
-            res
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn log_it(
-    app: &AppHandle,
-    r: &AnalyzerRule,
-    f: &CallFacts,
-    matched: bool,
-    ok: bool,
-    detail: String,
-    extracted: String,
-    sent: Sent,
-) {
-    let state = app.state::<AppState>();
-    let mut st = state.analyzers.lock().unwrap();
-    st.log.push_front(LogEntry {
-        at: crate::library::now(),
-        rule: r.name.clone(),
-        tg: f.tg,
-        tg_name: f.tg_name.clone(),
-        matched,
-        ok,
-        detail: detail.clone(),
-        extracted: extracted.clone(),
-    });
-    st.log.truncate(200);
-    drop(st);
-    crate::events::record(
-        app,
-        crate::events::NewEvent {
-            source: "analyzer",
-            rule_id: r.id.clone(),
-            rule_name: r.name.clone(),
-            tg: f.tg,
-            tg_name: f.tg_name.clone(),
-            status: match (matched, ok) {
-                (true, true) => "sent",
-                (false, true) => "quiet",
-                _ => "failed",
-            }
-            .into(),
-            detail: detail.clone(),
-            message: sent.message,
-            chat: sent.chat,
-            message_ids: sent.ids,
-            data: extracted,
-            calls: f.id.into_iter().collect(),
-            ..Default::default()
-        },
-    );
-    if matched && !ok {
-        let _ = app.emit("alert_error", format!("{}: {detail}", r.name));
-    }
-    let _ = app.emit("analyzers", ());
 }
 
 // ---------------------------------------------------------------------------
@@ -721,7 +478,7 @@ fn parse_object(answer: &str) -> Option<serde_json::Value> {
 
 /// True when the rule's condition holds over the extracted object. No clauses
 /// means "always send".
-fn evaluate(r: &AnalyzerRule, obj: &serde_json::Value) -> bool {
+pub(crate) fn evaluate(r: &AnalyzerRule, obj: &serde_json::Value) -> bool {
     if r.conditions.is_empty() {
         return true;
     }
@@ -780,41 +537,6 @@ fn value_to_string(v: Option<&serde_json::Value>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// rendering
-// ---------------------------------------------------------------------------
-
-fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Value) -> String {
-    let time = crate::library::local_hms(if f.start > 0 {
-        f.start
-    } else {
-        crate::library::now()
-    });
-    let mut out = template
-        .replace("{name}", &r.name)
-        .replace("{tg}", &f.tg.to_string())
-        .replace("{tgname}", &f.tg_name)
-        .replace("{tgdesc}", f.tg_desc.as_deref().unwrap_or(""))
-        .replace("{unit}", &f.unit.to_string())
-        .replace(
-            "{unitname}",
-            f.unit_name.as_deref().unwrap_or(&f.unit.to_string()),
-        )
-        .replace("{time}", &time)
-        .replace("{secs}", &format!("{:.0}", f.secs))
-        .replace("{transcript}", f.transcript.as_deref().unwrap_or(""))
-        .replace(
-            "{json}",
-            &serde_json::to_string_pretty(obj).unwrap_or_default(),
-        );
-    if let Some(map) = obj.as_object() {
-        for (k, v) in map {
-            out = out.replace(&format!("{{field.{k}}}"), &value_to_string(Some(v)));
-        }
-    }
-    out.trim().to_string()
-}
-
-// ---------------------------------------------------------------------------
 // hardening
 //
 // Every rule that enters the app — from the editor, from the mobile web API,
@@ -826,7 +548,6 @@ fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Val
 // quarantined: fresh id, disabled, no chat.
 // ---------------------------------------------------------------------------
 
-pub const MAX_RULES: usize = 200;
 /// Largest template file accepted, in bytes.
 pub const MAX_TEMPLATE_BYTES: usize = 512 * 1024;
 const MAX_TEMPLATE_RULES: usize = 50;
@@ -1061,8 +782,8 @@ pub fn parse_template(text: &str) -> Result<Template, String> {
     Ok(t)
 }
 
-/// Build a template from the listener's own rules. The chat id and enabled
-/// flag are personal to this install and never leave it.
+/// Build a template from rules (the tests write files with it).
+#[cfg(test)]
 pub fn make_template(
     rules: Vec<AnalyzerRule>,
     name: &str,
@@ -1092,93 +813,6 @@ pub fn make_template(
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub fn analyzers_get(state: State<AppState>) -> Settings {
-    state.analyzers.lock().unwrap().settings.clone()
-}
-
-#[tauri::command]
-pub fn analyzers_set(
-    app: AppHandle,
-    state: State<AppState>,
-    rules: Vec<AnalyzerRule>,
-) -> Result<(), String> {
-    let mut rules = rules;
-    if rules.len() > MAX_RULES {
-        return Err(format!(
-            "{} analyzers is more than the limit of {MAX_RULES}",
-            rules.len()
-        ));
-    }
-    let mut ids: HashSet<String> = HashSet::new();
-    for (i, r) in rules.iter_mut().enumerate() {
-        sanitize_rule(r)?;
-        if r.id.is_empty() {
-            r.id = format!("z{}-{i}", crate::library::now());
-        }
-        if !ids.insert(r.id.clone()) {
-            return Err(format!("two analyzers share the id '{}'", r.id));
-        }
-        if r.name.is_empty() {
-            r.name = format!("Analyzer {}", i + 1);
-        }
-    }
-    let mut st = state.analyzers.lock().unwrap();
-    let keep: HashSet<(String, u16)> = rules
-        .iter()
-        .flat_map(|r| r.tgs.iter().map(move |t| (r.id.clone(), *t)))
-        .collect();
-    st.last_fired.retain(|k, _| keep.contains(k));
-    st.settings.rules = rules;
-    store(&app, &st.settings)
-}
-
-/// Parse a template file the listener chose, returning the hardened rules
-/// for review. Nothing is saved until the UI adds them with `analyzers_set`.
-#[tauri::command]
-pub fn analyzer_template_import(text: String) -> Result<Template, String> {
-    parse_template(&text)
-}
-
-/// Bundle the given rules (all, when `ids` is empty) as a template file's
-/// JSON text.
-#[tauri::command]
-pub fn analyzer_template_export(
-    state: State<AppState>,
-    ids: Vec<String>,
-    name: String,
-    author: String,
-    description: String,
-) -> Result<String, String> {
-    let rules: Vec<AnalyzerRule> = state
-        .analyzers
-        .lock()
-        .unwrap()
-        .settings
-        .rules
-        .iter()
-        .filter(|r| ids.is_empty() || ids.contains(&r.id))
-        .cloned()
-        .collect();
-    if rules.is_empty() {
-        return Err("no analyzers to export".into());
-    }
-    let t = make_template(rules, &name, &author, &description);
-    serde_json::to_string_pretty(&t).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn analyzers_log(state: State<AppState>) -> Vec<LogEntry> {
-    state
-        .analyzers
-        .lock()
-        .unwrap()
-        .log
-        .iter()
-        .cloned()
-        .collect()
-}
 
 /// The cloud settings plus whether an API key is currently stored (the key
 /// itself never leaves the secret store).
@@ -1218,105 +852,9 @@ pub fn analyzer_cloud_clear_key() -> Result<(), String> {
     crate::secrets::remove("analyzer-cloud-key")
 }
 
-/// Built-in starter templates (ECPR candidate screen, SOR survey, stroke).
-#[tauri::command]
-pub fn analyzer_templates() -> Vec<AnalyzerRule> {
-    templates()
-}
-
-/// Run one analyzer now against the most recent call that passes its
-/// pre-filter, so the rule can be seen working without waiting for traffic.
-#[tauri::command]
-pub async fn analyzer_test(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<String, String> {
-    let r = state
-        .analyzers
-        .lock()
-        .unwrap()
-        .settings
-        .rules
-        .iter()
-        .find(|r| r.id == id)
-        .cloned()
-        .ok_or("no such analyzer")?;
-    let db = state
-        .db
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("no call library open")?;
-    // Newest transcribed calls on the rule's talkgroups (or any).
-    let mut calls: Vec<crate::library::CallRow> = Vec::new();
-    {
-        let c = db.lock().unwrap();
-        let tgs: Vec<Option<u16>> = if r.tgs.is_empty() {
-            vec![None]
-        } else {
-            r.tgs.iter().map(|t| Some(*t)).collect()
-        };
-        for tg in tgs {
-            if let Ok(rows) = crate::library::search(
-                &c,
-                &crate::library::Query {
-                    tg,
-                    limit: Some(50),
-                    ..Default::default()
-                },
-            ) {
-                calls.extend(rows);
-            }
-        }
-    }
-    calls.sort_by_key(|c| std::cmp::Reverse(c.start));
-    let f = calls.into_iter().find_map(|c| {
-        let text = c
-            .transcript_edited
-            .clone()
-            .or_else(|| c.transcript.clone())
-            .filter(|t| !t.trim().is_empty())?;
-        let f = crate::alerts::facts_from_row(&app, c, Some(text));
-        pre_filter(&r, &f).then_some(f)
-    });
-    let Some(f) = f else {
-        return Ok("no recent call matched the pre-filter (talkgroups / keywords)".into());
-    };
-    let ollama = crate::alerts::shared_settings(&state).1;
-    let cloud = state.analyzers.lock().unwrap().settings.cloud.clone();
-    let key = crate::secrets::get("analyzer-cloud-key").unwrap_or_default();
-    let obj = tauri::async_runtime::spawn_blocking(move || {
-        let res = if r.engine == "cloud" {
-            cloud_extract(&cloud, &key, &r, &f)
-        } else {
-            ollama_extract(&ollama, &r, &f)
-        };
-        res.map(|o| (r, f, o))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let (r, f, obj) = obj;
-    let matched = evaluate(&r, &obj);
-    let extracted = serde_json::to_string_pretty(&obj).unwrap_or_default();
-    let preview = render(&r.message, &r, &f, &obj);
-    Ok(format!(
-        "Tested on TG {} “{}”.\nCondition {}.\n\nExtracted:\n{}\n\nMessage preview:\n{}",
-        f.tg,
-        f.tg_name,
-        if matched {
-            "MET — would send"
-        } else {
-            "not met — would stay quiet"
-        },
-        extracted,
-        preview
-    ))
-}
-
-/// The starter templates. ECPR mirrors the n8n ED-ECPR gate; SOR and stroke
-/// are common EMS screens in the same shape.
-fn templates() -> Vec<AnalyzerRule> {
+/// The starter screens (the tripwire recipes offer them). ECPR mirrors the
+/// n8n ED-ECPR gate; SOR and stroke are common EMS screens in the same shape.
+pub fn builtin_templates() -> Vec<AnalyzerRule> {
     vec![
         AnalyzerRule {
             id: String::new(),
@@ -1574,7 +1112,7 @@ mod tests {
 
     #[test]
     fn builtin_templates_pass_the_sanitizer() {
-        for mut r in templates() {
+        for mut r in builtin_templates() {
             sanitize_rule(&mut r).unwrap();
         }
     }
