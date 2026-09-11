@@ -1143,19 +1143,20 @@ impl Reporter<'_> {
         for c in out.completed {
             self.calls += 1;
             let secs = c.pcm.len() as f64 / 8000.0;
-            // The grant's start time serves the first clip on the channel;
-            // a later transmission on the same grant (cut at its
-            // predecessor's terminator) has no entry, and just ended, so its
-            // start is its length ago.
+            // A grant's clips are reported together when it retires, each
+            // saying how long after the grant it began; the grant's entry
+            // serves them all, so it stays until the channel is granted
+            // again (stale ones are swept below). Without an entry the clip
+            // just ended, so it began its length ago.
+            let now = epoch_secs();
             let (start, drops_at_start) = self
                 .started
-                .remove(&(c.talkgroup, c.freq_hz))
-                .unwrap_or_else(|| {
-                    (
-                        epoch_secs().saturating_sub(secs.round() as u64),
-                        self.drops_now,
-                    )
-                });
+                .get(&(c.talkgroup, c.freq_hz))
+                .map(|&(g, d)| (g + c.started_after_secs.round() as u64, d))
+                .unwrap_or_else(|| (now.saturating_sub(secs.round() as u64), self.drops_now));
+            let start = start.min(now);
+            self.started
+                .retain(|_, &mut (g, _)| now.saturating_sub(g) < 3600);
             let dropped_blocks = self.drops_now.saturating_sub(drops_at_start);
             let name = self.name_of(c.talkgroup);
             let desc = self.description_of(c.talkgroup);
@@ -1170,7 +1171,12 @@ impl Reporter<'_> {
                 .map(|r| crate::policy_allows(&r, c.talkgroup))
                 .unwrap_or(true);
             let wav = self.calls_dir.filter(|_| !c.pcm.is_empty() && recordable).and_then(|root| {
-                let stamp = chrono_stamp();
+                // Named for when the clip was on the air, not when it was
+                // reported: the clips of one grant arrive together, and a
+                // stem taken by one of them (or by an earlier call in the
+                // same second) is never reused — that overwrote the audio
+                // and left two or three rows pointing at one file.
+                let stamp = chrono_stamp_at(start);
                 let day = root.join(&stamp[0..4]).join(&stamp[4..6]).join(&stamp[6..8]);
                 let rel = crate::names::render(
                     &self.name_template,
@@ -1195,6 +1201,7 @@ impl Reporter<'_> {
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| stamp.clone());
                 std::fs::create_dir_all(&dir).ok()?;
+                let stem = unique_stem(&dir, stem);
                 let path = dir.join(format!("{stem}.wav"));
                 match hs_core::wav::write_wav(path.to_str()?, 8000, &c.pcm) {
                     Ok(()) => {
@@ -1308,11 +1315,26 @@ impl Reporter<'_> {
 }
 
 /// `YYYYMMDD-HHMMSS` local-ish stamp without pulling in a date crate: UTC.
-fn chrono_stamp() -> String {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+/// A stem no file in `dir` already uses, in any of the forms a stored call
+/// takes (audio in whichever codec, and its sidecar, which outlives a
+/// transcode): `stem`, else `stem-2`, `stem-3`, …
+fn unique_stem(dir: &std::path::Path, stem: String) -> String {
+    let taken = |s: &str| {
+        ["wav", "json", "m4a", "mp3", "opus", "ogg", "flac"]
+            .iter()
+            .any(|e| dir.join(format!("{s}.{e}")).exists())
+    };
+    if !taken(&stem) {
+        return stem;
+    }
+    (2..)
+        .map(|n| format!("{stem}-{n}"))
+        .find(|s| !taken(s))
+        .unwrap_or(stem)
+}
+
+/// `YYYYMMDD-HHMMSS` (UTC) for an epoch second.
+fn chrono_stamp_at(t: u64) -> String {
     // Civil-from-days (Howard Hinnant), UTC.
     let days = (t / 86400) as i64;
     let secs = t % 86400;
@@ -1336,6 +1358,22 @@ fn chrono_stamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Clips of one grant are reported together, so two can want the same
+    /// stem in the same second; the second gets a suffix instead of
+    /// overwriting the first's audio. The sidecar counts as taken too, since
+    /// it outlives a transcode.
+    #[test]
+    fn a_taken_stem_gets_a_suffix() {
+        let dir = std::env::temp_dir().join(format!("hs-stem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::unique_stem(&dir, "a".into()), "a");
+        std::fs::write(dir.join("a.wav"), b"x").unwrap();
+        assert_eq!(super::unique_stem(&dir, "a".into()), "a-2");
+        std::fs::write(dir.join("a-2.json"), b"{}").unwrap();
+        assert_eq!(super::unique_stem(&dir, "a".into()), "a-3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::sync::atomic::AtomicBool;
 

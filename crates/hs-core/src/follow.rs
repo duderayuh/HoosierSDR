@@ -161,6 +161,8 @@ struct ActiveCall {
     /// Transmissions already cut from this call, waiting for the call to
     /// retire so the modulation can be chosen on the whole call's evidence.
     done: Vec<Segment>,
+    /// `age` at the last cut: where the transmission in progress began.
+    seg_age: f64,
 }
 
 /// One transmission cut from a call: its audio from both decoders, and the
@@ -174,6 +176,9 @@ struct Segment {
     source_unit: u32,
     start: SegmentBase,
     end: SegmentBase,
+    /// Seconds of IQ into the call when this transmission began and ended.
+    start_age: f64,
+    end_age: f64,
 }
 
 /// End the transmission in progress on `c`: keep what was decoded as its
@@ -189,8 +194,11 @@ fn cut(c: &mut ActiveCall) {
         source_unit: core::mem::take(&mut c.source_unit),
         start: c.seg,
         end,
+        start_age: c.seg_age,
+        end_age: c.age,
     });
     c.seg = end;
+    c.seg_age = c.age;
 }
 
 /// The decoder counters at the start of a transmission: Link Control words
@@ -233,6 +241,12 @@ pub struct Call {
     pub talkgroup: u16,
     pub source_unit: u32,
     pub freq_hz: u64,
+    /// Seconds after the channel was granted that this transmission began
+    /// and ended. The clips of one grant are reported together when it
+    /// retires, so these — not the moment of the report — say when each
+    /// was on the air.
+    pub started_after_secs: f64,
+    pub ended_after_secs: f64,
     /// Modulation that actually decoded, once known.
     pub modulation: Option<Modulation>,
     /// Frame syncs each modulation achieved, the evidence for that choice.
@@ -1022,6 +1036,8 @@ impl TrunkFollower {
                 Call {
                     syncs_c4fm: s.syncs_c4fm,
                     syncs_cqpsk: s.syncs_cqpsk,
+                    started_after_secs: s.start_age,
+                    ended_after_secs: s.end_age,
                     voice_frame_errors: err_hi.saturating_sub(err_lo),
                     voice_frames_poor: poor_hi.saturating_sub(poor_lo),
                     talkgroup: c.talkgroup,
@@ -1193,6 +1209,7 @@ impl TrunkFollower {
                 ending: None,
                 seg: SegmentBase::default(),
                 done: Vec::new(),
+                seg_age: 0.0,
             };
             call.c4fm.set_uv_quality(self.uv_quality);
             call.cqpsk.set_uv_quality(self.uv_quality);
@@ -1759,6 +1776,7 @@ impl TrunkFollower {
             ending: None,
             seg: SegmentBase::default(),
             done: Vec::new(),
+            seg_age: 0.0,
         });
     }
 
@@ -1833,11 +1851,21 @@ mod priority_tests {
         assert_eq!(f.only_call().source_unit, 0);
 
         // The reply keyed up inside the hang, then the channel went quiet.
+        f.only_call().age = 4.0;
         f.only_call().pcm_c4fm.extend_from_slice(&[9, 9]);
         f.only_call().syncs_c4fm = 2;
+        f.only_call().age = 7.5;
         let c = f.band.active.remove(0);
         let calls = f.retire(c);
         assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].started_after_secs, calls[0].ended_after_secs),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            (calls[1].started_after_secs, calls[1].ended_after_secs),
+            (0.0, 7.5)
+        );
         assert_eq!(calls[0].pcm, vec![1, 2, 3, 4]);
         assert_eq!(calls[0].source_unit, 790065);
         assert_eq!(calls[0].syncs_c4fm, 5);
