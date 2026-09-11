@@ -467,8 +467,9 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     };
     let apply_live = |f: &mut TrunkFollower, rep: &mut Reporter| {
         let fl = live.filters.lock().unwrap();
-        if fl.lockout != *f.lockout() {
-            f.set_lockout(fl.lockout.iter().copied());
+        let locked: std::collections::HashSet<u16> = fl.lockout.union(&fl.extra).copied().collect();
+        if locked != *f.lockout() {
+            f.set_lockout(locked.iter().copied());
         }
         let want: Option<std::collections::HashSet<u16>> = match fl.hold {
             Some(tg) => Some([tg].into_iter().collect()),

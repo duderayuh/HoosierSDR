@@ -82,7 +82,10 @@ pub struct Site {
 /// these, so a change reaches every run at once.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Filters {
+    /// The listener's lockouts, saved with the playlist.
     pub lockout: HashSet<u16>,
+    /// Locked for now only (timed avoids, muted groups); never saved.
+    pub extra: HashSet<u16>,
     pub lockout_ranges: Vec<(u16, u16)>,
     /// Talkgroups to follow (`None` = all): the playlist's, unless the UI
     /// narrowed it further (service-tag filter).
@@ -493,12 +496,13 @@ pub fn set_lockout(
     extra: Option<Vec<u16>>,
 ) -> Result<(), String> {
     let f = filters_for(&app, &state, playlist.as_deref());
-    let mut saved = f.lock().unwrap().clone();
-    saved.lockout = tgs.iter().copied().collect();
-    let mut live = saved.clone();
-    live.lockout.extend(extra.unwrap_or_default());
-    *f.lock().unwrap() = live;
-    persist_filters(&app, playlist.as_deref(), &saved)
+    let snapshot = {
+        let mut g = f.lock().unwrap();
+        g.lockout = tgs.into_iter().collect();
+        g.extra = extra.unwrap_or_default().into_iter().collect();
+        g.clone()
+    };
+    persist_filters(&app, playlist.as_deref(), &snapshot)
 }
 
 /// Replace a playlist's talkgroup priority table.
@@ -650,6 +654,18 @@ mod tests {
         assert_eq!(sites[0].id, "5737-1");
         assert_eq!(sites[0].control_mhz, 857.6625);
         assert_eq!(sites[0].name, "MESA System 1");
+    }
+
+    #[test]
+    fn transient_lockouts_are_not_what_gets_saved() {
+        let mut f = Filters::default();
+        f.lockout = [10119].into_iter().collect();
+        f.extra = [10120, 10121].into_iter().collect();
+        let mut live: Vec<u16> = f.lockout.union(&f.extra).copied().collect();
+        live.sort_unstable();
+        assert_eq!(live, vec![10119, 10120, 10121]);
+        let saved: Vec<u16> = f.lockout.iter().copied().collect();
+        assert_eq!(saved, vec![10119]);
     }
 
     #[test]

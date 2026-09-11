@@ -2960,6 +2960,10 @@ if (TAURI) {
     // Auto-start: opt-in, and only if the last-used site still exists.
     const pr = store("hs.prefs", {});
     if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
+      // The detected radio decides the rate and centre a site gets (an RTL-SDR
+      // is centred on the control channel); wait, briefly, until the radio list
+      // has replaced the placeholder options before tuning.
+      await new Promise((done) => { const t0 = Date.now(); (function poll() { if ($("source").value.includes("|") || Date.now() - t0 > 4000) done(); else setTimeout(poll, 50); })(); });
       activateSite(pr.lastPlaylist);
       logEvent(`auto-start: ${sites.find((p) => p.id === pr.lastPlaylist).name}`);
       setTimeout(() => $("start").click(), 600);
