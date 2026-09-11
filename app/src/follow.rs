@@ -1122,12 +1122,21 @@ impl Reporter<'_> {
         }
         for c in out.completed {
             self.calls += 1;
+            let secs = c.pcm.len() as f64 / 8000.0;
+            // The grant's start time serves the first clip on the channel;
+            // a later transmission on the same grant (cut at its
+            // predecessor's terminator) has no entry, and just ended, so its
+            // start is its length ago.
             let (start, drops_at_start) = self
                 .started
                 .remove(&(c.talkgroup, c.freq_hz))
-                .unwrap_or_else(|| (epoch_secs(), self.drops_now));
+                .unwrap_or_else(|| {
+                    (
+                        epoch_secs().saturating_sub(secs.round() as u64),
+                        self.drops_now,
+                    )
+                });
             let dropped_blocks = self.drops_now.saturating_sub(drops_at_start);
-            let secs = c.pcm.len() as f64 / 8000.0;
             let name = self.name_of(c.talkgroup);
             let desc = self.description_of(c.talkgroup);
             let service = self.service_of(c.talkgroup);
