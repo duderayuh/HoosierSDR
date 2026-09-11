@@ -6,7 +6,7 @@
   <title>HoosierSDR</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600&display=swap" />
   <link rel="stylesheet" href="vendor/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -468,7 +468,11 @@
             <div class="body">
               <div class="lab">Theme</div>
               <div class="chips" id="themeChips"></div>
-              <p class="help" style="margin-top:8px">Six colour schemes; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+              <p class="help" style="margin-top:8px" id="themeHelp">Colour schemes, including the seasons and the Speedway; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+              <div class="lab" style="margin-top:12px">Fonts <span class="mono faint">override the scheme's type</span></div>
+              <div class="mono small faint">Body</div><div class="chips" id="fontBodyChips"></div>
+              <div class="mono small faint" style="margin-top:6px">Monospace <span class="faint">(IDs, times, transcripts' small print)</span></div><div class="chips" id="fontMonoChips"></div>
+              <div class="mono small faint" style="margin-top:6px">Headings</div><div class="chips" id="fontDisplayChips"></div>
               <div class="lab" style="margin-top:12px">Text size <span class="mono faint">scales the whole interface</span></div>
               <div class="chips" id="fsChips"></div>
               <div class="lab" style="margin-top:12px">Top tabs <span class="mono faint">drag a tab to reorder them</span></div>
