@@ -1321,7 +1321,9 @@ if (TAURI) {
       if (vals.includes(key)) $("source").value = key; else if (vals.includes(st.source)) $("source").value = st.source;
       if (st.rate) $("rate").value = String(st.rate);
       if (st.freq) $("center").value = (st.freq / 1e6).toFixed(4) + "M";
-      if (st.control) $("freq").value = (st.control / 1e6).toFixed(4) + "M"; else if (st.freq) $("freq").value = (st.freq / 1e6).toFixed(4) + "M";
+      const firstRun = (snap.runs || [])[0];
+      if (firstRun && firstRun.control_mhz) $("freq").value = firstRun.control_mhz.toFixed(4) + "M";
+      else if (st.control) $("freq").value = (st.control / 1e6).toFixed(4) + "M"; else if (st.freq) $("freq").value = (st.freq / 1e6).toFixed(4) + "M";
       if (st.modulation && $("tmod")) $("tmod").value = st.modulation;
       if (typeof st.play === "boolean") $("play").checked = st.play;
       if (st.hang_ms) $("hangMs").value = st.hang_ms;
