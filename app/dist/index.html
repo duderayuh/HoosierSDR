@@ -965,6 +965,7 @@
               <div class="inline" style="gap:16px;flex-wrap:wrap">
                 <label class="check" style="margin:0"><input id="akTelegram" type="checkbox" checked /> Telegram</label>
                 <label class="field" style="margin:0;min-width:200px"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="akChat" type="text" placeholder="-1001234567890" spellcheck="false" /></label>
+                <label class="field" style="margin:0;min-width:120px"><span class="lab">Topic <span class="mono faint">forum topic id; blank = default</span></span><input id="akTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
                 <label class="check" style="margin:0"><input id="akBluesky" type="checkbox" /> Bluesky</label>
                 <label class="check" style="margin:0"><input id="akAudio" type="checkbox" checked /> attach audio</label>
                 <label class="check" style="margin:0"><input id="akTone" type="checkbox" checked /> tone in the app</label>
@@ -1003,7 +1004,7 @@
               <label class="field"><span class="lab">Summary prompt <span class="mono faint">what the model should extract</span></span><textarea id="cvPrompt" style="min-height:64px"></textarea></label>
               <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {tgdesc} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
               <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat · add :topic for a forum topic</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Min transmissions</span><input id="cvMin" type="text" inputmode="numeric" value="1" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="cvAudio" type="checkbox" checked /> combined audio</label><label class="check" style="margin:0"><input id="cvNoTr" type="checkbox" /> send without transcript</label></span></label>
               </div>
@@ -1029,7 +1030,7 @@
               <div class="row3">
                 <label class="field"><span class="lab">Every (min)</span><input id="dgInterval" type="text" inputmode="numeric" value="15" /></label>
                 <label class="field"><span class="lab">Window (min) <span class="mono faint">how far back</span></span><input id="dgWindow" type="text" inputmode="numeric" value="15" /></label>
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat · add :topic for a forum topic</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
               </div>
               <label class="field"><span class="lab">Prompt <span class="mono faint">the question the model answers</span></span><textarea id="dgPrompt" style="min-height:64px"></textarea></label>
               <label class="field"><span class="lab">Message <span class="mono faint">{summary} {name} {count} {window} {time} {transcript}</span></span><textarea id="dgMessage" style="min-height:56px"></textarea></label>
@@ -1044,6 +1045,7 @@
               <div class="row2">
                 <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Chat ID <span class="mono faint">your user or group id</span></span><input id="tgChat" type="text" placeholder="123456789" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Topic <span class="mono faint">forum topic id, if the group uses topics; blank = none</span></span><input id="tgTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
               </div>
               <div class="inline"><button class="btn primary" id="tgSave">Save</button><button class="btn ghost" id="tgTest">Send a test message</button><span class="help">Audio goes as MP3 via ffmpeg (as a WAV document without it).</span></div>
             </div>
@@ -1121,7 +1123,7 @@
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
               </div>
               <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat · add :topic for a forum topic</span></span><input id="azChat" type="text" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
                 <label class="field"><span class="lab">&nbsp;</span></label>
               </div>

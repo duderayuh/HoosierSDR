@@ -146,7 +146,7 @@ fn run_digest(app: AppHandle, r: DigestRule) -> Result<String, String> {
     let state = app.state::<AppState>();
     let (tg, ollama) = crate::alerts::shared_settings(&state);
     let chat = if r.chat_id.trim().is_empty() {
-        tg.chat_id.clone()
+        tg.destination()
     } else {
         r.chat_id.clone()
     };
