@@ -44,6 +44,11 @@ pub struct Place {
     /// The talkgroups that belong to it, so traffic on them is about here.
     #[serde(default)]
     pub tgs: Vec<u16>,
+    /// Which system those talkgroups are on. Two systems in range can use
+    /// the same numbers, so a place without this claims a number, not a
+    /// channel. Blank means any system.
+    #[serde(default)]
+    pub system: String,
     #[serde(default)]
     pub notes: String,
     #[serde(default = "yes")]
@@ -117,6 +122,7 @@ pub fn sanitize(s: &mut Settings) {
         p.name = crate::analyzers::clean_line(&p.name, 120);
         p.address = crate::analyzers::clean_line(&p.address, 200);
         p.notes = crate::analyzers::clean_line(&p.notes, 400);
+        p.system = crate::analyzers::clean_line(&p.system, 80);
         if p.id.trim().is_empty() {
             p.id = new_id(&p.name);
         }
@@ -167,11 +173,13 @@ fn new_id(name: &str) -> String {
 // what the book is for
 // ---------------------------------------------------------------------------
 
-/// The place a talkgroup belongs to, if any.
-pub fn for_tg(s: &Settings, tg: u16) -> Option<&Place> {
-    s.places
-        .iter()
-        .find(|p| p.enabled && p.tgs.contains(&tg))
+/// The place a talkgroup on `system` belongs to, if any.
+pub fn for_tg<'a>(s: &'a Settings, tg: u16, system: &str) -> Option<&'a Place> {
+    s.places.iter().find(|p| {
+        p.enabled
+            && p.tgs.contains(&tg)
+            && (p.system.is_empty() || system.is_empty() || p.system == system)
+    })
 }
 
 /// Every placed place that can do `feature`, nearest to `from` first.
@@ -206,6 +214,7 @@ pub struct Suggestion {
     pub kind: String,
     pub tg: u16,
     pub tg_name: String,
+    pub system: String,
     /// The catalog line it was read from, so the listener can judge it.
     pub from: String,
 }
@@ -247,40 +256,51 @@ pub fn hospital_from_description(desc: &str) -> Option<String> {
     (name.len() >= 3).then(|| name.to_string())
 }
 
-/// Read the catalog for places worth adding, skipping any talkgroup the book
-/// already knows.
-pub fn suggest(app: &AppHandle, sid: Option<u32>) -> Vec<Suggestion> {
+/// Read the catalog for places worth adding, skipping talkgroups the book
+/// already claims.
+///
+/// One catalog per system, never the merged one: two systems in range
+/// commonly use the same talkgroup numbers, and the merged view would hand
+/// back whichever description won.
+pub fn suggest(app: &AppHandle, only: Option<u32>) -> Vec<Suggestion> {
     let state = app.state::<AppState>();
-    let known: std::collections::HashSet<u16> = {
+    let known: std::collections::HashSet<(u16, String)> = {
         let st = state.places.lock().unwrap();
         st.settings
             .places
             .iter()
-            .flat_map(|p| p.tgs.clone())
+            .flat_map(|p| p.tgs.iter().map(|t| (*t, p.system.clone())))
             .collect()
     };
-    let rows = {
-        let cat = state.catalog.lock().unwrap();
-        cat.talkgroups(sid)
-    };
+    let systems = crate::playlists::sids_by_system_name(app);
     let mut out = Vec::new();
-    for t in rows {
-        if known.contains(&t.id) {
+    for (system, sid) in systems {
+        if only.is_some_and(|s| s != sid) {
             continue;
         }
-        let desc = t.description.clone().unwrap_or_default();
-        let Some(name) = hospital_from_description(&desc) else {
-            continue;
+        let rows = {
+            let cat = state.catalog.lock().unwrap();
+            cat.talkgroups(Some(sid))
         };
-        out.push(Suggestion {
-            name,
-            kind: "hospital".into(),
-            tg: t.id,
-            tg_name: t.alias.clone().unwrap_or_else(|| format!("TG {}", t.id)),
-            from: desc,
-        });
+        for t in rows {
+            if known.contains(&(t.id, system.clone())) || known.contains(&(t.id, String::new())) {
+                continue;
+            }
+            let desc = t.description.clone().unwrap_or_default();
+            let Some(name) = hospital_from_description(&desc) else {
+                continue;
+            };
+            out.push(Suggestion {
+                name,
+                kind: "hospital".into(),
+                tg: t.id,
+                tg_name: t.alias.clone().unwrap_or_else(|| format!("TG {}", t.id)),
+                system: system.clone(),
+                from: desc,
+            });
+        }
     }
-    out.sort_by(|a, b| a.tg.cmp(&b.tg));
+    out.sort_by(|a, b| a.system.cmp(&b.system).then(a.tg.cmp(&b.tg)));
     out
 }
 
@@ -411,10 +431,16 @@ mod tests {
             places: vec![place("Example General", &[], 40.0, -86.0)],
         };
         s.places[0].tgs = vec![10257];
-        assert_eq!(for_tg(&s, 10257).unwrap().name, "Example General");
-        assert!(for_tg(&s, 10258).is_none());
+        s.places[0].system = "Example System".into();
+        assert_eq!(for_tg(&s, 10257, "Example System").unwrap().name, "Example General");
+        assert!(for_tg(&s, 10258, "Example System").is_none());
+        // The same number on the other system in range is not this place.
+        assert!(for_tg(&s, 10257, "Other System").is_none());
+        // A place that names no system claims the number anywhere.
+        s.places[0].system = String::new();
+        assert!(for_tg(&s, 10257, "Other System").is_some());
         s.places[0].enabled = false;
-        assert!(for_tg(&s, 10257).is_none(), "a switched-off place claims nothing");
+        assert!(for_tg(&s, 10257, "Example System").is_none(), "a switched-off place claims nothing");
     }
 
     #[test]
