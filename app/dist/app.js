@@ -2603,86 +2603,86 @@ if (TAURI) {
 
 /* ================= conversations tab ================= */
 // Stored conversations: what a conversation rule stitched, summarised and sent.
-let cvRows = [], cvSel = null, cvStats = null;
-const cvAgo = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };
-const cvWhen = (t) => new Date(t * 1000).toLocaleString("en-US", { month: "numeric", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
-const cvClock = (t) => new Date(t * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
-const cvDur = (s) => { s = Math.max(0, Math.round(s)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
-const cvBadge = (st) => `<span class="badge ${st === "sent" ? "clear" : st === "failed" ? "enc" : ""}">${esc(st || "?")}</span>`;
-const cvUnitName = (p) => p.unit_name || `radio ${p.unit}`;
-function cvArgs() { const tg = $("cvTgFilter").value; return { q: $("cvSearch").value.trim() || null, tg: tg ? +tg : null, before: null, limit: 100 }; }
-async function cvLoad(more) {
+let convRows = [], convSel = null, convStats = null;
+const convAgo = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };
+const convWhen = (t) => new Date(t * 1000).toLocaleString("en-US", { month: "numeric", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
+const convClock = (t) => new Date(t * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const convDur = (s) => { s = Math.max(0, Math.round(s)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
+const convBadge = (st) => `<span class="badge ${st === "sent" ? "clear" : st === "failed" ? "enc" : ""}">${esc(st || "?")}</span>`;
+const convUnitName = (p) => p.unit_name || `radio ${p.unit}`;
+function convArgs() { const tg = $("cvTgFilter").value; return { q: $("cvSearch").value.trim() || null, tg: tg ? +tg : null, before: null, limit: 100 }; }
+async function convLoad(more) {
   if (!TAURI) return;
   try {
-    const args = cvArgs(); if (more && cvRows.length) args.before = cvRows[cvRows.length - 1].last_at;
+    const args = convArgs(); if (more && convRows.length) args.before = convRows[convRows.length - 1].last_at;
     const rows = (await invoke("conversations_list", args)) || [];
-    cvRows = more ? cvRows.concat(rows) : rows;
+    convRows = more ? convRows.concat(rows) : rows;
     $("cvOlder").disabled = rows.length < 100;
-    cvRenderList();
+    convRenderList();
   } catch (e) { log(`conversations_list: ${e}`); }
-  cvLoadStats();
+  convLoadStats();
 }
-async function cvLoadStats() {
+async function convLoadStats() {
   if (!TAURI) return;
   try {
     const st = (await invoke("conversations_stats")) || {};
-    cvStats = st;
+    convStats = st;
     $("cvStTotal").textContent = st.total || 0; $("cvStSent").textContent = st.sent || 0; $("cvStFailed").textContent = st.failed || 0; $("cvStSkipped").textContent = st.skipped || 0;
     $("cvCount").textContent = st.total ? `(${st.total})` : "";
     const by = st.by_tg || [];
     $("cvStEmpty").style.display = by.length ? "none" : "";
     $("cvStBody").innerHTML = by.map(([tg, name, n]) => `<tr data-cvtg="${tg}" title="Show only this talkgroup"><td>${esc(name)} <span class="faint mono">${tg}</span></td><td>${n}</td></tr>`).join("");
-    $("cvStBody").querySelectorAll("[data-cvtg]").forEach((tr) => tr.onclick = () => { $("cvTgFilter").value = tr.dataset.cvtg; cvShowPage("list"); cvLoad(false); });
+    $("cvStBody").querySelectorAll("[data-cvtg]").forEach((tr) => tr.onclick = () => { $("cvTgFilter").value = tr.dataset.cvtg; convShowPage("list"); convLoad(false); });
     const sel = $("cvTgFilter"); const cur = sel.value;
     sel.innerHTML = `<option value="">All talkgroups</option>` + by.map(([tg, name]) => `<option value="${tg}">${esc(name)} (${tg})</option>`).join("");
     sel.value = cur; if (sel.value !== cur) sel.value = "";
   } catch (e) { log(`conversations_stats: ${e}`); }
 }
-function cvRenderList() {
-  $("cvCardsEmpty").style.display = cvRows.length ? "none" : "";
-  $("cvListMeta").textContent = cvRows.length ? `${cvRows.length} shown` : "";
-  $("cvCards").innerHTML = cvRows.map((r) => `<div class="cvcard ${esc(r.status)}" data-cvid="${r.id}">
-    <div class="top"><span class="cid">${esc(r.conv_id)}</span>${cvBadge(r.status)}${r.revision ? `<span class="badge">rev ${r.revision}</span>` : ""}${r.source === "test" ? `<span class="badge">test</span>` : ""}<span class="tgpill" title="TG ${r.tg} · ${esc(r.tg_name)}">${esc(r.tg_desc || r.tg_name)}</span></div>
-    <div class="when">${esc(cvWhen(r.first_at))} · ${esc(r.rule_name)} · ${r.calls} transmission${r.calls === 1 ? "" : "s"} · ${cvDur(r.last_at - r.first_at)}</div>
+function convRenderList() {
+  $("cvCardsEmpty").style.display = convRows.length ? "none" : "";
+  $("cvListMeta").textContent = convRows.length ? `${convRows.length} shown` : "";
+  $("cvCards").innerHTML = convRows.map((r) => `<div class="cvcard ${esc(r.status)}" data-cvid="${r.id}">
+    <div class="top"><span class="cid">${esc(r.conv_id)}</span>${convBadge(r.status)}${r.revision ? `<span class="badge">rev ${r.revision}</span>` : ""}${r.source === "test" ? `<span class="badge">test</span>` : ""}<span class="tgpill" title="TG ${r.tg} · ${esc(r.tg_name)}">${esc(r.tg_desc || r.tg_name)}</span></div>
+    <div class="when">${esc(convWhen(r.first_at))} · ${esc(r.rule_name)} · ${r.calls} transmission${r.calls === 1 ? "" : "s"} · ${convDur(r.last_at - r.first_at)}</div>
     <div class="tags">${(r.units || []).map((u) => `<span class="cvunit">${esc(u)}</span>`).join("")}</div>
     <div class="summ"><span class="eyebrow">AI summary</span>${esc(r.summary || r.detail || "(no summary)")}</div>
     <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button></div>
   </div>`).join("");
   const cards = $("cvCards");
-  cards.querySelectorAll("[data-cvopen]").forEach((b) => b.onclick = () => cvOpen(+b.dataset.cvopen));
-  cards.querySelectorAll("[data-cvlisten]").forEach((b) => b.onclick = () => { const r = cvRows.find((x) => x.id === +b.dataset.cvlisten); if (r) cvListen(r); });
-  cards.querySelectorAll("[data-cvcopy]").forEach((b) => b.onclick = () => { const r = cvRows.find((x) => x.id === +b.dataset.cvcopy); if (r) cvCopy(r); });
+  cards.querySelectorAll("[data-cvopen]").forEach((b) => b.onclick = () => convOpen(+b.dataset.cvopen));
+  cards.querySelectorAll("[data-cvlisten]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvlisten); if (r) convListen(r); });
+  cards.querySelectorAll("[data-cvcopy]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvcopy); if (r) convCopy(r); });
 }
-function cvCopy(r) { const cb = navigator.clipboard; if (!cb) return; cb.writeText(r.message || r.summary || "").then(() => uiToast("Message copied"), () => {}); }
-async function cvListen(r) {
+function convCopy(r) { const cb = navigator.clipboard; if (!cb) return; cb.writeText(r.message || r.summary || "").then(() => uiToast("Message copied"), () => {}); }
+async function convListen(r) {
   const pieces = (r.pieces || []).filter((p) => p.id != null || p.audio);
   if (!pieces.length) { uiToast("No audio stored for this conversation", "err"); return; }
   uiToast(`Queued ${pieces.length} transmission${pieces.length === 1 ? "" : "s"}`);
   for (const p of pieces) { try { if (p.id != null) await invoke("library_play", { id: p.id }); else await invoke("play_wav", { path: p.audio }); } catch (e) { uiToast(`${e}`, "err"); return; } }
 }
-function cvShowPage(which) {
+function convShowPage(which) {
   $("cvListPage").style.display = which === "list" ? "" : "none";
   $("cvDetailPage").style.display = which === "detail" ? "" : "none";
   $("cvSeg").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === which)));
 }
-async function cvOpen(id) {
-  let r = cvRows.find((x) => x.id === id);
+async function convOpen(id) {
+  let r = convRows.find((x) => x.id === id);
   if (TAURI) { try { r = (await invoke("conversation_get", { id })) || r; } catch (e) { uiToast(`${e}`, "err"); } }
   if (!r) return;
-  cvSel = r;
+  convSel = r;
   $("cvSeg").querySelector('[data-v="detail"]').disabled = false;
-  cvShowPage("detail");
-  $("cvdStatus").innerHTML = cvBadge(r.status) + (r.revision ? ` <span class="badge">revised ×${r.revision}</span>` : "") + (r.source === "test" ? ` <span class="badge">test run</span>` : "");
-  $("cvdAgo").textContent = r.sent_at ? `${cvAgo(r.sent_at)}` : "";
+  convShowPage("detail");
+  $("cvdStatus").innerHTML = convBadge(r.status) + (r.revision ? ` <span class="badge">revised ×${r.revision}</span>` : "") + (r.source === "test" ? ` <span class="badge">test run</span>` : "");
+  $("cvdAgo").textContent = r.sent_at ? `${convAgo(r.sent_at)}` : "";
   const pieces = r.pieces || [];
   const kv = [
     ["Talkgroup", `${esc(r.tg_desc || r.tg_name)} <span class="faint mono">${esc(r.tg_name)} · TG ${r.tg}</span>`],
     ["Conversation ID", `<span class="mono">${esc(r.conv_id)}</span>`],
     ["Rule", esc(r.rule_name)],
     ["Transmissions", `${pieces.length}`],
-    ["Started", esc(cvWhen(r.first_at))],
-    ["Ended", `${esc(cvWhen(r.last_at))} <span class="faint">· ${cvDur(r.last_at - r.first_at)}</span>`],
-    ["Sent", r.sent_at ? esc(cvWhen(r.sent_at)) : "—"],
+    ["Started", esc(convWhen(r.first_at))],
+    ["Ended", `${esc(convWhen(r.last_at))} <span class="faint">· ${convDur(r.last_at - r.first_at)}</span>`],
+    ["Sent", r.sent_at ? esc(convWhen(r.sent_at)) : "—"],
     ["Telegram chat", r.chat ? `<span class="mono">${esc(r.chat)}</span>` : "—"],
   ];
   $("cvdInfo").innerHTML = kv.map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
@@ -2691,37 +2691,37 @@ async function cvOpen(id) {
   const seen = new Set(); const parts = [];
   for (const p of pieces) { if (seen.has(p.unit)) continue; seen.add(p.unit); parts.push(p); }
   const mobiles = parts.filter((p) => !p.fixed), fixed = parts.filter((p) => p.fixed);
-  $("cvdParts").innerHTML = mobiles.map((p, i) => `<div class="p">${i === 0 ? '<span class="star" title="Primary unit">★</span>' : '<span style="width:1em"></span>'}<span class="mono faint">UID ${p.unit}</span><b>${esc(cvUnitName(p))}</b><span class="cvunit">unit</span>${i === 0 ? '<span class="badge">primary</span>' : ""}</div>`).join("")
+  $("cvdParts").innerHTML = mobiles.map((p, i) => `<div class="p">${i === 0 ? '<span class="star" title="Primary unit">★</span>' : '<span style="width:1em"></span>'}<span class="mono faint">UID ${p.unit}</span><b>${esc(convUnitName(p))}</b><span class="cvunit">unit</span>${i === 0 ? '<span class="badge">primary</span>' : ""}</div>`).join("")
     + fixed.map((p) => `<div class="p"><span style="width:1em"></span><span class="mono faint">UID ${p.unit}</span><b>${esc(p.unit_name || "fixed party")}</b><span class="cvunit fixed">hospital</span></div>`).join("")
     || `<div class="faint small">No radios recorded.</div>`;
   $("cvdSummary").textContent = r.summary || (r.status === "skipped" ? "(skipped — no transcript arrived, so nothing was summarised)" : "(no summary)");
   $("cvdSummMeta").textContent = r.summary ? `${r.summary.length} chars` : "";
   $("cvdMessage").textContent = r.message || "(nothing was sent)";
-  $("cvdSentMeta").textContent = r.status === "sent" ? `sent ${r.sent_at ? cvWhen(r.sent_at) : ""}` : r.status;
+  $("cvdSentMeta").textContent = r.status === "sent" ? `sent ${r.sent_at ? convWhen(r.sent_at) : ""}` : r.status;
   $("cvdDetail").textContent = r.detail || "";
   $("cvdTranscript").textContent = r.transcript || "(empty)";
   $("cvdPrompt").textContent = r.prompt || "(no prompt — no transcript, so the model was not asked)";
-  $("cvdSegMeta").textContent = `${pieces.length} · ${cvDur(pieces.reduce((a, p) => a + (p.secs || 0), 0))} of audio`;
-  $("cvdSegs").innerHTML = pieces.map((p) => `<tr><td class="mono time">${esc(cvClock(p.at))}<br><small class="faint">${(p.secs || 0).toFixed(1)} s</small></td><td class="who"><span class="cvunit ${p.fixed ? "fixed" : ""}">${p.fixed ? "hospital" : "unit"}</span><br><span class="mono faint">UID ${p.unit}</span> ${esc(p.fixed ? (p.unit_name || "") : cvUnitName(p))}</td><td class="tr">${p.transcript ? esc(p.transcript) : '<span class="faint">[no transcript]</span>'}</td><td class="act">${p.id != null ? `<button class="btn ghost sm" data-cvplay="${p.id}" title="Play this transmission">▶</button>` : p.audio ? `<button class="btn ghost sm" data-cvwav="${esc(p.audio)}" title="Play this transmission">▶</button>` : ""}</td></tr>`).join("")
+  $("cvdSegMeta").textContent = `${pieces.length} · ${convDur(pieces.reduce((a, p) => a + (p.secs || 0), 0))} of audio`;
+  $("cvdSegs").innerHTML = pieces.map((p) => `<tr><td class="mono time">${esc(convClock(p.at))}<br><small class="faint">${(p.secs || 0).toFixed(1)} s</small></td><td class="who"><span class="cvunit ${p.fixed ? "fixed" : ""}">${p.fixed ? "hospital" : "unit"}</span><br><span class="mono faint">UID ${p.unit}</span> ${esc(p.fixed ? (p.unit_name || "") : convUnitName(p))}</td><td class="tr">${p.transcript ? esc(p.transcript) : '<span class="faint">[no transcript]</span>'}</td><td class="act">${p.id != null ? `<button class="btn ghost sm" data-cvplay="${p.id}" title="Play this transmission">▶</button>` : p.audio ? `<button class="btn ghost sm" data-cvwav="${esc(p.audio)}" title="Play this transmission">▶</button>` : ""}</td></tr>`).join("")
     || `<tr><td colspan="4" class="faint">No transmissions recorded.</td></tr>`;
   $("cvdSegs").querySelectorAll("[data-cvplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.cvplay }).catch((e) => uiToast(`${e}`, "err")));
   $("cvdSegs").querySelectorAll("[data-cvwav]").forEach((b) => b.onclick = () => invoke("play_wav", { path: b.dataset.cvwav }).catch((e) => uiToast(`${e}`, "err")));
 }
-$("cvSeg").querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.dataset.v === "detail" && !cvSel) return; cvShowPage(b.dataset.v); });
-$("cvdBack").onclick = () => cvShowPage("list");
-$("cvdListen").onclick = () => { if (cvSel) cvListen(cvSel); };
-$("cvdCopy").onclick = () => { if (cvSel) cvCopy(cvSel); };
+$("cvSeg").querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.dataset.v === "detail" && !convSel) return; convShowPage(b.dataset.v); });
+$("cvdBack").onclick = () => convShowPage("list");
+$("cvdListen").onclick = () => { if (convSel) convListen(convSel); };
+$("cvdCopy").onclick = () => { if (convSel) convCopy(convSel); };
 $("cvdDelete").onclick = async () => {
-  if (!cvSel) return;
-  if (!(await uiConfirm(`Delete stored conversation ${cvSel.conv_id}? The library calls it points at are kept.`, "Delete"))) return;
-  try { await invoke("conversation_delete", { id: cvSel.id }); cvRows = cvRows.filter((x) => x.id !== cvSel.id); cvSel = null; $("cvSeg").querySelector('[data-v="detail"]').disabled = true; cvShowPage("list"); cvRenderList(); cvLoadStats(); } catch (e) { uiToast(`${e}`, "err"); }
+  if (!convSel) return;
+  if (!(await uiConfirm(`Delete stored conversation ${convSel.conv_id}? The library calls it points at are kept.`, "Delete"))) return;
+  try { await invoke("conversation_delete", { id: convSel.id }); convRows = convRows.filter((x) => x.id !== convSel.id); convSel = null; $("cvSeg").querySelector('[data-v="detail"]').disabled = true; convShowPage("list"); convRenderList(); convLoadStats(); } catch (e) { uiToast(`${e}`, "err"); }
 };
-$("cvRefresh").onclick = () => cvLoad(false);
-$("cvOlder").onclick = () => cvLoad(true);
-$("cvSearch").onkeydown = (e) => { if (e.key === "Enter") cvLoad(false); };
-$("cvTgFilter").onchange = () => { cvShowPage("list"); cvLoad(false); };
-if (listen) listen("conversations", () => { if ($("view-conversations").style.display !== "none" && $("cvListPage").style.display !== "none") cvLoad(false); });
-window.conversationsOnShow = () => cvLoad(false);
+$("cvRefresh").onclick = () => convLoad(false);
+$("cvOlder").onclick = () => convLoad(true);
+$("cvSearch").onkeydown = (e) => { if (e.key === "Enter") convLoad(false); };
+$("cvTgFilter").onchange = () => { convShowPage("list"); convLoad(false); };
+if (listen) listen("conversations", () => { if ($("view-conversations").style.display !== "none" && $("cvListPage").style.display !== "none") convLoad(false); });
+window.conversationsOnShow = () => convLoad(false);
 
 /* ================= onboarding / setup wizard ================= */
 /* A short guided setup: radio → RadioReference → find system → start.
