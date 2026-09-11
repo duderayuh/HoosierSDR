@@ -4,7 +4,7 @@
 // in the alerts settings object app.js already holds — reached through
 // alertsSettings() / alertsPersist() so there is only ever one copy to save.
 (() => {
-  if (typeof invoke !== "function") { window.destBind = () => {}; return; }   // standalone preview: no backend
+  if (typeof invoke !== "function") return;   // standalone preview: no backend
   const S = () => (typeof window.alertsSettings === "function" ? window.alertsSettings() : null);
   const V = () => (typeof window.alertsView === "function" ? window.alertsView() : null);
   const dests = () => (S() && S().destinations) || [];
@@ -136,7 +136,7 @@
     $("cxDests").querySelectorAll("[data-cxtest]").forEach((b) => b.onclick = async () => { const d = dests().find((x) => x.id === b.dataset.cxtest); if (!d) return; b.disabled = true; try { uiToast(await invoke("telegram_test_destination", { destination: d })); } catch (e) { uiToast(`${e}`, "err"); } finally { b.disabled = false; } });
     $("cxDests").querySelectorAll("[data-cxdel]").forEach((b) => b.onclick = async () => {
       const d = dests().find((x) => x.id === b.dataset.cxdel); if (!d) return;
-      if (!(await uiConfirm(`Remove “${d.name}”? Rules that send there keep sending there; they just show the chat id instead of this name.`, "Remove"))) return;
+      if (!(await uiConfirm(`Remove “${d.name}”? Tripwires that send there keep sending there; they just show the chat id instead of this name.`, "Remove"))) return;
       S().destinations = dests().filter((x) => x.id !== d.id); await persist();
     });
     // Default + status messages: every destination, plus whatever is set now.
@@ -153,19 +153,16 @@
   $("tgAnnounce").onchange = async () => { const s = S(); if (!s) return; s.telegram.announce = $("tgAnnounce").checked; await persist(); };
   $("tgAnnounceDest").onchange = async () => { const s = S(); if (!s) return; s.telegram.announce_chat = $("tgAnnounceDest").value; await persist(); };
 
-  // Chats your rules already send to that have no name yet — one click to
-  // name them (today's rules carry raw ids from before destinations).
+  // Chats your tripwires already send to that have no name yet — one click
+  // to name them, and those tripwires then send by that name.
   async function renderFound() {
     const s = S(); if (!s) { $("cxFound").innerHTML = ""; return; }
     const used = new Map(); // target → rule names
     const note = (t, who) => { t = String(t || "").trim(); if (!t) return; if (!used.has(t)) used.set(t, []); used.get(t).push(who); };
-    for (const a of s.alerts || []) note(join(a.chat_id, a.topic_id), a.name);
     note(defaultTarget(), "default");
-    try { const v = await invoke("analyzers_get"); for (const r of (v && v.rules) || []) note(r.chat_id, r.name); } catch (_) {}
-    try { const v = await invoke("conversations_get"); for (const r of (v && v.settings && v.settings.rules) || []) note(r.chat_id, r.name); } catch (_) {}
-    try { const v = await invoke("digests_get"); for (const r of (v && v.rules) || []) note(r.chat_id, r.name); } catch (_) {}
+    try { const v = await invoke("tripwires_get"); for (const t of (v && v.tripwires) || []) if (t.send.dest === "custom") note(t.send.chat, t.name); } catch (_) {}
     const loose = [...used].filter(([t]) => !dests().some((d) => targetOf(d) === t));
-    $("cxFound").innerHTML = loose.length ? `<div class="cxfoundh">Already used by your rules — give them a name</div>` + loose.map(([t, who]) => { const d = describe(t); return `<div class="row cxfound"><span class="grow"><b>${esc(d === t ? "chat " + t : d)}</b>${d === t ? "" : ` <span class="mono faint">${esc(t)}</span>`}<br><small class="faint">used by ${esc(who.map((w) => (w === "default" ? "the default" : w)).join(", "))}</small></span><button class="btn ghost sm" data-cxname-found="${esc(t)}">Name it</button></div>`; }).join("") : "";
+    $("cxFound").innerHTML = loose.length ? `<div class="cxfoundh">Already used by your tripwires — give them a name</div>` + loose.map(([t, who]) => { const d = describe(t); return `<div class="row cxfound"><span class="grow"><b>${esc(d === t ? "chat " + t : d)}</b>${d === t ? "" : ` <span class="mono faint">${esc(t)}</span>`}<br><small class="faint">used by ${esc(who.map((w) => (w === "default" ? "the default" : w)).join(", "))}</small></span><button class="btn ghost sm" data-cxname-found="${esc(t)}">Name it</button></div>`; }).join("") : "";
     $("cxFound").querySelectorAll("[data-cxname-found]").forEach((b) => b.onclick = () => {
       const t = b.dataset.cxnameFound;
       const m = uiModal(`<div class="eyebrow">Name this destination</div><p class="help mono">${esc(t)}</p><label class="field"><span class="lab">Name</span><input data-n type="text" value="${esc(describe(t))}" spellcheck="false"></label><div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Save</button></div>`);
@@ -180,8 +177,6 @@
     if (!$("set-connections")) return;
     renderBot(); renderChats(); renderDests();
     if (settingsPageVisible("connections")) renderFound();
-    // Every rule editor's "Send to" list follows the destinations.
-    for (const b of binds.values()) b.fill();
   }
   window.connectionsRender = render;
   window.connectionsOnShow = async () => {
@@ -190,31 +185,4 @@
     if (!bot && V() && V().has_token) verify(true);
   };
 
-  /* ---------- "Send to" in the rule editors ---------- */
-  // A select of destinations over the rule's own chat field(s): picking a
-  // destination writes its chat (and topic) into them, "Default" clears
-  // them, "Other chat…" reveals them for a raw id. The rule keeps storing
-  // the chat as before, so nothing about sending changes.
-  const binds = new Map();
-  window.destBind = (selId, chatId, topicId) => {
-    const sel = $(selId), chat = $(chatId), topic = topicId ? $(topicId) : null, other = $(selId + "Other");
-    if (!sel || !chat) return;
-    const cur = () => (topic ? join(chat.value, topic.value) : chat.value.trim());
-    const fill = () => {
-      const t = cur(), list = dests(), known = list.some((d) => targetOf(d) === t), def = defaultTarget();
-      sel.innerHTML = `<option value="">Default${def ? " — " + esc(nameOf(def)) : " (none set)"}</option>` +
-        list.map((d) => `<option value="${esc(targetOf(d))}">${esc(d.name)}</option>`).join("") +
-        `<option value="__other">Other chat…</option>`;
-      sel.value = !t ? "" : known ? t : "__other";
-      if (other) other.style.display = sel.value === "__other" ? "" : "none";
-    };
-    sel.onchange = () => {
-      const v = sel.value;
-      if (v === "__other") { if (other) other.style.display = ""; chat.focus(); return; }
-      if (other) other.style.display = "none";
-      if (topic) { const [c, t] = split(v); chat.value = c; topic.value = t; } else chat.value = v;
-    };
-    binds.set(selId, { fill });
-    fill();
-  };
 })();

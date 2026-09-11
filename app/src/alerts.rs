@@ -386,7 +386,7 @@ pub fn ask_ollama(
         "You screen radio-scanner transcripts for alerts. The transcript below is machine-generated from a public-safety radio call and may contain recognition errors.\n\n\
          Talkgroup: {} (TG {})\nRadio: {}\nTranscript: \"{}\"\n\n\
          Instruction from the listener: {}\n\n\
-         Answer with JSON only: {{\"fire\": true or false, \"summary\": \"one sentence\"}}.",
+         Answer with JSON only: {{\"send\": true or false, \"summary\": \"one sentence\"}} — \"send\" is true when, by the listener's instruction, they should be alerted about this call.",
         f.tg_name,
         f.tg,
         f.unit_name.clone().unwrap_or_else(|| f.unit.to_string()),
@@ -445,12 +445,15 @@ pub fn ask_ollama(
     })
 }
 
-/// `{"fire": bool, "summary": str}`, tolerating text around the JSON.
+/// `{"send": bool, "summary": str}`, tolerating text around the JSON. The
+/// key was once `fire`, which on fire/EMS radio a model can read as "is there
+/// a fire?" — a reply using it is still understood.
 pub fn parse_verdict(answer: &str) -> Option<(bool, String)> {
     let start = answer.find('{')?;
     let end = answer.rfind('}')?;
     let v: serde_json::Value = serde_json::from_str(&answer[start..=end]).ok()?;
-    let fire = match &v["fire"] {
+    let key = if v.get("send").is_some() { "send" } else { "fire" };
+    let fire = match &v[key] {
         serde_json::Value::Bool(b) => *b,
         serde_json::Value::String(s) => {
             s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
@@ -941,6 +944,10 @@ mod tests {
             Some((false, String::new()))
         );
         assert_eq!(parse_verdict("I cannot tell."), None);
+        assert_eq!(
+            parse_verdict("{\"send\": true, \"summary\": \"CPR under way\"}"),
+            Some((true, "CPR under way".into()))
+        );
     }
 }
 
