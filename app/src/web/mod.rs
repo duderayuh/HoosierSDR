@@ -59,6 +59,7 @@ const APP_EVENTS: &[&str] = &[
     "grant",
     "status",
     "spectrum",
+    "runs",
     "error",
     "stopped",
     "hook_error",

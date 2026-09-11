@@ -328,6 +328,7 @@ pub fn dual_start(
     let prev = crate::take_previous(&state);
     let handle = std::thread::spawn(move || {
         crate::join_previous(prev);
+        crate::join_idle_radios(&app.state::<crate::AppState>());
         let res =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
                 // Open both radios. SDR B starts parked on the control channel.

@@ -500,3 +500,307 @@ mod wrapper_tests {
         assert_eq!(b.dropped(), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// One radio, several consumers.
+
+/// A radio shared by several decode loops. The physical source is read by
+/// one thread and every block is handed to each [`TeeSource`] subscribed at
+/// the time; a consumer that falls behind loses blocks (counted in its own
+/// `dropped`) without stalling the others. When the last consumer is gone
+/// the reader thread returns and drops the radio, so the device can be
+/// opened again.
+///
+/// Two trunked sites whose control channels both sit inside one wideband
+/// capture (an Airspy's 10 MHz covers most of an 800 MHz band) are followed
+/// from a single tuner this way: the app opens the radio once, wraps it in
+/// [`Normalized`] so the resample happens once, and each site's follower
+/// reads its own `TeeSource` as if it were a radio of its own.
+pub struct Tee {
+    shared: std::sync::Arc<TeeShared>,
+    reader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+struct TeeShared {
+    sample_rate: f64,
+    center_freq: f64,
+    depth: usize,
+    consumers: std::sync::Mutex<Vec<TeeSlot>>,
+    inner_drops: std::sync::atomic::AtomicU64,
+    driver_drops: std::sync::atomic::AtomicU64,
+    /// Set once the reader has stopped (radio closed or failed).
+    finished: std::sync::atomic::AtomicBool,
+}
+
+struct TeeSlot {
+    tx: std::sync::mpsc::SyncSender<std::sync::Arc<Vec<f32>>>,
+    drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Tee {
+    /// Start reading `inner` in blocks of `block_pairs` IQ pairs. Nothing is
+    /// read until the first consumer subscribes; nothing is kept for a
+    /// consumer that subscribes later than the first block.
+    pub fn new<S: SdrSource + Send + 'static>(mut inner: S, block_pairs: usize) -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::mpsc::TrySendError;
+        use std::sync::Arc;
+
+        let sample_rate = inner.sample_rate();
+        let depth = ((sample_rate * 2.0) / block_pairs as f64)
+            .ceil()
+            .clamp(16.0, 1024.0) as usize;
+        let shared = Arc::new(TeeShared {
+            sample_rate,
+            center_freq: inner.center_freq(),
+            depth,
+            consumers: std::sync::Mutex::new(Vec::new()),
+            inner_drops: AtomicU64::new(0),
+            driver_drops: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
+        });
+        let sh = Arc::clone(&shared);
+        let reader = std::thread::spawn(move || {
+            let mut buf = vec![0.0f32; block_pairs * 2];
+            // Wait for the first consumer before touching the radio, so a
+            // subscriber never misses the opening blocks.
+            let mut waited = 0u32;
+            while sh.consumers.lock().unwrap().is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                waited += 1;
+                if waited > 500 {
+                    sh.finished.store(true, Ordering::SeqCst);
+                    sh.consumers.lock().unwrap().clear();
+                    return;
+                }
+            }
+            loop {
+                match inner.read(&mut buf) {
+                    Ok(0) => continue,
+                    Ok(n) => {
+                        sh.inner_drops.store(inner.dropped(), Ordering::Relaxed);
+                        sh.driver_drops
+                            .store(inner.driver_dropped(), Ordering::Relaxed);
+                        let block = Arc::new(buf[..n].to_vec());
+                        let mut cons = sh.consumers.lock().unwrap();
+                        cons.retain(|c| match c.tx.try_send(Arc::clone(&block)) {
+                            Ok(()) => true,
+                            Err(TrySendError::Full(_)) => {
+                                c.drops.fetch_add(1, Ordering::Relaxed);
+                                true
+                            }
+                            Err(TrySendError::Disconnected(_)) => false,
+                        });
+                        if cons.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            sh.finished.store(true, Ordering::SeqCst);
+            // Dropping the senders ends every consumer with `Eof`.
+            sh.consumers.lock().unwrap().clear();
+            // `inner` drops here: the radio closes.
+        });
+        Self {
+            shared,
+            reader: std::sync::Mutex::new(Some(reader)),
+        }
+    }
+
+    pub fn sample_rate(&self) -> f64 {
+        self.shared.sample_rate
+    }
+
+    pub fn center_freq(&self) -> f64 {
+        self.shared.center_freq
+    }
+
+    /// The radio is still being read (at least one consumer, no error).
+    pub fn alive(&self) -> bool {
+        !self.shared.finished.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn consumers(&self) -> usize {
+        self.shared.consumers.lock().unwrap().len()
+    }
+
+    /// A new consumer, fed every block from now on. `None` once the radio
+    /// has closed.
+    pub fn subscribe(&self) -> Option<TeeSource> {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+        if !self.alive() {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(self.shared.depth);
+        let drops = Arc::new(AtomicU64::new(0));
+        self.shared.consumers.lock().unwrap().push(TeeSlot {
+            tx,
+            drops: Arc::clone(&drops),
+        });
+        Some(TeeSource {
+            rx,
+            shared: Arc::clone(&self.shared),
+            drops,
+            pending: None,
+            pending_pos: 0,
+        })
+    }
+
+    /// Wait for the reader thread (after the last consumer has gone), so a
+    /// caller about to reopen the same device knows it is closed.
+    pub fn join(&self) {
+        if let Some(h) = self.reader.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// One consumer's view of a [`Tee`]: an [`SdrSource`] at the radio's rate
+/// and centre. `read` waits at most 250 ms so a stop flag is always polled.
+pub struct TeeSource {
+    rx: std::sync::mpsc::Receiver<std::sync::Arc<Vec<f32>>>,
+    shared: std::sync::Arc<TeeShared>,
+    drops: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pending: Option<std::sync::Arc<Vec<f32>>>,
+    pending_pos: usize,
+}
+
+impl SdrSource for TeeSource {
+    fn sample_rate(&self) -> f64 {
+        self.shared.sample_rate
+    }
+
+    fn center_freq(&self) -> f64 {
+        self.shared.center_freq
+    }
+
+    fn dropped(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.drops.load(Ordering::Relaxed) + self.shared.inner_drops.load(Ordering::Relaxed)
+    }
+
+    fn driver_dropped(&self) -> u64 {
+        self.shared.driver_drops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+        let exhausted = self
+            .pending
+            .as_ref()
+            .map_or(true, |p| self.pending_pos >= p.len());
+        if exhausted {
+            self.pending = match self.rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(b) => Some(b),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(0),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(SourceError::Eof)
+                }
+            };
+            self.pending_pos = 0;
+        }
+        let block = self.pending.as_ref().unwrap();
+        let avail = &block[self.pending_pos..];
+        let n = avail.len().min(buf.len() & !1);
+        buf[..n].copy_from_slice(&avail[..n]);
+        self.pending_pos += n;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tee_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// A source that counts up, so consumers can check they saw the same
+    /// samples in order.
+    struct Counter {
+        next: f32,
+        left: usize,
+        rate: f64,
+    }
+
+    impl SdrSource for Counter {
+        fn sample_rate(&self) -> f64 {
+            self.rate
+        }
+        fn center_freq(&self) -> f64 {
+            857_000_000.0
+        }
+        fn read(&mut self, buf: &mut [f32]) -> Result<usize, SourceError> {
+            if self.left == 0 {
+                return Err(SourceError::Eof);
+            }
+            let n = buf.len().min(self.left);
+            for s in &mut buf[..n] {
+                *s = self.next;
+                self.next += 1.0;
+            }
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    fn drain(mut s: TeeSource) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut buf = vec![0.0f32; 1000];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => continue,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => return out,
+            }
+        }
+    }
+
+    #[test]
+    fn every_consumer_sees_the_whole_stream_in_order() {
+        let tee = Tee::new(Counter { next: 0.0, left: 20_000, rate: 9_600_000.0 }, 256);
+        let a = tee.subscribe().unwrap();
+        let b = tee.subscribe().unwrap();
+        assert_eq!(tee.consumers(), 2);
+        let ta = std::thread::spawn(move || drain(a));
+        let tb = std::thread::spawn(move || drain(b));
+        let (va, vb) = (ta.join().unwrap(), tb.join().unwrap());
+        assert_eq!(va.len(), 20_000);
+        assert_eq!(va, vb);
+        assert!(va.iter().enumerate().all(|(i, v)| *v == i as f32));
+        tee.join();
+        assert!(!tee.alive());
+        assert!(tee.subscribe().is_none());
+    }
+
+    #[test]
+    fn a_slow_consumer_loses_blocks_but_not_the_others() {
+        // At 48 kS/s the queue holds 375 blocks; push 600 while consumer
+        // `slow` never reads. The fast consumer may drop some too if the
+        // producer outruns it, but never silently: every block is either
+        // delivered or counted.
+        let blocks = 600;
+        let tee = Tee::new(Counter { next: 0.0, left: 256 * 2 * blocks, rate: 48_000.0 }, 256);
+        let fast = tee.subscribe().unwrap();
+        let slow = tee.subscribe().unwrap();
+        let fast_drops = Arc::clone(&fast.drops);
+        let v = drain(fast);
+        tee.join();
+        assert_eq!(
+            v.len() / 512 + fast_drops.load(Ordering::Relaxed) as usize,
+            blocks
+        );
+        assert!(slow.dropped() > 0, "the stalled consumer should have dropped blocks");
+        assert_eq!(slow.drops.load(Ordering::Relaxed), slow.dropped());
+    }
+
+    #[test]
+    fn the_radio_closes_when_the_last_consumer_leaves() {
+        let tee = Tee::new(Counter { next: 0.0, left: usize::MAX, rate: 9_600_000.0 }, 256);
+        let a = tee.subscribe().unwrap();
+        drop(a);
+        tee.join();
+        assert!(!tee.alive());
+    }
+}

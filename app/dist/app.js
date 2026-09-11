@@ -198,7 +198,7 @@ function activeStart(ev) {
   if (activeCalls.has(key)) return;
   const el = document.createElement("div");
   el.className = "call" + (ev.priority && ev.priority < 50 ? " pri" : "");
-  el.innerHTML = `<span class="tg">${esc(ev.name)}</span><span class="t">0:00</span><span class="sub">${ev.desc ? esc(ev.desc) + " · " : ""}TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)}</span>`;
+  el.innerHTML = `<span class="tg">${esc(ev.name)}</span><span class="t">0:00</span><span class="sub">${ev.desc ? esc(ev.desc) + " · " : ""}TG ${ev.tg} · ${ev.freq_mhz.toFixed(4)}</span>${runLabel(ev) ? `<span class="sys">${esc(runLabel(ev))}</span>` : ""}`;
   el.dataset.tg = ev.tg; applyColor(el, ev.tg);
   $("active").prepend(el);
   activeCalls.set(key, { el, start: Date.now() });
@@ -862,8 +862,32 @@ function setStatus(s) {
 
 /* ---------- follow events (backend or demo) ---------- */
 const evCounts = {};
+/* ---------- several systems at once ----------
+   Each playlist being followed is a run on the backend; every follow event
+   carries `run` (id) and `system` (label). Calls, grants and notices from all
+   runs show together; the single-system panels (tuning, site, status,
+   waterfall, constellation) show the run picked in the bar under the top bar. */
+let runsNow = [];
+let viewRun = null;
+const DIAG_KINDS = new Set(["measured", "site", "status", "spectrum", "constellation"]);
+function renderRuns() {
+  const bar = $("runsBar");
+  if (!bar) return;
+  if (!runsNow.some((r) => r.id === viewRun)) viewRun = runsNow.length ? runsNow[0].id : null;
+  bar.hidden = runsNow.length < 2;
+  bar.innerHTML = runsNow.length < 2 ? "" : `<span class="lab">Systems</span>` + runsNow.map((r) =>
+    `<span class="runchip${r.id === viewRun ? " on" : ""}" data-run="${r.id}" title="Show this system's tuning, site and waterfall panels">${esc(r.label)} <span class="f">${r.control_mhz.toFixed(4)}</span><button class="x" data-stoprun="${r.id}" title="Stop this system">✕</button></span>`).join("");
+  bar.querySelectorAll("[data-run]").forEach((el) => el.onclick = (e) => { if (e.target.closest("[data-stoprun]")) return; viewRun = +el.dataset.run; renderRuns(); });
+  bar.querySelectorAll("[data-stoprun]").forEach((b) => b.onclick = () => invoke("stop_run", { id: +b.dataset.stoprun }).catch((e) => alert(e)));
+}
+function setRuns(list) { runsNow = Array.isArray(list) ? list : []; renderRuns(); }
+const runLabel = (ev) => runsNow.length > 1 && ev.system ? ev.system : "";
+
 function handleFollow(ev) {
   evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
+  // Another system's diagnostics: keep the panels on the picked run.
+  if (ev.run != null && viewRun != null && ev.run !== viewRun && DIAG_KINDS.has(ev.kind)) return;
+  if (ev.kind === "notice" && runsNow.length > 1 && ev.system) ev = { ...ev, text: `${ev.system}: ${ev.text}` };
   // Spectrum, status and constellation stream continuously — a counter line
   // once in 20 proves they flow without drowning the terminal (each log() is
   // also an IPC round-trip). Everything else is rare enough to dump.
@@ -1299,7 +1323,9 @@ if (TAURI) {
     }
     setState(snap && snap.running ? (st && st.mode === "capture" ? "capturing" : "following") : "standby");
   };
-  listen("error", (e) => { log(`backend error: ${e.payload}`); setState("standby"); alert("Capture error:\n" + e.payload); });
+  listen("error", (e) => { log(`backend error: ${e.payload}`); if (!runsNow.length) setState("standby"); alert("Capture error:\n" + e.payload); });
+  listen("runs", (e) => setRuns(e.payload));
+  invoke("runs_list").then((list) => { setRuns(list); if (runsNow.length && $("pillText").textContent === "standby") setState("following"); }).catch(() => {});
   listen("follow", (e) => handleFollow(e.payload));
 
   const opts = () => ({
@@ -1335,11 +1361,29 @@ if (TAURI) {
         $("tunedHz").textContent = mhz(o.freq);
         const pl = playlists.find((p) => p.id === $("playlist").value);
         save("hs.prefs", { ...store("hs.prefs", {}), lastPlaylist: $("playlist").value });
-        bandLo = (parseFreq($("center").value) - o.rate * 0.4) / 1e6; bandHi = (parseFreq($("center").value) + o.rate * 0.4) / 1e6;
-        await invoke("start_follow", { source: o.source, freq: parseFreq($("center").value), rate: o.rate, gain: o.gain,
-          control: o.freq, callsDir: $("callsdir").value.trim() || null, play: $("play").checked,
-          hangMs: parseInt($("hangMs").value, 10) || null, systemName: pl ? pl.system_name : null, siteName: pl ? pl.site_name : null,
-          ppm: ppmVal(), device: srcId() || null, modulation: $("tmod").value, extra: coverageExtras() });
+        // Several playlists at once: one run each, all reading the same radio,
+        // so the band centre has to reach every control channel.
+        const also = pl ? plAlsoSelected().filter((p) => p.id !== pl.id) : [];
+        const group = pl ? [pl, ...also] : [];
+        let center = parseFreq($("center").value);
+        if (group.length > 1) {
+          const fit = commonCentre(group.map((p) => p.control_mhz * 1e6), o.rate);
+          if (!fit.ok) { setState("standby"); alert(`These playlists can't be followed together on one radio at ${(o.rate / 1e6).toFixed(1)} MSPS — their control channels are ${(fit.span / 1e6).toFixed(2)} MHz apart and the radio reaches ±${(fit.half / 1e6).toFixed(2)} MHz:\n\n${group.map((p) => `${p.name} · ${p.control_mhz.toFixed(4)} MHz`).join("\n")}\n\nUntick one in the + list, or pick a wider rate.`); return; }
+          center = fit.center;
+          $("center").value = (center / 1e6).toFixed(4) + "M";
+          logEvent(`following ${group.length} systems from one radio: ${group.map((p) => p.name).join(" · ")} — band centre ${(center / 1e6).toFixed(4)} MHz`);
+        }
+        bandLo = (center - o.rate * 0.4) / 1e6; bandHi = (center + o.rate * 0.4) / 1e6;
+        const common = { source: o.source, freq: center, rate: o.rate, gain: o.gain, callsDir: $("callsdir").value.trim() || null, play: $("play").checked,
+          hangMs: parseInt($("hangMs").value, 10) || null, ppm: ppmVal(), device: srcId() || null, modulation: $("tmod").value };
+        if (!group.length) {
+          await invoke("start_follow", { ...common, control: o.freq, systemName: null, siteName: null, extra: coverageExtras(), playlist: null });
+        } else {
+          for (const [i, p] of group.entries()) {
+            await invoke("start_follow", { ...common, control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.site_name,
+              extra: i === 0 ? coverageExtras() : null, playlist: p.id });
+          }
+        }
       } else {
         $("tunedHz").textContent = mhz(opts().freq);
         $("wfAxis").textContent = `${(opts().freq / 1e6).toFixed(4)} MHz ± ${(opts().rate / 2e6).toFixed(2)} MHz`;
@@ -2659,8 +2703,42 @@ if (TAURI) {
 
   /* ---------- playlists ---------- */
   let playlists = [];
+  // The band centre that reaches every control channel on one radio, if one
+  // exists: the radio decodes ±0.4 of its (normalised) rate around the centre.
+  function commonCentre(controls_hz, rate) {
+    const norm = rate >= 9_000_000 ? 9_600_000 : rate >= 2_450_000 && rate < 2_550_000 ? 2_400_000 : rate;
+    const half = norm * 0.4, lo = Math.min(...controls_hz), hi = Math.max(...controls_hz);
+    return { ok: hi - lo < 2 * half - 25_000, center: Math.round((lo + hi) / 2), span: hi - lo, half };
+  }
+  window.commonCentre = commonCentre;
+  const plAlsoIds = () => (store("hs.prefs", {}).alsoPlaylists || []);
+  function plAlsoSelected() { const ids = plAlsoIds(); return playlists.filter((p) => ids.includes(p.id)); }
+  function plMoreRender() {
+    const cur = $("playlist").value;
+    const ids = plAlsoIds();
+    const others = playlists.filter((p) => p.id !== cur);
+    $("plMoreList").innerHTML = others.length ? others.map((p) =>
+      `<label><input type="checkbox" data-also="${esc(p.id)}" ${ids.includes(p.id) ? "checked" : ""} /> <span>${esc(p.name)} <small>${p.control_mhz.toFixed(4)} MHz</small></span></label>`).join("")
+      : `<div class="none">No other playlists yet — make one under Settings → Playlists.</div>`;
+    $("plMoreList").querySelectorAll("[data-also]").forEach((cb) => cb.onchange = () => {
+      const set = new Set(plAlsoIds()); cb.checked ? set.add(cb.dataset.also) : set.delete(cb.dataset.also);
+      save("hs.prefs", { ...store("hs.prefs", {}), alsoPlaylists: [...set] }); plMoreBadge();
+    });
+    plMoreBadge();
+  }
+  function plMoreBadge() {
+    const n = plAlsoSelected().filter((p) => p.id !== $("playlist").value).length;
+    const b = $("plMore"); if (!b) return;
+    b.classList.toggle("on", n > 0); b.innerHTML = n ? `+<span class="n">${n}</span>` : "+";
+  }
+  if ($("plMore")) {
+    $("plMore").onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); const pop = $("plMorePop"); pop.hidden = !pop.hidden; if (!pop.hidden) plMoreRender(); };
+    document.addEventListener("click", (e) => { const pop = $("plMorePop"); if (!pop.hidden && !e.target.closest("#plMorePop")) pop.hidden = true; });
+    $("playlist").addEventListener("change", plMoreBadge);
+  }
   function renderPlaylists(list) {
     playlists = list;
+    plMoreBadge();
     $("plEmpty").style.display = list.length ? "none" : "";
     $("plList").innerHTML = list.map((p) =>
       `<div class="row" data-id="${esc(p.id)}"><span class="grow"><b>${esc(p.name)}</b><br><small>${esc(p.system_name)} · site ${p.site_id} ${esc(p.site_name)} · ${p.control_mhz.toFixed(4)} MHz · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</small></span>` +

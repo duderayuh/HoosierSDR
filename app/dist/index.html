@@ -23,7 +23,12 @@
     </div>
     <span class="spacer"></span>
     <label class="tb"><span>Playlist</span>
-      <select id="playlist"><option value="">— every talkgroup —</option></select></label>
+      <span class="inline plpick"><select id="playlist"><option value="">— every talkgroup —</option></select><button class="btn ghost sm plmore" id="plMore" title="Also listen to other playlists at the same time (each needs its own control channel inside the radio's span)">+</button></span></label>
+    <div class="plmore-pop" id="plMorePop" hidden>
+      <div class="plmore-head">Also listen to</div>
+      <div id="plMoreList" class="plmore-list"></div>
+      <p class="help">Each playlist here becomes its own system, decoded at the same time from the same radio. Their control channels must all fit inside the radio's span; otherwise you'll be told which one doesn't.</p>
+    </div>
     <label class="tb"><span>Radio</span>
       <select id="source"><option value="rtlsdr" selected>RTL-SDR</option><option value="airspy">Airspy R2</option></select></label>
     <label class="tb"><span>Rate</span>
@@ -39,6 +44,7 @@
     <button class="themebtn" id="help" title="Setup guide" aria-label="Setup guide">?</button>
     <button class="themebtn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
   </header>
+  <div class="runsbar" id="runsBar" hidden></div>
 
   <main class="wrap">
     <!-- ===================== MONITOR ===================== -->
