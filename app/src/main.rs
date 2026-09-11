@@ -65,6 +65,15 @@ struct AppState {
     reencode_running: Arc<AtomicBool>,
     /// The previous run's thread, joined before a new radio is opened.
     run_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Live trunk-following runs (one per playlist/site) and the radios they
+    /// read. Several runs share one radio through a `Tee` when their control
+    /// channels sit inside the same capture.
+    runs: Mutex<Vec<Run>>,
+    radios: Mutex<std::collections::HashMap<String, Radio>>,
+    run_seq: std::sync::atomic::AtomicU64,
+    /// Serialises radio opening, so two runs started together see one
+    /// opened radio instead of both trying to open the same device.
+    start_lock: Mutex<()>,
     catalog: Arc<Mutex<Option<CsvCatalog>>>,
     /// Talkgroups the listener has locked out; read by the follower live.
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
@@ -130,6 +139,106 @@ struct AppState {
     /// names), so a remote desktop page joining mid-run can show the same
     /// controls as the local one. Cleared when the run ends.
     last_start: Mutex<Option<serde_json::Value>>,
+}
+
+/// One live trunk-following run: a site (usually a playlist) being followed.
+struct Run {
+    id: u64,
+    /// Short name for the UI: the playlist's name, else the site's.
+    label: String,
+    system: String,
+    site: String,
+    control_hz: f64,
+    /// `source|device` of the radio it reads.
+    radio: String,
+    flag: Arc<AtomicBool>,
+    playlist: Option<String>,
+}
+
+/// An opened radio, shared by every run whose control channel fits.
+struct Radio {
+    tee: Arc<hs_core::stream::Tee>,
+    center_hz: f64,
+    /// Rate after normalisation (what the followers see).
+    norm_rate: f64,
+    name: String,
+}
+
+/// What the UI shows for a run (chips in the top bar, the run picker).
+#[derive(Serialize, Clone)]
+pub(crate) struct RunInfo {
+    id: u64,
+    label: String,
+    system: String,
+    site: String,
+    control_mhz: f64,
+    radio: String,
+    playlist: Option<String>,
+}
+
+pub(crate) fn runs_info(state: &AppState) -> Vec<RunInfo> {
+    state
+        .runs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| RunInfo {
+            id: r.id,
+            label: r.label.clone(),
+            system: r.system.clone(),
+            site: r.site.clone(),
+            control_mhz: r.control_hz / 1e6,
+            radio: r.radio.clone(),
+            playlist: r.playlist.clone(),
+        })
+        .collect()
+}
+
+/// Tell the UI which runs exist (after a start or a stop).
+fn emit_runs(app: &AppHandle) {
+    let _ = app.emit("runs", runs_info(&app.state::<AppState>()));
+}
+
+/// The live runs, for a page opening mid-session.
+#[tauri::command]
+fn runs_list(state: State<AppState>) -> Vec<RunInfo> {
+    runs_info(&state)
+}
+
+/// Stop one run; the others (and the radio, if shared) carry on.
+#[tauri::command]
+fn stop_run(id: u64, state: State<AppState>) -> Result<(), String> {
+    let runs = state.runs.lock().unwrap();
+    let r = runs.iter().find(|r| r.id == id).ok_or("no such run")?;
+    r.flag.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// A follow event tagged with the run it came from, so the UI can tell
+/// systems apart: `run` (id) and `system` (the run's label).
+fn emit_run(app: &AppHandle, run: u64, label: &str, ev: follow::FollowEvent) {
+    let mut v = serde_json::to_value(&ev).unwrap_or(serde_json::Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("run".into(), run.into());
+        o.insert("system".into(), label.into());
+    }
+    let _ = app.emit("follow", v);
+}
+
+/// Close radios nobody reads any more (join their reader threads so the
+/// device is really released) before something opens one.
+fn join_idle_radios(state: &AppState) {
+    let mut radios = state.radios.lock().unwrap();
+    let mut handles = state.gain_handles.lock().unwrap();
+    radios.retain(|k, r| {
+        if r.tee.alive() && r.tee.consumers() > 0 {
+            true
+        } else {
+            r.tee.join();
+            handles.remove(k);
+            false
+        }
+    });
 }
 
 impl AppState {
@@ -720,9 +829,12 @@ fn load_catalog(app: AppHandle, path: String, state: State<AppState>) -> Result<
 /// Stop an in-progress live capture.
 #[tauri::command]
 fn stop_capture(state: State<AppState>) {
-    state.running.store(false, Ordering::SeqCst);
+    for r in state.runs.lock().unwrap().iter() {
+        r.flag.store(false, Ordering::SeqCst);
+    }
     if let Some(f) = state.run_flag.lock().unwrap().as_ref() {
         f.store(false, Ordering::SeqCst);
+        state.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -793,6 +905,7 @@ fn start_capture(
     let prev = take_previous(&state);
     let handle = std::thread::spawn(move || {
         join_previous(prev);
+        join_idle_radios(&app.state::<AppState>());
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             capture_loop(
                 &app,
@@ -953,8 +1066,11 @@ fn start_follow(
     device: Option<String>,
     modulation: Option<String>,
     extra: Option<Vec<ExtraSpec>>,
-) -> Result<(), String> {
-    if state.running.swap(true, Ordering::SeqCst) {
+    playlist: Option<String>,
+) -> Result<u64, String> {
+    // A capture or dual-SDR session owns its radio outright; follow runs
+    // stack — each site is its own run, sharing a radio when it fits.
+    if state.running.load(Ordering::SeqCst) && state.runs.lock().unwrap().is_empty() {
         return Err("already running".into());
     }
     *state.last_start.lock().unwrap() = Some(serde_json::json!({
@@ -962,14 +1078,66 @@ fn start_follow(
         "control": control, "gain": gain, "ppm": ppm, "modulation": modulation, "play": play,
         "hang_ms": hang_ms, "system_name": system_name, "site_name": site_name,
     }));
+    if let Some(r) = state
+        .runs
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|r| (r.control_hz - control).abs() < 1.0)
+    {
+        return Err(format!(
+            "already following {} on {:.4} MHz",
+            r.label,
+            control / 1e6
+        ));
+    }
+    let taken_controls: Vec<f64> = state.runs.lock().unwrap().iter().map(|r| r.control_hz).collect();
+    let radio_key = format!("{source}|{}", device.clone().unwrap_or_default());
+    if let Some(r) = state.radios.lock().unwrap().get(&radio_key).filter(|r| r.tee.alive() && r.tee.consumers() > 0) {
+        let half = r.norm_rate * 0.4;
+        if (control - r.center_hz).abs() >= half {
+            return Err(format!(
+                "{} is tuned to {:.4} MHz (±{:.2} MHz) for another system, and {:.4} MHz is outside that — stop the other system first, or start both together so the band centre covers both",
+                r.name, r.center_hz / 1e6, half / 1e6, control / 1e6
+            ));
+        }
+    }
+    let (pl_allow, pl_name) = match playlist.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => {
+            let p = playlists::load(&app)
+                .into_iter()
+                .find(|p| p.id == id)
+                .ok_or("no such playlist")?;
+            let tgs: Option<std::collections::HashSet<u16>> =
+                (!p.tgs.is_empty()).then(|| p.tgs.iter().copied().collect());
+            (Some(Arc::new(Mutex::new(tgs))), Some(p.name))
+        }
+        None => (None, None),
+    };
+    let label = pl_name
+        .or_else(|| site_name.clone().filter(|s| !s.is_empty()))
+        .or_else(|| system_name.clone().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| format!("{:.4} MHz", control / 1e6));
     let running = Arc::new(AtomicBool::new(true));
-    *state.run_flag.lock().unwrap() = Some(running.clone());
+    let run_id = state.run_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    state.running.store(true, Ordering::SeqCst);
+    state.runs.lock().unwrap().push(Run {
+        id: run_id,
+        label: label.clone(),
+        system: system_name.clone().unwrap_or_default(),
+        site: site_name.clone().unwrap_or_default(),
+        control_hz: control,
+        radio: radio_key.clone(),
+        flag: running.clone(),
+        playlist: playlist.clone(),
+    });
+    emit_runs(&app);
     let max_calls = state.max_calls.load(Ordering::SeqCst).clamp(1, 24);
     let channelizer = state.use_channelizer.load(Ordering::SeqCst);
     let uv_quality = state.uv_quality.load(Ordering::SeqCst).clamp(1, 64);
     let catalog = state.catalog.clone();
     let lockout = state.lockout.clone();
-    let allowlist = state.allowlist.clone();
+    let allowlist = pl_allow.unwrap_or_else(|| state.allowlist.clone());
     let hold = state.hold.clone();
     let priorities = state.priorities.clone();
     let lockout_ranges = state.lockout_ranges.clone();
@@ -989,10 +1157,7 @@ fn start_follow(
     let streamer = state.streamer.clone();
     let uploader = state.uploader.clone();
     let audio = if play { state.audio() } else { None };
-    let my_gen = state.run_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let prev = take_previous(&state);
     let handle = std::thread::spawn(move || {
-        join_previous(prev);
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
             // A radio that cannot span the requested band centre and the
             // control channel (an RTL-SDR at 2.4 MSPS covers ±1.2 MHz) is
@@ -1003,27 +1168,60 @@ fn start_follow(
                 .unwrap_or(rate);
             let mut freq = freq;
             if (control - freq).abs() >= norm * 0.4 {
-                let _ = app.emit(
-                    "follow",
-                    follow::FollowEvent::Notice {
+                emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
                         text: format!(
                             "band centre {:.4} MHz can't reach the control channel at this rate — centred on {:.4} MHz instead (±{:.2} MHz)",
                             freq / 1e6,
                             control / 1e6,
                             norm * 0.4 / 1e6
                         ),
-                    },
-                );
+                    });
                 freq = control;
             }
-            let primary_setting = devices::settings_for(&app, &source, device.as_deref()).gain_setting(&source);
-            let (src, h) = open_device_with_gain(&source, device.as_deref(), ppm_tune(freq, ppm), rate, gain, primary_setting)?;
-            {
+            // The radio: joined if another run already reads it and this
+            // control channel sits inside its capture, opened otherwise.
+            let src = {
                 let st = app.state::<AppState>();
-                let mut hs = st.gain_handles.lock().unwrap();
-                hs.clear();
-                hs.insert(format!("{source}|{}", device.clone().unwrap_or_default()), h);
-            }
+                let _serial = st.start_lock.lock().unwrap();
+                join_idle_radios(&st);
+                let mut radios = st.radios.lock().unwrap();
+                match radios.get(&radio_key).filter(|r| r.tee.alive()) {
+                    Some(r) => {
+                        let half = r.norm_rate * 0.4;
+                        if (control - r.center_hz).abs() >= half {
+                            return Err(format!(
+                                "{} is tuned to {:.4} MHz (±{:.2} MHz) for another system, and {:.4} MHz is outside that — stop the other system first, or start both together so the band centre covers both",
+                                r.name, r.center_hz / 1e6, half / 1e6, control / 1e6
+                            ));
+                        }
+                        freq = r.center_hz;
+                        let s = r.tee.subscribe().ok_or("the shared radio closed")?;
+                        emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
+                            text: format!("sharing {} with the other system (band centre {:.4} MHz)", r.name, freq / 1e6),
+                        });
+                        s
+                    }
+                    None => {
+                        let primary_setting = devices::settings_for(&app, &source, device.as_deref()).gain_setting(&source);
+                        let (raw, h) = open_device_with_gain(&source, device.as_deref(), ppm_tune(freq, ppm), rate, gain, primary_setting)?;
+                        st.gain_handles.lock().unwrap().insert(radio_key.clone(), h);
+                        // Normalise once here (10 → 9.6 MSPS on an Airspy) so
+                        // every follower on this radio sees a clean rate and
+                        // the resample is not repeated per run.
+                        let norm = hs_core::stream::Normalized::new(raw);
+                        let norm_rate = hs_source::SdrSource::sample_rate(&norm);
+                        let tee = Arc::new(hs_core::stream::Tee::new(norm, 65536));
+                        let s = tee.subscribe().ok_or("the radio closed at once")?;
+                        radios.insert(radio_key.clone(), Radio {
+                            tee,
+                            center_hz: freq,
+                            norm_rate,
+                            name: format!("{source} {}", device.clone().unwrap_or_default()).trim().to_string(),
+                        });
+                        s
+                    }
+                }
+            };
             // Extra radios: a failure to open one is reported, not fatal.
             let mut extras = Vec::new();
             for (i, x) in extra.clone().unwrap_or_default().into_iter().enumerate() {
@@ -1036,7 +1234,7 @@ fn start_follow(
                         extras.push(follow::ExtraRadio { center_hz: x.center, label, src })
                     }
                     Err(e) => {
-                        let _ = app.emit("follow", follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
+                        emit_run(&app, run_id, &label, follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
                     }
                 }
             }
@@ -1057,6 +1255,7 @@ fn start_follow(
             });
             let params = follow::FollowParams {
                 max_calls,
+                taken_controls,
                 channelizer,
                 modulation: modulation.unwrap_or_default(),
                 uv_quality,
@@ -1072,12 +1271,9 @@ fn start_follow(
             };
             let player = if play { audio } else { None };
             if play && player.is_none() {
-                let _ = app.emit(
-                    "follow",
-                    follow::FollowEvent::Notice {
+                emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
                         text: "no audio output device — calls are not being played".into(),
-                    },
-                );
+                    });
             }
             // Clone the connection handle and release the outer lock at once:
             // holding it for the whole run would block every library command
@@ -1163,12 +1359,9 @@ fn start_follow(
                     if learn_aliases.load(Ordering::SeqCst) {
                         if let (Some(alias), true) = (talker_alias.as_deref(), *source != 0) {
                             if units::learn(&app, app.state::<AppState>().inner(), *source, alias) {
-                                let _ = app.emit(
-                                    "follow",
-                                    follow::FollowEvent::Notice {
+                                emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
                                         text: format!("learned alias “{alias}” for radio {source}"),
-                                    },
-                                );
+                                    });
                             }
                         }
                     }
@@ -1246,14 +1439,14 @@ fn start_follow(
                         }
                     }
                 }
-                let _ = app.emit("follow", ev);
+                emit_run(&app, run_id, &label, ev);
             })
         }))
         .unwrap_or_else(|p| Err(format!("follow crashed: {}", panic_text(&p))));
-        finish_run(&app, my_gen, res);
+        finish_follow_run(&app, run_id, res);
     });
-    *state.run_thread.lock().unwrap() = Some(handle);
-    Ok(())
+    let _ = handle; // runs to completion on its own; the radio table tracks the device
+    Ok(run_id)
 }
 
 fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
@@ -1273,6 +1466,27 @@ fn finish_run(app: &AppHandle, my_gen: u64, res: Result<(), String>) {
     if state.run_gen.load(Ordering::SeqCst) == my_gen {
         state.running.store(false, Ordering::SeqCst);
         *state.last_start.lock().unwrap() = None;
+        *state.hold.lock().unwrap() = None;
+        state.archive_mode.store(false, Ordering::SeqCst);
+        let _ = app.emit("stopped", ());
+    }
+}
+
+/// Epilogue of one follow run: drop it from the table, tell the UI, and
+/// when it was the last one, go back to standby.
+fn finish_follow_run(app: &AppHandle, run_id: u64, res: Result<(), String>) {
+    let state = app.state::<AppState>();
+    if let Err(e) = res {
+        let _ = app.emit("error", e);
+    }
+    let remaining = {
+        let mut runs = state.runs.lock().unwrap();
+        runs.retain(|r| r.id != run_id);
+        runs.len()
+    };
+    emit_runs(app);
+    if remaining == 0 {
+        state.running.store(false, Ordering::SeqCst);
         *state.hold.lock().unwrap() = None;
         state.archive_mode.store(false, Ordering::SeqCst);
         let _ = app.emit("stopped", ());
@@ -1617,6 +1831,7 @@ fn survey_capture(
     let ret = entry.clone();
     let handle = std::thread::spawn(move || {
         join_previous(prev);
+        join_idle_radios(&app.state::<AppState>());
         let timer_flag = running.clone();
         let _timer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs_f64(seconds.max(1.0)));
@@ -2222,7 +2437,9 @@ fn main() {
             remotes::remotes_set,
             remotes::remotes_scan,
             remotes::remote_token_set,
-            remotes::remote_open
+            remotes::remote_open,
+            runs_list,
+            stop_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running HoosierSDR");

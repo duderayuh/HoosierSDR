@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct FollowParams {
     /// Most calls decoded at once (1–24).
     pub max_calls: usize,
+    /// Control channels other runs already follow (Hz). A band scan that
+    /// lands on one of these is refused rather than followed twice.
+    pub taken_controls: Vec<f64>,
     /// Traffic channels via the shared channelizer (true) or classic
     /// per-channel decimation (false) — an on-air A/B switch.
     pub channelizer: bool,
@@ -363,6 +366,13 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 Some(f) => {
                     let nominal = f.freq_hz.unwrap_or(p.center_hz + f.offset_hz);
                     let measured = p.center_hz + f.offset_hz;
+                    if let Some(t) = p.taken_controls.iter().find(|t| (*t - nominal).abs() < 2_000.0) {
+                        return Err(format!(
+                            "no control channel near {:.4} MHz — the band scan only found the one at {:.4} MHz, which another system is already following. Is this site within range?",
+                            p.control_hz / 1e6,
+                            t / 1e6
+                        ));
+                    }
                     emit(FollowEvent::Notice {
                         text: format!(
                             "found control channel at {:.4} MHz ({}, NAC {})",
@@ -1422,6 +1432,7 @@ mod tests {
             return;
         };
         let p = FollowParams {
+            taken_controls: Vec::new(),
             center_hz: 851e6,
             control_hz: 851_537_500.0,
             calls_dir: None,
@@ -1520,6 +1531,7 @@ mod tests {
             return;
         };
         let p = FollowParams {
+            taken_controls: Vec::new(),
             center_hz: 851e6,
             control_hz: 851_537_500.0,
             calls_dir: None,
@@ -1585,6 +1597,7 @@ mod tests {
         let starts_with = |allow: Option<Vec<u16>>| -> Option<usize> {
             let src = cs16_source(&path, 2_500_000.0)?;
             let p = FollowParams {
+            taken_controls: Vec::new(),
                 center_hz: 851e6,
                 control_hz: 851_537_500.0,
                 calls_dir: None,
@@ -1650,6 +1663,7 @@ mod tests {
         let starts_with = |hold_tg: u16| -> Option<usize> {
             let src = cs16_source(&path, 2_500_000.0)?;
             let p = FollowParams {
+            taken_controls: Vec::new(),
                 center_hz: 851e6,
                 control_hz: 851_537_500.0,
                 calls_dir: None,
@@ -1717,6 +1731,7 @@ mod tests {
     fn live_airspy_follow_25s() {
         let src = crate::open_device("airspy", None, 855e6, 10_000_000.0, None).expect("airspy");
         let p = FollowParams {
+            taken_controls: Vec::new(),
             center_hz: 855e6,
             control_hz: 851_537_500.0,
             calls_dir: None,

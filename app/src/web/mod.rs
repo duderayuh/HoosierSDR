@@ -59,6 +59,7 @@ const APP_EVENTS: &[&str] = &[
     "grant",
     "status",
     "spectrum",
+    "runs",
     "error",
     "stopped",
     "hook_error",
@@ -138,13 +139,19 @@ pub struct WebState {
 /// desktop page ahead of the live feed.
 #[derive(Default)]
 pub struct Snap {
+    /// Per run (several systems can be followed at once); key 0 = untagged.
+    runs: std::collections::BTreeMap<u64, RunSnap>,
+    /// Recent completed calls (all runs), for the call history. Marked
+    /// `replayed` so the page adds the rows without re-sounding tones.
+    calls: std::collections::VecDeque<serde_json::Value>,
+}
+
+#[derive(Default)]
+struct RunSnap {
     measured: Option<serde_json::Value>,
     site: Option<serde_json::Value>,
     status: Option<serde_json::Value>,
     notices: std::collections::VecDeque<serde_json::Value>,
-    /// Recent completed calls, for the call history. Marked `replayed` so
-    /// the page adds the rows without re-sounding emergency tones.
-    calls: std::collections::VecDeque<serde_json::Value>,
 }
 
 const SNAP_NOTICES: usize = 40;
@@ -153,53 +160,70 @@ const SNAP_CALLS: usize = 60;
 impl Snap {
     fn note(&mut self, frame: &Frame) {
         match frame.event.as_str() {
-            "follow" => match frame.data.get("kind").and_then(|k| k.as_str()) {
-                Some("measured") => {
-                    self.measured = Some(frame.data.clone());
-                    self.site = None;
-                    self.notices.clear();
-                }
-                Some("site") => self.site = Some(frame.data.clone()),
-                Some("status") => self.status = Some(frame.data.clone()),
-                Some("notice") => {
-                    if self.notices.len() >= SNAP_NOTICES {
-                        self.notices.pop_front();
-                    }
-                    self.notices.push_back(frame.data.clone());
-                }
-                Some("call") => {
+            "follow" => {
+                let run = frame.data.get("run").and_then(|r| r.as_u64()).unwrap_or(0);
+                let kind = frame.data.get("kind").and_then(|k| k.as_str());
+                if kind == Some("call") {
                     if self.calls.len() >= SNAP_CALLS {
                         self.calls.pop_front();
                     }
                     let mut d = frame.data.clone();
                     d["replayed"] = serde_json::Value::Bool(true);
                     self.calls.push_back(d);
+                    return;
                 }
-                _ => {}
-            },
+                let r = self.runs.entry(run).or_default();
+                match kind {
+                    Some("measured") => {
+                        r.measured = Some(frame.data.clone());
+                        r.site = None;
+                        r.notices.clear();
+                    }
+                    Some("site") => r.site = Some(frame.data.clone()),
+                    Some("status") => r.status = Some(frame.data.clone()),
+                    Some("notice") => {
+                        if r.notices.len() >= SNAP_NOTICES {
+                            r.notices.pop_front();
+                        }
+                        r.notices.push_back(frame.data.clone());
+                    }
+                    _ => {}
+                }
+            }
+            // The run list: forget runs that have ended.
+            "runs" => {
+                let alive: std::collections::HashSet<u64> = frame
+                    .data
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|r| r.get("id").and_then(|i| i.as_u64())).collect())
+                    .unwrap_or_default();
+                self.runs.retain(|id, _| *id == 0 || alive.contains(id));
+            }
             "stopped" | "error" => {
-                self.measured = None;
-                self.site = None;
-                self.status = None;
+                self.runs.clear();
             }
             _ => {}
         }
     }
 
+    /// The frames that rebuild the panels, run by run (the page keeps its
+    /// single-system panels on the run it has picked), then the calls.
     fn events(&self) -> Vec<Frame> {
         let mut out = Vec::new();
         let f = |d: &serde_json::Value| Frame::event("follow", d.clone());
-        if let Some(m) = &self.measured {
-            out.push(f(m));
+        for r in self.runs.values() {
+            if let Some(m) = &r.measured {
+                out.push(f(m));
+            }
+            if let Some(s) = &r.site {
+                out.push(f(s));
+            }
+            out.extend(r.notices.iter().map(f));
+            if let Some(s) = &r.status {
+                out.push(f(s));
+            }
         }
-        if let Some(s) = &self.site {
-            out.push(f(s));
-        }
-        out.extend(self.notices.iter().map(f));
         out.extend(self.calls.iter().map(f));
-        if let Some(s) = &self.status {
-            out.push(f(s));
-        }
         out
     }
 }
@@ -621,7 +645,8 @@ async fn snapshot(State(st): State<Arc<WebState>>, _auth: Auth) -> Json<serde_js
     } else {
         Vec::new()
     };
-    Json(serde_json::json!({ "running": running, "start": start, "events": events }))
+    let runs = crate::runs_info(&s);
+    Json(serde_json::json!({ "running": running, "start": start, "runs": runs, "events": events }))
 }
 
 /// Server-Sent Events: the live feed (grants, calls, notices, status, …) plus
