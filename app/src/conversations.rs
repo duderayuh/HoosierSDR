@@ -1396,7 +1396,9 @@ pub struct StoredStats {
     pub sent: u32,
     pub failed: u32,
     pub skipped: u32,
-    /// (talkgroup, name, conversations), most first.
+    /// (talkgroup, label, conversations), most first. The label is the
+    /// RadioReference description ("IU Health North ER"), or the alpha tag
+    /// when the catalog has none.
     pub by_tg: Vec<(u16, String, u32)>,
 }
 
@@ -1427,7 +1429,8 @@ fn stats_rows(c: &Connection) -> Result<StoredStats, String> {
         }
         let mut stmt = c
             .prepare(
-                "SELECT tg, MAX(tg_name), COUNT(*) AS n FROM conversations GROUP BY tg ORDER BY n DESC, tg",
+                "SELECT tg, MAX(CASE WHEN tg_desc <> '' THEN tg_desc ELSE tg_name END), COUNT(*) AS n
+                 FROM conversations GROUP BY tg ORDER BY n DESC, tg",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
