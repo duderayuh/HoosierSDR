@@ -3192,6 +3192,19 @@ function dpCard(i) {
 }
 // How the pin got where it is. "grid" means the dispatcher's grid
 // reference placed it — a few hundred metres, not a doorstep.
+// When a mis-heard street was put right, keep what was actually said in
+// view — the listener is the one who can tell whether the swap was fair.
+function dpHeardAs(i, calls) {
+  if (i.geocode !== "corrected") return "";
+  for (const c of calls || []) {
+    let heard = "";
+    try { heard = (JSON.parse(c.extracted || "{}").address || "").trim(); } catch (_) {}
+    if (heard && heard.toLowerCase() !== String(i.address).toLowerCase()) {
+      return `<div class="faint sm">heard as “${esc(heard)}”</div>`;
+    }
+  }
+  return "";
+}
 function dpPlacedBadge(i) {
   if (!i.address) return "";
   if (i.lat == null) return `<span class="nogeo" title="address not found on the map — open details to fix it">⚠ unmapped</span>`;
@@ -3302,7 +3315,7 @@ async function dpDetails(id) {
       <div><div class="k">First heard · last update</div><div class="v">${t(i.created)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</div></div>
       <div><div class="k">Units</div><div class="v units" style="display:flex;flex-wrap:wrap;gap:4px">${dpUnits(i) || "—"}</div></div>
       <div><div class="k">Channel</div><div class="v">${esc(i.tg_name)} <span class="mono faint">TG ${i.tg}</span></div></div>
-      <div><div class="k">Address · as heard</div><div class="v">${esc(i.address) || "<span class='faint'>none</span>"}</div></div>
+      <div><div class="k">Address · as heard</div><div class="v">${esc(i.address) || "<span class='faint'>none</span>"}${dpHeardAs(i, d.calls)}</div></div>
       <div><div class="k">Validated</div><div class="v">${i.geocode === "grid" ? "<span class='warn'>≈ " + esc(i.validated) + " — approximate, from the grid reference</span>" : i.geocode === "corrected" ? "✎ " + esc(i.validated) + " <span class='faint'>(street name corrected)</span>" : i.validated ? "✓ " + esc(i.validated) : i.geocode === "manual" ? "placed by hand" : i.geocode === "none" ? "<span class='warn'>not found near home — fix the address below</span>" : i.geocode === "error" ? "<span class='warn'>geocoder error — try again</span>" : "<span class='faint'>—</span>"}</div></div>
       <div><div class="k">Coordinates</div><div class="v mono">${i.lat != null ? `${(+i.lat).toFixed(6)}, ${(+i.lon).toFixed(6)}` : "—"}</div></div>
       <div><div class="k">Summary</div><div class="v">${esc(i.summary) || "—"}</div></div>
