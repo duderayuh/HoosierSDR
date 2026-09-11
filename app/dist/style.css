@@ -1148,3 +1148,19 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dpcard .approx { color: var(--warn, #d8a657); border: 1px solid color-mix(in srgb, var(--warn, #d8a657) 40%, transparent); }
 .dpcard .fixedup { color: var(--accent, #7bd); border: 1px solid color-mix(in srgb, var(--accent, #7bd) 40%, transparent); }
 .dpmk.approx { opacity: .78; border-style: dashed; }
+
+/* The place book, in the Dispatch setup pane. */
+.pllist { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
+.plrow { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.plrow:hover { background: var(--row-hover, rgba(127,127,127,.08)); }
+.plrow.on { border-color: var(--accent, #7bd); background: color-mix(in srgb, var(--accent, #7bd) 10%, transparent); }
+.plrow.off { opacity: .5; }
+.plrow .em { font-size: 15px; }
+.plrow b { font-weight: 600; }
+.plrow .feat, .plrow .tgs { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); opacity: .85; white-space: nowrap; }
+.plrow .warn.sm { font-size: 11px; }
+.pledit { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line, rgba(127,127,127,.25)); display: flex; flex-direction: column; gap: 8px; }
+.plfeats { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.plfeats .check { font-size: 12px; }
+.plsuggest { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.plsuggest .from { font-size: 11px; opacity: .6; margin-left: 22px; font-family: var(--mono, monospace); }

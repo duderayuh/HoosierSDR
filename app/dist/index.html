@@ -310,6 +310,33 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Places</span><span class="meta" id="plMeta"></span><button class="btn ghost sm" id="plSuggest" title="Read the talkgroup catalog for hospitals it already names">Add from my catalog</button><button class="btn ghost sm" id="plAdd">+ Place</button></div>
+            <div class="body tight">
+              <p class="help">Hospitals, stations and landmarks, with the channels that belong to them. A place on the map lets a tripwire say how far away something is, and which hospital nearest the call can take it.</p>
+              <div id="plList" class="pllist"></div>
+              <div class="empty small" id="plEmpty">No places yet. If your catalog names the hospital channels, “Add from my catalog” fills this in.</div>
+              <div id="plEdit" class="pledit" style="display:none">
+                <div class="row3">
+                  <label class="field"><span class="lab">Name</span><input id="plName" type="text" spellcheck="false" /></label>
+                  <label class="field"><span class="lab">Kind</span><select id="plKind"><option value="hospital">Hospital</option><option value="station">Station</option><option value="landmark">Landmark</option><option value="other">Other</option></select></label>
+                  <label class="field"><span class="lab">&nbsp;</span><label class="check"><input id="plEnabled" type="checkbox" checked /> In use</label></label>
+                </div>
+                <div class="row2">
+                  <label class="field"><span class="lab">Address <span class="mono faint">or leave blank and search by name</span></span><input id="plAddress" type="text" spellcheck="false" /></label>
+                  <label class="field"><span class="lab">On the map <span class="mono faint" id="plWhere"></span></span><button class="btn ghost sm" id="plLocate" style="justify-self:start">Find on the map</button></label>
+                </div>
+                <label class="field"><span class="lab">What it can do <span class="mono faint">nothing is assumed — tick what you know</span></span></label>
+                <div id="plFeatures" class="plfeats"></div>
+                <div class="row2">
+                  <label class="field"><span class="lab">Anything else it can do <span class="mono faint">comma separated</span></span><input id="plOwnFeatures" type="text" spellcheck="false" placeholder="hyperbaric, replant" /></label>
+                  <label class="field"><span class="lab">Channels <span class="mono faint">traffic here is about this place</span></span><span class="inline"><input id="plTgs" type="text" spellcheck="false" placeholder="10257" /><button class="btn ghost sm" id="plPickTgs">Pick…</button></span></label>
+                </div>
+                <label class="field"><span class="lab">Notes</span><input id="plNotes" type="text" spellcheck="false" /></label>
+                <div class="inline"><button class="btn primary sm" id="plSave">Save</button><span class="spacer"></span><button class="btn ghost sm danger" id="plDelete">Delete</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Home &amp; geocoding</span><span class="meta" id="dpGeoMeta"></span></div>
             <div class="body tight">
               <div class="row3">
@@ -1282,5 +1309,6 @@
   <script src="retention.js"></script>
   <script src="connections.js"></script>
   <script src="tripwires.js"></script>
+  <script src="places.js"></script>
 </body>
 </html>
