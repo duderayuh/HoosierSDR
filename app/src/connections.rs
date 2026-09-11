@@ -196,7 +196,12 @@ pub fn sanitize_destinations(list: &mut Vec<Destination>) -> Result<(), String> 
     let mut seen = std::collections::HashSet::new();
     for (i, d) in list.iter_mut().enumerate() {
         d.id = crate::analyzers::clean_line(&d.id, 40);
-        if d.id.is_empty() || !d.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if d.id.is_empty()
+            || !d
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             d.id = format!("d{}-{i}", crate::library::now());
         }
         d.name = crate::analyzers::clean_line(&d.name, 60);
@@ -206,9 +211,18 @@ pub fn sanitize_destinations(list: &mut Vec<Destination>) -> Result<(), String> 
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@'))
         {
-            return Err(format!("destination “{}”: the chat id has unexpected characters", d.name));
+            return Err(format!(
+                "destination “{}”: the chat id has unexpected characters",
+                d.name
+            ));
         }
-        d.topic_id = d.topic_id.trim().chars().filter(|c| c.is_ascii_digit()).take(16).collect();
+        d.topic_id = d
+            .topic_id
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .take(16)
+            .collect();
         if d.name.is_empty() {
             d.name = if d.topic_id.is_empty() {
                 format!("Chat {}", d.chat_id)
@@ -269,7 +283,10 @@ pub async fn telegram_verify() -> Result<BotInfo, String> {
                 })
             }
         };
-        let mut r = agent(15).get(&url).call().map_err(|e| format!("telegram: {e}"))?;
+        let mut r = agent(15)
+            .get(&url)
+            .call()
+            .map_err(|e| format!("telegram: {e}"))?;
         let status = r.status().as_u16();
         let text = r.body_mut().read_to_string().unwrap_or_default();
         if status != 200 {
@@ -367,7 +384,10 @@ mod tests {
         let chats = parse_updates(&updates());
         assert_eq!(chats.len(), 3);
         let me = chats.iter().find(|c| c.id == "111").unwrap();
-        assert_eq!((me.kind.as_str(), me.title.as_str()), ("private", "Sam Rivera"));
+        assert_eq!(
+            (me.kind.as_str(), me.title.as_str()),
+            ("private", "Sam Rivera")
+        );
         let team = chats.iter().find(|c| c.id == "-1001").unwrap();
         assert!(team.is_forum);
         assert_eq!(team.title, "Test Team");
@@ -375,11 +395,20 @@ mod tests {
         assert_eq!(
             team.topics,
             vec![
-                Topic { id: 57, name: "Arrests".into() },
-                Topic { id: 64, name: "Stroke".into() }
+                Topic {
+                    id: 57,
+                    name: "Arrests".into()
+                },
+                Topic {
+                    id: 64,
+                    name: "Stroke".into()
+                }
             ]
         );
-        assert_eq!(chats.iter().find(|c| c.id == "-1002").unwrap().kind, "channel");
+        assert_eq!(
+            chats.iter().find(|c| c.id == "-1002").unwrap().kind,
+            "channel"
+        );
     }
 
     #[test]
@@ -388,7 +417,16 @@ mod tests {
             id: "-1001".into(),
             title: "Old title".into(),
             is_forum: true,
-            topics: vec![Topic { id: 99, name: "Quiet topic".into() }, Topic { id: 57, name: String::new() }],
+            topics: vec![
+                Topic {
+                    id: 99,
+                    name: "Quiet topic".into(),
+                },
+                Topic {
+                    id: 57,
+                    name: String::new(),
+                },
+            ],
             seen: 50,
             ..Default::default()
         }];
@@ -396,17 +434,41 @@ mod tests {
         let team = saved.iter().find(|c| c.id == "-1001").unwrap();
         assert_eq!(team.title, "Test Team");
         assert_eq!(team.topics.len(), 3, "{:?}", team.topics);
-        assert_eq!(team.topics[0], Topic { id: 57, name: "Arrests".into() });
-        assert!(team.topics.iter().any(|t| t.id == 99), "a quiet topic is not forgotten");
+        assert_eq!(
+            team.topics[0],
+            Topic {
+                id: 57,
+                name: "Arrests".into()
+            }
+        );
+        assert!(
+            team.topics.iter().any(|t| t.id == 99),
+            "a quiet topic is not forgotten"
+        );
         assert_eq!(saved[0].id, "-1002", "most recently seen first");
     }
 
     #[test]
     fn destinations_are_tidied() {
         let mut list = vec![
-            Destination { id: "a".into(), name: " ECPR › Arrests ".into(), chat_id: " -1001 ".into(), topic_id: "57x".into() },
-            Destination { id: "a".into(), name: "".into(), chat_id: "-1001".into(), topic_id: "".into() },
-            Destination { id: "../x".into(), name: "Nothing".into(), chat_id: "".into(), topic_id: "".into() },
+            Destination {
+                id: "a".into(),
+                name: " ECPR › Arrests ".into(),
+                chat_id: " -1001 ".into(),
+                topic_id: "57x".into(),
+            },
+            Destination {
+                id: "a".into(),
+                name: "".into(),
+                chat_id: "-1001".into(),
+                topic_id: "".into(),
+            },
+            Destination {
+                id: "../x".into(),
+                name: "Nothing".into(),
+                chat_id: "".into(),
+                topic_id: "".into(),
+            },
         ];
         sanitize_destinations(&mut list).unwrap();
         assert_eq!(list.len(), 2, "no chat, no destination");
@@ -414,7 +476,12 @@ mod tests {
         assert_eq!(list[0].target(), "-1001:57");
         assert_eq!(list[1].name, "Chat -1001");
         assert_ne!(list[0].id, list[1].id);
-        let mut bad = vec![Destination { id: "b".into(), name: "x".into(), chat_id: "12; drop".into(), topic_id: "".into() }];
+        let mut bad = vec![Destination {
+            id: "b".into(),
+            name: "x".into(),
+            chat_id: "12; drop".into(),
+            topic_id: "".into(),
+        }];
         assert!(sanitize_destinations(&mut bad).is_err());
     }
 }

@@ -547,16 +547,49 @@
           </div>
         </div>
         <div class="stack settings-page" id="set-library" style="display:none">
+      <section class="two-col">
+        <div class="stack">
           <div class="panel">
-            <div class="head"><span class="eyebrow">Library</span><span class="meta" id="libStats"></span></div>
+            <div class="head"><span class="eyebrow">Retention · what the library keeps</span><span class="meta" id="rtMeta"></span></div>
             <div class="body">
-              <div class="mono small" id="libDir">—</div>
-              <div class="row2" style="margin-top:8px">
-                <label class="field"><span class="lab">Delete calls older than (days) <span class="mono faint">auto-prunes daily · starred kept</span></span><input id="pruneDays" type="text" inputmode="numeric" placeholder="never" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="pruneNow" style="width:100%">Prune now</button></label>
+              <div class="rtnotice" id="rtNotice" style="display:none"></div>
+              <label class="check"><input id="rtEnabled" type="checkbox" /> Clean up automatically, every hour</label>
+              <div class="row2">
+                <label class="field"><span class="lab">Keep calls for <span class="mono faint">record + transcript · days · blank = forever</span></span><input id="rtRecord" type="text" inputmode="numeric" placeholder="forever" /></label>
+                <label class="field"><span class="lab">Keep their audio for <span class="mono faint">days · blank = as long as the call</span></span><input id="rtAudio" type="text" inputmode="numeric" placeholder="as long as the call" /></label>
               </div>
+              <div class="lab" style="margin-top:4px">Always keep</div>
+              <div class="inline" style="gap:16px;flex-wrap:wrap">
+                <label class="check" style="margin:0"><input id="rtStarred" type="checkbox" checked /> starred calls</label>
+                <label class="check" style="margin:0"><input id="rtFired" type="checkbox" checked /> calls a tripwire sent about</label>
+                <label class="check" style="margin:0"><input id="rtIncidents" type="checkbox" checked /> calls in an incident or hospital report</label>
+              </div>
+              <div class="head" style="padding-left:0;margin-top:8px"><span class="eyebrow">For particular talkgroups</span><span class="spacer"></span><button class="btn ghost sm" id="rtRuleAdd">+ Rule</button></div>
+              <div id="rtRules" class="list"></div>
+              <div class="empty small" id="rtRulesEmpty">Every talkgroup uses the defaults above. Add a rule to keep hospital channels longer, or a busy ops channel shorter.</div>
+              <div class="lab" style="margin-top:10px">Not worth keeping</div>
+              <div class="rtrows">
+                <label class="check" style="margin:0"><input id="rtShortOn" type="checkbox" /> Audio shorter than <input id="rtShort" type="text" inputmode="decimal" value="1.5" class="rtnum" /> s <span class="faint">(after it has been transcribed)</span></label>
+                <label class="check" style="margin:0"><input id="rtNoAudioOn" type="checkbox" /> Calls with no audio at all, after <input id="rtNoAudio" type="text" inputmode="numeric" value="24" class="rtnum" /> hours <span class="faint">(grants that carried no voice)</span></label>
+                <label class="check" style="margin:0"><input id="rtEncOn" type="checkbox" /> Encrypted calls, after <input id="rtEnc" type="text" inputmode="numeric" value="24" class="rtnum" /> hours</label>
+                <label class="check" style="margin:0"><input id="rtCapOn" type="checkbox" /> Keep audio under <input id="rtCap" type="text" inputmode="decimal" value="20" class="rtnum" /> GB <span class="faint">(oldest unprotected audio goes first)</span></label>
+                <label class="check" style="margin:0">Tripwire history: keep <input id="rtHistory" type="text" inputmode="numeric" value="180" class="rtnum" /> days</label>
+              </div>
+              <p class="help">Talkgroups whose audio is never recorded are set in <b>Aliases</b> (the ● Rec column) and <b>Audio &amp; recording</b>.</p>
+              <div class="inline" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary" id="rtSave">Save</button><button class="btn ghost" id="rtPreview">Preview</button><button class="btn ghost" id="rtApply">Clean up now</button><span class="help" id="rtPreviewOut"></span></div>
             </div>
           </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Library</span><span class="meta" id="libStats"></span><span class="spacer"></span><button class="btn ghost sm" id="rtUsageRefresh">↻</button></div>
+            <div class="body">
+              <div class="mono small" id="libDir">—</div>
+              <div class="rtusage" id="rtUsage"><span class="faint">Measuring…</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
         </div>
         <div class="stack settings-page" id="set-audio" style="display:none">
           <div class="panel">
@@ -1286,6 +1319,7 @@
   <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
   <script src="picker.js"></script>
+  <script src="retention.js"></script>
   <script src="connections.js"></script>
 </body>
 </html>

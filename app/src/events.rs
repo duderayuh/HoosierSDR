@@ -183,7 +183,10 @@ pub fn fired_for(c: &Connection, ids: &[i64]) -> HashMap<i64, Vec<Fired>> {
         for (call, f) in rows.flatten() {
             let v = out.entry(call).or_default();
             // Newest first, so the first outcome per rule is the one kept.
-            if !v.iter().any(|x| x.source == f.source && x.rule_id == f.rule_id) {
+            if !v
+                .iter()
+                .any(|x| x.source == f.source && x.rule_id == f.rule_id)
+            {
                 v.push(f);
             }
         }
@@ -389,8 +392,14 @@ mod tests {
         let f = fired_for(&c, &[1, 2, 9]);
         let one = &f[&1];
         assert_eq!(one.len(), 2, "{one:?}");
-        assert_eq!((one[0].rule_id.as_str(), one[0].status.as_str()), ("a", "sent"));
-        assert_eq!((one[1].rule_id.as_str(), one[1].status.as_str()), ("b", "quiet"));
+        assert_eq!(
+            (one[0].rule_id.as_str(), one[0].status.as_str()),
+            ("a", "sent")
+        );
+        assert_eq!(
+            (one[1].rule_id.as_str(), one[1].status.as_str()),
+            ("b", "quiet")
+        );
         assert_eq!(f[&2][0].status, "quiet");
         assert!(!f.contains_key(&9));
         assert!(!f.contains_key(&3), "only the asked-for calls");
@@ -404,10 +413,24 @@ mod tests {
         let all = list(&c, &EventQuery::default()).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].rule_id, "b", "newest first");
-        let a = list(&c, &EventQuery { rule_id: Some("a".into()), ..Default::default() }).unwrap();
+        let a = list(
+            &c,
+            &EventQuery {
+                rule_id: Some("a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(a[0].calls, vec![5, 6]);
         assert_eq!(a[0].message_ids, vec![41, 42]);
-        let by_call = list(&c, &EventQuery { call: Some(7), ..Default::default() }).unwrap();
+        let by_call = list(
+            &c,
+            &EventQuery {
+                call: Some(7),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(by_call.len(), 1);
         assert_eq!(by_call[0].status, "failed");
     }

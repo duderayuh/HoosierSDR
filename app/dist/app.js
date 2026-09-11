@@ -97,7 +97,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 // Pages that load something when shown. Playlists, Aliases, Alerts,
 // Analyzers, Devices and Discovery were top-level tabs once; their code
 // still refreshes only while on screen, via settingsPageVisible().
-const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
+const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", library: "libraryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
 let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
@@ -2384,25 +2384,11 @@ if (TAURI) {
   };
   $("trEnabled").onchange = $("trSave").onclick;
   async function libStatsRefresh() {
-    try { const [n, secs, tr, dir] = await invoke("library_stats"); $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
+    try { const st = await invoke("library_stats"); const [n, secs, tr, dir] = Array.isArray(st) ? st : [st.count, st.seconds, st.transcribed, st.dir]; $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
   }
-  const RET_KEY = "hs.retention";
-  const retentionDays = () => { const d = parseInt(store(RET_KEY, ""), 10); return Number.isFinite(d) && d >= 0 ? d : null; };
-  $("pruneDays").value = store(RET_KEY, "");
-  $("pruneDays").onchange = () => { save(RET_KEY, $("pruneDays").value); uiToast("Retention saved — calls older than this are auto-pruned (starred kept)."); };
-  async function autoPrune() {
-    const d = retentionDays(); if (d == null) return;
-    try { const n = await invoke("library_prune", { days: d }); if (n > 0) { log(`auto-prune: ${n} call${n === 1 ? "" : "s"} older than ${d} days deleted`); libStatsRefresh(); } } catch (e) { log(`auto-prune: ${e}`); }
-  }
-  $("pruneNow").onclick = async () => {
-    const d = parseInt($("pruneDays").value, 10); if (!Number.isFinite(d)) { alert("Enter a number of days."); return; }
-    save(RET_KEY, $("pruneDays").value);
-    if (!(await uiConfirm(`Delete unstarred calls older than ${d} days?`, "Delete"))) return;
-    try { const n = await invoke("library_prune", { days: d }); alert(`${n} calls deleted`); libStatsRefresh(); } catch (e) { alert(e); }
-  };
-  autoPrune();
-  setInterval(autoPrune, 12 * 3600 * 1000);
-  trRefresh(); libStatsRefresh();
+  // Retention (what the library keeps) lives in retention.js and the
+  // backend's hourly timer; the page no longer prunes by itself.
+  trRefresh(); libStatsRefresh(); window.libStatsRefresh = libStatsRefresh;
 
   /* ---------- transcript corrections (global + per-talkgroup) ---------- */
   let tcRules = [];

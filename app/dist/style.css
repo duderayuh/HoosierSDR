@@ -1019,3 +1019,18 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 @media (max-width: 700px) { .pkrow { grid-template-columns: auto 1fr auto; } .pkrow .d, .pkrow .n { display: none; } }
 .cxfoundh { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: 10px 0 2px; }
 .cxfound { align-items: center; }
+
+/* ---------- retention + disk use ---------- */
+.rtnotice { border: 1px solid color-mix(in srgb, var(--amber, #f5b544) 55%, transparent); background: color-mix(in srgb, var(--amber, #f5b544) 10%, transparent); color: var(--ink); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 8px; }
+.rtrows { display: grid; gap: 6px; margin: 4px 0; }
+.rtnum { width: 4.5em !important; display: inline-block; padding: 2px 6px !important; text-align: right; }
+.rtrule .rtname { width: auto; min-width: 10em; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 2px 4px; }
+.rtrule .rtname:hover, .rtrule .rtname:focus { border-color: var(--line); }
+.rtrulefields { gap: 6px; font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
+.rtusage { margin-top: 8px; font-size: 12.5px; }
+.rtstat { margin: 2px 0; }
+.rtline { display: grid; grid-template-columns: minmax(6em, 11em) 1fr auto; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
+.rtline .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rtline .v { color: var(--ink-faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.rtbar { display: block; height: 7px; border-radius: 4px; background: color-mix(in srgb, var(--ink-faint) 15%, transparent); overflow: hidden; }
+.rtbar span { display: block; height: 100%; background: var(--signal); border-radius: 4px; }

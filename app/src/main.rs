@@ -34,6 +34,7 @@ mod names;
 mod player;
 mod playlists;
 mod remotes;
+mod retention;
 mod rr;
 mod secrets;
 mod status;
@@ -137,6 +138,8 @@ struct AppState {
     /// names), so a remote desktop page joining mid-run can show the same
     /// controls as the local one. Cleared when the run ends.
     last_start: Mutex<Option<serde_json::Value>>,
+    /// What the call library keeps, and for how long.
+    retention: Mutex<retention::Settings>,
 }
 
 /// One live trunk-following run: a site (usually a playlist) being followed.
@@ -2252,6 +2255,8 @@ fn main() {
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
+            *state.retention.lock().unwrap() = retention::load(app.handle());
+            retention::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -2376,6 +2381,12 @@ fn main() {
             channels::channel_activity,
             channels::channel_sets_get,
             channels::channel_sets_set,
+            retention::retention_get,
+            retention::retention_set,
+            retention::retention_migrate,
+            retention::retention_preview,
+            retention::retention_apply,
+            retention::retention_usage,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,

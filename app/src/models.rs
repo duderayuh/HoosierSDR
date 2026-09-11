@@ -71,16 +71,24 @@ pub fn model_path(engine: &str, model: &str) -> Option<PathBuf> {
         // openai-whisper names its turbo file after the full model name.
         "openai-whisper" => Some(home().join(".cache/whisper").join(format!(
             "{}.pt",
-            if model == "turbo" { "large-v3-turbo" } else { model }
+            if model == "turbo" {
+                "large-v3-turbo"
+            } else {
+                model
+            }
         ))),
-        _ => hf_repo(engine, model).map(|r| hub().join(format!("models--{}", r.replace('/', "--")))),
+        _ => {
+            hf_repo(engine, model).map(|r| hub().join(format!("models--{}", r.replace('/', "--"))))
+        }
     }
 }
 
 /// Bytes a file or directory takes, counting each file once (the hub cache
 /// links snapshot files to its blobs; links are not followed).
 pub fn size_of(p: &Path) -> u64 {
-    let Ok(m) = std::fs::symlink_metadata(p) else { return 0 };
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return 0;
+    };
     if m.is_file() {
         return m.len();
     }
@@ -175,13 +183,28 @@ mod tests {
     #[test]
     fn paths_follow_each_engines_cache_layout() {
         let fw = model_path("faster-whisper", "turbo").unwrap();
-        assert!(fw.ends_with("models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"), "{fw:?}");
-        assert!(model_path("faster-whisper", "base").unwrap().ends_with("models--Systran--faster-whisper-base"));
-        assert!(model_path("faster-whisper", "distil-large-v3").unwrap().ends_with("models--Systran--faster-distil-whisper-large-v3"));
-        assert!(model_path("mlx-whisper", "turbo").unwrap().ends_with("models--mlx-community--whisper-turbo"));
-        assert!(model_path("mlx-whisper", "large-v3").unwrap().ends_with("models--mlx-community--whisper-large-v3-mlx"));
-        assert!(model_path("openai-whisper", "turbo").unwrap().ends_with(".cache/whisper/large-v3-turbo.pt"));
-        assert!(model_path("openai-whisper", "medium").unwrap().ends_with(".cache/whisper/medium.pt"));
+        assert!(
+            fw.ends_with("models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"),
+            "{fw:?}"
+        );
+        assert!(model_path("faster-whisper", "base")
+            .unwrap()
+            .ends_with("models--Systran--faster-whisper-base"));
+        assert!(model_path("faster-whisper", "distil-large-v3")
+            .unwrap()
+            .ends_with("models--Systran--faster-distil-whisper-large-v3"));
+        assert!(model_path("mlx-whisper", "turbo")
+            .unwrap()
+            .ends_with("models--mlx-community--whisper-turbo"));
+        assert!(model_path("mlx-whisper", "large-v3")
+            .unwrap()
+            .ends_with("models--mlx-community--whisper-large-v3-mlx"));
+        assert!(model_path("openai-whisper", "turbo")
+            .unwrap()
+            .ends_with(".cache/whisper/large-v3-turbo.pt"));
+        assert!(model_path("openai-whisper", "medium")
+            .unwrap()
+            .ends_with(".cache/whisper/medium.pt"));
     }
 
     #[test]

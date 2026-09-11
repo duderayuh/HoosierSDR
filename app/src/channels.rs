@@ -85,7 +85,10 @@ pub fn sanitize(s: &mut Settings) {
         }
         set.id = crate::analyzers::clean_line(&set.id, 40);
         if set.id.is_empty()
-            || !set.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || !set
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             || !ids.insert(set.id.clone())
         {
             set.id = format!("s{}-{i}", crate::library::now());
@@ -98,7 +101,10 @@ pub fn sanitize(s: &mut Settings) {
 }
 
 #[tauri::command]
-pub fn channel_activity(state: State<AppState>, hours: Option<u32>) -> Result<Vec<Activity>, String> {
+pub fn channel_activity(
+    state: State<AppState>,
+    hours: Option<u32>,
+) -> Result<Vec<Activity>, String> {
     let db = state
         .db
         .lock()
@@ -137,7 +143,12 @@ mod tests {
         let d = std::env::temp_dir().join(format!("hs_chan_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let c = crate::library::open(&d).unwrap();
-        for (tg, start, tr) in [(1001u16, 100i64, true), (1001, 200, false), (1002, 150, true), (1003, 10, true)] {
+        for (tg, start, tr) in [
+            (1001u16, 100i64, true),
+            (1001, 200, false),
+            (1002, 150, true),
+            (1003, 10, true),
+        ] {
             let id = crate::library::insert(
                 &c,
                 &crate::library::CallRow {
@@ -155,7 +166,10 @@ mod tests {
         }
         let a = activity(&c, 50).unwrap();
         assert_eq!(a.len(), 2, "1003 is before the window");
-        assert_eq!((a[0].tg, a[0].calls, a[0].transcribed, a[0].last_at), (1001, 2, 1, 200));
+        assert_eq!(
+            (a[0].tg, a[0].calls, a[0].transcribed, a[0].last_at),
+            (1001, 2, 1, 200)
+        );
         assert_eq!((a[1].tg, a[1].calls), (1002, 1));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -164,8 +178,16 @@ mod tests {
     fn sets_are_tidied() {
         let mut s = Settings {
             sets: vec![
-                ChannelSet { id: "a".into(), name: " Hospitals ".into(), tgs: vec![3, 1, 3, 2] },
-                ChannelSet { id: "a".into(), name: "".into(), tgs: vec![] },
+                ChannelSet {
+                    id: "a".into(),
+                    name: " Hospitals ".into(),
+                    tgs: vec![3, 1, 3, 2],
+                },
+                ChannelSet {
+                    id: "a".into(),
+                    name: "".into(),
+                    tgs: vec![],
+                },
             ],
         };
         sanitize(&mut s);

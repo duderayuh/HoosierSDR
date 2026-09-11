@@ -269,6 +269,7 @@ pub struct CallFacts {
     pub transcript: Option<String>,
     /// The system the call was heard on (its RadioReference name), so a
     /// rule can tell TG 10202 on one system from TG 10202 on another.
+    #[allow(dead_code)] // read by the Tripwires rule engine
     pub system: String,
 }
 
