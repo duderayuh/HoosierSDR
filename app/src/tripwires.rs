@@ -530,7 +530,12 @@ fn from_analyzer(r: &crate::analyzers::AnalyzerRule, al: &crate::alerts::Setting
         },
         check: Check {
             kind: "extract".into(),
-            engine: if r.engine == "cloud" { "cloud" } else { "local" }.into(),
+            engine: if r.engine == "cloud" {
+                "cloud"
+            } else {
+                "local"
+            }
+            .into(),
             prompt: r.instructions.clone(),
             think: r.think,
             fields: r.fields.clone(),
@@ -607,7 +612,8 @@ pub fn parse_bundle(text: &str) -> Result<Bundle, String> {
             tripwires: t.rules.iter().map(|r| from_analyzer(r, &al)).collect(),
         }
     } else if format == FORMAT {
-        let b: Bundle = serde_json::from_value(v).map_err(|e| format!("not a tripwire file: {e}"))?;
+        let b: Bundle =
+            serde_json::from_value(v).map_err(|e| format!("not a tripwire file: {e}"))?;
         if b.version > VERSION {
             return Err(format!(
                 "this file is version {}, newer than this app understands ({VERSION})",
@@ -622,7 +628,10 @@ pub fn parse_bundle(text: &str) -> Result<Bundle, String> {
         return Err("the file has no tripwires".into());
     }
     if b.tripwires.len() > 50 {
-        return Err(format!("the file has {} tripwires (limit 50)", b.tripwires.len()));
+        return Err(format!(
+            "the file has {} tripwires (limit 50)",
+            b.tripwires.len()
+        ));
     }
     b.name = clean_line(&b.name, 80);
     b.author = clean_line(&b.author, 80);
@@ -722,7 +731,12 @@ pub fn sanitize(t: &mut Tripwire) -> Result<(), String> {
         ("ask", _) | ("extract", _) => k.kind.clone(),
         _ => "none".into(),
     };
-    k.engine = if k.engine == "cloud" { "cloud" } else { "local" }.into();
+    k.engine = if k.engine == "cloud" {
+        "cloud"
+    } else {
+        "local"
+    }
+    .into();
     k.prompt = clean_text(&k.prompt, 12_000);
     k.match_mode = if k.match_mode.eq_ignore_ascii_case("any") {
         "any"
@@ -730,7 +744,12 @@ pub fn sanitize(t: &mut Tripwire) -> Result<(), String> {
         "all"
     }
     .into();
-    k.if_unavailable = if k.if_unavailable == "hold" { "hold" } else { "send" }.into();
+    k.if_unavailable = if k.if_unavailable == "hold" {
+        "hold"
+    } else {
+        "send"
+    }
+    .into();
     if k.fields.len() > 32 || k.conditions.len() > 32 {
         return Err(format!("'{}' has too many fields or conditions", t.name));
     }
@@ -844,6 +863,22 @@ pub fn matches(t: &Tripwire, f: &CallFacts) -> Option<Vec<String>> {
     (!m.is_empty()).then_some(m)
 }
 
+const STANDARD_TOKENS: &[&str] = &[
+    "name",
+    "alert",
+    "tg",
+    "tgname",
+    "tgdesc",
+    "unit",
+    "unitname",
+    "time",
+    "secs",
+    "transcript",
+    "keywords",
+    "ai",
+    "json",
+];
+
 /// Fill a message template. Tokens: `{name}` (also `{alert}`), `{tg}`,
 /// `{tgname}`, `{tgdesc}`, `{unit}`, `{unitname}`, `{time}`, `{secs}`,
 /// `{transcript}`, `{keywords}`, `{ai}`, `{json}`, `{field.KEY}`.
@@ -860,10 +895,13 @@ pub fn render(
     } else {
         crate::library::now()
     });
-    let unit = f
-        .unit_name
-        .clone()
-        .unwrap_or_else(|| if f.unit == 0 { String::new() } else { f.unit.to_string() });
+    let unit = f.unit_name.clone().unwrap_or_else(|| {
+        if f.unit == 0 {
+            String::new()
+        } else {
+            f.unit.to_string()
+        }
+    });
     let mut out = template
         .replace("{name}", name)
         .replace("{alert}", name)
@@ -890,6 +928,10 @@ pub fn render(
                     other => other.to_string(),
                 };
                 out = out.replace(&format!("{{field.{k}}}"), &s);
+                // `{candidate}` works too, unless it names a standard token.
+                if !STANDARD_TOKENS.contains(&k.as_str()) {
+                    out = out.replace(&format!("{{{k}}}"), &s);
+                }
             }
         }
     } else {
@@ -902,7 +944,8 @@ pub fn render(
             let t = l.trim();
             t.is_empty()
                 || !t.chars().all(|c| {
-                    c.is_whitespace() || matches!(c, '·' | '-' | '—' | '–' | '|' | ',' | ':' | '/' | '(' | ')')
+                    c.is_whitespace()
+                        || matches!(c, '·' | '-' | '—' | '–' | '|' | ',' | ':' | '/' | '(' | ')')
                 })
         })
         .collect::<Vec<_>>()
@@ -913,10 +956,13 @@ pub fn render(
 
 /// The text of a follow-up reply.
 fn follow_text(f: &CallFacts) -> String {
-    let who = f
-        .unit_name
-        .clone()
-        .unwrap_or_else(|| if f.unit == 0 { String::new() } else { f.unit.to_string() });
+    let who = f.unit_name.clone().unwrap_or_else(|| {
+        if f.unit == 0 {
+            String::new()
+        } else {
+            f.unit.to_string()
+        }
+    });
     let time = crate::library::local_hm(if f.start > 0 {
         f.start
     } else {
@@ -1021,7 +1067,7 @@ pub fn compile_rules(
     for t in list {
         // A blank result falls back to the engine's own default chat, which
         // is the same default — and an unresolvable one sends nowhere.
-        let chat = if t.send.telegram {
+        let chat = if t.send.telegram && !t.send.dest.is_empty() {
             resolve_dest(al, &t.send).unwrap_or_default()
         } else {
             String::new()
@@ -1105,7 +1151,8 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
     let live = {
         let mut st = state.tripwires.lock().unwrap();
         let now = crate::library::now();
-        st.threads.retain(|t| t.until > now && t.replies < MAX_REPLIES);
+        st.threads
+            .retain(|t| t.until > now && t.replies < MAX_REPLIES);
         !st.threads.is_empty()
     };
     if list.iter().all(|t| !needs_transcript(t)) && !live {
@@ -1179,7 +1226,8 @@ fn run_check(state: &AppState, t: &Tripwire, f: &CallFacts) -> Verdict {
                         Field {
                             key: "fire".into(),
                             kind: "bool".into(),
-                            desc: "true if the listener's instruction says to send this alert".into(),
+                            desc: "true if the listener's instruction says to send this alert"
+                                .into(),
                         },
                         Field {
                             key: "summary".into(),
@@ -1275,12 +1323,32 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
     let (note, fields) = match run_check(&state, &t, &f) {
         Verdict::Pass { note, fields } => (note, fields),
         Verdict::Quiet { why, fields } => {
-            record(app, &t, &f, "quiet", why, String::new(), &keywords, fields.as_ref(), (String::new(), Vec::new()));
+            record(
+                app,
+                &t,
+                &f,
+                "quiet",
+                why,
+                String::new(),
+                &keywords,
+                fields.as_ref(),
+                (String::new(), Vec::new()),
+            );
             return;
         }
         Verdict::Unavailable(e) => {
             if t.check.if_unavailable == "hold" {
-                record(app, &t, &f, "held", format!("check unavailable, held: {e}"), String::new(), &keywords, None, (String::new(), Vec::new()));
+                record(
+                    app,
+                    &t,
+                    &f,
+                    "held",
+                    format!("check unavailable, held: {e}"),
+                    String::new(),
+                    &keywords,
+                    None,
+                    (String::new(), Vec::new()),
+                );
                 return;
             }
             (format!("(AI check unavailable: {e})"), None)
@@ -1290,7 +1358,14 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
     let message = if is_reply {
         follow_text(&f)
     } else {
-        render(&t.send.message, &t.name, &f, &keywords, &note, fields.as_ref())
+        render(
+            &t.send.message,
+            &t.name,
+            &f,
+            &keywords,
+            &note,
+            fields.as_ref(),
+        )
     };
     let _ = app.emit(
         "alert",
@@ -1298,7 +1373,17 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
     );
     if !t.send.telegram {
         state.tripwires.lock().unwrap().last_sent.insert(key, now);
-        record(app, &t, &f, "sent", "in the app only".into(), message, &keywords, fields.as_ref(), (String::new(), Vec::new()));
+        record(
+            app,
+            &t,
+            &f,
+            "sent",
+            "in the app only".into(),
+            message,
+            &keywords,
+            fields.as_ref(),
+            (String::new(), Vec::new()),
+        );
         return;
     }
     let dest = match &reply_to {
@@ -1308,7 +1393,17 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
     let dest = match dest {
         Ok(d) => d,
         Err(e) => {
-            record(app, &t, &f, "failed", e, message, &keywords, fields.as_ref(), (String::new(), Vec::new()));
+            record(
+                app,
+                &t,
+                &f,
+                "failed",
+                e,
+                message,
+                &keywords,
+                fields.as_ref(),
+                (String::new(), Vec::new()),
+            );
             return;
         }
     };
@@ -1361,9 +1456,29 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
             } else {
                 detail
             };
-            record(app, &t, &f, "sent", detail, message, &keywords, fields.as_ref(), (dest, ids));
+            record(
+                app,
+                &t,
+                &f,
+                "sent",
+                detail,
+                message,
+                &keywords,
+                fields.as_ref(),
+                (dest, ids),
+            );
         }
-        Err(e) => record(app, &t, &f, "failed", e, message, &keywords, fields.as_ref(), (dest, Vec::new())),
+        Err(e) => record(
+            app,
+            &t,
+            &f,
+            "failed",
+            e,
+            message,
+            &keywords,
+            fields.as_ref(),
+            (dest, Vec::new()),
+        ),
     }
 }
 
@@ -1418,10 +1533,40 @@ fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
                 "alert",
                 serde_json::json!({ "name": t.name, "tg": f.tg, "message": message, "tone": false, "call": f.id, "follow": true }),
             );
-            let res = deliver(&state, &th.dest, &f, &message, &t.name, t.send.audio, 0, 0, Some(th.root));
+            let res = deliver(
+                &state,
+                &th.dest,
+                &f,
+                &message,
+                &t.name,
+                t.send.audio,
+                0,
+                0,
+                Some(th.root),
+            );
             match res {
-                Ok((d, ids)) => record(&app, &t, &f, "sent", format!("follow-up {d}"), message, &[], None, (th.dest.clone(), ids)),
-                Err(e) => record(&app, &t, &f, "failed", format!("follow-up: {e}"), message, &[], None, (th.dest.clone(), Vec::new())),
+                Ok((d, ids)) => record(
+                    &app,
+                    &t,
+                    &f,
+                    "sent",
+                    format!("follow-up {d}"),
+                    message,
+                    &[],
+                    None,
+                    (th.dest.clone(), ids),
+                ),
+                Err(e) => record(
+                    &app,
+                    &t,
+                    &f,
+                    "failed",
+                    format!("follow-up: {e}"),
+                    message,
+                    &[],
+                    None,
+                    (th.dest.clone(), Vec::new()),
+                ),
             }
         });
     }
@@ -1451,13 +1596,7 @@ fn deliver(
             .map(|id| ("sent".to_string(), vec![id])),
         Some((path, is_mp3)) => {
             let res = crate::alerts::send_audio_reply(
-                dest,
-                &path,
-                is_mp3,
-                message,
-                title,
-                &f.tg_name,
-                reply_to,
+                dest, &path, is_mp3, message, title, &f.tg_name, reply_to,
             );
             let _ = std::fs::remove_file(&path);
             res.map(|ids| {
@@ -1682,7 +1821,10 @@ pub fn recipes() -> Vec<Recipe> {
         ),
     ];
     // The analyzer screens (ECPR, stroke, arrest status and outcome).
-    for (i, a) in crate::analyzers::builtin_templates().into_iter().enumerate() {
+    for (i, a) in crate::analyzers::builtin_templates()
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("screen-{}", i + 1);
         let t = Tripwire {
             name: a.name.clone(),
@@ -1868,11 +2010,9 @@ pub async fn tripwire_test(app: AppHandle, id: String) -> Result<String, String>
         .ok_or("no such tripwire")?;
     match t.when.kind.as_str() {
         "conversation" => crate::conversations::conversation_test(app, id).await,
-        "digest" => {
-            tauri::async_runtime::spawn_blocking(move || crate::digest::run_now(app, &id))
-                .await
-                .map_err(|e| e.to_string())?
-        }
+        "digest" => tauri::async_runtime::spawn_blocking(move || crate::digest::run_now(app, &id))
+            .await
+            .map_err(|e| e.to_string())?,
         _ => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();
             let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
@@ -1890,7 +2030,12 @@ pub async fn tripwire_test(app: AppHandle, id: String) -> Result<String, String>
                             &c,
                             &crate::library::Query {
                                 tg,
-                                unit: t.when.units.first().copied().filter(|_| t.when.units.len() == 1),
+                                unit: t
+                                    .when
+                                    .units
+                                    .first()
+                                    .copied()
+                                    .filter(|_| t.when.units.len() == 1),
                                 limit: Some(200),
                                 ..Default::default()
                             },
@@ -1909,7 +2054,9 @@ pub async fn tripwire_test(app: AppHandle, id: String) -> Result<String, String>
                 .into_iter()
                 .map(|r| crate::alerts::facts_from_row(&app, r, None))
                 .collect();
-            let hit = facts.iter().find_map(|f| matches(&test, f).map(|kw| (f.clone(), kw)));
+            let hit = facts
+                .iter()
+                .find_map(|f| matches(&test, f).map(|kw| (f.clone(), kw)));
             let (f, kw, how) = match hit {
                 Some((f, kw)) => (f, kw, "the newest call it matches"),
                 None => {
@@ -1922,10 +2069,19 @@ pub async fn tripwire_test(app: AppHandle, id: String) -> Result<String, String>
                     if f.transcript.is_none() {
                         f.transcript = Some("(test — no transcript on this call)".into());
                     }
-                    (f, Vec::new(), "the newest call on its talkgroups (nothing matched it yet)")
+                    (
+                        f,
+                        Vec::new(),
+                        "the newest call on its talkgroups (nothing matched it yet)",
+                    )
                 }
             };
-            let desc = format!("“{}” against {how}: {} · {}", t.name, f.tg_name, crate::library::local_hm(f.start));
+            let desc = format!(
+                "“{}” against {how}: {} · {}",
+                t.name,
+                f.tg_name,
+                crate::library::local_hm(f.start)
+            );
             let app2 = app.clone();
             std::thread::spawn(move || fire(&app2, test, f, kw));
             Ok(format!("firing {desc}"))
@@ -2001,7 +2157,10 @@ mod tests {
         f.system = "Other System".into();
         assert_eq!(matches(&t, &f), None);
         f.system = String::new();
-        assert!(matches(&t, &f).is_some(), "an unknown system is not ruled out");
+        assert!(
+            matches(&t, &f).is_some(),
+            "an unknown system is not ruled out"
+        );
     }
 
     #[test]
@@ -2036,7 +2195,26 @@ mod tests {
         assert!(m.starts_with("Arrest: Medic 3/20308 by Medic 3 — CPR\n4 {"));
         assert!(m.ends_with("starting CPR"));
         assert!(!m.contains("{ai}"));
-        let plain = render("{name}\n{json}\n{transcript}", "X", &facts("hi"), &[], "", None);
+        let bare = render(
+            "{candidate} {tg}",
+            "X",
+            &facts(""),
+            &[],
+            "",
+            Some(&serde_json::json!({ "candidate": "maybe", "tg": "no" })),
+        );
+        assert_eq!(
+            bare, "maybe 20308",
+            "a field cannot shadow a standard token"
+        );
+        let plain = render(
+            "{name}\n{json}\n{transcript}",
+            "X",
+            &facts("hi"),
+            &[],
+            "",
+            None,
+        );
         assert_eq!(plain, "X\n\nhi");
     }
 
@@ -2139,20 +2317,36 @@ mod tests {
         assert_eq!(a.send.follow, "off", "no new behaviour sneaks in");
         let e = &list[1];
         assert!(e.when.emergency && e.when.phrases.is_empty());
-        assert_eq!((e.send.dest.as_str(), e.send.chat.as_str()), ("custom", "555"));
+        assert_eq!(
+            (e.send.dest.as_str(), e.send.chat.as_str()),
+            ("custom", "555")
+        );
         let z = &list[2];
-        assert_eq!((z.id.as_str(), z.check.kind.as_str(), z.check.engine.as_str()), ("z1", "extract", "cloud"));
+        assert_eq!(
+            (
+                z.id.as_str(),
+                z.check.kind.as_str(),
+                z.check.engine.as_str()
+            ),
+            ("z1", "extract", "cloud")
+        );
         assert_eq!(z.when.phrases, vec!["arrest"]);
         assert_eq!(z.check.conditions.len(), 1);
         let c = &list[3];
-        assert_eq!((c.when.kind.as_str(), c.check.kind.as_str()), ("conversation", "summarize"));
+        assert_eq!(
+            (c.when.kind.as_str(), c.check.kind.as_str()),
+            ("conversation", "summarize")
+        );
         assert_eq!(c.when.conversation.fixed_units, vec![900001]);
         assert_eq!(c.send.dest, "d1");
         // The digest's id "d1" is not a destination id clash — ids are per
         // rule list — but it must stay unique among tripwires.
         let d = &list[4];
         assert_eq!(d.id, "d1");
-        assert_eq!((d.when.digest.every_mins, d.when.digest.window_mins), (30, 15));
+        assert_eq!(
+            (d.when.digest.every_mins, d.when.digest.window_mins),
+            (30, 15)
+        );
         for mut t in list {
             sanitize(&mut t).unwrap();
         }
@@ -2170,8 +2364,22 @@ mod tests {
         assert_eq!(digests.len(), 1);
         let (g, o) = (&digests[0], &dg.rules[0]);
         assert_eq!(
-            (&g.id, &g.tgs, g.interval_secs, g.window_secs, &g.prompt, &g.message),
-            (&o.id, &o.tgs, o.interval_secs, o.window_secs, &o.prompt, &o.message)
+            (
+                &g.id,
+                &g.tgs,
+                g.interval_secs,
+                g.window_secs,
+                &g.prompt,
+                &g.message
+            ),
+            (
+                &o.id,
+                &o.tgs,
+                o.interval_secs,
+                o.window_secs,
+                &o.prompt,
+                &o.message
+            )
         );
         assert_eq!(g.chat_id, "", "no chat set = the default");
     }
@@ -2244,12 +2452,23 @@ mod tests {
         assert_ne!(got.id, "t1");
         assert_eq!(got.when.phrases, vec!["cpr"]);
         // An old analyzer template still imports.
-        let old = crate::analyzers::make_template(crate::analyzers::builtin_templates(), "Screens", "", "");
+        let old = crate::analyzers::make_template(
+            crate::analyzers::builtin_templates(),
+            "Screens",
+            "",
+            "",
+        );
         let b = parse_bundle(&serde_json::to_string(&old).unwrap()).unwrap();
         assert_eq!(b.tripwires.len(), old.rules.len());
-        assert!(b.tripwires.iter().all(|t| t.check.kind == "extract" && !t.enabled));
+        assert!(b
+            .tripwires
+            .iter()
+            .all(|t| t.check.kind == "extract" && !t.enabled));
         assert!(parse_bundle("{}").is_err());
-        assert!(parse_bundle(&format!("{{\"format\":\"{FORMAT}\",\"version\":9,\"tripwires\":[]}}")).is_err());
+        assert!(parse_bundle(&format!(
+            "{{\"format\":\"{FORMAT}\",\"version\":9,\"tripwires\":[]}}"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2259,5 +2478,56 @@ mod tests {
         let s = follow_text(&f);
         assert!(s.starts_with("↳ Medic 3 · Medic 3 · "));
         assert!(s.ends_with("on scene, starting compressions"));
+    }
+}
+
+/// `HS_MIGRATE_DIR=<config dir> cargo test migrate_a_real_config -- --ignored
+/// --nocapture` prints what the first start would build from that
+/// directory's rule files (read-only).
+#[cfg(test)]
+mod real_config {
+    #[test]
+    #[ignore]
+    fn migrate_a_real_config() {
+        let Ok(dir) = std::env::var("HS_MIGRATE_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        fn read<T: serde::de::DeserializeOwned + Default>(p: std::path::PathBuf) -> T {
+            std::fs::read_to_string(&p)
+                .ok()
+                .map(|t| {
+                    serde_json::from_str(&t).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                })
+                .unwrap_or_default()
+        }
+        let al: crate::alerts::Settings = read(dir.join("alerts.json"));
+        let az: crate::analyzers::Settings = read(dir.join("analyzers.json"));
+        let cv: crate::conversations::Settings = read(dir.join("conversations.json"));
+        let dg: crate::digest::Settings = read(dir.join("digests.json"));
+        let mut list = super::migrate(&al, &az, &cv, &dg);
+        for t in &mut list {
+            super::sanitize(t).unwrap_or_else(|e| panic!("{}: {e}", t.name));
+        }
+        println!("{}", serde_json::to_string_pretty(&list).unwrap());
+        let (convs, digests) = super::compile_rules(&list, &al);
+        for (a, b) in convs.iter().zip(&cv.rules) {
+            if a != b {
+                println!("CONVERSATION DIFFERS {}:\n  old {b:?}\n  new {a:?}", a.id);
+            }
+        }
+        for (a, b) in digests.iter().zip(&dg.rules) {
+            if a != b {
+                println!("DIGEST DIFFERS {}:\n  old {b:?}\n  new {a:?}", a.id);
+            }
+        }
+        println!(
+            "{} alerts + {} analyzers + {} conversations + {} digests → {} tripwires",
+            al.alerts.len(),
+            az.rules.len(),
+            cv.rules.len(),
+            dg.rules.len(),
+            list.len()
+        );
     }
 }
