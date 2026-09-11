@@ -60,6 +60,7 @@
     $("plEnabled").checked = p.enabled !== false;
     $("plWhere").textContent = p.lat != null ? `${(+p.lat).toFixed(5)}, ${(+p.lon).toFixed(5)}` : "not on the map yet";
     $("plTgs").value = (p.tgs || []).join(", ");
+    $("plSystem").value = p.system || "";
     const own = (p.features || []).filter((f) => !features.some(([k]) => k === f));
     $("plFeatures").innerHTML = features.map(([k, lab]) =>
       `<label class="check"><input type="checkbox" data-feat="${esc(k)}" ${(p.features || []).includes(k) ? "checked" : ""} /> ${esc(lab)}</label>`).join("");
@@ -74,6 +75,7 @@
     p.notes = $("plNotes").value.trim();
     p.enabled = $("plEnabled").checked;
     p.tgs = $("plTgs").value.split(/[^0-9]+/).filter(Boolean).map(Number).slice(0, 32);
+    p.system = $("plSystem").value.trim();
     const ticked = [...$("plFeatures").querySelectorAll("[data-feat]")].filter((i) => i.checked).map((i) => i.dataset.feat);
     const own = $("plOwnFeatures").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     p.features = [...new Set([...ticked, ...own])];
@@ -134,30 +136,32 @@
       const picked = await ask(list);
       if (!picked || !picked.length) return;
       for (const s of picked) {
-        places.push({ id: "", name: s.name, kind: s.kind, features: [], tgs: [s.tg], enabled: true, notes: `From the catalog: ${s.from}` });
+        places.push({ id: "", name: s.name, kind: s.kind, features: [], tgs: [s.tg], system: s.system, enabled: true, notes: `From the catalog: ${s.from}` });
       }
       await save(`Added ${picked.length} place${picked.length === 1 ? "" : "s"} — now find each on the map and tick what it can do`);
     } catch (e) { uiToast(`${e}`, "err"); }
     finally { b.disabled = false; }
   }
 
-  // A plain modal: every suggestion ticked, the listener unticks what they
-  // don't want. The catalog line is shown so they can judge each one.
+  // System names off RadioReference are a mouthful ("… (Formerly IDPS)");
+  // the part before the first bracket is the name people use.
+  const shortSystem = (s) => String(s).split("(")[0].trim() || s;
+
+  // The app's own modal, so this looks like every other sheet: everything
+  // ticked, the listener unticks what they don't want, and each row shows
+  // the catalog line it was read from so they can judge it.
   function ask(list) {
     return new Promise((resolve) => {
-      const wrap = document.createElement("div");
-      wrap.className = "modal";
-      wrap.innerHTML = `<div class="sheet">
-        <div class="head"><b>Places your catalog names</b><span class="meta">${list.length} hospital channel${list.length === 1 ? "" : "s"}</span></div>
-        <div class="body plsuggest">${list.map((s, i) => `
-          <label class="check"><input type="checkbox" data-i="${i}" checked />
-            <b>${esc(s.name)}</b> <span class="mono faint">${esc(s.tg_name)}</span>
-            <div class="from">${esc(s.from)}</div></label>`).join("")}</div>
-        <div class="foot"><span class="faint sm">Each is added unplaced, with nothing ticked about what it can do.</span><span class="spacer"></span>
-          <button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Add these</button></div>
-      </div>`;
-      document.body.appendChild(wrap);
-      const close = (v) => { wrap.remove(); resolve(v); };
+      const html = `
+        <div class="xport" style="margin:0 0 10px"><b>Places your catalog names</b><span class="spacer"></span><span class="faint sm">${list.length} hospital channel${list.length === 1 ? "" : "s"}</span></div>
+        <div class="plsuggest">${list.map((s, i) => `
+          <label class="plsug"><input type="checkbox" data-i="${i}" checked />
+            <span class="who"><b>${esc(s.name)}</b><span class="mono faint">${esc(s.tg_name)}${s.system ? " · " + esc(shortSystem(s.system)) : ""}</span></span>
+            <span class="from">${esc(s.from)}</span></label>`).join("")}</div>
+        <div class="xport" style="margin:12px 0 0"><span class="faint sm">Each arrives unplaced, with nothing ticked about what it can do.</span><span class="spacer"></span>
+          <button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Add these</button></div>`;
+      const wrap = uiModal(html, { wide: true });
+      const close = (v) => { wrap.close(); resolve(v); };
       wrap.querySelector("[data-no]").onclick = () => close(null);
       wrap.querySelector("[data-yes]").onclick = () => close(
         [...wrap.querySelectorAll("[data-i]")].filter((i) => i.checked).map((i) => list[+i.dataset.i]));

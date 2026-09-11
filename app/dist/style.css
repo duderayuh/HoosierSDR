@@ -1162,5 +1162,10 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .pledit { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line, rgba(127,127,127,.25)); display: flex; flex-direction: column; gap: 8px; }
 .plfeats { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .plfeats .check { font-size: 12px; }
-.plsuggest { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
-.plsuggest .from { font-size: 11px; opacity: .6; margin-left: 22px; font-family: var(--mono, monospace); }
+.plsuggest { display: flex; flex-direction: column; gap: 2px; max-height: 52vh; overflow-y: auto; }
+.plsug { display: grid; grid-template-columns: 18px 1fr; gap: 2px 8px; align-items: baseline; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+.plsug:hover { background: var(--row-hover, rgba(127,127,127,.08)); }
+.plsug input { margin: 0; }
+.plsug .who { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.plsug .who .mono { font-size: 11px; }
+.plsug .from { grid-column: 2; font-size: 11px; opacity: .55; font-family: var(--mono, monospace); }
