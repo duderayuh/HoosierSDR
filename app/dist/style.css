@@ -144,6 +144,246 @@
 }
 
 
+/* ---- more schemes: editors' classics, seasons, and the Speedway ---- */
+:root[data-theme="nord"] {
+  --bg:         #2e3440;
+  --panel:      #3b4252;
+  --panel-2:    #434c5e;
+  --line:       #4c566a;
+  --line-soft:  #3f4859;
+  --ink:        #eceff4;
+  --ink-dim:    #d8dee9;
+  --ink-faint:  #a3adc2;
+  --signal:     #88c0d0;
+  --signal-2:   #5e81ac;
+  --amber:      #ebcb8b;
+  --clear:      #a3be8c;
+  --enc:        #bf616e;
+  --scope-bg:   #242933;
+  --scope-grid: #3b4252;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(136,192,208,.10);
+}
+:root[data-theme="dracula"] {
+  --bg:         #1e1f29;
+  --panel:      #282a36;
+  --panel-2:    #303241;
+  --line:       #44475a;
+  --line-soft:  #363848;
+  --ink:        #f8f8f2;
+  --ink-dim:    #c9cbd8;
+  --ink-faint:  #8e91a8;
+  --signal:     #bd93f9;
+  --signal-2:   #9b6fe6;
+  --amber:      #f1fa8c;
+  --clear:      #50fa7b;
+  --enc:        #ff5555;
+  --scope-bg:   #16171f;
+  --scope-grid: #2b2d3a;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(189,147,249,.12);
+}
+:root[data-theme="gruvbox"] {
+  --bg:         #1d2021;
+  --panel:      #282828;
+  --panel-2:    #32302f;
+  --line:       #504945;
+  --line-soft:  #3c3836;
+  --ink:        #ebdbb2;
+  --ink-dim:    #d5c4a1;
+  --ink-faint:  #a89984;
+  --signal:     #fabd2f;
+  --signal-2:   #d79921;
+  --amber:      #fe8019;
+  --clear:      #b8bb26;
+  --enc:        #fb4934;
+  --scope-bg:   #141617;
+  --scope-grid: #2b2b2b;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(250,189,47,.10);
+}
+:root[data-theme="sepia"] {
+  --bg:         #ede4d3;
+  --panel:      #f8f2e6;
+  --panel-2:    #f0e8d8;
+  --line:       #d6c8ad;
+  --line-soft:  #e4d9c4;
+  --ink:        #3b2f1e;
+  --ink-dim:    #5e4d36;
+  --ink-faint:  #7d6a4f;
+  --signal:     #8a5a1b;
+  --signal-2:   #6d4514;
+  --amber:      #a86b0a;
+  --clear:      #4f7a2a;
+  --enc:        #a83a32;
+  --scope-bg:   #1a140c;
+  --scope-grid: #2e2415;
+  --shadow:     0 1px 2px rgba(10,30,28,.10), 0 8px 30px rgba(10,30,28,.06);
+  --glow:       none;
+}
+/* Winter: snow on a clear morning. */
+:root[data-theme="snow"] {
+  --bg:         #e8eef6;
+  --panel:      #fbfdff;
+  --panel-2:    #eef3fa;
+  --line:       #cfdbe8;
+  --line-soft:  #dfe7f1;
+  --ink:        #0e1c2e;
+  --ink-dim:    #33475e;
+  --ink-faint:  #5a6f87;
+  --signal:     #1f6fb2;
+  --signal-2:   #17568c;
+  --amber:      #b8791a;
+  --clear:      #2b8a66;
+  --enc:        #c23b5a;
+  --scope-bg:   #071019;
+  --scope-grid: #16273a;
+  --shadow:     0 1px 2px rgba(10,30,28,.10), 0 8px 30px rgba(10,30,28,.06);
+  --glow:       none;
+}
+/* February. */
+:root[data-theme="valentine"] {
+  --bg:         #f7e3ea;
+  --panel:      #fff5f8;
+  --panel-2:    #fbe9ef;
+  --line:       #ecc5d2;
+  --line-soft:  #f3d8e1;
+  --ink:        #3d1220;
+  --ink-dim:    #6b2a40;
+  --ink-faint:  #8f5568;
+  --signal:     #d0325f;
+  --signal-2:   #a8244a;
+  --amber:      #c2731c;
+  --clear:      #2e8b62;
+  --enc:        #b01737;
+  --scope-bg:   #1c0810;
+  --scope-grid: #3a1220;
+  --shadow:     0 1px 2px rgba(10,30,28,.10), 0 8px 30px rgba(10,30,28,.06);
+  --glow:       none;
+}
+/* March: four-leaf clover and gold. */
+:root[data-theme="clover"] {
+  --bg:         #06140b;
+  --panel:      #0c2114;
+  --panel-2:    #11301b;
+  --line:       #1f4a2c;
+  --line-soft:  #163a22;
+  --ink:        #e8f5e9;
+  --ink-dim:    #b7d8bd;
+  --ink-faint:  #83a98b;
+  --signal:     #3ddc84;
+  --signal-2:   #22b866;
+  --amber:      #f4c542;
+  --clear:      #7be495;
+  --enc:        #ff6b6b;
+  --scope-bg:   #030c06;
+  --scope-grid: #0f2a17;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(61,220,132,.12);
+}
+/* Autumn. */
+:root[data-theme="harvest"] {
+  --bg:         #1a1008;
+  --panel:      #24170c;
+  --panel-2:    #2e1e10;
+  --line:       #4a3319;
+  --line-soft:  #3a2813;
+  --ink:        #f6e7d2;
+  --ink-dim:    #d9c0a1;
+  --ink-faint:  #a98c6b;
+  --signal:     #e3762e;
+  --signal-2:   #b85a1c;
+  --amber:      #f0b429;
+  --clear:      #9bbf3b;
+  --enc:        #d8433a;
+  --scope-bg:   #100904;
+  --scope-grid: #2a1a0b;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(227,118,46,.10);
+}
+/* October. */
+:root[data-theme="haunt"] {
+  --bg:         #0d0a14;
+  --panel:      #15101f;
+  --panel-2:    #1c1529;
+  --line:       #34264a;
+  --line-soft:  #251b37;
+  --ink:        #f3ecff;
+  --ink-dim:    #c9b8e6;
+  --ink-faint:  #9483b3;
+  --signal:     #ff7a1a;
+  --signal-2:   #d95f08;
+  --amber:      #ffb000;
+  --clear:      #8fe36b;
+  --enc:        #ff3b5c;
+  --scope-bg:   #08060d;
+  --scope-grid: #1e1630;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(255,122,26,.12);
+}
+/* December. */
+:root[data-theme="yuletide"] {
+  --bg:         #0b1a12;
+  --panel:      #10241a;
+  --panel-2:    #153021;
+  --line:       #285039;
+  --line-soft:  #1d3f2b;
+  --ink:        #f4efe6;
+  --ink-dim:    #cfd8cf;
+  --ink-faint:  #98ab9c;
+  --signal:     #e63946;
+  --signal-2:   #b82a35;
+  --amber:      #f2c14e;
+  --clear:      #5fcf7a;
+  --enc:        #ff5a6e;
+  --scope-bg:   #05100a;
+  --scope-grid: #143622;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(230,57,70,.12);
+}
+/* IndyCar: series red on black. */
+:root[data-theme="indycar"] {
+  --bg:         #0a0a0b;
+  --panel:      #131316;
+  --panel-2:    #1a1a1f;
+  --line:       #2c2c33;
+  --line-soft:  #222227;
+  --ink:        #f5f5f7;
+  --ink-dim:    #c6c6cf;
+  --ink-faint:  #8d8d99;
+  --signal:     #e4002b;
+  --signal-2:   #b30022;
+  --amber:      #ffd400;
+  --clear:      #3ddc84;
+  --enc:        #ff5e7a;
+  --scope-bg:   #050506;
+  --scope-grid: #1c1c22;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(228,0,43,.14);
+}
+/* The Brickyard: Speedway brick, wing-and-wheel gold, and a checkered flag under the top bar. */
+:root[data-theme="brickyard"] {
+  --bg:         #120c0a;
+  --panel:      #1c1210;
+  --panel-2:    #261815;
+  --line:       #4a2e28;
+  --line-soft:  #36211d;
+  --ink:        #f7efe9;
+  --ink-dim:    #d8c7bf;
+  --ink-faint:  #a48f86;
+  --signal:     #d4a24c;
+  --signal-2:   #a97c30;
+  --amber:      #f2c14e;
+  --clear:      #7bd389;
+  --enc:        #c8102e;
+  --scope-bg:   #0a0605;
+  --scope-grid: #2b1a15;
+  --shadow:     0 1px 0 rgba(255,255,255,.02), 0 10px 34px rgba(0,0,0,.5);
+  --glow:       0 0 22px rgba(212,162,76,.12);
+}
+:root[data-theme="brickyard"] .topbar { border-bottom: 5px solid transparent; border-image: repeating-linear-gradient(90deg, #f4f1ec 0 9px, #17110f 9px 18px) 5; }
+:root[data-theme="indycar"] .topbar { border-bottom: 3px solid var(--signal); }
+
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 13.5px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
@@ -464,14 +704,14 @@ th.sortable:hover { color: var(--ink); }
 th.sortable.asc::after { content: " ▲"; } th.sortable.desc::after { content: " ▼"; }
 td.act button.on-ok { color: var(--clear); border-color: var(--clear); }
 td.act button.off { opacity: .35; text-decoration: line-through; }
-#view-aliases .tablewrap.tgs { max-height: none; flex: 1; }
-#view-aliases .panel:first-child { display: flex; flex-direction: column; height: 100%; }
-#view-aliases .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#set-aliases .tablewrap.tgs { max-height: none; flex: 1; }
+#set-aliases .panel:first-child { display: flex; flex-direction: column; height: 100%; }
+#set-aliases .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .wrap { margin-bottom: calc(24px + 8px); }   /* the fixed status bar is 24px here */
-#view-aliases .panel:first-child { display: block; height: auto; }
-#view-aliases .panel:first-child > .body { display: block; }
-#view-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
-#view-aliases .stack:first-child > .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#set-aliases .panel:first-child { display: block; height: auto; }
+#set-aliases .panel:first-child > .body { display: block; }
+#set-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
+#set-aliases .stack:first-child > .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* Settings: left sidebar + one page per topic (multicol removed) */
 #view-settings .settings-layout { display: flex; gap: 10px; height: 100%; }
 #view-settings .settings-nav { width: 160px; flex: 0 0 auto; padding: 2px 0; }
@@ -680,3 +920,14 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .cvstats3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
 #cvStBody td:last-child { text-align: right; font-family: var(--mono); }
 #cvStBody tr { cursor: pointer; }
+
+/* ---------- draggable top tabs ---------- */
+.seg.nav button.dragging { opacity: .35; }
+
+/* ---------- theme picker swatches ---------- */
+.chips .chip .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.25); }
+
+/* ---------- inline transcript editing ---------- */
+td.tr.editing { padding: 2px 4px; white-space: normal; }
+.tr-edit { width: 100%; min-width: 240px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.4; background: var(--panel-2); color: var(--ink); border: 1px solid var(--signal); border-radius: 6px; padding: 4px 6px; resize: vertical; }
+td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }

@@ -6,7 +6,7 @@
   <title>HoosierSDR</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600&display=swap" />
   <link rel="stylesheet" href="vendor/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -18,12 +18,7 @@
       <button data-v="monitor" aria-pressed="true">Monitor</button>
       <button data-v="library" aria-pressed="false">Library</button>
       <button data-v="conversations" aria-pressed="false">Conversations</button>
-      <button data-v="playlists" aria-pressed="false">Playlists</button>
-      <button data-v="aliases" aria-pressed="false">Aliases</button>
-      <button data-v="alerts" aria-pressed="false">Alerts</button>
-      <button data-v="analyzers" aria-pressed="false">Analyzers</button>
       <button data-v="dispatch" aria-pressed="false">Dispatch</button>
-      <button data-v="devices" aria-pressed="false">Devices</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
     <span class="spacer"></span>
@@ -261,335 +256,6 @@
       </section>
     </div>
 
-    <!-- ===================== ALIASES ===================== -->
-    <div class="view" id="view-aliases" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Talkgroup aliases</span>
-              <input id="alFilter" type="text" placeholder="filter: name, description, category, TG…" spellcheck="false" />
-              <select id="alSource" title="Alias source (system / CSV)" style="width:auto;max-width:220px;padding:4px 26px 4px 8px;font-size:11.5px"><option value="">all sources</option></select>
-              <span class="meta" id="alMeta"></span></div>
-            <div class="body tight">
-              <div class="xport">
-                <label class="field" style="margin:0;flex:1"><span class="lab">Check a talkgroup</span>
-                  <span class="inline"><input id="alCheck" type="text" inputmode="numeric" placeholder="20305" spellcheck="false" /><button class="btn ghost sm" id="alCheckGo">Is it loaded?</button></span></label>
-                <span class="mono small" id="alCheckResult" style="flex:2"></span>
-              </div>
-              <div class="tablewrap tgs" style="max-height:calc(64vh / var(--z))">
-                <table><thead><tr><th><input type="checkbox" id="alTickAll" title="tick shown" /></th><th data-sort="id" class="sortable">TG</th><th data-sort="alias" class="sortable">Alpha tag</th><th data-sort="description" class="sortable">Description</th><th data-sort="tag" class="sortable">Tag</th><th data-sort="category" class="sortable">Category</th><th data-sort="source" class="sortable">Source</th><th class="actions-h" title="Record · Stream · Upload">Rec · Str · Up</th><th class="actions-h">Colour · Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
-              </div>
-              <div class="xport" style="margin:6px 0 0">
-                <span class="faint">Ticked →</span>
-                <input id="grpName" type="text" placeholder="group name, e.g. Hospitals" spellcheck="false" style="max-width:200px" />
-                <button class="btn ghost sm" id="grpMake">Make / add to group</button>
-                <span class="meta" id="grpMeta"></span>
-              </div>
-              <div id="grpList" class="list" style="max-height:90px;margin-top:4px"></div>
-              <div class="xport" style="margin:6px 0 0">
-                <span class="faint">Shown talkgroups:</span>
-                <button class="btn ghost sm" data-bulk="record:on">record</button><button class="btn ghost sm" data-bulk="record:off">don't record</button>
-                <button class="btn ghost sm" data-bulk="stream:on">stream</button><button class="btn ghost sm" data-bulk="stream:off">don't stream</button>
-                <button class="btn ghost sm" data-bulk="upload:on">upload</button><button class="btn ghost sm" data-bulk="upload:off">don't upload</button>
-                <span class="meta" id="polMeta"></span>
-              </div>
-              <div class="empty" id="alEmpty"><span class="big">No aliases loaded</span>Load a system from RadioReference in Playlists, or import a talkgroup CSV below.</div>
-            </div>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Alias sources</span><span class="meta" id="srcMeta"></span></div>
-            <div class="body tight">
-              <div id="srcList" class="list"></div>
-              <p class="help">Each RadioReference system you load (Playlists → Load) and each CSV you import is kept here and merged; the newest source wins when two name the same talkgroup. Priority, alert, avoid and lock-out are your own settings and apply whichever source names the talkgroup — the same model as SDRTrunk's alias lists.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Talkgroup ranges</span><span class="meta" id="rgMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">From</span><input id="rgLo" type="text" inputmode="numeric" placeholder="10000" spellcheck="false" /></label>
-                <label class="field"><span class="lab">To</span><input id="rgHi" type="text" inputmode="numeric" placeholder="10999" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Label</span><input id="rgName" type="text" placeholder="County" spellcheck="false" /></label>
-              </div>
-              <div class="row3">
-                <label class="field"><span class="lab">Priority</span><input type="number" id="rgPri" class="priin" min="1" max="99" placeholder="50" title="1 = highest, 99 = lowest; blank = normal" /></label>
-                <label class="field"><span class="lab">Colour</span><select id="rgColor"><option value="">none</option></select></label>
-                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="rgLock" type="checkbox" /> lock out</label><label class="check" style="margin:0"><input id="rgBell" type="checkbox" /> 🔔</label><button class="btn ghost" id="rgAdd">Add</button></span></label>
-              </div>
-              <div id="rgList" class="list" style="max-height:200px"></div>
-              <p class="help">A rule covers every talkgroup in the range — the way SDRTrunk alias ranges and OP25 whitelists work. Explicit per-talkgroup settings win over a range; the engine applies lock-out and priority ranges natively.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="unitSave" style="width:100%">Save</button></label>
-              </div>
-              <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
-                <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
-              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
-              <div class="lab" style="margin-top:10px">Wildcard rules <span class="mono faint">regex over the radio ID · $1 captures · first match wins</span></div>
-              <div class="row3">
-                <label class="field"><span class="lab">Pattern</span><input id="urPat" type="text" placeholder="^49001(\d\d)$" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Name</span><input id="urName" type="text" placeholder="Fleet $1" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><button class="btn ghost" id="urAdd">Add rule</button><input id="urTry" type="text" inputmode="numeric" placeholder="try an ID" style="max-width:110px" /></span></label>
-              </div>
-              <div class="mono small" id="urTryOut"></div>
-              <div id="urList" class="list" style="max-height:160px"></div>
-              <label class="check" style="margin-top:8px"><input id="learnAliases" type="checkbox" /> Remember aliases the system broadcasts over the air (Motorola talker alias; experimental)</label>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
-            <div class="body">
-              <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>
-                <span class="inline"><input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" /><button class="btn ghost" id="loadcat">Load</button></span></label>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <!-- ===================== ALERTS ===================== -->
-    <div class="view" id="view-alerts" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Alerts</span><span class="meta" id="akMeta"></span><button class="btn primary sm" id="akNew">+ New alert</button></div>
-            <div class="body tight">
-              <div id="akList" class="list" style="max-height:calc(26vh / var(--z))"></div>
-              <div class="empty small" id="akEmpty">No alerts yet. An alert watches talkgroups for keywords in the transcript (or an emergency, any call, or a radio) and sends a Telegram message with the audio.</div>
-            </div>
-          </div>
-          <div class="panel" id="akEditor" style="display:none">
-            <div class="head"><span class="eyebrow">Edit alert</span><span class="meta" id="akEdMeta"></span><button class="btn ghost sm" id="akTest">Test now</button><button class="btn ghost sm" id="akDelete">Delete</button><button class="btn primary sm" id="akSave">Save</button></div>
-            <div class="body tight">
-              <div class="row3">
-                <label class="field"><span class="lab">Name</span><input id="akName" type="text" placeholder="Cardiac arrest" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Trigger</span><select id="akKind"><option value="keywords">keywords in transcript</option><option value="emergency">emergency flag</option><option value="talkgroup">any call on talkgroup</option><option value="unit">radio keys up</option></select></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="akEnabled" type="checkbox" checked /> enabled</label></label>
-              </div>
-              <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated; empty = any</span></span>
-                <span class="inline"><input id="akTgs" type="text" placeholder="20305, 20308" spellcheck="false" /><button class="btn ghost sm" id="akPickTg" title="Pick from loaded aliases">pick…</button></span></label>
-              <div id="akTgPick" class="chips" style="display:none;max-height:120px;overflow:auto"></div>
-              <label class="field" id="akKwField"><span class="lab">Keywords <span class="mono faint">one per line or comma-separated · any matches · whole words, case-insensitive</span></span>
-                <textarea id="akKeywords" style="min-height:70px" placeholder="ventricular tachycardia&#10;ventricular fibrillation&#10;cardiac arrest&#10;CPR&#10;working arrest"></textarea></label>
-              <label class="field" id="akUnitField"><span class="lab">Radio IDs <span class="mono faint">comma-separated; empty = any</span></span><input id="akUnits" type="text" placeholder="790065" spellcheck="false" /></label>
-              <label class="field"><span class="lab">Message <span class="mono faint">{alert} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {keywords} {ai}</span></span>
-                <textarea id="akMessage" style="min-height:64px"></textarea></label>
-              <div class="row3">
-                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="akCooldown" type="text" inputmode="numeric" value="300" /></label>
-                <label class="field"><span class="lab">Attach earlier calls <span class="mono faint">same talkgroup</span></span><input id="akPrev" type="text" inputmode="numeric" value="0" /></label>
-                <label class="field"><span class="lab">…within (s)</span><input id="akWindow" type="text" inputmode="numeric" value="120" /></label>
-              </div>
-              <div class="inline" style="gap:16px;flex-wrap:wrap">
-                <label class="check" style="margin:0"><input id="akTelegram" type="checkbox" checked /> Telegram</label>
-                <label class="check" style="margin:0"><input id="akBluesky" type="checkbox" /> Bluesky</label>
-                <label class="check" style="margin:0"><input id="akAudio" type="checkbox" checked /> attach audio</label>
-                <label class="check" style="margin:0"><input id="akTone" type="checkbox" checked /> tone in the app</label>
-                <label class="check" style="margin:0"><input id="akAi" type="checkbox" /> AI gate (Ollama)</label>
-                <label class="check" style="margin:0" id="akThinkWrap" title="Let a thinking model reason before it answers. Slower; only offered when the chosen Ollama model has a thinking mode."><input id="akAiThink" type="checkbox" /> reasoning <span class="mono faint" id="akThinkHint"></span></label>
-              </div>
-              <label class="field" id="akAiField" style="margin-top:8px"><span class="lab">AI prompt <span class="mono faint">the model answers fire / don't fire; its one-line summary fills {ai}</span></span>
-                <textarea id="akAiPrompt" style="min-height:56px" placeholder="Is this a working cardiac arrest happening now — not a patient with a history of cardiac arrest, a training call, or a cancelled response? Fire only if CPR or defibrillation is actively underway."></textarea></label>
-              <p class="help">Keyword alerts fire when the transcript arrives, so they trail the call by the transcription time. The cooldown keeps one incident from sending a message per transmission.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Conversations · summarise the back-and-forth</span><span class="meta" id="cvMeta"></span><button class="btn primary sm" id="cvNew">+ New rule</button></div>
-            <div class="body tight">
-              <div id="cvList" class="list" style="max-height:calc(20vh / var(--z))"></div>
-              <div class="empty small" id="cvEmpty">A rule watches talkgroups where one party is fixed (a hospital) and mobile units call in. Each back-and-forth becomes one incident — two radios taking turns are treated as one exchange even before the hospital's ID is known: when it goes quiet the transcripts are stitched, the local model summarises them, and the summary goes to Telegram with the combined audio. A late transmission revises it (old message deleted, new one sent).</div>
-            </div>
-          </div>
-          <div class="panel" id="cvEditor" style="display:none">
-            <div class="head"><span class="eyebrow">Edit conversation rule</span><span class="meta" id="cvEdMeta"></span><button class="btn ghost sm" id="cvTest">Test on recent calls</button><button class="btn ghost sm" id="cvDelete">Delete</button><button class="btn primary sm" id="cvSave">Save</button></div>
-            <div class="body tight">
-              <div class="row3">
-                <label class="field"><span class="lab">Name</span><input id="cvName" type="text" placeholder="Hospitals" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="cvTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="cvEnabled" type="checkbox" checked /> enabled</label></label>
-              </div>
-              <label class="field"><span class="lab">Fixed radio IDs <span class="mono faint">the hospital's consoles · comma-separated · everything else is a mobile unit</span></span>
-                <span class="inline"><input id="cvFixed" type="text" placeholder="900001, 900002" spellcheck="false" /><label class="check" style="margin:0;white-space:nowrap"><input id="cvLearn" type="checkbox" checked /> learn from traffic</label></span></label>
-              <div class="mono small" id="cvProposed"></div>
-              <div class="row2">
-                <label class="field"><span class="lab">Quiet that ends it (s)</span><input id="cvGap" type="text" inputmode="numeric" value="90" /></label>
-                <label class="field"><span class="lab">Reply gap (s) <span class="mono faint">another radio this soon after is the other side</span></span><input id="cvReply" type="text" inputmode="numeric" value="45" /></label>
-                <label class="field"><span class="lab">Late window (s) <span class="mono faint">revise if more arrives</span></span><input id="cvLate" type="text" inputmode="numeric" value="180" /></label>
-                <label class="field"><span class="lab">Max length (s)</span><input id="cvMax" type="text" inputmode="numeric" value="900" /></label>
-              </div>
-              <label class="field"><span class="lab">Summary prompt <span class="mono faint">what the model should extract</span></span><textarea id="cvPrompt" style="min-height:64px"></textarea></label>
-              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {tgdesc} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
-              <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Min transmissions</span><input id="cvMin" type="text" inputmode="numeric" value="1" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="cvAudio" type="checkbox" checked /> combined audio</label><label class="check" style="margin:0"><input id="cvNoTr" type="checkbox" /> send without transcript</label></span></label>
-              </div>
-              <p class="help">Needs transcription on (Settings) and an Ollama model chosen above. The summary waits up to 90 s past the quiet gap for transcripts to land.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Digests · periodic "what's happening"</span><span class="meta" id="dgMeta"></span><button class="btn primary sm" id="dgNew">+ New digest</button></div>
-            <div class="body tight">
-              <div id="dgList" class="list" style="max-height:calc(16vh / var(--z))"></div>
-              <div class="empty small" id="dgEmpty">A digest rolls up the transcripts on a set of talkgroups every few minutes and sends "what's happening" to Telegram. Set the cadence, the look-back window, and the question the model answers.</div>
-              <div class="tablewrap tgs" style="max-height:calc(16vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Digest</th><th>Result</th></tr></thead><tbody id="dgLog"></tbody></table></div>
-            </div>
-          </div>
-          <div class="panel" id="dgEditor" style="display:none">
-            <div class="head"><span class="eyebrow">Edit digest</span><span class="meta" id="dgEdMeta"></span><button class="btn ghost sm" id="dgTest">Run now</button><button class="btn ghost sm" id="dgDelete">Delete</button><button class="btn primary sm" id="dgSave">Save</button></div>
-            <div class="body tight">
-              <div class="row3">
-                <label class="field"><span class="lab">Name</span><input id="dgName" type="text" placeholder="Southeast" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="dgTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="dgEnabled" type="checkbox" checked /> enabled</label></label>
-              </div>
-              <div class="row3">
-                <label class="field"><span class="lab">Every (min)</span><input id="dgInterval" type="text" inputmode="numeric" value="15" /></label>
-                <label class="field"><span class="lab">Window (min) <span class="mono faint">how far back</span></span><input id="dgWindow" type="text" inputmode="numeric" value="15" /></label>
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
-              </div>
-              <label class="field"><span class="lab">Prompt <span class="mono faint">the question the model answers</span></span><textarea id="dgPrompt" style="min-height:64px"></textarea></label>
-              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {name} {count} {window} {time} {transcript}</span></span><textarea id="dgMessage" style="min-height:56px"></textarea></label>
-              <p class="help">Runs on its own timer once the interval elapses. The window is how far back each digest looks.</p>
-            </div>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Telegram</span><span class="meta" id="tgMeta2"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Chat ID <span class="mono faint">your user or group id</span></span><input id="tgChat" type="text" placeholder="123456789" spellcheck="false" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="tgSave">Save</button><button class="btn ghost" id="tgTest">Send a test message</button><span class="help">Audio goes as MP3 via ffmpeg (as a WAV document without it).</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Bluesky</span><span class="meta" id="bsMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Handle <span class="mono faint">e.g. you.bsky.social</span></span><input id="bsHandle" type="text" spellcheck="false" /></label>
-                <label class="field"><span class="lab">App password <span class="mono faint">from Bluesky → Settings → App passwords</span></span><input id="bsPassword" type="password" spellcheck="false" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="bsSave">Save</button><button class="btn ghost" id="bsTest">Post a test</button><span class="help">Tick "Bluesky" on an alert to post it there. Text only (audio can't go to Bluesky); long messages are truncated to 280 chars.</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">AI gate · Ollama</span><span class="meta" id="olMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">Server</span><input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Model</span><span class="inline"><select id="olModel"><option value="">—</option></select><button class="btn ghost sm" id="olRefresh" title="List models">↻</button></span></label>
-                <label class="field"><span class="lab">Timeout (s)</span><input id="olTimeout" type="text" inputmode="numeric" value="60" /></label>
-              </div>
-              <label class="check"><input id="olFailOpen" type="checkbox" checked /> If the model can't be reached, send the alert anyway (and say so)</label>
-              <p class="help">The model sees the transcript and your prompt and answers with JSON. Keep prompts specific: what makes it a real event, and what should <i>not</i> fire.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Conversations in progress</span><span class="meta" id="cvLiveMeta"></span></div>
-            <div class="body tight">
-              <div id="cvLive" class="list" style="max-height:calc(22vh / var(--z))"></div>
-              <div class="empty small" id="cvLiveEmpty">Nothing open.</div>
-              <div class="tablewrap tgs" style="max-height:calc(18vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Rule</th><th>Units</th><th>Result</th></tr></thead><tbody id="cvLog"></tbody></table></div>
-            </div>
-          </div>
-          <div class="panel grow">
-            <div class="head"><span class="eyebrow">Fired</span><span class="meta" id="akLogMeta"></span><button class="btn ghost sm" id="akLogRefresh">↻</button></div>
-            <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:calc(32vh / var(--z))"><table><thead><tr><th>Time</th><th>Alert</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="akLog"></tbody></table></div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <!-- ===================== ANALYZERS ===================== -->
-    <div class="view" id="view-analyzers" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Built-in…</button><button class="btn ghost sm" id="azImport">Import…</button><button class="btn ghost sm" id="azExport">Export…</button><button class="btn primary sm" id="azNew">+ New analyzer</button><input id="azImportFile" type="file" accept=".json,application/json" style="display:none" /></div>
-            <div class="body tight">
-              <div id="azList" class="list" style="max-height:calc(26vh / var(--z))"></div>
-              <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a built-in template (the ECPR candidate screen ships with the app), or import a template file someone shared. Imported analyzers arrive disabled with no chat set, so nothing runs or sends until you have read them.</div>
-            </div>
-          </div>
-          <div class="panel" id="azEditor" style="display:none">
-            <div class="head"><span class="eyebrow">Edit analyzer</span><span class="meta" id="azEdMeta"></span><button class="btn ghost sm" id="azTest">Test on recent call</button><button class="btn ghost sm" id="azDelete">Delete</button><button class="btn primary sm" id="azSave">Save</button></div>
-            <div class="body tight">
-              <div class="row3">
-                <label class="field"><span class="lab">Name</span><input id="azName" type="text" placeholder="ECPR candidate" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated · blank = any</span></span><input id="azTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azEnabled" type="checkbox" checked /> enabled</label></label>
-              </div>
-              <label class="field"><span class="lab">Only run when the transcript contains <span class="mono faint">one per line · blank = every transcript</span></span><textarea id="azKeywords" style="min-height:44px" placeholder="cardiac arrest&#10;working arrest&#10;CPR"></textarea></label>
-              <label class="field"><span class="lab">Instructions to the model <span class="mono faint">what to look for and how to judge it</span></span><textarea id="azInstructions" style="min-height:120px"></textarea></label>
-              <div class="head" style="padding-left:0"><span class="eyebrow">Fields to extract</span><span class="spacer"></span><button class="btn ghost sm" id="azFieldAdd">+ Field</button></div>
-              <div id="azFields" class="list" style="max-height:calc(22vh / var(--z))"></div>
-              <div class="row3">
-                <label class="field"><span class="lab">Send when</span><select id="azMatch"><option value="all">all conditions hold</option><option value="any">any condition holds</option><option value="">always (just extract & notify)</option></select></label>
-                <label class="field" style="grid-column:span 2"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="azCondAdd" style="justify-self:start">+ Condition</button></label>
-              </div>
-              <div id="azConds" class="list" style="max-height:calc(18vh / var(--z))"></div>
-              <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
-              <div class="row3">
-                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
-                <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
-              </div>
-              <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
-                <label class="field"><span class="lab">&nbsp;</span></label>
-              </div>
-              <p class="help">Local Ollama uses the server/model set in <b>Alerts → AI gate · Ollama</b>. Cloud uses the provider configured in the panel on the right. Bluesky posts to the account set in <b>Settings → Bluesky</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
-            </div>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Cloud model · for analyzers set to "Cloud"</span><span class="meta" id="azcMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
-                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
-              </div>
-              <div class="row2">
-                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
-                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
-              </div>
-              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
-              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
-              <p class="help">OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">How it works</span></div>
-            <div class="body">
-              <p class="help">Each finished call is transcribed, then every enabled analyzer whose talkgroups (and keywords, if set) match runs its prompt against the transcript. The model returns the fields you defined as JSON; if your condition over those fields holds, the message is sent to your chosen destinations (Telegram and/or Bluesky) with the extracted values filled in. This is the app-native version of the n8n "cardiac arrest? → ECPR candidate? → alert" flow.</p>
-              <p class="help"><b>Test on recent call</b> runs the prompt against the newest stored call that passes the pre-filter and shows you the extracted JSON and the message it would send, without waiting for live traffic.</p>
-            </div>
-          </div>
-          <div class="panel grow">
-            <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="azLogMeta"></span><button class="btn ghost sm" id="azLogRefresh">↻</button></div>
-            <div class="body tight">
-              <div class="tablewrap tgs" style="max-height:calc(52vh / var(--z))"><table><thead><tr><th>Time</th><th>Analyzer</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="azLog"></tbody></table></div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <!-- ===================== DEVICES ===================== -->
     <!-- ===================== DISPATCH · live incident map ===================== -->
     <div class="view" id="view-dispatch" style="display:none">
       <section class="dispatch" id="dpMain">
@@ -685,74 +351,6 @@
       </section>
     </div>
 
-    <div class="view" id="view-devices" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Attached radios</span><span class="meta" id="dvMeta"></span><button class="btn ghost sm" id="dvRescan">Rescan</button></div>
-            <div class="body tight">
-              <div id="dvList" class="list" style="max-height:calc(40vh / var(--z))"></div>
-              <div class="empty small" id="dvEmpty">No radio detected. Plug in an Airspy or RTL-SDR and press Rescan.</div>
-              <p class="help">The top-bar Radio picker lists these. On start-up the app picks the saved radio if it is attached, otherwise the first Airspy, otherwise the first RTL-SDR.</p>
-            </div>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Band coverage · the other radios</span><span class="meta" id="cpMeta"></span></div>
-            <div class="body">
-              <p class="help">The radio picked in the top bar holds the control channel. Every other attached radio marked <b>cover</b> is parked on a part of the site's span the primary cannot see, so calls granted there are decoded too — the way Unitrunker spreads a site over several tuners.</p>
-              <div class="row2">
-                <label class="field"><span class="lab">Site span (MHz) <span class="mono faint">from the playlist; edit to override</span></span><span class="inline"><input id="cpLo" type="text" inputmode="decimal" placeholder="851.0" /><span class="faint">to</span><input id="cpHi" type="text" inputmode="decimal" placeholder="869.0" /></span></label>
-                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="cpEnabled" type="checkbox" checked /> use the other radios for coverage</label></label>
-              </div>
-              <div id="cpRoles" class="list" style="max-height:160px"></div>
-              <div class="mono small" id="cpPlan" style="margin-top:6px"></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Selected radio</span><span class="meta" id="dvSelMeta">—</span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Nickname</span><input id="dvNick" type="text" placeholder="Airspy on the roof antenna" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Preferred rate</span><select id="dvRate"></select></label>
-              </div>
-              <label class="field"><span class="lab">Frequency correction (ppm)</span>
-                <span class="inline"><input id="ppm" type="text" inputmode="decimal" placeholder="0" /><button class="btn ghost sm" id="ppmUse" title="Use the value measured from the control channel" disabled>use measured</button></span></label>
-              <input id="gain" type="hidden" />
-              <div id="gnRtl">
-                <div class="lab">Gain · RTL-SDR</div>
-                <div class="row2">
-                  <label class="check" style="margin:0"><input id="gnRtlAgc" type="checkbox" checked /> tuner AGC</label>
-                  <label class="field" style="margin:0"><span class="lab">Tuner gain (dB) <span class="mono faint">the R820T's real steps</span></span>
-                    <span class="inline"><input id="gnRtlGain" type="range" min="0" max="28" value="28" /><span class="mono small" id="gnRtlGainVal" style="min-width:52px">49.6</span></span></label>
-                </div>
-              </div>
-              <div id="gnAirspy">
-                <div class="lab">Gain · Airspy</div>
-                <label class="check"><input id="gnAsEnabled" type="checkbox" /> Apply gain settings to this Airspy <span class="faint">(the 2016 R2 firmware this was built on hangs USB on any gain call — if streaming stops, untick and replug)</span></label>
-                <div class="row2">
-                  <label class="field"><span class="lab">Mode</span><select id="gnAsMode"><option value="agc">front-end AGC (LNA + mixer)</option><option value="linearity">linearity preset</option><option value="sensitivity">sensitivity preset</option><option value="manual">manual stages</option></select></label>
-                  <label class="field" id="gnAsPresetField"><span class="lab">Preset 0–21 <span class="mono faint">higher = more gain</span></span><span class="inline"><input id="gnAsPreset" type="range" min="0" max="21" value="12" /><span class="mono small" id="gnAsPresetVal" style="min-width:24px">12</span></span></label>
-                </div>
-                <div id="gnAsManual">
-                  <div class="row3">
-                    <label class="field"><span class="lab">LNA 0–14</span><span class="inline"><input id="gnAsLna" type="range" min="0" max="14" value="8" /><span class="mono small" id="gnAsLnaVal">8</span></span></label>
-                    <label class="field"><span class="lab">Mixer 0–15</span><span class="inline"><input id="gnAsMixer" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsMixerVal">8</span></span></label>
-                    <label class="field"><span class="lab">VGA 0–15</span><span class="inline"><input id="gnAsVga" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsVgaVal">8</span></span></label>
-                  </div>
-                  <div class="inline" style="gap:14px"><label class="check" style="margin:0"><input id="gnAsLnaAgc" type="checkbox" /> LNA AGC</label><label class="check" style="margin:0"><input id="gnAsMixerAgc" type="checkbox" /> mixer AGC</label></div>
-                </div>
-              </div>
-              <div class="inline" style="margin-top:6px"><button class="btn ghost sm" id="gnApply" title="Change the gain on the running radio now">Apply to the running radio</button><span class="mono small" id="gnMeta"></span></div>
-              <div class="mono small" id="ppmMeasured">Measured on the next start: the control channel's offset, as ppm of its frequency.</div>
-              <div class="inline" style="margin-top:8px"><button class="btn primary" id="dvSave">Save</button><span class="help">Saved per radio (by serial). The follower also measures and compensates tuner error on its own; ppm keeps the band centred where the band centre says.</span></div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
     <!-- ===================== CONVERSATIONS ===================== -->
     <div class="view" id="view-conversations" style="display:none">
       <section class="cv-layout">
@@ -842,77 +440,17 @@
       </section>
     </div>
 
-    <!-- ===================== PLAYLISTS ===================== -->
-    <div class="view" id="view-playlists" style="display:none">
-      <section class="two-col">
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Username</span><input id="rrUser" type="text" autocomplete="username" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Password</span><input id="rrPass" type="password" autocomplete="current-password" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Log in here, then find and load a system below. Secrets are saved on this Mac.</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Find a system</span><span class="meta" id="findMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">ZIP code</span>
-                  <span class="inline"><input id="bZip" type="text" inputmode="numeric" placeholder="46204" spellcheck="false" /><button class="btn ghost" id="bZipGo">Go</button></span></label>
-                <label class="field"><span class="lab">State</span><select id="bState"><option value="">—</option></select></label>
-                <label class="field"><span class="lab">County</span><select id="bCounty"><option value="">— statewide —</option></select></label>
-              </div>
-              <label class="field"><span class="lab">System ID <span class="mono faint">or paste radioreference.com/db/sid/…</span></span>
-                <span class="inline"><input id="rrSid" type="text" inputmode="numeric" placeholder="11" spellcheck="false" /><button class="btn ghost" id="rrDownload">Load</button></span></label>
-              <div class="progress" id="rrProg" style="display:none"><div class="bar"><i id="rrProgBar"></i></div><span class="mono small" id="rrProgText"></span></div>
-              <div id="sysList" class="list"></div>
-            </div>
-          </div>
-
-          <div class="panel" id="sysPanel" style="display:none">
-            <div class="head"><span class="eyebrow" id="sysName">System</span><span class="meta" id="sysMeta"></span></div>
-            <div class="body">
-              <div class="notice mono" id="sysLoaded" style="color:var(--clear);margin-bottom:8px"></div>
-              <span class="lab">Site</span>
-              <div id="siteList" class="list"></div>
-              <div class="row3" style="margin-top:10px">
-                <label class="field"><span class="lab">Filter talkgroups</span><input id="tgFilter" type="text" placeholder="dispatch, fire…" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Category</span><select id="tgCat"><option value="">all</option></select></label>
-                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><button class="btn ghost" id="tgAll">Select shown</button><button class="btn ghost" id="tgNone">Clear</button></span></label>
-              </div>
-              <div class="meta" id="tgMeta" style="margin-bottom:6px"></div>
-              <div class="tablewrap tgs">
-                <table><thead><tr><th></th><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th></th></tr></thead><tbody id="tgBody"></tbody></table>
-              </div>
-              <div class="row2" style="margin-top:12px">
-                <label class="field"><span class="lab">Playlist name</span><input id="plName" type="text" placeholder="County dispatch" spellcheck="false" /></label>
-                <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="plSave" style="width:100%">Save playlist</button></label>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Playlists</span><span class="meta" id="plMeta"></span></div>
-            <div class="body">
-              <div id="plList" class="list tall"></div>
-              <div class="empty" id="plEmpty"><span class="big">No playlists yet</span>Find a system, pick a site and talkgroups, save — then choose it in the top bar.</div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-
     <!-- ===================== SETTINGS ===================== -->
     <div class="view" id="view-settings" style="display:none">
       <section class="settings-layout">
         <nav class="settings-nav" id="setNav">
           <button class="on" data-p="appearance">Appearance</button>
           <button data-p="scanning">Scanning</button>
+          <button data-p="playlists">Playlists</button>
+          <button data-p="aliases">Aliases</button>
+          <button data-p="alerts">Alerts</button>
+          <button data-p="analyzers">Analyzers</button>
+          <button data-p="devices">Devices</button>
           <button data-p="transcription">Transcription</button>
           <button data-p="corrections">Corrections</button>
           <button data-p="audio">Audio &amp; recording</button>
@@ -930,9 +468,15 @@
             <div class="body">
               <div class="lab">Theme</div>
               <div class="chips" id="themeChips"></div>
-              <p class="help" style="margin-top:8px">Six colour schemes; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+              <p class="help" style="margin-top:8px" id="themeHelp">Colour schemes, including the seasons and the Speedway; Amber and Terminal switch to a monospace type throughout for a phosphor-CRT look. Changes apply instantly.</p>
+              <div class="lab" style="margin-top:12px">Fonts <span class="mono faint">override the scheme's type</span></div>
+              <div class="mono small faint">Body</div><div class="chips" id="fontBodyChips"></div>
+              <div class="mono small faint" style="margin-top:6px">Monospace <span class="faint">(IDs, times, transcripts' small print)</span></div><div class="chips" id="fontMonoChips"></div>
+              <div class="mono small faint" style="margin-top:6px">Headings</div><div class="chips" id="fontDisplayChips"></div>
               <div class="lab" style="margin-top:12px">Text size <span class="mono faint">scales the whole interface</span></div>
               <div class="chips" id="fsChips"></div>
+              <div class="lab" style="margin-top:12px">Top tabs <span class="mono faint">drag a tab to reorder them</span></div>
+              <div class="inline"><button class="btn ghost sm" id="navOrderReset">Reset order</button><span class="help">Monitor, Library, Conversations, Dispatch, Settings. Everything else lives in this left-hand menu.</span></div>
             </div>
           </div>
         </div>
@@ -1199,6 +743,458 @@
                 <table><thead><tr><th>Pin</th><th>Latitude</th><th>Longitude</th><th>File</th><th>Captured</th><th></th></tr></thead><tbody id="surveyBody"></tbody></table>
               </div>
               <p class="help">Radio positions ride inside packet data (often encrypted). Survey mode pins <em>your</em> location: arm it, tap the map, then "Capture here" records a timed IQ+log tagged with that spot. Tiles load from OpenStreetMap when online.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-playlists" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">RadioReference account</span><span class="meta" id="rrMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Username</span><input id="rrUser" type="text" autocomplete="username" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Password</span><input id="rrPass" type="password" autocomplete="current-password" /></label>
+              </div>
+              <div class="inline"><button class="btn primary" id="rrSave">Save</button><span class="help">Premium account required. Log in here, then find and load a system below. Secrets are saved on this Mac.</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Find a system</span><span class="meta" id="findMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">ZIP code</span>
+                  <span class="inline"><input id="bZip" type="text" inputmode="numeric" placeholder="46204" spellcheck="false" /><button class="btn ghost" id="bZipGo">Go</button></span></label>
+                <label class="field"><span class="lab">State</span><select id="bState"><option value="">—</option></select></label>
+                <label class="field"><span class="lab">County</span><select id="bCounty"><option value="">— statewide —</option></select></label>
+              </div>
+              <label class="field"><span class="lab">System ID <span class="mono faint">or paste radioreference.com/db/sid/…</span></span>
+                <span class="inline"><input id="rrSid" type="text" inputmode="numeric" placeholder="11" spellcheck="false" /><button class="btn ghost" id="rrDownload">Load</button></span></label>
+              <div class="progress" id="rrProg" style="display:none"><div class="bar"><i id="rrProgBar"></i></div><span class="mono small" id="rrProgText"></span></div>
+              <div id="sysList" class="list"></div>
+            </div>
+          </div>
+
+          <div class="panel" id="sysPanel" style="display:none">
+            <div class="head"><span class="eyebrow" id="sysName">System</span><span class="meta" id="sysMeta"></span></div>
+            <div class="body">
+              <div class="notice mono" id="sysLoaded" style="color:var(--clear);margin-bottom:8px"></div>
+              <span class="lab">Site</span>
+              <div id="siteList" class="list"></div>
+              <div class="row3" style="margin-top:10px">
+                <label class="field"><span class="lab">Filter talkgroups</span><input id="tgFilter" type="text" placeholder="dispatch, fire…" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Category</span><select id="tgCat"><option value="">all</option></select></label>
+                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><button class="btn ghost" id="tgAll">Select shown</button><button class="btn ghost" id="tgNone">Clear</button></span></label>
+              </div>
+              <div class="meta" id="tgMeta" style="margin-bottom:6px"></div>
+              <div class="tablewrap tgs">
+                <table><thead><tr><th></th><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th></th></tr></thead><tbody id="tgBody"></tbody></table>
+              </div>
+              <div class="row2" style="margin-top:12px">
+                <label class="field"><span class="lab">Playlist name</span><input id="plName" type="text" placeholder="County dispatch" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="plSave" style="width:100%">Save playlist</button></label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Playlists</span><span class="meta" id="plMeta"></span></div>
+            <div class="body">
+              <div id="plList" class="list tall"></div>
+              <div class="empty" id="plEmpty"><span class="big">No playlists yet</span>Find a system, pick a site and talkgroups, save — then choose it in the top bar.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-aliases" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroup aliases</span>
+              <input id="alFilter" type="text" placeholder="filter: name, description, category, TG…" spellcheck="false" />
+              <select id="alSource" title="Alias source (system / CSV)" style="width:auto;max-width:220px;padding:4px 26px 4px 8px;font-size:11.5px"><option value="">all sources</option></select>
+              <span class="meta" id="alMeta"></span></div>
+            <div class="body tight">
+              <div class="xport">
+                <label class="field" style="margin:0;flex:1"><span class="lab">Check a talkgroup</span>
+                  <span class="inline"><input id="alCheck" type="text" inputmode="numeric" placeholder="20305" spellcheck="false" /><button class="btn ghost sm" id="alCheckGo">Is it loaded?</button></span></label>
+                <span class="mono small" id="alCheckResult" style="flex:2"></span>
+              </div>
+              <div class="tablewrap tgs" style="max-height:calc(64vh / var(--z))">
+                <table><thead><tr><th><input type="checkbox" id="alTickAll" title="tick shown" /></th><th data-sort="id" class="sortable">TG</th><th data-sort="alias" class="sortable">Alpha tag</th><th data-sort="description" class="sortable">Description</th><th data-sort="tag" class="sortable">Tag</th><th data-sort="category" class="sortable">Category</th><th data-sort="source" class="sortable">Source</th><th class="actions-h" title="Record · Stream · Upload">Rec · Str · Up</th><th class="actions-h">Colour · Pri · Alert · Avoid · Lock</th></tr></thead><tbody id="alBody"></tbody></table>
+              </div>
+              <div class="xport" style="margin:6px 0 0">
+                <span class="faint">Ticked →</span>
+                <input id="grpName" type="text" placeholder="group name, e.g. Hospitals" spellcheck="false" style="max-width:200px" />
+                <button class="btn ghost sm" id="grpMake">Make / add to group</button>
+                <span class="meta" id="grpMeta"></span>
+              </div>
+              <div id="grpList" class="list" style="max-height:90px;margin-top:4px"></div>
+              <div class="xport" style="margin:6px 0 0">
+                <span class="faint">Shown talkgroups:</span>
+                <button class="btn ghost sm" data-bulk="record:on">record</button><button class="btn ghost sm" data-bulk="record:off">don't record</button>
+                <button class="btn ghost sm" data-bulk="stream:on">stream</button><button class="btn ghost sm" data-bulk="stream:off">don't stream</button>
+                <button class="btn ghost sm" data-bulk="upload:on">upload</button><button class="btn ghost sm" data-bulk="upload:off">don't upload</button>
+                <span class="meta" id="polMeta"></span>
+              </div>
+              <div class="empty" id="alEmpty"><span class="big">No aliases loaded</span>Load a system from RadioReference in Playlists, or import a talkgroup CSV below.</div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Alias sources</span><span class="meta" id="srcMeta"></span></div>
+            <div class="body tight">
+              <div id="srcList" class="list"></div>
+              <p class="help">Each RadioReference system you load (Playlists → Load) and each CSV you import is kept here and merged; the newest source wins when two name the same talkgroup. Priority, alert, avoid and lock-out are your own settings and apply whichever source names the talkgroup — the same model as SDRTrunk's alias lists.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroup ranges</span><span class="meta" id="rgMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">From</span><input id="rgLo" type="text" inputmode="numeric" placeholder="10000" spellcheck="false" /></label>
+                <label class="field"><span class="lab">To</span><input id="rgHi" type="text" inputmode="numeric" placeholder="10999" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Label</span><input id="rgName" type="text" placeholder="County" spellcheck="false" /></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Priority</span><input type="number" id="rgPri" class="priin" min="1" max="99" placeholder="50" title="1 = highest, 99 = lowest; blank = normal" /></label>
+                <label class="field"><span class="lab">Colour</span><select id="rgColor"><option value="">none</option></select></label>
+                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="rgLock" type="checkbox" /> lock out</label><label class="check" style="margin:0"><input id="rgBell" type="checkbox" /> 🔔</label><button class="btn ghost" id="rgAdd">Add</button></span></label>
+              </div>
+              <div id="rgList" class="list" style="max-height:200px"></div>
+              <p class="help">A rule covers every talkgroup in the range — the way SDRTrunk alias ranges and OP25 whitelists work. Explicit per-talkgroup settings win over a range; the engine applies lock-out and priority ranges natively.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost" id="unitSave" style="width:100%">Save</button></label>
+              </div>
+              <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
+                <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
+              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
+              <div class="lab" style="margin-top:10px">Wildcard rules <span class="mono faint">regex over the radio ID · $1 captures · first match wins</span></div>
+              <div class="row3">
+                <label class="field"><span class="lab">Pattern</span><input id="urPat" type="text" placeholder="^49001(\d\d)$" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Name</span><input id="urName" type="text" placeholder="Fleet $1" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><button class="btn ghost" id="urAdd">Add rule</button><input id="urTry" type="text" inputmode="numeric" placeholder="try an ID" style="max-width:110px" /></span></label>
+              </div>
+              <div class="mono small" id="urTryOut"></div>
+              <div id="urList" class="list" style="max-height:160px"></div>
+              <label class="check" style="margin-top:8px"><input id="learnAliases" type="checkbox" /> Remember aliases the system broadcasts over the air (Motorola talker alias; experimental)</label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
+            <div class="body">
+              <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>
+                <span class="inline"><input id="catalog" type="text" placeholder="~/talkgroups.csv" spellcheck="false" /><button class="btn ghost" id="loadcat">Load</button></span></label>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-alerts" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Alerts</span><span class="meta" id="akMeta"></span><button class="btn primary sm" id="akNew">+ New alert</button></div>
+            <div class="body tight">
+              <div id="akList" class="list" style="max-height:calc(26vh / var(--z))"></div>
+              <div class="empty small" id="akEmpty">No alerts yet. An alert watches talkgroups for keywords in the transcript (or an emergency, any call, or a radio) and sends a Telegram message with the audio.</div>
+            </div>
+          </div>
+          <div class="panel" id="akEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit alert</span><span class="meta" id="akEdMeta"></span><button class="btn ghost sm" id="akTest">Test now</button><button class="btn ghost sm" id="akDelete">Delete</button><button class="btn primary sm" id="akSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="akName" type="text" placeholder="Cardiac arrest" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Trigger</span><select id="akKind"><option value="keywords">keywords in transcript</option><option value="emergency">emergency flag</option><option value="talkgroup">any call on talkgroup</option><option value="unit">radio keys up</option></select></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="akEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated; empty = any</span></span>
+                <span class="inline"><input id="akTgs" type="text" placeholder="20305, 20308" spellcheck="false" /><button class="btn ghost sm" id="akPickTg" title="Pick from loaded aliases">pick…</button></span></label>
+              <div id="akTgPick" class="chips" style="display:none;max-height:120px;overflow:auto"></div>
+              <label class="field" id="akKwField"><span class="lab">Keywords <span class="mono faint">one per line or comma-separated · any matches · whole words, case-insensitive</span></span>
+                <textarea id="akKeywords" style="min-height:70px" placeholder="ventricular tachycardia&#10;ventricular fibrillation&#10;cardiac arrest&#10;CPR&#10;working arrest"></textarea></label>
+              <label class="field" id="akUnitField"><span class="lab">Radio IDs <span class="mono faint">comma-separated; empty = any</span></span><input id="akUnits" type="text" placeholder="790065" spellcheck="false" /></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{alert} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {keywords} {ai}</span></span>
+                <textarea id="akMessage" style="min-height:64px"></textarea></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="akCooldown" type="text" inputmode="numeric" value="300" /></label>
+                <label class="field"><span class="lab">Attach earlier calls <span class="mono faint">same talkgroup</span></span><input id="akPrev" type="text" inputmode="numeric" value="0" /></label>
+                <label class="field"><span class="lab">…within (s)</span><input id="akWindow" type="text" inputmode="numeric" value="120" /></label>
+              </div>
+              <div class="inline" style="gap:16px;flex-wrap:wrap">
+                <label class="check" style="margin:0"><input id="akTelegram" type="checkbox" checked /> Telegram</label>
+                <label class="check" style="margin:0"><input id="akBluesky" type="checkbox" /> Bluesky</label>
+                <label class="check" style="margin:0"><input id="akAudio" type="checkbox" checked /> attach audio</label>
+                <label class="check" style="margin:0"><input id="akTone" type="checkbox" checked /> tone in the app</label>
+                <label class="check" style="margin:0"><input id="akAi" type="checkbox" /> AI gate (Ollama)</label>
+                <label class="check" style="margin:0" id="akThinkWrap" title="Let a thinking model reason before it answers. Slower; only offered when the chosen Ollama model has a thinking mode."><input id="akAiThink" type="checkbox" /> reasoning <span class="mono faint" id="akThinkHint"></span></label>
+              </div>
+              <label class="field" id="akAiField" style="margin-top:8px"><span class="lab">AI prompt <span class="mono faint">the model answers fire / don't fire; its one-line summary fills {ai}</span></span>
+                <textarea id="akAiPrompt" style="min-height:56px" placeholder="Is this a working cardiac arrest happening now — not a patient with a history of cardiac arrest, a training call, or a cancelled response? Fire only if CPR or defibrillation is actively underway."></textarea></label>
+              <p class="help">Keyword alerts fire when the transcript arrives, so they trail the call by the transcription time. The cooldown keeps one incident from sending a message per transmission.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Conversations · summarise the back-and-forth</span><span class="meta" id="cvMeta"></span><button class="btn primary sm" id="cvNew">+ New rule</button></div>
+            <div class="body tight">
+              <div id="cvList" class="list" style="max-height:calc(20vh / var(--z))"></div>
+              <div class="empty small" id="cvEmpty">A rule watches talkgroups where one party is fixed (a hospital) and mobile units call in. Each back-and-forth becomes one incident — two radios taking turns are treated as one exchange even before the hospital's ID is known: when it goes quiet the transcripts are stitched, the local model summarises them, and the summary goes to Telegram with the combined audio. A late transmission revises it (old message deleted, new one sent).</div>
+            </div>
+          </div>
+          <div class="panel" id="cvEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit conversation rule</span><span class="meta" id="cvEdMeta"></span><button class="btn ghost sm" id="cvTest">Test on recent calls</button><button class="btn ghost sm" id="cvDelete">Delete</button><button class="btn primary sm" id="cvSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="cvName" type="text" placeholder="Hospitals" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="cvTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="cvEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <label class="field"><span class="lab">Fixed radio IDs <span class="mono faint">the hospital's consoles · comma-separated · everything else is a mobile unit</span></span>
+                <span class="inline"><input id="cvFixed" type="text" placeholder="900001, 900002" spellcheck="false" /><label class="check" style="margin:0;white-space:nowrap"><input id="cvLearn" type="checkbox" checked /> learn from traffic</label></span></label>
+              <div class="mono small" id="cvProposed"></div>
+              <div class="row2">
+                <label class="field"><span class="lab">Quiet that ends it (s)</span><input id="cvGap" type="text" inputmode="numeric" value="90" /></label>
+                <label class="field"><span class="lab">Reply gap (s) <span class="mono faint">another radio this soon after is the other side</span></span><input id="cvReply" type="text" inputmode="numeric" value="45" /></label>
+                <label class="field"><span class="lab">Late window (s) <span class="mono faint">revise if more arrives</span></span><input id="cvLate" type="text" inputmode="numeric" value="180" /></label>
+                <label class="field"><span class="lab">Max length (s)</span><input id="cvMax" type="text" inputmode="numeric" value="900" /></label>
+              </div>
+              <label class="field"><span class="lab">Summary prompt <span class="mono faint">what the model should extract</span></span><textarea id="cvPrompt" style="min-height:64px"></textarea></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {tgdesc} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Min transmissions</span><input id="cvMin" type="text" inputmode="numeric" value="1" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="cvAudio" type="checkbox" checked /> combined audio</label><label class="check" style="margin:0"><input id="cvNoTr" type="checkbox" /> send without transcript</label></span></label>
+              </div>
+              <p class="help">Needs transcription on (Settings) and an Ollama model chosen above. The summary waits up to 90 s past the quiet gap for transcripts to land.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Digests · periodic "what's happening"</span><span class="meta" id="dgMeta"></span><button class="btn primary sm" id="dgNew">+ New digest</button></div>
+            <div class="body tight">
+              <div id="dgList" class="list" style="max-height:calc(16vh / var(--z))"></div>
+              <div class="empty small" id="dgEmpty">A digest rolls up the transcripts on a set of talkgroups every few minutes and sends "what's happening" to Telegram. Set the cadence, the look-back window, and the question the model answers.</div>
+              <div class="tablewrap tgs" style="max-height:calc(16vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Digest</th><th>Result</th></tr></thead><tbody id="dgLog"></tbody></table></div>
+            </div>
+          </div>
+          <div class="panel" id="dgEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit digest</span><span class="meta" id="dgEdMeta"></span><button class="btn ghost sm" id="dgTest">Run now</button><button class="btn ghost sm" id="dgDelete">Delete</button><button class="btn primary sm" id="dgSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="dgName" type="text" placeholder="Southeast" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated</span></span><input id="dgTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="dgEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Every (min)</span><input id="dgInterval" type="text" inputmode="numeric" value="15" /></label>
+                <label class="field"><span class="lab">Window (min) <span class="mono faint">how far back</span></span><input id="dgWindow" type="text" inputmode="numeric" value="15" /></label>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
+              </div>
+              <label class="field"><span class="lab">Prompt <span class="mono faint">the question the model answers</span></span><textarea id="dgPrompt" style="min-height:64px"></textarea></label>
+              <label class="field"><span class="lab">Message <span class="mono faint">{summary} {name} {count} {window} {time} {transcript}</span></span><textarea id="dgMessage" style="min-height:56px"></textarea></label>
+              <p class="help">Runs on its own timer once the interval elapses. The window is how far back each digest looks.</p>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Telegram</span><span class="meta" id="tgMeta2"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Chat ID <span class="mono faint">your user or group id</span></span><input id="tgChat" type="text" placeholder="123456789" spellcheck="false" /></label>
+              </div>
+              <div class="inline"><button class="btn primary" id="tgSave">Save</button><button class="btn ghost" id="tgTest">Send a test message</button><span class="help">Audio goes as MP3 via ffmpeg (as a WAV document without it).</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Bluesky</span><span class="meta" id="bsMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Handle <span class="mono faint">e.g. you.bsky.social</span></span><input id="bsHandle" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">App password <span class="mono faint">from Bluesky → Settings → App passwords</span></span><input id="bsPassword" type="password" spellcheck="false" /></label>
+              </div>
+              <div class="inline"><button class="btn primary" id="bsSave">Save</button><button class="btn ghost" id="bsTest">Post a test</button><span class="help">Tick "Bluesky" on an alert to post it there. Text only (audio can't go to Bluesky); long messages are truncated to 280 chars.</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">AI gate · Ollama</span><span class="meta" id="olMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Server</span><input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Model</span><span class="inline"><select id="olModel"><option value="">—</option></select><button class="btn ghost sm" id="olRefresh" title="List models">↻</button></span></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="olTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="check"><input id="olFailOpen" type="checkbox" checked /> If the model can't be reached, send the alert anyway (and say so)</label>
+              <p class="help">The model sees the transcript and your prompt and answers with JSON. Keep prompts specific: what makes it a real event, and what should <i>not</i> fire.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Conversations in progress</span><span class="meta" id="cvLiveMeta"></span></div>
+            <div class="body tight">
+              <div id="cvLive" class="list" style="max-height:calc(22vh / var(--z))"></div>
+              <div class="empty small" id="cvLiveEmpty">Nothing open.</div>
+              <div class="tablewrap tgs" style="max-height:calc(18vh / var(--z));margin-top:6px"><table><thead><tr><th>Time</th><th>Rule</th><th>Units</th><th>Result</th></tr></thead><tbody id="cvLog"></tbody></table></div>
+            </div>
+          </div>
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow">Fired</span><span class="meta" id="akLogMeta"></span><button class="btn ghost sm" id="akLogRefresh">↻</button></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:calc(32vh / var(--z))"><table><thead><tr><th>Time</th><th>Alert</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="akLog"></tbody></table></div>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-analyzers" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Analyzers · custom prompts that extract data</span><span class="meta" id="azMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="azTemplates">Built-in…</button><button class="btn ghost sm" id="azImport">Import…</button><button class="btn ghost sm" id="azExport">Export…</button><button class="btn primary sm" id="azNew">+ New analyzer</button><input id="azImportFile" type="file" accept=".json,application/json" style="display:none" /></div>
+            <div class="body tight">
+              <div id="azList" class="list" style="max-height:calc(26vh / var(--z))"></div>
+              <div class="empty small" id="azEmpty">An analyzer runs your own prompt over each transcript, pulls out named fields (e.g. ECPR candidacy, criteria met, likelihood), and sends a Telegram message when a condition over those fields holds. Start from a built-in template (the ECPR candidate screen ships with the app), or import a template file someone shared. Imported analyzers arrive disabled with no chat set, so nothing runs or sends until you have read them.</div>
+            </div>
+          </div>
+          <div class="panel" id="azEditor" style="display:none">
+            <div class="head"><span class="eyebrow">Edit analyzer</span><span class="meta" id="azEdMeta"></span><button class="btn ghost sm" id="azTest">Test on recent call</button><button class="btn ghost sm" id="azDelete">Delete</button><button class="btn primary sm" id="azSave">Save</button></div>
+            <div class="body tight">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="azName" type="text" placeholder="ECPR candidate" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Talkgroups <span class="mono faint">comma-separated · blank = any</span></span><input id="azTgs" type="text" placeholder="10202, 10244" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azEnabled" type="checkbox" checked /> enabled</label></label>
+              </div>
+              <label class="field"><span class="lab">Only run when the transcript contains <span class="mono faint">one per line · blank = every transcript</span></span><textarea id="azKeywords" style="min-height:44px" placeholder="cardiac arrest&#10;working arrest&#10;CPR"></textarea></label>
+              <label class="field"><span class="lab">Instructions to the model <span class="mono faint">what to look for and how to judge it</span></span><textarea id="azInstructions" style="min-height:120px"></textarea></label>
+              <div class="head" style="padding-left:0"><span class="eyebrow">Fields to extract</span><span class="spacer"></span><button class="btn ghost sm" id="azFieldAdd">+ Field</button></div>
+              <div id="azFields" class="list" style="max-height:calc(22vh / var(--z))"></div>
+              <div class="row3">
+                <label class="field"><span class="lab">Send when</span><select id="azMatch"><option value="all">all conditions hold</option><option value="any">any condition holds</option><option value="">always (just extract & notify)</option></select></label>
+                <label class="field" style="grid-column:span 2"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="azCondAdd" style="justify-self:start">+ Condition</button></label>
+              </div>
+              <div id="azConds" class="list" style="max-height:calc(18vh / var(--z))"></div>
+              <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
+              <div class="row3">
+                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
+                <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat</span></span><input id="azChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
+                <label class="field"><span class="lab">&nbsp;</span></label>
+              </div>
+              <p class="help">Local Ollama uses the server/model set in <b>Alerts → AI gate · Ollama</b>. Cloud uses the provider configured in the panel on the right. Bluesky posts to the account set in <b>Settings → Bluesky</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Cloud model · for analyzers set to "Cloud"</span><span class="meta" id="azcMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
+                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
+              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
+              <p class="help">OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">How it works</span></div>
+            <div class="body">
+              <p class="help">Each finished call is transcribed, then every enabled analyzer whose talkgroups (and keywords, if set) match runs its prompt against the transcript. The model returns the fields you defined as JSON; if your condition over those fields holds, the message is sent to your chosen destinations (Telegram and/or Bluesky) with the extracted values filled in. This is the app-native version of the n8n "cardiac arrest? → ECPR candidate? → alert" flow.</p>
+              <p class="help"><b>Test on recent call</b> runs the prompt against the newest stored call that passes the pre-filter and shows you the extracted JSON and the message it would send, without waiting for live traffic.</p>
+            </div>
+          </div>
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow">Ran</span><span class="meta" id="azLogMeta"></span><button class="btn ghost sm" id="azLogRefresh">↻</button></div>
+            <div class="body tight">
+              <div class="tablewrap tgs" style="max-height:calc(52vh / var(--z))"><table><thead><tr><th>Time</th><th>Analyzer</th><th>Talkgroup</th><th>Result</th></tr></thead><tbody id="azLog"></tbody></table></div>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-devices" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Attached radios</span><span class="meta" id="dvMeta"></span><button class="btn ghost sm" id="dvRescan">Rescan</button></div>
+            <div class="body tight">
+              <div id="dvList" class="list" style="max-height:calc(40vh / var(--z))"></div>
+              <div class="empty small" id="dvEmpty">No radio detected. Plug in an Airspy or RTL-SDR and press Rescan.</div>
+              <p class="help">The top-bar Radio picker lists these. On start-up the app picks the saved radio if it is attached, otherwise the first Airspy, otherwise the first RTL-SDR.</p>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Band coverage · the other radios</span><span class="meta" id="cpMeta"></span></div>
+            <div class="body">
+              <p class="help">The radio picked in the top bar holds the control channel. Every other attached radio marked <b>cover</b> is parked on a part of the site's span the primary cannot see, so calls granted there are decoded too — the way Unitrunker spreads a site over several tuners.</p>
+              <div class="row2">
+                <label class="field"><span class="lab">Site span (MHz) <span class="mono faint">from the playlist; edit to override</span></span><span class="inline"><input id="cpLo" type="text" inputmode="decimal" placeholder="851.0" /><span class="faint">to</span><input id="cpHi" type="text" inputmode="decimal" placeholder="869.0" /></span></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="cpEnabled" type="checkbox" checked /> use the other radios for coverage</label></label>
+              </div>
+              <div id="cpRoles" class="list" style="max-height:160px"></div>
+              <div class="mono small" id="cpPlan" style="margin-top:6px"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Selected radio</span><span class="meta" id="dvSelMeta">—</span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Nickname</span><input id="dvNick" type="text" placeholder="Airspy on the roof antenna" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Preferred rate</span><select id="dvRate"></select></label>
+              </div>
+              <label class="field"><span class="lab">Frequency correction (ppm)</span>
+                <span class="inline"><input id="ppm" type="text" inputmode="decimal" placeholder="0" /><button class="btn ghost sm" id="ppmUse" title="Use the value measured from the control channel" disabled>use measured</button></span></label>
+              <input id="gain" type="hidden" />
+              <div id="gnRtl">
+                <div class="lab">Gain · RTL-SDR</div>
+                <div class="row2">
+                  <label class="check" style="margin:0"><input id="gnRtlAgc" type="checkbox" checked /> tuner AGC</label>
+                  <label class="field" style="margin:0"><span class="lab">Tuner gain (dB) <span class="mono faint">the R820T's real steps</span></span>
+                    <span class="inline"><input id="gnRtlGain" type="range" min="0" max="28" value="28" /><span class="mono small" id="gnRtlGainVal" style="min-width:52px">49.6</span></span></label>
+                </div>
+              </div>
+              <div id="gnAirspy">
+                <div class="lab">Gain · Airspy</div>
+                <label class="check"><input id="gnAsEnabled" type="checkbox" /> Apply gain settings to this Airspy <span class="faint">(the 2016 R2 firmware this was built on hangs USB on any gain call — if streaming stops, untick and replug)</span></label>
+                <div class="row2">
+                  <label class="field"><span class="lab">Mode</span><select id="gnAsMode"><option value="agc">front-end AGC (LNA + mixer)</option><option value="linearity">linearity preset</option><option value="sensitivity">sensitivity preset</option><option value="manual">manual stages</option></select></label>
+                  <label class="field" id="gnAsPresetField"><span class="lab">Preset 0–21 <span class="mono faint">higher = more gain</span></span><span class="inline"><input id="gnAsPreset" type="range" min="0" max="21" value="12" /><span class="mono small" id="gnAsPresetVal" style="min-width:24px">12</span></span></label>
+                </div>
+                <div id="gnAsManual">
+                  <div class="row3">
+                    <label class="field"><span class="lab">LNA 0–14</span><span class="inline"><input id="gnAsLna" type="range" min="0" max="14" value="8" /><span class="mono small" id="gnAsLnaVal">8</span></span></label>
+                    <label class="field"><span class="lab">Mixer 0–15</span><span class="inline"><input id="gnAsMixer" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsMixerVal">8</span></span></label>
+                    <label class="field"><span class="lab">VGA 0–15</span><span class="inline"><input id="gnAsVga" type="range" min="0" max="15" value="8" /><span class="mono small" id="gnAsVgaVal">8</span></span></label>
+                  </div>
+                  <div class="inline" style="gap:14px"><label class="check" style="margin:0"><input id="gnAsLnaAgc" type="checkbox" /> LNA AGC</label><label class="check" style="margin:0"><input id="gnAsMixerAgc" type="checkbox" /> mixer AGC</label></div>
+                </div>
+              </div>
+              <div class="inline" style="margin-top:6px"><button class="btn ghost sm" id="gnApply" title="Change the gain on the running radio now">Apply to the running radio</button><span class="mono small" id="gnMeta"></span></div>
+              <div class="mono small" id="ppmMeasured">Measured on the next start: the control channel's offset, as ppm of its frequency.</div>
+              <div class="inline" style="margin-top:8px"><button class="btn primary" id="dvSave">Save</button><span class="help">Saved per radio (by serial). The follower also measures and compensates tuner error on its own; ppm keeps the band centred where the band centre says.</span></div>
             </div>
           </div>
         </div>
