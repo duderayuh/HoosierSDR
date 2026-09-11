@@ -1060,7 +1060,13 @@ let discDirty = false;
 function discoveryGrant(ev) {
   const sid = runSid(ev), key = sid != null ? `${sid}:${ev.tg}` : String(ev.tg);
   const t = disc.tgs[key] || (disc.tgs[key] = { first: Date.now(), n: 0, tg: ev.tg });
-  if (sid != null) { t.sid = sid; if (ev.system) t.system = ev.system; }
+  if (sid != null) {
+    t.sid = sid; if (ev.system) t.system = ev.system;
+    // An entry filed by number alone before the system was known: fold its
+    // counts in, so the talkgroup does not appear twice with a stale name.
+    const legacy = disc.tgs[String(ev.tg)];
+    if (legacy) { t.n += legacy.n || 0; if (legacy.first && legacy.first < t.first) t.first = legacy.first; delete disc.tgs[String(ev.tg)]; }
+  }
   t.n++; t.last = Date.now(); t.name = ev.name; t.named = ev.named; t.freq = ev.freq_mhz; if (ev.unit) t.unit = ev.unit; t.enc = ev.encrypted;
   const k = ev.freq_mhz.toFixed(4), f = disc.freqs[k] || (disc.freqs[k] = { n: 0, tgs: {} });
   f.n++; f.last = Date.now(); f.tgs[ev.tg] = 1;
