@@ -572,11 +572,18 @@
     catch (e) { toast(e, true); }
   };
 
-  // already have a token? go straight to the dashboard.
+  // A token handed over in the address (the desktop opening a remote
+  // instance) is kept and stripped from the URL. Then try the dashboard
+  // straight away: with a saved token, or none at all when this instance
+  // trusts devices on its Tailscale account.
   (async () => {
-    if (!token()) { showLogin(); return; }
+    try {
+      const qs = new URLSearchParams(location.search);
+      const t = qs.get("token");
+      if (t) { localStorage.setItem(TOKEN_KEY, t); history.replaceState(null, "", location.pathname); }
+    } catch { /* no URL access */ }
     try { const s = await api("/api/status"); await Promise.all([loadNames(), loadDevices()]); showDash(); renderStatus(s); connect(); loadVolume(); }
-    catch { /* stays on login */ }
+    catch { showLogin(); }
   })();
 </script>
 </body>

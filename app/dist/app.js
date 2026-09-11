@@ -97,7 +97,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 // Pages that load something when shown. Playlists, Aliases, Alerts,
 // Analyzers, Devices and Discovery were top-level tabs once; their code
 // still refreshes only while on screen, via settingsPageVisible().
-const PAGE_HOOKS = { discovery: "discoveryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow" };
+const PAGE_HOOKS = { discovery: "discoveryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
 let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
@@ -1920,6 +1920,85 @@ if (TAURI) {
   $("webTokenCopy").onclick = () => copyText($("webToken").value).then(() => uiToast("Token copied"));
   $("webTokenShow").onclick = () => { const el = $("webToken"); const show = el.type === "password"; el.type = show ? "text" : "password"; $("webTokenShow").textContent = show ? "Hide" : "Show"; };
   webRefresh();
+
+  /* ---------- instances on the tailnet ---------- */
+  let tnRows = [];
+  async function tnRefresh() {
+    try {
+      const v = await invoke("remotes_get");
+      if (!v) return;
+      $("tnTrust").checked = !!(v.settings && v.settings.trust_tailnet);
+      if (v.tailnet) {
+        const t = v.tailnet;
+        $("tnAccount").innerHTML = `Linked as <b>${esc(t.login || "this Tailscale account")}</b> · this Mac is <span class="mono">${esc(t.dns || t.host)}</span>${t.ip ? ` (${esc(t.ip)})` : ""} · ${t.online} of ${t.devices} device${t.devices === 1 ? "" : "s"} online`;
+        $("tnMeta").textContent = "";
+      } else {
+        $("tnAccount").textContent = v.error ? `Tailscale unavailable: ${v.error}` : "Tailscale unavailable";
+        $("tnMeta").textContent = "not linked";
+      }
+    } catch (e) { log(`remotes_get: ${e}`); $("tnAccount").textContent = "Tailscale unavailable"; }
+  }
+  $("tnTrust").onchange = async () => {
+    try { await invoke("remotes_set", { settings: { trust_tailnet: $("tnTrust").checked } }); uiToast($("tnTrust").checked ? "Trusting devices on your account" : "Token required again"); }
+    catch (e) { alert(e); }
+  };
+  function tnStateHtml(r) {
+    if (r.found) {
+      const bits = [];
+      bits.push(r.authorized ? (r.running === true ? "running" : r.running === false ? "standby" : "reachable") : (r.trusts_tailnet ? "trusts this account" : "token needed"));
+      if (r.authorized && r.catalog_len != null) bits.push(`${r.catalog_len} talkgroups`);
+      if (r.version) bits.push(`v${r.version}`);
+      return `<span class="tn-state on${r.authorized ? " ok" : ""}">${esc(bits.join(" · "))}</span>`;
+    }
+    if (r.error) return `<span class="tn-state err" title="${esc(r.error)}">error</span>`;
+    return `<span class="tn-state">${r.online ? "no HoosierSDR" : "offline"}</span>`;
+  }
+  let tnScanned = false;
+  function tnRender() {
+    const el = $("tnList");
+    if (!tnRows.length) { el.innerHTML = `<div class="tn-empty">${tnScanned ? "No online devices found. Click Scan to look again." : "Not scanned yet."}</div>`; return; }
+    el.innerHTML = tnRows.map((r, i) => `
+      <div class="tn-row${r.found ? " found" : ""}" data-i="${i}">
+        <div class="tn-who">
+          <div class="tn-name">${esc(r.host || r.dns)}${r.is_self ? ` <span class="faint">this Mac</span>` : ""}${r.same_account ? "" : ` <span class="faint">other account</span>`}</div>
+          <div class="mono faint">${esc(r.dns)}${r.ip ? ` · ${esc(r.ip)}` : ""}${r.os ? ` · ${esc(r.os)}` : ""}</div>
+        </div>
+        <div class="tn-status">${tnStateHtml(r)}</div>
+        <div class="tn-act">${r.found && !r.is_self ? `
+          <input type="password" class="tn-token" placeholder="${r.has_token ? "token saved" : "paste token"}" spellcheck="false" autocomplete="off" />
+          <button class="btn ghost sm" data-tnsave>Save</button>
+          <button class="btn sm" data-tnopen>Open</button>` : r.found && r.is_self ? `<button class="btn ghost sm" data-tnopen>Open</button>` : ""}
+        </div>
+      </div>`).join("");
+  }
+  async function tnScan() {
+    const btn = $("tnScan"); btn.disabled = true; btn.textContent = "Scanning…"; tnScanned = true;
+    $("tnMeta").textContent = "scanning";
+    try {
+      const rows = await invoke("remotes_scan");
+      tnRows = Array.isArray(rows) ? rows : [];
+      const found = tnRows.filter((r) => r.found).length;
+      $("tnMeta").textContent = `${found} instance${found === 1 ? "" : "s"} · ${tnRows.length} device${tnRows.length === 1 ? "" : "s"} checked`;
+    } catch (e) { log(`remotes_scan: ${e}`); $("tnMeta").textContent = `scan failed: ${e}`; tnRows = []; }
+    tnRender();
+    btn.disabled = false; btn.textContent = "Scan";
+  }
+  $("tnScan").onclick = tnScan;
+  window.remoteOnShow = () => { tnRefresh(); if (!tnScanned) tnScan(); };
+  $("tnList").onclick = async (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    const row = b.closest(".tn-row"); const r = row && tnRows[parseInt(row.dataset.i, 10)]; if (!r) return;
+    if (b.hasAttribute("data-tnsave")) {
+      const inp = row.querySelector(".tn-token");
+      try { await invoke("remote_token_set", { dns: r.dns, token: inp.value }); uiToast(inp.value.trim() ? "Token saved" : "Token cleared"); inp.value = ""; tnScan(); }
+      catch (err) { alert(err); }
+    } else if (b.hasAttribute("data-tnopen")) {
+      try { await invoke("remote_open", { dns: r.dns, url: r.url, host: r.host }); }
+      catch (err) { alert(err); }
+    }
+  };
+  tnRefresh();
+  tnRender();
 
   /* ---------- script hook ---------- */
   const hkSettings = () => ({ enabled: $("hkEnabled").checked, command: $("hkCmd").value.trim(), timeout_secs: parseInt($("hkTimeout").value, 10) || 20, min_secs: parseFloat($("hkMin").value) || 0, emergency_only: $("hkEmg").checked });
