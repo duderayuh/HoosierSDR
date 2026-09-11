@@ -1684,7 +1684,7 @@ if (TAURI) {
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
     $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
+    $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
     akKindUi();
   }
@@ -1696,7 +1696,7 @@ if (TAURI) {
     a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
     a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
     a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
+    a.telegram = $("akTelegram").checked; a.chat_id = $("akChat").value.trim(); a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
     return a;
   }
   async function akPersist() {

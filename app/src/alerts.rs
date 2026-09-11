@@ -53,6 +53,9 @@ pub struct Alert {
     /// Seconds before the same alert may fire again for the same talkgroup.
     pub cooldown_secs: u32,
     pub telegram: bool,
+    /// Telegram chat this alert goes to; blank = the alerts' default chat.
+    #[serde(default)]
+    pub chat_id: String,
     /// Also post to Bluesky.
     #[serde(default)]
     pub bluesky: bool,
@@ -85,6 +88,7 @@ impl Default for Alert {
             message: "🚨 {alert}\n{tgname} (TG {tg}) · {unitname} · {time}\n{transcript}".into(),
             cooldown_secs: 300,
             telegram: true,
+            chat_id: String::new(),
             bluesky: false,
             tone: true,
             attach_audio: true,
@@ -410,6 +414,14 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
         let (tg_settings, ollama) = {
             let st = state.alerts.lock().unwrap();
             (st.settings.telegram.clone(), st.settings.ollama.clone())
+        };
+        // The alert's own chat, when it names one.
+        let tg_settings = if a.chat_id.trim().is_empty() {
+            tg_settings
+        } else {
+            Telegram {
+                chat_id: a.chat_id.trim().to_string(),
+            }
         };
         let mut ai_note = String::new();
         if a.ai_gate && !a.ai_prompt.trim().is_empty() {
@@ -1040,6 +1052,7 @@ pub fn alerts_set(
         if a.name.trim().is_empty() {
             a.name = format!("Alert {}", i + 1);
         }
+        a.chat_id = a.chat_id.trim().chars().take(64).collect();
     }
     store(&app, &settings)?;
     state.alerts.lock().unwrap().settings = settings;
