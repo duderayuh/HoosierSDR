@@ -1952,7 +1952,9 @@ fn locate_blocking(
 fn inc_unmapped(c: &Connection, limit: u32) -> Result<Vec<Incident>, String> {
     let mut st = c
         .prepare(&format!(
-            "SELECT {INC_COLS} FROM incidents WHERE geocode IN ('none', 'error') AND address <> '' ORDER BY created DESC LIMIT ?1"
+            // 'grid' is in here too: an approximate pin is a candidate for
+            // an exact one, so a later retry can upgrade it.
+            "SELECT {INC_COLS} FROM incidents WHERE geocode IN ('none', 'error', 'grid') AND address <> '' ORDER BY created DESC LIMIT ?1"
         ))
         .map_err(|e| e.to_string())?;
     let rows = st
@@ -2020,8 +2022,10 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
         let c = db.lock().unwrap();
         inc_unmapped(&c, 500)?
     };
-    let (mut tried, mut placed) = (0u32, 0u32);
+    let (mut tried, mut placed, mut upgraded) = (0u32, 0u32, 0u32);
     for mut i in todo {
+        // An approximate pin is only worth retrying for an exact answer.
+        let was_grid = i.geocode == "grid";
         // A hundred-block grid reference is not a place; Indiana county
         // roads are named like one ("N 100 E"), so never offer it.
         if is_grid_ref(&i.address) {
@@ -2041,9 +2045,13 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                     inc_update(&c, &i, &key)?;
                 }
                 let _ = app.emit("incident", &i);
-                placed += 1;
+                if was_grid {
+                    upgraded += 1;
+                } else {
+                    placed += 1;
+                }
             }
-            Ok(None) | Err(_) if settings.grid_fallback => {
+            Ok(None) | Err(_) if settings.grid_fallback && !was_grid => {
                 let grid = {
                     let c = db.lock().unwrap();
                     grid_of(&c, i.id)
@@ -2070,7 +2078,7 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
             Err(e) => eprintln!("[dispatch] retry geocode #{}: {e}", i.id),
         }
     }
-    Ok((tried, placed))
+    Ok((tried, placed + upgraded))
 }
 
 /// Re-fit the grid on demand, for the Setup panel's button.
