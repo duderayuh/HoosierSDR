@@ -494,6 +494,8 @@ tbody tr:hover td { background: color-mix(in srgb, var(--signal) 5%, transparent
 tbody tr.new td { animation: slidein .35s ease-out; }
 @keyframes slidein { from { background: color-mix(in srgb, var(--signal) 18%, transparent); } to { background: transparent; } }
 td.time, td.dl, td.src, td.len { font-family: var(--mono); white-space: nowrap; }
+.tablewrap.lib td.desc { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--signal); font-size: 12px; }
+.tablewrap.lib td.time { font-size: 11px; color: var(--ink-faint); }
 td.tg .num { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
 td.act { white-space: nowrap; text-align: right; }
 td.act button { background: none; border: 1px solid var(--line); color: var(--ink-dim); border-radius: 6px; padding: 2px 7px; font-size: 12px; cursor: pointer; margin-left: 4px; }

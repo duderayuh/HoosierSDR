@@ -643,12 +643,20 @@ fn library_search(
     state: State<AppState>,
     query: library::Query,
 ) -> Result<Vec<library::CallRow>, String> {
-    with_db(&state, |c| library::search(c, &query))
+    let mut rows = with_db(&state, |c| library::search(c, &query))?;
+    for r in rows.iter_mut() {
+        r.tg_desc = upload::tg_meta(&state.catalog, r.tg).desc;
+    }
+    Ok(rows)
 }
 
 #[tauri::command]
 fn library_get(state: State<AppState>, id: i64) -> Result<Option<library::CallRow>, String> {
-    with_db(&state, |c| library::get(c, id))
+    let mut row = with_db(&state, |c| library::get(c, id))?;
+    if let Some(r) = row.as_mut() {
+        r.tg_desc = upload::tg_meta(&state.catalog, r.tg).desc;
+    }
+    Ok(row)
 }
 
 #[tauri::command]
@@ -2241,9 +2249,7 @@ fn main() {
                         .map(|old| {
                             old.into_iter()
                                 .flat_map(|(tg, pairs)| {
-                                    pairs
-                                        .into_iter()
-                                        .map(move |(a, b)| (Some(tg), a, b))
+                                    pairs.into_iter().map(move |(a, b)| (Some(tg), a, b))
                                 })
                                 .collect()
                         })

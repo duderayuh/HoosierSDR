@@ -18,6 +18,10 @@ pub struct CallRow {
     pub secs: f64,
     pub tg: u16,
     pub tg_name: String,
+    /// RadioReference description ("Med 06 - St. Vincent's - 86th Street
+    /// ER"); filled from the catalog when rows are handed to the UI.
+    #[serde(default)]
+    pub tg_desc: String,
     pub service: String,
     pub category: String,
     pub unit: u32,
@@ -201,6 +205,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         secs: r.get(2)?,
         tg: r.get::<_, i64>(3)? as u16,
         tg_name: r.get(4)?,
+        tg_desc: String::new(),
         unit: r.get::<_, i64>(5)? as u32,
         unit_name: r.get(6)?,
         freq_hz: r.get::<_, i64>(7)? as u64,
@@ -667,11 +672,7 @@ mod tests {
             &call(&d, 10103, "Police North Dispatch", 2.0, 1_700_000_000),
         )
         .unwrap();
-        let b = insert(
-            &c,
-            &call(&d, 10147, "Fire Dispatch", 1.0, 1_700_000_100),
-        )
-        .unwrap();
+        let b = insert(&c, &call(&d, 10147, "Fire Dispatch", 1.0, 1_700_000_100)).unwrap();
         set_transcript(
             &c,
             a,

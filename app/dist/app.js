@@ -939,7 +939,11 @@ function handleFollow(ev) {
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
       // Say when a call's audio has holes, and why: stream drops mean the
       // decoder fell behind (CPU/USB); poor frames mean the signal itself.
-      if (!ev.replayed && ev.secs > 0 && (ev.dropped_blocks > 0 || ev.poor_frames > ev.secs * 50 * 0.05)) logEvent(`${ev.name} ${ev.secs.toFixed(1)}s: ${ev.dropped_blocks ? ev.dropped_blocks + " stream drop(s)" : ""}${ev.dropped_blocks && ev.poor_frames ? ", " : ""}${ev.poor_frames ? ev.poor_frames + " of " + Math.round(ev.secs * 50) + " frames concealed" : ""} — audio has holes`, "warn");
+      // Concealed frames are worth a warning when they add up to something
+      // audible: a twentieth of the call *and* at least 200 ms (10 frames).
+      // Every keyup starts with a few frames the decoder is still acquiring,
+      // and on a one-second clip four of those already pass 5%.
+      if (!ev.replayed && ev.secs > 0 && (ev.dropped_blocks > 0 || (ev.poor_frames >= 10 && ev.poor_frames > ev.secs * 50 * 0.05))) logEvent(`${ev.name} ${ev.secs.toFixed(1)}s: ${ev.dropped_blocks ? ev.dropped_blocks + " stream drop(s)" : ""}${ev.dropped_blocks && ev.poor_frames ? ", " : ""}${ev.poor_frames ? ev.poor_frames + " of " + Math.round(ev.secs * 50) + " frames concealed" : ""} — audio has holes`, "warn");
       if (typeof libLiveAdd === "function" && ev.id != null) libLiveAdd(ev.id);
       $("r-voice").innerHTML = followVoice.toFixed(1) + "<small>s</small>";
       break;
@@ -2132,12 +2136,17 @@ if (TAURI) {
   }
   function libRowHtml(r) {
     const t = r.transcript_edited || r.transcript || "";
+    // One cell per header: blank (select), Time, Talkgroup, Description,
+    // Unit, Length, Transcript, Actions. The Time cell was missing, so
+    // every header sat one column left of its data.
     return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
+      `<td class="time">${esc(fmtT(r.start))}</td>` +
       `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}</td>` +
-      `<td class="src">${esc(r.unit_name || r.unit || "—")}</td><td class="len">${r.secs.toFixed(1)}s</td>` +
+      `<td class="desc">${esc(r.tg_desc || "")}</td>` +
+      `<td class="src">${r.unit_name ? `${esc(r.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : (r.unit ? `UID ${r.unit}` : "—")}</td><td class="len">${r.secs.toFixed(1)} s</td>` +
       `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
       `<td class="act">${r.audio ? `<button title="Play" data-lplay="${r.id}">▶</button>` : ""}<button title="Star" data-lstar="${r.id}" class="${r.starred ? "pri-h" : ""}">★</button>` +
-      `<button title="Transcribe now" data-ltr="${r.id}">T</button></td></tr>`;
+      `<button title="Run the transcriber on this call now (again, if it already has a transcript)" data-ltr="${r.id}">Transcribe</button></td></tr>`;
   }
   function libPrependHtml(r) { $("libBody").insertAdjacentHTML("afterbegin", libRowHtml(r)); libRows.unshift(r); $("libEmpty").style.display = "none"; wireLibRows(); }
   function wireLibRows() {
