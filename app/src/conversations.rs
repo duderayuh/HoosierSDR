@@ -243,7 +243,11 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
         .and_then(|m| m.get(&unit))
         .copied()
         .unwrap_or(0);
-    n >= 3 && total > 0 && n * 10 >= total * 6
+    // A hospital's console shows up in a third or more of its talkgroup's
+    // conversations; no ambulance does. Sixty percent (the old bar) missed
+    // a console heard in 50 of 107, because the doctor's handset, the
+    // operator's, and one-sided calls each take a share.
+    n >= 3 && total > 0 && n * 3 >= total
 }
 
 /// Which open conversation a transmission belongs to (index into `open`), or
@@ -1605,8 +1609,18 @@ mod tests {
         // Learned: seen in 3 of 4 conversations.
         let k = learn_key("r", 10202);
         s.seen.insert(k.clone(), 4);
-        s.learned.entry(k).or_default().insert(790065, 3);
+        s.learned.entry(k.clone()).or_default().insert(790065, 3);
         assert!(is_fixed(&s, &r, 10202, 790065));
+        // A console heard in 50 of 107 is the hospital; a unit in 2 of 107
+        // (or 3 of 20) is not.
+        s.seen.insert(k.clone(), 107);
+        s.learned.entry(k.clone()).or_default().insert(4916085, 50);
+        s.learned.entry(k.clone()).or_default().insert(4918296, 2);
+        assert!(is_fixed(&s, &r, 10202, 4916085));
+        assert!(!is_fixed(&s, &r, 10202, 4918296));
+        s.seen.insert(k.clone(), 20);
+        s.learned.entry(k.clone()).or_default().insert(111, 3);
+        assert!(!is_fixed(&s, &r, 10202, 111));
         let mut off = r.clone();
         off.learn_fixed = false;
         assert!(!is_fixed(&s, &off, 10202, 790065));
