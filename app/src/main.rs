@@ -1091,6 +1091,17 @@ fn start_follow(
             control / 1e6
         ));
     }
+    let taken_controls: Vec<f64> = state.runs.lock().unwrap().iter().map(|r| r.control_hz).collect();
+    let radio_key = format!("{source}|{}", device.clone().unwrap_or_default());
+    if let Some(r) = state.radios.lock().unwrap().get(&radio_key).filter(|r| r.tee.alive() && r.tee.consumers() > 0) {
+        let half = r.norm_rate * 0.4;
+        if (control - r.center_hz).abs() >= half {
+            return Err(format!(
+                "{} is tuned to {:.4} MHz (±{:.2} MHz) for another system, and {:.4} MHz is outside that — stop the other system first, or start both together so the band centre covers both",
+                r.name, r.center_hz / 1e6, half / 1e6, control / 1e6
+            ));
+        }
+    }
     let (pl_allow, pl_name) = match playlist.as_deref().filter(|s| !s.is_empty()) {
         Some(id) => {
             let p = playlists::load(&app)
@@ -1109,7 +1120,6 @@ fn start_follow(
         .unwrap_or_else(|| format!("{:.4} MHz", control / 1e6));
     let running = Arc::new(AtomicBool::new(true));
     let run_id = state.run_seq.fetch_add(1, Ordering::SeqCst) + 1;
-    let radio_key = format!("{source}|{}", device.clone().unwrap_or_default());
     state.running.store(true, Ordering::SeqCst);
     state.runs.lock().unwrap().push(Run {
         id: run_id,
@@ -1245,6 +1255,7 @@ fn start_follow(
             });
             let params = follow::FollowParams {
                 max_calls,
+                taken_controls,
                 channelizer,
                 modulation: modulation.unwrap_or_default(),
                 uv_quality,
