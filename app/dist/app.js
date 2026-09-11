@@ -3221,7 +3221,7 @@ const dpDemo = async (cmd, args) => {
   switch (cmd) {
     case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Indianapolis, IN", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "", grid_fallback: true, calibration: { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow } };
     case "incidents_list": return dpDemoIncidents.filter((i) => !args || !args.since || i.updated >= args.since);
-    case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
+    case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, reports: i.id === 1 ? [{ id: 9, at: i.created + 1500, tg: 10259, tg_name: "MED-06", tg_desc: "Example General ER", place: "Example General", summary: "Medic 21 inbound with a 68-year-old in cardiac arrest, ROSC achieved.", how: "Medic 21 was sent to this run" }] : [], calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
     case "dispatch_log": return dpDemoIncidents.map((i) => ({ at: i.updated, tg: i.tg, tg_name: i.tg_name, call: 700 + i.id, outcome: "new", detail: `#${i.id} ${i.call_type} · ${i.address}`, incident: i.id }));
     case "dispatch_set": case "incident_delete": return null;
     case "incident_locate": { const i = dpDemoIncidents.find((x) => x.id === args.id); if (i && args.lat != null) { i.lat = args.lat; i.lon = args.lon; i.geocode = "manual"; } return i; }
@@ -3292,6 +3292,26 @@ function dpCard(i) {
 // reference placed it — a few hundred metres, not a doorstep.
 // When a mis-heard street was put right, keep what was actually said in
 // view — the listener is the one who can tell whether the swap was fair.
+// The run as a story: dispatched, worked, and — when a crew was heard
+// reading a report to a hospital — where the patient went. The hospital
+// half is joined by the crew's callsign, so the reason is shown with it.
+function dpStory(i, calls, reports, t) {
+  if (!(reports || []).length) return "";
+  const first = calls && calls.length ? calls[0].at : i.created;
+  const step = (at, what, who, body, how) => `
+    <div class="dpstep">
+      <span class="mono when">${t(at)}</span>
+      <span class="mins">${at > first ? "+" + Math.round((at - first) / 60) + " min" : ""}</span>
+      <div class="what"><b>${esc(what)}</b>${who ? ` <span class="faint">${esc(who)}</span>` : ""}
+        ${body ? `<div class="body">${esc(body)}</div>` : ""}
+        ${how ? `<div class="how">joined because ${esc(how)}</div>` : ""}</div>
+    </div>`;
+  const rows = [step(i.created, `${i.emoji} ${i.call_type}`, (i.units || []).join(", "), i.address, "")];
+  for (const r of reports) {
+    rows.push(step(r.at, `🏥 ${r.place || r.tg_desc || r.tg_name}`, "", r.summary, r.how));
+  }
+  return `<div class="k" style="margin-top:10px">What happened</div><div class="dpstory">${rows.join("")}</div>`;
+}
 function dpHeardAs(i, calls) {
   if (i.geocode !== "corrected") return "";
   for (const c of calls || []) {
@@ -3419,6 +3439,7 @@ async function dpDetails(id) {
       <div><div class="k">Summary</div><div class="v">${esc(i.summary) || "—"}</div></div>
     </div>
     <div class="fix"><input data-fixaddr type="text" value="${esc(i.address)}" placeholder="Corrected street address or intersection" spellcheck="false"><button class="btn ghost sm" data-fixgo>Re-geocode</button><button class="btn ghost sm" data-fixmap title="Place the pin at the current map centre">Use map centre</button></div>
+    ${dpStory(i, d.calls, d.reports, t)}
     <div class="k" style="margin-top:10px">Transmissions</div>
     <div class="calls">${calls || '<div class="faint">none</div>'}</div>
   </div>`, { wide: true });
