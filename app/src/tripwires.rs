@@ -1519,6 +1519,41 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
 
 /// Later traffic inside a live thread's scope, sent as a reply. `fired` are
 /// the tripwires this call trips on its own (they reply for themselves).
+/// The live threads this call belongs to, claiming each one as it goes: the
+/// reply is counted and the call remembered here, so a second transcript for
+/// the same call cannot send it twice.
+fn claim_threads(
+    threads: &mut [Thread],
+    f: &CallFacts,
+    fired: &HashSet<String>,
+    rules: &HashMap<String, Tripwire>,
+    now: i64,
+) -> Vec<(Thread, Tripwire)> {
+    let mut out = Vec::new();
+    for th in threads.iter_mut() {
+        if th.until <= now || th.replies >= MAX_REPLIES || fired.contains(&th.rule) {
+            continue;
+        }
+        if f.id.is_some_and(|id| th.calls.contains(&id)) {
+            continue;
+        }
+        let inside = match th.scope.as_str() {
+            "radio" => th.unit != 0 && f.unit == th.unit,
+            "channel" => f.tg == th.tg,
+            _ => false,
+        };
+        let Some(t) = rules.get(&th.rule).filter(|t| t.enabled) else {
+            continue;
+        };
+        if inside {
+            th.replies += 1;
+            th.calls.extend(f.id);
+            out.push((th.clone(), t.clone()));
+        }
+    }
+    out
+}
+
 fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
     if f.transcript.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return;
@@ -1533,31 +1568,7 @@ fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
             .iter()
             .map(|t| (t.id.clone(), t.clone()))
             .collect();
-        let mut out = Vec::new();
-        for th in st.threads.iter_mut() {
-            if th.until <= now || th.replies >= MAX_REPLIES || fired.contains(&th.rule) {
-                continue;
-            }
-            if f.id.is_some_and(|id| th.calls.contains(&id)) {
-                continue;
-            }
-            let inside = match th.scope.as_str() {
-                "radio" => th.unit != 0 && f.unit == th.unit,
-                "channel" => f.tg == th.tg,
-                _ => false,
-            };
-            let Some(t) = rules.get(&th.rule).filter(|t| t.enabled) else {
-                continue;
-            };
-            if inside {
-                // Claimed now, so a second transcript for the same call
-                // cannot send it twice.
-                th.replies += 1;
-                th.calls.extend(f.id);
-                out.push((th.clone(), t.clone()));
-            }
-        }
-        out
+        claim_threads(&mut st.threads, f, fired, &rules, now)
     };
     for (th, t) in due {
         let (app, f) = (app.clone(), f.clone());
@@ -2143,6 +2154,92 @@ mod tests {
             system: "Test System".into(),
             ..Default::default()
         }
+    }
+
+    fn thread(scope: &str, until: i64) -> Thread {
+        Thread {
+            rule: "t1".into(),
+            tg: 20308,
+            unit: 790065,
+            scope: scope.into(),
+            dest: String::new(),
+            root: 42,
+            until,
+            replies: 0,
+            calls: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn a_live_thread_claims_later_traffic_once() {
+        let t = words(&["cardiac arrest"], &[]);
+        let rules: HashMap<String, Tripwire> = [("t1".to_string(), t)].into_iter().collect();
+        let none = HashSet::new();
+        let mut threads = vec![thread("channel", 100)];
+
+        // The first transcript of call 1 replies.
+        let f = facts("engine 3 responding");
+        assert_eq!(claim_threads(&mut threads, &f, &none, &rules, 0).len(), 1);
+        assert_eq!(threads[0].replies, 1);
+        // A second transcript for the same call does not.
+        assert!(claim_threads(&mut threads, &f, &none, &rules, 0).is_empty());
+        assert_eq!(threads[0].replies, 1);
+
+        // A call on another channel is outside a "channel" thread.
+        let mut other = f.clone();
+        other.id = Some(2);
+        other.tg = 20309;
+        assert!(claim_threads(&mut threads, &other, &none, &rules, 0).is_empty());
+
+        // Nothing replies once the window closes, or after the cap.
+        let mut third = f.clone();
+        third.id = Some(3);
+        assert!(claim_threads(&mut threads, &third, &none, &rules, 200).is_empty());
+        threads[0].replies = MAX_REPLIES;
+        assert!(claim_threads(&mut threads, &third, &none, &rules, 0).is_empty());
+    }
+
+    #[test]
+    fn a_tripwire_that_just_sent_does_not_also_reply_to_itself() {
+        let t = words(&["cardiac arrest"], &[]);
+        let rules: HashMap<String, Tripwire> = [("t1".to_string(), t)].into_iter().collect();
+        let mut threads = vec![thread("channel", 100)];
+        let fired: HashSet<String> = ["t1".to_string()].into_iter().collect();
+        let f = facts("another cardiac arrest");
+        assert!(claim_threads(&mut threads, &f, &fired, &rules, 0).is_empty());
+        assert_eq!(threads[0].replies, 0);
+    }
+
+    #[test]
+    fn a_radio_thread_follows_the_radio_not_the_channel() {
+        let t = words(&["cardiac arrest"], &[]);
+        let rules: HashMap<String, Tripwire> = [("t1".to_string(), t)].into_iter().collect();
+        let none = HashSet::new();
+        let mut threads = vec![thread("radio", 100)];
+
+        // Same radio, different channel: still the same story.
+        let mut moved = facts("arriving at the hospital");
+        moved.tg = 20400;
+        assert_eq!(claim_threads(&mut threads, &moved, &none, &rules, 0).len(), 1);
+
+        // Another radio on the original channel is someone else.
+        let mut stranger = facts("truck 2 on scene");
+        stranger.id = Some(9);
+        stranger.unit = 790066;
+        assert!(claim_threads(&mut threads, &stranger, &none, &rules, 0).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_or_switched_off_tripwire_stops_replying() {
+        let mut t = words(&["cardiac arrest"], &[]);
+        t.enabled = false;
+        let off: HashMap<String, Tripwire> = [("t1".to_string(), t)].into_iter().collect();
+        let gone: HashMap<String, Tripwire> = HashMap::new();
+        let none = HashSet::new();
+        let mut threads = vec![thread("channel", 100)];
+        let f = facts("still talking");
+        assert!(claim_threads(&mut threads, &f, &none, &off, 0).is_empty());
+        assert!(claim_threads(&mut threads, &f, &none, &gone, 0).is_empty());
     }
 
     fn words(ws: &[&str], tgs: &[u16]) -> Tripwire {

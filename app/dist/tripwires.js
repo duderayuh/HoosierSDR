@@ -129,7 +129,9 @@
   // The same tripwire as one string, keys sorted (the backend's key order
   // is not the page's), for "has it changed?".
   const stable = (x) => JSON.stringify(x, (k, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.keys(v).sort().reduce((o, key) => { o[key] = v[key]; return o; }, {}) : v));
-  const normal = (t) => t;
+  // A copy without half-typed rows: a field whose name is still empty would
+  // make the backend refuse the whole draft mid-keystroke.
+  const tidy = (t) => { const c = clone(t); c.check.fields = (c.check.fields || []).filter((f) => (f.key || "").trim()); c.check.conditions = (c.check.conditions || []).filter((x) => (x.field || "").trim()); return c; };
   async function leaveOk() {
     if (!draft || !isDirty()) return true;
     return uiConfirm("Discard the changes to this tripwire?", "Discard");
@@ -142,12 +144,12 @@
   }
   function edit(id, t, w) {
     sel = id; draft = t; words = w; tried = new Map(); preview = null;
-    saved = id === "new" ? "" : stable(normal(t));
+    saved = id === "new" ? "" : stable(tidy(t));
     $("twGallery").style.display = "none"; $("twEdit").style.display = "";
     renderList(); fill(); schedulePreview(0);
   }
   function closeEditor() { sel = null; draft = null; words = null; $("twEdit").style.display = "none"; $("twGallery").style.display = ""; showGallery(); }
-  const isDirty = () => draft && stable(normal(read())) !== saved;
+  const isDirty = () => draft && stable(tidy(read())) !== saved;
   function markDirty() { $("twDirty").textContent = sel === "new" ? "not saved yet" : isDirty() ? "unsaved changes" : ""; }
 
   function fillDest() {
@@ -331,10 +333,10 @@
     if (!t.name) { uiToast("Give it a name", "err"); $("twName").focus(); return; }
     if (t.when.kind === "call" && !t.when.tgs.length && !t.when.units.length && !t.when.phrases.length && !t.when.emergency) { uiToast("Pick talkgroups, radios or phrases first — as it is, it would fire on every call", "err"); return; }
     if (t.check.kind === "ask" || t.check.kind === "extract") { if (!t.check.prompt.trim()) { uiToast("Write the question for the AI check (or choose Send every match)", "err"); return; } }
-    const next = sel === "new" ? [...list, clone(t)] : list.map((x) => (x.id === sel ? clone(t) : x));
+    const next = sel === "new" ? [...list, tidy(t)] : list.map((x) => (x.id === sel ? tidy(t) : x));
     if (!(await persist(next))) return;
     const got = sel === "new" ? list[list.length - 1] : list.find((x) => x.id === sel);
-    sel = got.id; draft = clone(got); saved = stable(normal(draft));
+    sel = got.id; draft = clone(got); saved = stable(tidy(draft));
     renderList(); fill(); uiToast(`Saved “${got.name}”`);
     if (view && !view.transcribing && (t.when.phrases.length || t.check.kind !== "none" || t.when.kind !== "call")) uiToast("Transcription is off — this tripwire needs it (Settings → Transcription)", "err");
     loadStats();
@@ -364,7 +366,7 @@
   }
   async function runPreview() {
     if (!draft) return;
-    const seq = ++previewSeq, t = clone(read());
+    const seq = ++previewSeq, t = tidy(read());
     $("twHeadline").classList.add("busy");
     try {
       const p = await invoke("tripwire_preview", { tripwire: t, days });
@@ -415,7 +417,7 @@
     if (!preview || !draft) return;
     const ids = preview.samples.filter((s) => s.transcript).slice(0, 5).map((s) => s.id);
     const b = $("twTry"); b.disabled = true; b.textContent = "Asking the model…";
-    try { const out = await invoke("tripwire_try", { tripwire: clone(read()), ids }); for (const r of out) tried.set(r.id, r); renderPreview(); const n = out.filter((r) => r.verdict === "send").length; uiToast(`${n} of ${out.length} would send`); }
+    try { const out = await invoke("tripwire_try", { tripwire: tidy(read()), ids }); for (const r of out) tried.set(r.id, r); renderPreview(); const n = out.filter((r) => r.verdict === "send").length; uiToast(`${n} of ${out.length} would send`); }
     catch (e) { uiToast(`${e}`, "err"); }
     finally { b.disabled = false; b.textContent = "Try the check on these"; }
   };
