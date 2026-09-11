@@ -51,7 +51,7 @@ cargo run -p hs-cli -- --demo      # synthesized decode, no hardware needed
 - **Radios** — Airspy R2 (10 MSPS, whole-site), RTL-SDR (2.4 MSPS)
 - **Other protocols** — AM, NBFM, DCS; more on the roadmap
 - **Desktop app** — live decode, spectrum waterfall, record IQ (Tauri v2)
-- **Analyzers** — your own prompts pull structured fields out of each transcript (ECPR candidacy, stroke screen, …) and alert when a condition holds; built-in medical templates ship with the app, and analyzers can be exported as template files and imported from others (imports are size-capped, stripped of hidden characters, and arrive disabled with no chat set)
+- **Tripwires** — one kind of rule for everything that watches the radio: *when* (words on a channel, an emergency, a radio keying up, a conversation ending, or a timer), *check* (nothing, an AI yes/no question, or extracting named details like ECPR candidacy), *send* (Telegram, with the audio, at most once per quiet window, with later traffic arriving as replies in the same thread). The editor previews a draft against the calls you already have — how often it would have fired, which ones it would have caught, and which phrases are never actually said on those channels, with what the transcriber writes instead. Rules can be shared as files (size-capped, stripped of hidden characters, and arriving switched off)
 - **Dispatch map** — mark your dispatch talkgroups and each dispatched call becomes a live incident: the model extracts the address, units and call type and picks the emoji, the address is geocoded on OpenStreetMap (Nominatim), and calls about the same incident are grouped and updated in place on a Leaflet map
 
 ## Usage

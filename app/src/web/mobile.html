@@ -25,11 +25,12 @@
   .card h1 { font-size:13px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); font-weight:600; }
   .card p { color:var(--dim); margin:0 0 12px; font-size:14px; }
   label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--faint); margin:10px 0 4px; }
-  input, select {
+  input, select, textarea {
     width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--ink);
     border-radius:10px; padding:11px; font-size:16px;
   }
-  input:focus, select:focus { border-color:var(--signal); outline:none; }
+  input:focus, select:focus, textarea:focus { border-color:var(--signal); outline:none; }
+  textarea { font-family:inherit; box-sizing:border-box; resize:vertical; }
   button {
     width:100%; margin-top:14px; background:var(--signal); color:#05100e; border:0;
     border-radius:10px; padding:12px; font-size:15px; font-weight:600; cursor:pointer;
@@ -88,7 +89,7 @@
   .check input { width:auto; margin:0; }
   .rule { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); }
   .rule:last-child { border-bottom:0; }
-  .rule .nm { font-weight:600; }
+  .rule .nm { font-weight:600; cursor:pointer; flex:1; min-width:0; }
   .rule .en { color:var(--dim); font-size:12px; }
 </style>
 </head>
@@ -243,21 +244,44 @@
           <button id="hkSave">Save hook</button>
         </details>
 
-        <details class="card">
-          <summary class="h1">Alert rules</summary>
-          <div id="alertsList"><p class="muted">Loading…</p></div>
-        </details>
-        <details class="card">
-          <summary class="h1">Conversation rules</summary>
-          <div id="convList"><p class="muted">Loading…</p></div>
-        </details>
-        <details class="card">
-          <summary class="h1">Digests</summary>
-          <div id="digList"><p class="muted">Loading…</p></div>
-        </details>
-        <details class="card">
-          <summary class="h1">Analyzers</summary>
-          <div id="azList"><p class="muted">Loading…</p></div>
+        <details class="card" id="twCard">
+          <summary class="h1">Tripwires</summary>
+          <div id="twList"><p class="muted">Loading…</p></div>
+          <div id="twEdit" style="display:none">
+            <label for="twName">Name</label>
+            <input id="twName" type="text" spellcheck="false" />
+            <div id="twCallOnly">
+            <label for="twPhrases">Listen for <span class="hint">one phrase per line</span></label>
+            <textarea id="twPhrases" rows="3" spellcheck="false"></textarea>
+            <label for="twExcept">…but not</label>
+            <textarea id="twExcept" rows="2" spellcheck="false"></textarea>
+            </div>
+            <label for="twTgs">Talkgroups <span class="hint">numbers, comma separated</span></label>
+            <input id="twTgs" type="text" inputmode="numeric" spellcheck="false" />
+            <label for="twDest">Send to</label>
+            <select id="twDest"></select>
+            <div id="twCallOnly2">
+            <label for="twQuiet">At most</label>
+            <select id="twQuiet">
+              <option value="0">every time</option>
+              <option value="120">once per 2 min per talkgroup</option>
+              <option value="300">once per 5 min per talkgroup</option>
+              <option value="900">once per 15 min per talkgroup</option>
+              <option value="3600">once per hour per talkgroup</option>
+            </select>
+            <label for="twFollow">Follow-ups</label>
+            <select id="twFollow">
+              <option value="off">off</option>
+              <option value="radio">what that radio says next</option>
+              <option value="channel">everything on the talkgroup</option>
+              <option value="repeats">only this tripwire again</option>
+            </select>
+            </div>
+            <label class="check"><input id="twOn" type="checkbox" /> on</label>
+            <div class="hint" id="twNote"></div>
+            <button id="twSave">Save tripwire</button>
+            <button class="ghost" id="twCancel" style="margin-top:8px">Back to the list</button>
+          </div>
         </details>
       </div>
     </div>
@@ -505,37 +529,65 @@
     renderRules();
   }
 
-  function ruleList(el, rules, key, cb) {
-    el.innerHTML = rules.length ? rules.map(r => `<div class="rule"><span class="nm">${esc(r.name)}</span><label class="check" style="margin:0"><input type="checkbox" data-id="${esc(r[key])}" ${r.enabled ? "checked" : ""}></label></div>`).join("") : '<p class="muted">none</p>';
-    el.querySelectorAll("[data-id]").forEach(c => c.onchange = () => cb(c.dataset.id, c.checked));
+  /* ---- tripwires: the list, and a simple editor for one ---- */
+  let tripwires = null, twSel = null;
+  const twLines = (v) => String(v || "").split(/\n+/).map(x => x.trim()).filter(Boolean);
+  const twNums = (v) => String(v || "").split(/[\s,;]+/).map(x => parseInt(x, 10)).filter(Number.isFinite);
+  function twSentence(t) {
+    const w = t.when;
+    if (w.kind === "conversation") return `conversations on ${w.tgs.length ? w.tgs.length + " talkgroups" : "any talkgroup"}`;
+    if (w.kind === "digest") return `every ${w.digest.every_mins} min`;
+    const bits = [];
+    if (w.emergency) bits.push("emergencies");
+    if (w.phrases.length) bits.push(w.phrases.slice(0, 2).map(p => `“${p}”`).join(", ") + (w.phrases.length > 2 ? "…" : ""));
+    if (w.units.length) bits.push(`radio ${w.units[0]}`);
+    return `${bits.join(" · ") || "any call"} on ${w.tgs.length ? "TG " + w.tgs.slice(0, 2).join(", ") + (w.tgs.length > 2 ? "…" : "") : "any talkgroup"}${t.check.kind === "ask" ? " · AI asks" : t.check.kind === "extract" ? " · AI details" : ""}`;
   }
   async function renderRules() {
-    try { const v = await command("alerts_get"); alertsSettings = v.settings;
-      ruleList($("alertsList"), v.settings.alerts || [], "id", (id, on) => toggleAlert(id, on)); } catch {}
-    try { const v = await command("conversations_get");
-      ruleList($("convList"), v.settings.rules || [], "id", (id, on) => toggleConv(id, on)); } catch {}
-    try { const v = await command("digests_get");
-      ruleList($("digList"), v.rules || [], "id", (id, on) => toggleDig(id, on)); } catch {}
-    try { const v = await command("analyzers_get");
-      ruleList($("azList"), v.rules || [], "id", (id, on) => toggleAz(id, on)); } catch {}
+    try { const v = await command("tripwires_get"); tripwires = v.tripwires || []; } catch (e) { $("twList").innerHTML = `<p class="muted">${esc(String(e))}</p>`; return; }
+    $("twList").innerHTML = tripwires.length ? tripwires.map(t => `<div class="rule"><span class="nm" data-open="${esc(t.id)}">${esc(t.name)}<br><span class="hint">${esc(twSentence(t))}</span></span><label class="check" style="margin:0"><input type="checkbox" data-id="${esc(t.id)}" ${t.enabled ? "checked" : ""}></label></div>`).join("") : '<p class="muted">none yet — make one on the desktop</p>';
+    $("twList").querySelectorAll("[data-id]").forEach(c => c.onchange = () => twToggle(c.dataset.id, c.checked));
+    $("twList").querySelectorAll("[data-open]").forEach(n => n.onclick = () => twOpen(n.dataset.open));
   }
-  async function toggleAlert(id, on) {
-    if (!alertsSettings) return;
-    const a = alertsSettings.alerts.find(x => x.id === id); if (a) a.enabled = on;
-    try { await command("alerts_set", { settings: alertsSettings }); } catch (e) { toast(e, true); }
+  async function twSave(list) {
+    try { tripwires = await command("tripwires_set", { tripwires: list }); return true; }
+    catch (e) { toast(e, true); await renderRules(); return false; }
   }
-  async function toggleConv(id, on) {
-    try { const v = await command("conversations_get"); const r = v.settings.rules.find(x => x.id === id); if (r) r.enabled = on;
-      await command("conversations_set", { rules: v.settings.rules }); } catch (e) { toast(e, true); }
+  async function twToggle(id, on) {
+    const t = tripwires && tripwires.find(x => x.id === id); if (!t) return;
+    t.enabled = on;
+    if (await twSave(tripwires)) toast(`${t.name} is ${on ? "on" : "off"}`);
   }
-  async function toggleDig(id, on) {
-    try { const v = await command("digests_get"); const r = v.rules.find(x => x.id === id); if (r) r.enabled = on;
-      await command("digests_set", { rules: v.rules }); } catch (e) { toast(e, true); }
+  function twOpen(id) {
+    const t = tripwires.find(x => x.id === id); if (!t) return;
+    twSel = id;
+    $("twList").style.display = "none"; $("twEdit").style.display = "";
+    $("twName").value = t.name; $("twOn").checked = t.enabled;
+    $("twPhrases").value = t.when.phrases.join("\n"); $("twExcept").value = t.when.except.join("\n");
+    $("twTgs").value = t.when.tgs.join(", ");
+    const q = $("twQuiet");
+    [...q.querySelectorAll("[data-custom]")].forEach(o => o.remove());
+    if (![...q.options].some(o => o.value === String(t.send.quiet_secs))) q.insertAdjacentHTML("beforeend", `<option data-custom value="${t.send.quiet_secs}">once per ${t.send.quiet_secs} s per talkgroup</option>`);
+    q.value = String(t.send.quiet_secs); $("twFollow").value = t.send.follow;
+    const dests = (alertsSettings && alertsSettings.destinations) || [];
+    $("twDest").innerHTML = `<option value="">the default chat</option>` + dests.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join("") + (t.send.dest === "custom" ? `<option value="custom">${esc(t.send.chat)}</option>` : "");
+    $("twDest").value = t.send.dest || "";
+    const only = t.when.kind !== "call";
+    $("twCallOnly").style.display = $("twCallOnly2").style.display = only ? "none" : "";
+    $("twNote").textContent = only ? `This one ${t.when.kind === "digest" ? "runs on a timer" : "summarises conversations"} — the desktop has the rest of its settings.` : `${t.check.kind === "ask" ? "An AI question decides whether to send." : t.check.kind === "extract" ? "The AI pulls out details first." : "Every match is sent."} Message and AI settings are on the desktop.`;
   }
-  async function toggleAz(id, on) {
-    try { const v = await command("analyzers_get"); const r = v.rules.find(x => x.id === id); if (r) r.enabled = on;
-      await command("analyzers_set", { rules: v.rules }); } catch (e) { toast(e, true); }
-  }
+  $("twCancel").onclick = () => { twSel = null; $("twEdit").style.display = "none"; $("twList").style.display = ""; };
+  $("twSave").onclick = async () => {
+    const t = tripwires.find(x => x.id === twSel); if (!t) return;
+    t.name = $("twName").value.trim() || t.name; t.enabled = $("twOn").checked;
+    if (t.when.kind === "call") {
+      t.when.phrases = twLines($("twPhrases").value); t.when.except = twLines($("twExcept").value);
+      t.send.quiet_secs = parseInt($("twQuiet").value, 10) || 0; t.send.follow = $("twFollow").value;
+    }
+    t.when.tgs = twNums($("twTgs").value);
+    if ($("twDest").value !== "custom") { t.send.dest = $("twDest").value; t.send.chat = ""; }
+    if (await twSave(tripwires)) { toast("Tripwire saved"); $("twCancel").onclick(); await renderRules(); }
+  };
 
   // save handlers
   $("trSave").onclick = async () => {
