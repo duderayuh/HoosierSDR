@@ -966,3 +966,8 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .runchip .x { border: 0; background: transparent; color: var(--ink-dim); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 6px; border-radius: 999px; }
 .runchip .x:hover { background: var(--enc); color: #fff; }
 .call .sys { display: block; font-size: 10px; color: var(--ink-faint); letter-spacing: .04em; }
+
+/* per-playlist lockout chips: the playlist label chip, and inline rename inputs in the Playlists page */
+.lockbar .chip.lab { background: transparent; border-style: dashed; cursor: default; opacity: .8; }
+.list .row input.plname { font: inherit; font-weight: 600; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; color: inherit; min-width: 12ch; }
+.list .row input.plname:hover, .list .row input.plname:focus { border-color: var(--line, #8884); outline: none; }

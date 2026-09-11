@@ -191,10 +191,10 @@ function setState(s) {
 /* ---------- now playing ---------- */
 const activeCalls = new Map();   // key → { el, start }
 function activeKey(tg, f) { return `${tg}@${f.toFixed(4)}`; }
-let lastTg = null;
+let lastTg = null, lastPl = "";   // the talkgroup on the air and the playlist its run follows
 function activeStart(ev) {
   const key = activeKey(ev.tg, ev.freq_mhz);
-  lastTg = ev.tg; updateHoldBtn();
+  lastTg = ev.tg; lastPl = runPl(ev); updateHoldBtn();
   if (activeCalls.has(key)) return;
   const el = document.createElement("div");
   el.className = "call" + (ev.priority && ev.priority < 50 ? " pri" : "");
@@ -225,19 +225,21 @@ function logEvent(text, cls) {
 }
 $("evClear").onclick = () => { evlog.innerHTML = ""; };
 
-/* ---------- hold ---------- */
-let holdTg = null;
+/* ---------- hold: one talkgroup, on the playlist it was heard on (every site following that playlist narrows; other systems carry on) ---------- */
+let holdTg = null, holdPl = "";
 function updateHoldBtn() {
   const b = $("holdBtn");
   b.classList.toggle("on", holdTg != null);
   b.textContent = holdTg != null ? `Hold TG ${holdTg}` : (lastTg != null ? `Hold TG ${lastTg}` : "Hold");
+  b.title = holdTg != null && plName(holdPl) ? `Holding TG ${holdTg} on ${plName(holdPl)}` : "Follow only the talkgroup on the air / last heard";
   b.disabled = holdTg == null && lastTg == null;
 }
 $("holdBtn").onclick = () => {
-  holdTg = holdTg != null ? null : lastTg;
+  const releasing = holdTg != null, pl = releasing ? holdPl : lastPl;
+  holdTg = releasing ? null : lastTg; holdPl = pl;
   updateHoldBtn();
-  if (TAURI) invoke("set_hold", { tg: holdTg }).catch((e) => alert(e));
-  logEvent(holdTg != null ? `hold on TG ${holdTg}` : "hold released");
+  if (TAURI) invoke("set_hold", { tg: holdTg, playlist: pl || null }).catch((e) => alert(e));
+  logEvent(holdTg != null ? `hold on TG ${holdTg}${plName(pl) ? " · " + plName(pl) : ""}` : "hold released");
 };
 updateHoldBtn();
 function activeClear() { activeCalls.forEach((a) => a.el.remove()); activeCalls.clear(); activeRefresh(); }
@@ -273,18 +275,18 @@ function addCall(g) {
     `<td class="act">` +
       (g.wav ? `<button title="Replay" data-wav="${esc(g.wav)}">▶</button>` : "") +
       (g.id != null ? `<button title="Add to cart" data-cart="${g.id}" class="${cart.has(g.id) ? "on" : ""}">🛒</button>` : "") +
-      `<input type="number" class="priin" data-pri="${g.tg}" min="1" max="99" value="${priOf(g.tg)}" title="Priority 1–99 (1 = highest)">` +
+      `<input type="number" class="priin" data-pri="${g.tg}" data-pl="${esc(g.pl || "")}" min="1" max="99" value="${priOf(g.tg, g.pl)}" title="Priority 1–99 (1 = highest)">` +
       `<button title="Alert tone for TG ${g.tg}" data-bell="${g.tg}">🔔</button>` +
-      `<button title="Avoid TG ${g.tg} for a while" data-avoid="${g.tg}">⏱</button>` +
-      `<button title="Lock out TG ${g.tg}" data-lock="${g.tg}">⊘</button>` +
+      `<button title="Avoid TG ${g.tg} for a while" data-avoid="${g.tg}" data-pl="${esc(g.pl || "")}">⏱</button>` +
+      `<button title="Lock out TG ${g.tg}${plName(g.pl) ? " on " + esc(plName(g.pl)) : ""}" data-lock="${g.tg}" data-pl="${esc(g.pl || "")}">⊘</button>` +
     `</td>`;
   if (g.emergency) tr.classList.add("emg");
   if (g.secs === 0 || g.modulation === "?") tr.classList.add("noaudio");
   applyColor(tr, g.tg);
   tr.querySelectorAll("button[data-wav]").forEach((b) => b.onclick = () => replay(b.dataset.wav));
-  tr.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => toggleLock(+b.dataset.lock));
-  tr.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => avoidFor(+b.dataset.avoid));
-  tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); });
+  tr.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => toggleLock(+b.dataset.lock, b.dataset.pl));
+  tr.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => avoidFor(+b.dataset.avoid, b.dataset.pl));
+  tr.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value, b.dataset.pl); });
   tr.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => toggleBell(+b.dataset.bell));
   tr.querySelectorAll("button[data-cart]").forEach((b) => b.onclick = () => cartToggle(+b.dataset.cart, `${now()} ${g.name} · ${g.secs != null ? g.secs.toFixed(1) + "s" : ""}`));
   const text = `${g.name} ${g.desc || ""} ${g.service || ""} ${g.category || ""} ${g.system || ""} ${g.site_name || ""} ${g.tg} ${g.source || ""} ${g.unit_name || ""} ${g.talker_alias || ""} ${g.freq_mhz.toFixed(4)} ${g.transcript || ""}`.toLowerCase();
@@ -423,15 +425,52 @@ function applyFs(k) {
   const reset = $("navOrderReset"); if (reset) reset.onclick = () => window.navOrderReset();
 })();
 
-const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
+/* ---------- per-playlist filters ----------
+   A talkgroup number only means something within one system, so lockouts,
+   priorities and timed avoids are kept per playlist ("" = runs started
+   without one). A playlist's lockout and priorities live in the backend,
+   shared by every site following it and every open page; the unscoped set
+   and the timed avoids stay in this browser. */
+const filt = new Map();   // playlist id → { lockout:Set, prio:Map, avoid:Map(tg → epoch ms) }
+function filtFor(pl) {
+  pl = pl || "";
+  let f = filt.get(pl);
+  if (!f) {
+    f = { lockout: new Set(pl ? [] : store("hs.lockout", [])),
+      prio: new Map(pl ? [] : Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v])),
+      avoid: new Map(Object.entries(store(pl ? `hs.avoid.${pl}` : "hs.avoid", {})).map(([k, v]) => [+k, +v])) };
+    filt.set(pl, f);
+  }
+  return f;
+}
+const knownPlaylistIds = () => (window.playlistsAll || []).map((p) => p.id);
+const plName = (pl) => { if (!pl) return ""; const p = (window.playlistsAll || []).find((x) => x.id === pl); return p ? p.name : pl; };
+// The playlist a talkgroup of system `sid` belongs to: a live run's, else the first saved for that system.
+function plForSid(sid) {
+  if (sid == null) return "";
+  const live = (typeof runsNow !== "undefined" ? runsNow : []).find((r) => r.sid === sid && r.playlist);
+  if (live) return live.playlist;
+  const p = (window.playlistsAll || []).find((x) => x.sid === sid);
+  return p ? p.id : "";
+}
+// Take a playlist's saved lockout and priorities from the backend's copy.
+function loadPlaylistFilters(list) {
+  window.playlistsAll = list;
+  for (const p of list) { const f = filtFor(p.id); f.lockout = new Set(p.lockout || []); f.prio = new Map((p.priorities || []).map(([t, v]) => [+t, +v])); }
+  for (const id of [...filt.keys()]) if (id && !list.some((p) => p.id === id)) filt.delete(id);
+  renderLockout();
+}
 const bells = new Set(store("hs.bells", []));
-const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
-function pushPriorities() { if (TAURI) invoke("set_priorities", { entries: [...prio] }).catch((e) => log(`set_priorities: ${e}`)); }
-const priOf = (tg) => prio.get(tg) || 50;
-function setPriority(tg, val) {
-  const n = parseInt(val, 10);
-  if (Number.isFinite(n) && n >= 1 && n <= 99 && n !== 50) prio.set(tg, n); else prio.delete(tg);
-  save("hs.prio", Object.fromEntries(prio)); pushPriorities(); refreshRowButtons();
+function pushPriorities(pl) {
+  const f = filtFor(pl);
+  if (!pl) save("hs.prio", Object.fromEntries(f.prio));
+  if (TAURI) invoke("set_priorities", { entries: [...f.prio], playlist: pl || null }).catch((e) => log(`set_priorities: ${e}`));
+}
+const priOf = (tg, pl) => filtFor(pl).prio.get(tg) || 50;
+function setPriority(tg, val, pl) {
+  const n = parseInt(val, 10), f = filtFor(pl);
+  if (Number.isFinite(n) && n >= 1 && n <= 99 && n !== 50) f.prio.set(tg, n); else f.prio.delete(tg);
+  pushPriorities(pl); refreshRowButtons();
 }
 function toggleBell(tg) { bells.has(tg) ? bells.delete(tg) : bells.add(tg); save("hs.bells", [...bells]); refreshRowButtons(); }
 
@@ -555,43 +594,62 @@ function tone(kind) {
   } catch (_) {}
 }
 
-/* ---------- lockout (permanent) + timed avoid ---------- */
-const lockout = new Set(store("hs.lockout", []));
-function effectiveLockout() {
-  const now = Date.now();
-  for (const [tg, until] of avoidUntil) if (until <= now) avoidUntil.delete(tg);
-  save("hs.avoid", Object.fromEntries(avoidUntil));
-  return [...new Set([...lockout, ...avoidUntil.keys(), ...mutedByGroups()])];
+/* ---------- lockout (permanent) + timed avoid, per playlist ---------- */
+// What one playlist's runs should refuse right now: the saved lockout, plus
+// (for now only) timed avoids and talkgroups muted through groups.
+function effectiveLockout(pl) {
+  const f = filtFor(pl), now = Date.now();
+  for (const [tg, until] of f.avoid) if (until <= now) f.avoid.delete(tg);
+  save(pl ? `hs.avoid.${pl}` : "hs.avoid", Object.fromEntries(f.avoid));
+  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...new Set([...f.avoid.keys(), ...mutedByGroups()])] };
 }
-function pushLockout() { if (TAURI) invoke("set_lockout", { tgs: effectiveLockout() }).catch((e) => alert(e)); }
-function avoidFor(tg) {
-  const min = +$("avoidMin").value || 60;
-  if (avoidUntil.has(tg)) avoidUntil.delete(tg); else avoidUntil.set(tg, Date.now() + min * 60000);
-  save("hs.avoid", Object.fromEntries(avoidUntil)); renderLockout(); pushLockout();
+// Push one playlist's lockout (or, with no argument, every known one).
+function pushLockout(pl) {
+  if (!TAURI) return;
+  const ids = pl === undefined ? [...new Set(["", ...filt.keys(), ...knownPlaylistIds()])] : [pl || ""];
+  for (const id of ids) {
+    const e = effectiveLockout(id);
+    if (!id) save("hs.lockout", e.tgs);
+    invoke("set_lockout", { tgs: e.tgs, playlist: id || null, extra: e.extra }).catch((err) => log(`set_lockout: ${err}`));
+  }
 }
-setInterval(() => { const before = avoidUntil.size; effectiveLockout(); renderLockout(); renderGroupChips(); if (avoidUntil.size !== before) pushLockout(); }, 15000);
+function avoidFor(tg, pl) {
+  const min = +$("avoidMin").value || 60, f = filtFor(pl);
+  if (f.avoid.has(tg)) f.avoid.delete(tg); else f.avoid.set(tg, Date.now() + min * 60000);
+  renderLockout(); pushLockout(pl);
+}
+setInterval(() => {
+  for (const [pl, f] of filt) { const before = f.avoid.size; effectiveLockout(pl); if (f.avoid.size !== before) pushLockout(pl); }
+  renderLockout(); renderGroupChips();
+}, 15000);
 function renderLockout() {
-  const chips = [...lockout].sort((a, b) => a - b).map((tg) => `<span class="chip" data-tg="${tg}" title="Unlock">TG ${tg} ✕</span>`)
-    .concat([...avoidUntil].map(([tg, until]) => `<span class="chip" data-avoid="${tg}" title="Timed avoid — click to lift">TG ${tg} ⏱ ${Math.max(1, Math.round((until - Date.now()) / 60000))}m ✕</span>`));
+  const withChips = [...filt].filter(([, f]) => f.lockout.size || f.avoid.size);
+  const multi = withChips.length > 1;
+  const chips = withChips.flatMap(([pl, f]) => {
+    const lab = multi ? `<span class="chip lab" title="playlist">${esc(plName(pl) || "no playlist")}</span>` : "";
+    return [lab,
+      ...[...f.lockout].sort((a, b) => a - b).map((tg) => `<span class="chip" data-tg="${tg}" data-pl="${esc(pl)}" title="Unlock${plName(pl) ? " on " + esc(plName(pl)) : ""}">TG ${tg} ✕</span>`),
+      ...[...f.avoid].map(([tg, until]) => `<span class="chip" data-avoid="${tg}" data-pl="${esc(pl)}" title="Timed avoid — click to lift">TG ${tg} ⏱ ${Math.max(1, Math.round((until - Date.now()) / 60000))}m ✕</span>`)];
+  }).filter(Boolean);
   $("lockbar").style.display = chips.length ? "" : "none";
   $("lockchips").innerHTML = chips.join(" ");
-  $("lockchips").querySelectorAll(".chip[data-tg]").forEach((c) => c.onclick = () => toggleLock(+c.dataset.tg));
-  $("lockchips").querySelectorAll(".chip[data-avoid]").forEach((c) => c.onclick = () => avoidFor(+c.dataset.avoid));
+  $("lockchips").querySelectorAll(".chip[data-tg]").forEach((c) => c.onclick = () => toggleLock(+c.dataset.tg, c.dataset.pl));
+  $("lockchips").querySelectorAll(".chip[data-avoid]").forEach((c) => c.onclick = () => avoidFor(+c.dataset.avoid, c.dataset.pl));
   refreshRowButtons();
 }
 function refreshRowButtons() {
-  tbody.querySelectorAll("button[data-lock]").forEach((b) => b.classList.toggle("on", lockout.has(+b.dataset.lock)));
-  tbody.querySelectorAll("button[data-avoid]").forEach((b) => b.classList.toggle("on", avoidUntil.has(+b.dataset.avoid)));
-  tbody.querySelectorAll("input[data-pri]").forEach((b) => { const p = prio.get(+b.dataset.pri) || 50; b.className = "priin" + (p < 50 ? " pri-h" : p > 50 ? " pri-l" : ""); b.value = p; b.title = `Priority ${p < 50 ? "(high)" : p > 50 ? "(low)" : "(default)"} — type 1–99`; });
+  tbody.querySelectorAll("button[data-lock]").forEach((b) => b.classList.toggle("on", filtFor(b.dataset.pl).lockout.has(+b.dataset.lock)));
+  tbody.querySelectorAll("button[data-avoid]").forEach((b) => b.classList.toggle("on", filtFor(b.dataset.pl).avoid.has(+b.dataset.avoid)));
+  tbody.querySelectorAll("input[data-pri]").forEach((b) => { const p = priOf(+b.dataset.pri, b.dataset.pl); b.className = "priin" + (p < 50 ? " pri-h" : p > 50 ? " pri-l" : ""); b.value = p; b.title = `Priority ${p < 50 ? "(high)" : p > 50 ? "(low)" : "(default)"} — type 1–99`; });
   tbody.querySelectorAll("button[data-bell]").forEach((b) => b.classList.toggle("bell", bells.has(+b.dataset.bell)));
 }
-function toggleLock(tg) {
-  if (lockout.has(tg)) lockout.delete(tg); else lockout.add(tg);
-  save("hs.lockout", [...lockout]);
-  renderLockout(); pushLockout();
+function toggleLock(tg, pl) {
+  const f = filtFor(pl);
+  if (f.lockout.has(tg)) f.lockout.delete(tg); else f.lockout.add(tg);
+  renderLockout(); pushLockout(pl);
 }
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
-effectiveLockout(); renderLockout(); renderGroupChips();
+filtFor(""); renderLockout(); renderGroupChips(); pushLockout("");
 $("histHideNa").checked = !!store("hs.hidena", false); $("histHideNa").onchange = () => { save("hs.hidena", $("histHideNa").checked); applyHistFilter(); };
 
 /* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
@@ -894,6 +952,8 @@ const runLabel = (ev) => runsNow.length > 1 && ev.system ? ev.system : "";
 // The RadioReference system behind an event's run (runs started from a
 // playlist know theirs), so names and rosters stay apart per system.
 const runSid = (ev) => { const r = ev && ev.run != null ? runsNow.find((x) => x.id === ev.run) : null; return r && r.sid != null ? r.sid : null; };
+// The playlist an event's run follows ("" when it follows every talkgroup).
+const runPl = (ev) => { const r = ev && ev.run != null ? runsNow.find((x) => x.id === ev.run) : null; return r && r.playlist ? r.playlist : ""; };
 
 function handleFollow(ev) {
   evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
@@ -938,7 +998,7 @@ function handleFollow(ev) {
       if (!ev.encrypted) followVoice += ev.secs;
       if (ev.emergency && !ev.replayed) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
       addCall({ at: ev.replayed ? ev.start : null, tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,
-                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk, system: ev.system, site_name: ev.site_name });
+                secs: ev.secs, modulation: ev.modulation, wav: ev.wav, emergency: ev.emergency, patched_with: ev.patched_with, id: ev.id, syncs_c4fm: ev.syncs_c4fm, syncs_cqpsk: ev.syncs_cqpsk, system: ev.system, site_name: ev.site_name, pl: runPl(ev) });
       if (ev.secs === 0) { noAudioCount++; $("histMeta").title = `${noAudioCount} granted calls produced no audio`; }
       // Say when a call's audio has holes, and why: stream drops mean the
       // decoder fell behind (CPU/USB); poor frames mean the signal itself.
@@ -1061,7 +1121,7 @@ function discoveryGrant(ev) {
   const sid = runSid(ev), key = sid != null ? `${sid}:${ev.tg}` : String(ev.tg);
   const t = disc.tgs[key] || (disc.tgs[key] = { first: Date.now(), n: 0, tg: ev.tg });
   if (sid != null) {
-    t.sid = sid; if (ev.system) t.system = ev.system;
+    t.sid = sid; if (ev.system) t.system = ev.system; const rp = runPl(ev); if (rp) t.pl = rp;
     // An entry filed by number alone before the system was known: fold its
     // counts in, so the talkgroup does not appear twice with a stale name.
     const legacy = disc.tgs[String(ev.tg)];
@@ -1081,7 +1141,7 @@ function renderDiscovery() {
   const multi = new Set(rows.map((t) => t.sid ?? "")).size > 1;
   $("dcBody").innerHTML = rows.slice(0, 1000).map((t) => `<tr data-tg="${t.tg}"><td class="mono">${t.tg}${multi && t.system ? `<span class="faint" style="display:block;font-size:10.5px">${esc(t.system)}</span>` : ""}</td><td>${t.named ? esc(t.name) : `<span class="faint">unnamed</span>`}${t.enc ? ' <span class="badge enc">enc</span>' : ""}</td><td class="mono">${t.n}</td><td class="mono">${t.freq != null ? t.freq.toFixed(4) : "—"}</td><td class="mono">${t.unit || "—"}</td><td class="mono">${ago(t.last)}</td>` +
     `<td class="act"><button data-dcplay="${t.tg}" title="Play the newest recorded call on this talkgroup">▶</button><input type="text" data-name="${esc(t.key)}" placeholder="${t.named ? "rename" : "name it"}" style="width:120px;padding:2px 6px;font-size:11px" /><button data-namego="${esc(t.key)}">✔</button>` +
-    `<input type="number" class="priin" data-pri="${t.tg}" min="1" max="99" value="${prio.get(t.tg) || 50}" title="Priority 1–99 (1 = highest)"><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
+    `<input type="number" class="priin" data-pri="${t.tg}" data-pl="${esc(t.pl || plForSid(t.sid))}" min="1" max="99" value="${priOf(t.tg, t.pl || plForSid(t.sid))}" title="Priority 1–99 (1 = highest)"><button data-lock="${t.tg}" data-pl="${esc(t.pl || plForSid(t.sid))}" class="${filtFor(t.pl || plForSid(t.sid)).lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
   $("dcEmpty").style.display = rows.length ? "none" : "";
   const all = Object.keys(disc.tgs).length, unnamed = Object.values(disc.tgs).filter((t) => !t.named).length;
   $("dcMeta").textContent = all ? `${all} talkgroups · ${unnamed} unnamed` : "";
@@ -1099,8 +1159,8 @@ function renderDiscovery() {
     catch (e) { uiToast(`${e}`, "err"); }
   });
   tb.querySelectorAll("input[data-name]").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") tb.querySelector(`[data-namego="${i.dataset.name}"]`).click(); });
-  tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); renderDiscovery(); });
-  tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); renderDiscovery(); });
+  tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value, b.dataset.pl); renderDiscovery(); });
+  tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock, b.dataset.pl); renderDiscovery(); });
   const fr = Object.entries(disc.freqs).map(([f, v]) => ({ f: +f, ...v })).sort((a, b) => b.n - a.n);
   $("dfBody").innerHTML = fr.slice(0, 300).map((r) => `<tr><td class="mono">${r.f.toFixed(4)}</td><td class="mono">${r.n}</td><td class="mono">${Object.keys(r.tgs).length}</td><td>${bandHi ? (r.f >= bandLo && r.f <= bandHi ? '<span class="badge clear">yes</span>' : '<span class="badge enc">no</span>') : "—"}</td><td class="mono">${ago(r.last)}</td></tr>`).join("");
   $("dfMeta").textContent = fr.length ? `${fr.length} channels` : "";
@@ -1334,7 +1394,7 @@ if (TAURI) {
     logEvent(`${d.decoder}: ${d.audio_secs.toFixed(1)} s audio, ${d.events} event(s)${d.audio ? " — playing" : ""}`);
     if (d.audio) replay(d.audio);
   });
-  listen("stopped", () => { setState("standby"); holdTg = null; updateHoldBtn(); invoke("set_hold", { tg: null }).catch(() => {}); });
+  listen("stopped", () => { setState("standby"); holdTg = null; holdPl = ""; updateHoldBtn(); });
   // A remote desktop page opening mid-run: show the same controls and state
   // as the local one (the shim then replays the run's key frames).
   window.applySnapshot = (snap) => {
@@ -1355,9 +1415,9 @@ if (TAURI) {
       modeSel = st.mode === "capture" ? "capture" : st.mode === "dual" ? "dual" : "follow";
       setSeg($("modeSeg"), modeSel); applyMode();
       const first = (snap.runs || [])[0];
-      if (st.system_name || (first && first.playlist)) invoke("playlists_list").then((list) => {
-        const pl = (list || []).find((p) => first && first.playlist ? p.id === first.playlist : p.system_name === st.system_name && p.site_name === st.site_name);
-        if (pl) { $("playlist").value = pl.id; $("followMeta").textContent = `playlist: ${pl.name} · ${pl.tgs.length ? pl.tgs.length + " talkgroups" : "all talkgroups"}`; }
+      if (first && first.control_mhz) invoke("sites_list").then((list) => {
+        const st = (list || []).find((x) => Math.abs(x.control_mhz - first.control_mhz) < 1e-6);
+        if (st) { $("playlist").value = st.id; $("followMeta").textContent = siteMeta(st); }
       }).catch(() => {});
     }
     setState(snap && snap.running ? (st && st.mode === "capture" ? "capturing" : "following") : "standby");
@@ -1398,9 +1458,9 @@ if (TAURI) {
         const o = opts();
         $("followMeta").textContent = "measuring the control channel…";
         $("tunedHz").textContent = mhz(o.freq);
-        const pl = playlists.find((p) => p.id === $("playlist").value);
+        const pl = sites.find((p) => p.id === $("playlist").value);
         save("hs.prefs", { ...store("hs.prefs", {}), lastPlaylist: $("playlist").value });
-        // Several playlists at once: one run each, all reading the same radio,
+        // Several sites at once: one run each, all reading the same radio,
         // so the band centre has to reach every control channel.
         const also = pl ? plAlsoSelected().filter((p) => p.id !== pl.id) : [];
         const group = pl ? [pl, ...also] : [];
@@ -1410,7 +1470,7 @@ if (TAURI) {
           if (!fit.ok) { setState("standby"); alert(`These playlists can't be followed together on one radio at ${(o.rate / 1e6).toFixed(1)} MSPS — their control channels are ${(fit.span / 1e6).toFixed(2)} MHz apart and the radio reaches ±${(fit.half / 1e6).toFixed(2)} MHz:\n\n${group.map((p) => `${p.name} · ${p.control_mhz.toFixed(4)} MHz`).join("\n")}\n\nUntick one in the + list, or pick a wider rate.`); return; }
           center = fit.center;
           $("center").value = (center / 1e6).toFixed(4) + "M";
-          logEvent(`following ${group.length} systems from one radio: ${group.map((p) => p.name).join(" · ")} — band centre ${(center / 1e6).toFixed(4)} MHz`);
+          logEvent(`following ${group.length} sites from one radio: ${group.map((p) => p.name).join(" · ")} — band centre ${(center / 1e6).toFixed(4)} MHz`);
         }
         bandLo = (center - o.rate * 0.4) / 1e6; bandHi = (center + o.rate * 0.4) / 1e6;
         const common = { source: o.source, freq: center, rate: o.rate, gain: o.gain, callsDir: $("callsdir").value.trim() || null, play: $("play").checked,
@@ -1419,8 +1479,8 @@ if (TAURI) {
           await invoke("start_follow", { ...common, control: o.freq, systemName: null, siteName: null, extra: coverageExtras(), playlist: null });
         } else {
           for (const [i, p] of group.entries()) {
-            await invoke("start_follow", { ...common, control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.site_name,
-              extra: i === 0 ? coverageExtras() : null, playlist: p.id });
+            await invoke("start_follow", { ...common, control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.name,
+              extra: i === 0 ? coverageExtras() : null, playlist: p.playlist || null });
           }
         }
       } else {
@@ -2386,12 +2446,12 @@ if (TAURI) {
   let alSort = store("hs.alsort", { key: "id", dir: 1 });
   const alTicked = new Set();
   function alRowHtml(r) {
-    const p = prio.get(r.id) || 50, c = colorOf(r.id), rule = ruleFor(r.id);
+    const pl = plForSid(r.sid), f = filtFor(pl), p = priOf(r.id, pl), c = colorOf(r.id), rule = ruleFor(r.id);
     const pol = (k, glyph, title) => `<button data-pol="${k}:${r.id}" class="${polAllows(k, r.id) ? "on-ok" : "off"}" title="${title}: ${polAllows(k, r.id) ? "yes" : "no"} — click to toggle">${glyph}</button>`;
     return `<tr class="${r.encrypted ? "enc" : ""}" data-tg="${r.id}" ${c ? `data-color="${c}" style="--tgc:${c}"` : ""}><td><input type="checkbox" data-tick="${r.id}" ${alTicked.has(r.id) ? "checked" : ""}></td><td class="mono">${r.id}</td><td>${esc(r.alias)}</td><td>${esc(r.description)}${rule ? ` <small class="faint" title="range rule">▸ ${esc(rule.name || rule.lo + "–" + rule.hi)}</small>` : ""}</td><td><small>${esc(r.tag)}</small></td><td><small>${esc(r.category)}</small></td><td><small class="mono">${esc(srcLabel(r.source))}</small></td>` +
       `<td class="act">${pol("record", "●", "Record audio")}${pol("stream", "▶", "Stream live")}${pol("upload", "↑", "Upload to sharing services")}</td>` +
-      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><input type="number" class="priin" data-pri="${r.id}" min="1" max="99" value="${p}" title="Priority 1–99 (1 = highest)">` +
-      `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" class="${avoidUntil.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" class="${lockout.has(r.id) || (rule && rule.lock) ? "on" : ""}">⊘</button></td></tr>`;
+      `<td class="act"><button class="swatch" data-color="${r.id}" title="Colour — click to cycle" style="background:${c || "transparent"}"></button><input type="number" class="priin" data-pri="${r.id}" data-pl="${esc(pl)}" min="1" max="99" value="${p}" title="Priority 1–99 (1 = highest)${plName(pl) ? " on " + esc(plName(pl)) : ""}">` +
+      `<button data-bell="${r.id}" class="${bells.has(r.id) ? "bell" : ""}">🔔</button><button data-avoid="${r.id}" data-pl="${esc(pl)}" class="${f.avoid.has(r.id) ? "on" : ""}">⏱</button><button data-lock="${r.id}" data-pl="${esc(pl)}" class="${f.lockout.has(r.id) || (rule && rule.lock) ? "on" : ""}" title="Lock out${plName(pl) ? " on " + esc(plName(pl)) : ""}">⊘</button></td></tr>`;
   }
   const srcLabel = (src) => src.replace(/^rr_(\d+)$/, (m, sid) => { const pl = (typeof playlists !== "undefined" ? playlists : []).find((p) => String(p.sid) === sid); return pl ? `${pl.system_name}` : `RR sid ${sid}`; }).replace(/^csv_user$/, "named by you").replace(/^csv_/, "CSV ");
   let alShown = [];
@@ -2408,10 +2468,10 @@ if (TAURI) {
     const tb = $("alBody");
     tb.querySelectorAll("input[data-tick]").forEach((c) => c.onchange = () => { c.checked ? alTicked.add(+c.dataset.tick) : alTicked.delete(+c.dataset.tick); $("grpMeta").textContent = alTicked.size ? `${alTicked.size} ticked` : ""; });
     tb.querySelectorAll("button[data-pol]").forEach((b) => b.onclick = () => { const [k, tg] = b.dataset.pol.split(":"); polSet(k, +tg, !polAllows(k, +tg)); pushPolicies(); alRender(); });
-    tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value); alRender(); });
+    tb.querySelectorAll("input[data-pri]").forEach((b) => b.onchange = () => { setPriority(+b.dataset.pri, b.value, b.dataset.pl); alRender(); });
     tb.querySelectorAll("button[data-bell]").forEach((b) => b.onclick = () => { toggleBell(+b.dataset.bell); alRender(); });
-    tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid); alRender(); });
-    tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock); alRender(); });
+    tb.querySelectorAll("button[data-avoid]").forEach((b) => b.onclick = () => { avoidFor(+b.dataset.avoid, b.dataset.pl); alRender(); });
+    tb.querySelectorAll("button[data-lock]").forEach((b) => b.onclick = () => { toggleLock(+b.dataset.lock, b.dataset.pl); alRender(); });
     tb.querySelectorAll("button[data-color]").forEach((b) => b.onclick = () => { cycleColor(+b.dataset.color); alRender(); });
     renderTagChips();
   }
@@ -2454,13 +2514,20 @@ if (TAURI) {
   // with the chosen tags. Re-pushed after every playlist activation,
   // since activation sets the backend allowlist to the playlist alone.
   async function pushTagAllowlist() {
-    const pl = playlists.find((p) => p.id === $("playlist").value);
-    const plSet = pl && pl.tgs.length ? new Set(pl.tgs) : null;
-    if (!tagSel.size) { await invoke("set_allowlist", { tgs: plSet ? [...plSet] : null }).catch((e) => log(`allowlist: ${e}`)); return; }
+    // Every playlist a picked site follows (plus the unscoped set) is narrowed to the chosen tags.
+    const picked = [$("playlist").value, ...plAlsoIds()].map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+    const plIds = [...new Set(picked.map((s) => s.playlist || ""))];
+    if (!plIds.length) plIds.push("");
     const inTags = new Set(alRows.filter((r) => tagSel.has(r.tag)).map((r) => r.id));
-    const tgs = plSet ? [...plSet].filter((t) => inTags.has(t)) : [...inTags];
-    await invoke("set_allowlist", { tgs }).catch((e) => log(`allowlist: ${e}`));
-    $("followMeta").textContent = `tags: ${[...tagSel].join(", ")} → ${tgs.length} talkgroups`;
+    let shown = 0;
+    for (const id of plIds) {
+      if (!tagSel.size) { await invoke("set_allowlist", { tgs: null, playlist: id || null }).catch((e) => log(`allowlist: ${e}`)); continue; }
+      const pl = playlists.find((p) => p.id === id), plSet = pl && pl.tgs.length ? new Set(pl.tgs) : null;
+      const tgs = plSet ? [...plSet].filter((t) => inTags.has(t)) : [...inTags];
+      shown += tgs.length;
+      await invoke("set_allowlist", { tgs, playlist: id || null }).catch((e) => log(`allowlist: ${e}`));
+    }
+    if (tagSel.size) $("followMeta").textContent = `tags: ${[...tagSel].join(", ")} → ${shown} talkgroups`;
   }
   window.pushTagAllowlist = pushTagAllowlist;
 
@@ -2691,8 +2758,8 @@ if (TAURI) {
   };
   $("bState").onfocus = () => loadStates().catch((e) => alert(e));
 
-  /* ---------- a loaded system → playlist ---------- */
-  let sys = null, pickedSite = null, picked = new Set();
+  /* ---------- a loaded system → sites to hear, and a playlist of its talkgroups ---------- */
+  let sys = null, picked = new Set();
   async function loadSystem(sid) {
     try {
       $("rrDownload").disabled = true; $("findMeta").textContent = "downloading system…";
@@ -2703,9 +2770,9 @@ if (TAURI) {
       $("sysName").textContent = sys.name;
       $("sysMeta").textContent = `sid ${sys.sid} · ${sys.talkgroups} talkgroups · ${sys.sites.length} sites`;
       $("loadcat").textContent = sys.talkgroups + " TGs";
-      pickedSite = sys.sites[0] || null; picked = new Set();
-      renderSites(); renderCats(); renderTgs();
-      $("plName").value = sys.name;
+      picked = new Set();
+      renderSiteAddPl(); renderSites(); renderCats(); renderTgs();
+      if (!playlists.some((p) => p.sid === sys.sid)) $("plName").value = shortSystemName(sys.name);
       $("sysLoaded").textContent = `✔ Loaded ${sys.talkgroups} talkgroups from ${sys.name} — they now name calls; see the Aliases tab to check any talkgroup.`;
       logEvent(`loaded ${sys.talkgroups} talkgroups from ${sys.name}`);
       rrRefresh(); aliasesRefresh();
@@ -2713,16 +2780,35 @@ if (TAURI) {
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }
   }
+  // "Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)" → "MESA"
+  const shortSystemName = (n) => { const m = /\(([A-Z0-9-]{2,8})\)/.exec(n || ""); return m ? m[1] : (n || "Playlist"); };
   $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } $("rrProg").style.display = ""; $("rrProgBar").style.width = "3%"; $("rrProgText").textContent = "connecting…"; loadSystem(sid); };
   const siteRate = (s) => ((s.span_mhz ? s.span_mhz[1] - s.span_mhz[0] : 0) <= 1.9 ? 2500000 : 10000000);
+  // The playlist a newly added site will follow: one of the loaded system's.
+  function renderSiteAddPl() {
+    if (!sys) return;
+    const mine = playlists.filter((p) => p.sid === sys.sid), cur = $("siteAddPl").value;
+    $("siteAddPl").innerHTML = '<option value="">every talkgroup (no playlist)</option>' + mine.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</option>`).join("");
+    $("siteAddPl").value = mine.some((p) => p.id === cur) ? cur : (mine.length ? mine[0].id : "");
+  }
   function renderSites() {
+    const saved = new Set(sites.filter((s) => s.sid === sys.sid).map((s) => s.site_id));
     $("siteList").innerHTML = sys.sites.map((s) =>
-      `<div class="row ${pickedSite && s.site_id === pickedSite.site_id ? "on" : ""}" data-site="${s.site_id}">` +
-      `<span class="grow"><b>${s.site_id}</b> ${esc(s.name)}${s.tdma_control ? ' <small style="color:var(--enc)">TDMA CC — not decodable yet</small>' : ""}</span>` +
+      `<div class="row ${saved.has(s.site_id) ? "on" : ""}" data-site="${s.site_id}">` +
+      `<span class="grow"><b>${s.site_id}</b> ${esc(s.name)}${s.tdma_control ? ' <small style="color:var(--enc)">TDMA CC — not decodable yet</small>' : ""}${saved.has(s.site_id) ? ' <small class="faint">· added</small>' : ""}</span>` +
       (s.nac != null ? `<span class="mono">NAC 0x${s.nac.toString(16).toUpperCase().padStart(3, "0")}</span>` : "") +
       `<span class="mono">${s.control_mhz[0].toFixed(4)} MHz</span>` +
-      (s.span_mhz ? `<span class="mono">${(s.span_mhz[1] - s.span_mhz[0]).toFixed(2)} MHz span</span>` : "") + `</div>`).join("");
-    $("siteList").querySelectorAll(".row").forEach((r) => r.onclick = () => { pickedSite = sys.sites.find((s) => s.site_id === +r.dataset.site); renderSites(); });
+      (s.span_mhz ? `<span class="mono">${(s.span_mhz[1] - s.span_mhz[0]).toFixed(2)} MHz span</span>` : "") +
+      `<button class="btn ${saved.has(s.site_id) ? "ghost" : "primary"} sm" data-addsite="${s.site_id}" title="Save this site so it can be picked in the top bar; it follows the playlist chosen above">${saved.has(s.site_id) ? "Add again" : "Add site"}</button></div>`).join("");
+    $("siteList").querySelectorAll("[data-addsite]").forEach((b) => b.onclick = () => addSite(sys.sites.find((s) => s.site_id === +b.dataset.addsite)));
+  }
+  async function addSite(s) {
+    if (!s) return;
+    const lo = s.span_mhz ? s.span_mhz[0] : s.control_mhz[0], hi = s.span_mhz ? s.span_mhz[1] : s.control_mhz[0];
+    const site = { id: "", name: s.name, sid: sys.sid, system_name: sys.name, site_id: s.site_id, site_name: s.name, nac: s.nac,
+      control_mhz: s.control_mhz[0], center_mhz: +((lo + hi) / 2).toFixed(4), rate: siteRate(s),
+      span_mhz: s.span_mhz ? [s.span_mhz[0], s.span_mhz[1]] : null, playlist: $("siteAddPl").value || null };
+    try { renderSavedSites(await invoke("site_save", { site })); renderSites(); $("stMeta").textContent = `added ${s.name}`; logEvent(`added site ${s.name}`); } catch (e) { alert(e); }
   }
   function renderCats() {
     const cats = [...new Set(sys.tgs.map((t) => t.category).filter(Boolean))].sort();
@@ -2746,18 +2832,16 @@ if (TAURI) {
   $("tgAll").onclick = () => { shownTgs().filter((t) => !t.encrypted).forEach((t) => picked.add(t.id)); renderTgs(); };
   $("tgNone").onclick = () => { picked = new Set(); if (sys) renderTgs(); };
   $("plSave").onclick = async () => {
-    if (!sys || !pickedSite) { alert("Load a system and pick a site first."); return; }
-    const lo = pickedSite.span_mhz ? pickedSite.span_mhz[0] : pickedSite.control_mhz[0];
-    const hi = pickedSite.span_mhz ? pickedSite.span_mhz[1] : pickedSite.control_mhz[0];
-    const playlist = { id: "", name: $("plName").value.trim(), sid: sys.sid, system_name: sys.name,
-      site_id: pickedSite.site_id, site_name: pickedSite.name, nac: pickedSite.nac,
-      control_mhz: pickedSite.control_mhz[0], center_mhz: +((lo + hi) / 2).toFixed(4),
-      rate: siteRate(pickedSite), tgs: [...picked].sort((a, b) => a - b), span_mhz: pickedSite.span_mhz ? [pickedSite.span_mhz[0], pickedSite.span_mhz[1]] : null };
-    try { renderPlaylists(await invoke("playlist_save", { playlist })); $("plMeta").textContent = "saved"; } catch (e) { alert(e); }
+    if (!sys) { alert("Load a system first."); return; }
+    const name = $("plName").value.trim(); if (!name) { alert("Give the playlist a name."); return; }
+    // Saving under an existing name of the same system replaces its talkgroups (lockout and priorities stay).
+    const existing = playlists.find((p) => p.sid === sys.sid && p.name.toLowerCase() === name.toLowerCase());
+    const playlist = { id: existing ? existing.id : "", name, sid: sys.sid, system_name: sys.name, tgs: [...picked].sort((a, b) => a - b), lockout: [], priorities: [] };
+    try { renderPlaylists(await invoke("playlist_save", { playlist })); $("plMeta").textContent = existing ? `updated ${name}` : "saved"; renderSiteAddPl(); if (!existing) $("siteAddPl").value = playlists.find((p) => p.name === name && p.sid === sys.sid)?.id || ""; } catch (e) { alert(e); }
   };
 
-  /* ---------- playlists ---------- */
-  let playlists = [];
+  /* ---------- playlists (a system's talkgroups + its lockout and priorities) and sites (what the radio tunes) ---------- */
+  let playlists = [], sites = [];
   // The band centre that reaches every control channel on one radio, if one
   // exists: the radio decodes ±0.4 of its (normalised) rate around the centre.
   function commonCentre(controls_hz, rate) {
@@ -2766,15 +2850,16 @@ if (TAURI) {
     return { ok: hi - lo < 2 * half - 25_000, center: Math.round((lo + hi) / 2), span: hi - lo, half };
   }
   window.commonCentre = commonCentre;
+  // Sites picked alongside the main one (their ids, in preferences).
   const plAlsoIds = () => (store("hs.prefs", {}).alsoPlaylists || []);
-  function plAlsoSelected() { const ids = plAlsoIds(); return playlists.filter((p) => ids.includes(p.id)); }
+  function plAlsoSelected() { const ids = plAlsoIds(); return sites.filter((p) => ids.includes(p.id)); }
   function plMoreRender() {
     const cur = $("playlist").value;
     const ids = plAlsoIds();
-    const others = playlists.filter((p) => p.id !== cur);
+    const others = sites.filter((p) => p.id !== cur);
     $("plMoreList").innerHTML = others.length ? others.map((p) =>
-      `<label><input type="checkbox" data-also="${esc(p.id)}" ${ids.includes(p.id) ? "checked" : ""} /> <span>${esc(p.name)} <small>${p.control_mhz.toFixed(4)} MHz</small></span></label>`).join("")
-      : `<div class="none">No other playlists yet — make one under Settings → Playlists.</div>`;
+      `<label><input type="checkbox" data-also="${esc(p.id)}" ${ids.includes(p.id) ? "checked" : ""} /> <span>${esc(p.name)} <small>${esc(plName(p.playlist) || "all talkgroups")} · ${p.control_mhz.toFixed(4)} MHz</small></span></label>`).join("")
+      : `<div class="none">No other sites yet — add one under Settings → Playlists.</div>`;
     $("plMoreList").querySelectorAll("[data-also]").forEach((cb) => cb.onchange = () => {
       const set = new Set(plAlsoIds()); cb.checked ? set.add(cb.dataset.also) : set.delete(cb.dataset.also);
       save("hs.prefs", { ...store("hs.prefs", {}), alsoPlaylists: [...set] }); plMoreBadge();
@@ -2791,50 +2876,92 @@ if (TAURI) {
     document.addEventListener("click", (e) => { const pop = $("plMorePop"); if (!pop.hidden && !e.target.closest("#plMorePop")) pop.hidden = true; });
     $("playlist").addEventListener("change", plMoreBadge);
   }
+  const siteMeta = (s) => { const p = playlists.find((x) => x.id === s.playlist); return `site: ${s.name} · ${p ? `playlist ${p.name} (${p.tgs.length ? p.tgs.length + " talkgroups" : "all talkgroups"})` : "all talkgroups"}`; };
   function renderPlaylists(list) {
     playlists = list;
-    plMoreBadge();
+    loadPlaylistFilters(list);
     $("plEmpty").style.display = list.length ? "none" : "";
-    $("plList").innerHTML = list.map((p) =>
-      `<div class="row" data-id="${esc(p.id)}"><span class="grow"><b>${esc(p.name)}</b><br><small>${esc(p.system_name)} · site ${p.site_id} ${esc(p.site_name)} · ${p.control_mhz.toFixed(4)} MHz · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"}</small></span>` +
-      `<button class="btn primary" data-act="${p.id}">Use</button><button class="btn ghost" data-del="${p.id}">Delete</button></div>`).join("");
-    $("plList").querySelectorAll("[data-act]").forEach((b) => b.onclick = () => activatePlaylist(b.dataset.act));
+    $("plList").innerHTML = list.map((p) => {
+      const users = sites.filter((s) => s.playlist === p.id);
+      return `<div class="row" data-id="${esc(p.id)}"><span class="grow"><input class="plname" data-plname="${esc(p.id)}" value="${esc(p.name)}" title="Rename — press Enter" spellcheck="false" /><br><small>${esc(p.system_name)} · ${p.tgs.length ? p.tgs.length + " TGs" : "all TGs"} · ${(p.lockout || []).length} locked out · ${(p.priorities || []).length} priorities · ${users.length ? "sites: " + users.map((s) => esc(s.name)).join(", ") : "no site follows it yet"}</small></span>` +
+        `<button class="btn ghost" data-del="${esc(p.id)}">Delete</button></div>`;
+    }).join("");
+    $("plList").querySelectorAll("[data-plname]").forEach((inp) => inp.onchange = async () => {
+      const p = playlists.find((x) => x.id === inp.dataset.plname), name = inp.value.trim(); if (!p || !name || name === p.name) return;
+      try { renderPlaylists(await invoke("playlist_save", { playlist: { ...p, name } })); renderSavedSites(sites); } catch (e) { alert(e); }
+    });
     $("plList").querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
-      if (!(await uiConfirm("Delete this playlist?", "Delete"))) return;
-      try { renderPlaylists(await invoke("playlist_delete", { id: b.dataset.del })); } catch (e) { alert(e); }
+      const p = playlists.find((x) => x.id === b.dataset.del), users = sites.filter((s) => s.playlist === b.dataset.del);
+      if (!(await uiConfirm(`Delete playlist “${p ? p.name : ""}”?${users.length ? ` ${users.length} site${users.length === 1 ? "" : "s"} will follow every talkgroup instead.` : ""}`, "Delete"))) return;
+      try { renderPlaylists(await invoke("playlist_delete", { id: b.dataset.del })); renderSavedSites(await invoke("sites_list")); } catch (e) { alert(e); }
+    });
+    if (sys) renderSiteAddPl();
+    if (typeof renderSavedSites === "function" && sites.length) renderSavedSites(sites);
+  }
+  function renderSavedSites(list) {
+    sites = list;
+    $("stEmpty").style.display = list.length ? "none" : "";
+    const plOpts = (s) => '<option value="">every talkgroup</option>' + playlists.filter((p) => p.sid === s.sid).map((p) => `<option value="${esc(p.id)}" ${p.id === s.playlist ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+    $("stList").innerHTML = list.map((s) =>
+      `<div class="row" data-id="${esc(s.id)}"><span class="grow"><input class="plname" data-stname="${esc(s.id)}" value="${esc(s.name)}" title="Rename — press Enter" spellcheck="false" /><br><small>${esc(s.system_name)} · site ${s.site_id} ${esc(s.site_name)} · ${s.control_mhz.toFixed(4)} MHz</small></span>` +
+      `<label class="tb"><span>Playlist</span><select data-stpl="${esc(s.id)}">${plOpts(s)}</select></label>` +
+      `<button class="btn primary" data-act="${esc(s.id)}">Use</button><button class="btn ghost" data-stdel="${esc(s.id)}">Delete</button></div>`).join("");
+    const saveSite = async (id, patch) => { const s = sites.find((x) => x.id === id); if (!s) return; try { renderSavedSites(await invoke("site_save", { site: { ...s, ...patch } })); renderPlaylists(playlists); } catch (e) { alert(e); } };
+    $("stList").querySelectorAll("[data-stname]").forEach((inp) => inp.onchange = () => { const name = inp.value.trim(); if (name) saveSite(inp.dataset.stname, { name }); });
+    $("stList").querySelectorAll("[data-stpl]").forEach((sel) => sel.onchange = () => saveSite(sel.dataset.stpl, { playlist: sel.value || null }));
+    $("stList").querySelectorAll("[data-act]").forEach((b) => b.onclick = () => activateSite(b.dataset.act));
+    $("stList").querySelectorAll("[data-stdel]").forEach((b) => b.onclick = async () => {
+      if (!(await uiConfirm("Delete this site?", "Delete"))) return;
+      try { renderSavedSites(await invoke("site_delete", { id: b.dataset.stdel })); renderPlaylists(playlists); if (sys) renderSites(); } catch (e) { alert(e); }
     });
     const cur = $("playlist").value;
-    $("playlist").innerHTML = '<option value="">— every talkgroup —</option>' + list.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+    $("playlist").innerHTML = '<option value="">— every talkgroup —</option>' + list.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.playlist ? ` · ${esc(plName(p.playlist))}` : ""}</option>`).join("");
     $("playlist").value = list.some((p) => p.id === cur) ? cur : "";
+    plMoreBadge();
   }
-  async function activatePlaylist(id) {
-    try {
-      const p = await invoke("playlist_activate", { id: id || null });
-      $("playlist").value = p ? p.id : "";
-      if (typeof pushTagAllowlist === "function") pushTagAllowlist();
-      if (p) {
-        modeSel = "follow"; setSeg($("modeSeg"), "follow"); applyMode();
-        $("freq").value = p.control_mhz.toFixed(4) + "M"; $("center").value = p.center_mhz.toFixed(4) + "M";
-        if (p.span_mhz) { $("cpLo").value = p.span_mhz[0].toFixed(4); $("cpHi").value = p.span_mhz[1].toFixed(4); save("hs.span", p.span_mhz); if (typeof coveragePlan === "function") coveragePlan(); }
-        if ($("source").value === "rtlsdr" && p.rate > 2400000) {
-          $("rate").value = "2400000"; $("center").value = p.control_mhz.toFixed(4) + "M";
-          logEvent(`RTL-SDR covers ±1.2 MHz: centred on the control channel; calls outside that span will be skipped — pick Airspy R2 for the whole site`, "warn");
-        } else { $("rate").value = String(p.rate); }
-        syncRate();
-        if ($("pillText").textContent !== "standby") logEvent("playlist changed — press Stop, then Start to retune", "warn");
-        $("followMeta").textContent = `playlist: ${p.name} · ${p.tgs.length ? p.tgs.length + " talkgroups" : "all talkgroups"}`;
-        showView("monitor");
-      } else { $("followMeta").textContent = ""; }
-    } catch (e) { alert(e); }
+  // Pick a site: its tuning goes into the top bar; Start follows it with its playlist.
+  function activateSite(id) {
+    const p = sites.find((s) => s.id === id);
+    $("playlist").value = p ? p.id : "";
+    if (typeof pushTagAllowlist === "function") pushTagAllowlist();
+    if (p) {
+      modeSel = "follow"; setSeg($("modeSeg"), "follow"); applyMode();
+      $("freq").value = p.control_mhz.toFixed(4) + "M"; $("center").value = p.center_mhz.toFixed(4) + "M";
+      if (p.span_mhz) { $("cpLo").value = p.span_mhz[0].toFixed(4); $("cpHi").value = p.span_mhz[1].toFixed(4); save("hs.span", p.span_mhz); if (typeof coveragePlan === "function") coveragePlan(); }
+      if ($("source").value === "rtlsdr" && p.rate > 2400000) {
+        $("rate").value = "2400000"; $("center").value = p.control_mhz.toFixed(4) + "M";
+        logEvent(`RTL-SDR covers ±1.2 MHz: centred on the control channel; calls outside that span will be skipped — pick Airspy R2 for the whole site`, "warn");
+      } else { $("rate").value = String(p.rate); }
+      syncRate();
+      if ($("pillText").textContent !== "standby") logEvent("site changed — press Stop, then Start to retune", "warn");
+      $("followMeta").textContent = siteMeta(p);
+      showView("monitor");
+    } else { $("followMeta").textContent = ""; }
   }
-  $("playlist").onchange = () => activatePlaylist($("playlist").value);
-  invoke("playlists_list").then(async (list) => {
-    renderPlaylists(list);
-    // Auto-start: opt-in, and only if the last-used playlist still exists.
+  $("playlist").onchange = () => activateSite($("playlist").value);
+  // Lockouts and priorities kept globally by earlier versions move onto every
+  // playlist that has none of its own — once.
+  function migrateLocalFilters() {
+    if (store("hs.filtersMigrated", false)) return;
+    const f0 = filtFor("");
+    if (f0.lockout.size || f0.prio.size) for (const p of playlists) {
+      if ((p.lockout || []).length || (p.priorities || []).length) continue;
+      const f = filtFor(p.id); f.lockout = new Set(f0.lockout); f.prio = new Map(f0.prio);
+      pushLockout(p.id); pushPriorities(p.id);
+    }
+    save("hs.filtersMigrated", true);
+  }
+  Promise.all([invoke("playlists_list"), invoke("sites_list")]).then(async ([pl, st]) => {
+    sites = st || [];
+    renderPlaylists(pl || []);
+    renderSavedSites(sites);
+    migrateLocalFilters();
+    renderLockout();
+    // Auto-start: opt-in, and only if the last-used site still exists.
     const pr = store("hs.prefs", {});
-    if (pr.autostart && pr.lastPlaylist && list.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
-      await activatePlaylist(pr.lastPlaylist);
-      logEvent(`auto-start: ${list.find((p) => p.id === pr.lastPlaylist).name}`);
+    if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
+      activateSite(pr.lastPlaylist);
+      logEvent(`auto-start: ${sites.find((p) => p.id === pr.lastPlaylist).name}`);
       setTimeout(() => $("start").click(), 600);
     }
   }).catch((e) => log(`playlists: ${e}`));
@@ -3098,7 +3225,7 @@ async function obGather() {
   if (!invoke) return;
   try { obDevices = (await invoke("devices_list")).devices || []; } catch (_) {}
   try { const st = await invoke("rr_settings"); obCreds = !!(st && st.has_password); obCatalog = (st && st.catalog_len) || 0; } catch (_) {}
-  try { const pl = await invoke("playlists_list"); obPlaylists = Array.isArray(pl) ? pl.length : 0; } catch (_) {}
+  try { const st = await invoke("sites_list"); obPlaylists = Array.isArray(st) ? st.length : 0; } catch (_) {}
 }
 
 const obTick = (ok) => `<span class="obchk${ok ? " ok" : ""}">${ok ? "✓" : "○"}</span>`;
@@ -3179,7 +3306,7 @@ function obBody() {
           <li>${obTick(obDevices.length > 0)} <span><b>Plug in a radio</b> — an Airspy R2 or RTL-SDR dongle.</span></li>
           <li>${obTick(obCreds)} <span><b>RadioReference account</b> — names the talkgroups.</span></li>
           <li>${obTick(obCatalog > 0)} <span><b>Find your system</b> — ${obCatalog ? `${obCatalog} talkgroups loaded` : "the trunked system near you"}.</span></li>
-          <li>${obTick(obPlaylists > 0)} <span><b>Press Start</b> — ${obPlaylists ? `${obPlaylists} playlist${obPlaylists === 1 ? "" : "s"} saved` : "begin decoding"}.</span></li>
+          <li>${obTick(obPlaylists > 0)} <span><b>Press Start</b> — ${obPlaylists ? `${obPlaylists} site${obPlaylists === 1 ? "" : "s"} saved` : "begin decoding"}.</span></li>
         </ul>`;
     case 1:
       return `<h2>1 · Plug in a radio</h2>

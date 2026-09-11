@@ -55,14 +55,9 @@ pub struct FollowParams {
 
 /// Everything the loop reads live from the UI, shared by reference.
 pub struct Live<'a> {
-    pub lockout: &'a std::sync::Mutex<std::collections::HashSet<u16>>,
-    pub allowlist: &'a std::sync::Mutex<Option<std::collections::HashSet<u16>>>,
-    /// Hold: follow only this talkgroup until released.
-    pub hold: &'a std::sync::Mutex<Option<u16>>,
-    pub priorities: &'a std::sync::Mutex<std::collections::HashMap<u16, u8>>,
-    /// Locked-out and prioritised talkgroup ranges (inclusive).
-    pub lockout_ranges: &'a std::sync::Mutex<Vec<(u16, u16)>>,
-    pub priority_ranges: &'a std::sync::Mutex<Vec<(u16, u16, u8)>>,
+    /// The run's playlist filters: lockout, allowlist, hold, priorities and
+    /// the range rules. Sites sharing a playlist share this.
+    pub filters: &'a std::sync::Mutex<crate::playlists::Filters>,
     pub units: &'a std::sync::Mutex<crate::units::UnitTable>,
     /// Wildcard rules naming radios the table does not list.
     pub unit_rules: &'a std::sync::Mutex<Vec<crate::units::Rule>>,
@@ -471,31 +466,27 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         unnamed: std::collections::HashSet::new(),
     };
     let apply_live = |f: &mut TrunkFollower, rep: &mut Reporter| {
-        let want = live.lockout.lock().unwrap();
-        if *want != *f.lockout() {
-            f.set_lockout(want.iter().copied());
+        let fl = live.filters.lock().unwrap();
+        if fl.lockout != *f.lockout() {
+            f.set_lockout(fl.lockout.iter().copied());
         }
-        let hold = *live.hold.lock().unwrap();
-        let want: Option<std::collections::HashSet<u16>> = match hold {
+        let want: Option<std::collections::HashSet<u16>> = match fl.hold {
             Some(tg) => Some([tg].into_iter().collect()),
-            None => live.allowlist.lock().unwrap().clone(),
+            None => fl.allowlist.clone(),
         };
         if want.as_ref() != f.allowlist() {
             f.set_allowlist(want);
         }
-        let pri = live.priorities.lock().unwrap();
-        if *pri != rep.priorities {
-            rep.priorities = pri.clone();
-            f.set_priorities(pri.iter().map(|(t, p)| (*t, *p)));
+        if fl.priorities != rep.priorities {
+            rep.priorities = fl.priorities.clone();
+            f.set_priorities(fl.priorities.iter().map(|(t, p)| (*t, *p)));
         }
-        let lr = live.lockout_ranges.lock().unwrap();
-        if lr.as_slice() != f.lockout_ranges() {
-            f.set_lockout_ranges(lr.iter().copied());
+        if fl.lockout_ranges.as_slice() != f.lockout_ranges() {
+            f.set_lockout_ranges(fl.lockout_ranges.iter().copied());
         }
-        let pr = live.priority_ranges.lock().unwrap();
-        if pr.as_slice() != f.priority_ranges() {
-            rep.priority_ranges = pr.clone();
-            f.set_priority_ranges(pr.iter().copied());
+        if fl.priority_ranges.as_slice() != f.priority_ranges() {
+            rep.priority_ranges = fl.priority_ranges.clone();
+            f.set_priority_ranges(fl.priority_ranges.iter().copied());
         }
     };
     apply_live(&mut f, &mut rep);
@@ -1386,18 +1377,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    static NO_LOCKOUT_RANGES: std::sync::Mutex<Vec<(u16, u16)>> = std::sync::Mutex::new(Vec::new());
-    static NO_PRIORITY_RANGES: std::sync::Mutex<Vec<(u16, u16, u8)>> =
-        std::sync::Mutex::new(Vec::new());
     static NO_RULES: std::sync::Mutex<Vec<crate::units::Rule>> = std::sync::Mutex::new(Vec::new());
     static NO_RECORD: std::sync::Mutex<crate::Policy> = std::sync::Mutex::new(None);
 
-    #[allow(clippy::type_complexity)]
     fn live_defaults() -> (
-        std::sync::Mutex<std::collections::HashSet<u16>>,
-        std::sync::Mutex<Option<std::collections::HashSet<u16>>>,
-        std::sync::Mutex<Option<u16>>,
-        std::sync::Mutex<std::collections::HashMap<u16, u8>>,
+        std::sync::Mutex<crate::playlists::Filters>,
         std::sync::Mutex<crate::units::UnitTable>,
     ) {
         Default::default()
@@ -1449,17 +1433,12 @@ mod tests {
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
-        let (lockout, allow, hold, pri, units) = live_defaults();
+        let (filters, units) = live_defaults();
         let live = Live {
-            lockout: &lockout,
-            allowlist: &allow,
-            hold: &hold,
-            priorities: &pri,
+            filters: &filters,
             units: &units,
             db: None,
             spectrum: None,
-            lockout_ranges: &NO_LOCKOUT_RANGES,
-            priority_ranges: &NO_PRIORITY_RANGES,
             unit_rules: &NO_RULES,
             record: &NO_RECORD,
         };
@@ -1549,18 +1528,13 @@ mod tests {
         };
         let running = AtomicBool::new(true);
         let mut events = Vec::new();
-        let (_, allow, hold, pri, units) = live_defaults();
-        let lockout = std::sync::Mutex::new([20308u16].into_iter().collect());
+        let (filters, units) = live_defaults();
+        filters.lock().unwrap().lockout = [20308u16].into_iter().collect();
         let live = Live {
-            lockout: &lockout,
-            allowlist: &allow,
-            hold: &hold,
-            priorities: &pri,
+            filters: &filters,
             units: &units,
             db: None,
             spectrum: None,
-            lockout_ranges: &NO_LOCKOUT_RANGES,
-            priority_ranges: &NO_PRIORITY_RANGES,
             unit_rules: &NO_RULES,
             record: &NO_RECORD,
         };
@@ -1616,18 +1590,13 @@ mod tests {
             };
             let running = AtomicBool::new(true);
             let mut n = 0;
-            let (lockout, _, hold, pri, units) = live_defaults();
-            let allow = std::sync::Mutex::new(allow.map(|v| v.into_iter().collect()));
+            let (filters, units) = live_defaults();
+            filters.lock().unwrap().allowlist = allow.map(|v| v.into_iter().collect());
             let live = Live {
-                lockout: &lockout,
-                allowlist: &allow,
-                hold: &hold,
-                priorities: &pri,
+                filters: &filters,
                 units: &units,
                 db: None,
                 spectrum: None,
-                lockout_ranges: &NO_LOCKOUT_RANGES,
-                priority_ranges: &NO_PRIORITY_RANGES,
                 unit_rules: &NO_RULES,
                 record: &NO_RECORD,
             };
@@ -1682,18 +1651,13 @@ mod tests {
                 live: false,
             };
             let running = AtomicBool::new(true);
-            let (lockout, allow, _, pri, units) = live_defaults();
-            let hold = std::sync::Mutex::new(Some(hold_tg));
+            let (filters, units) = live_defaults();
+            filters.lock().unwrap().hold = Some(hold_tg);
             let live = Live {
-                lockout: &lockout,
-                allowlist: &allow,
-                hold: &hold,
-                priorities: &pri,
+                filters: &filters,
                 units: &units,
                 db: None,
                 spectrum: None,
-                lockout_ranges: &NO_LOCKOUT_RANGES,
-                priority_ranges: &NO_PRIORITY_RANGES,
                 unit_rules: &NO_RULES,
                 record: &NO_RECORD,
             };
@@ -1762,17 +1726,12 @@ mod tests {
         });
         let player = crate::player::spawn();
         let (mut starts, mut calls, mut last) = (0, 0, None);
-        let (lockout, allow, hold, pri, units) = live_defaults();
+        let (filters, units) = live_defaults();
         let live = Live {
-            lockout: &lockout,
-            allowlist: &allow,
-            hold: &hold,
-            priorities: &pri,
+            filters: &filters,
             units: &units,
             db: None,
             spectrum: None,
-            lockout_ranges: &NO_LOCKOUT_RANGES,
-            priority_ranges: &NO_PRIORITY_RANGES,
             unit_rules: &NO_RULES,
             record: &NO_RECORD,
         };

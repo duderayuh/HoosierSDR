@@ -22,12 +22,12 @@
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
     <span class="spacer"></span>
-    <label class="tb"><span>Playlist</span>
-      <span class="inline plpick"><select id="playlist"><option value="">— every talkgroup —</option></select><button class="btn ghost sm plmore" id="plMore" title="Also listen to other playlists at the same time (each needs its own control channel inside the radio's span)">+</button></span></label>
+    <label class="tb"><span>Site</span>
+      <span class="inline plpick"><select id="playlist"><option value="">— every talkgroup —</option></select><button class="btn ghost sm plmore" id="plMore" title="Also listen to other sites at the same time (each needs its own control channel inside the radio's span)">+</button></span></label>
     <div class="plmore-pop" id="plMorePop" hidden>
       <div class="plmore-head">Also listen to</div>
       <div id="plMoreList" class="plmore-list"></div>
-      <p class="help">Each playlist here becomes its own system, decoded at the same time from the same radio. Their control channels must all fit inside the radio's span; otherwise you'll be told which one doesn't.</p>
+      <p class="help">Each site here is decoded at the same time from the same radio, following its own playlist. Their control channels must all fit inside the radio's span; otherwise you'll be told which one doesn't.</p>
     </div>
     <label class="tb"><span>Radio</span>
       <select id="source"><option value="rtlsdr" selected>RTL-SDR</option><option value="airspy">Airspy R2</option></select></label>
@@ -800,7 +800,7 @@
             <div class="head"><span class="eyebrow" id="sysName">System</span><span class="meta" id="sysMeta"></span></div>
             <div class="body">
               <div class="notice mono" id="sysLoaded" style="color:var(--clear);margin-bottom:8px"></div>
-              <span class="lab">Site</span>
+              <label class="field"><span class="lab">Sites — add the ones you can hear; each follows <span class="mono faint">this playlist</span></span><select id="siteAddPl"><option value="">every talkgroup (no playlist)</option></select></label>
               <div id="siteList" class="list"></div>
               <div class="row3" style="margin-top:10px">
                 <label class="field"><span class="lab">Filter talkgroups</span><input id="tgFilter" type="text" placeholder="dispatch, fire…" spellcheck="false" /></label>
@@ -812,7 +812,7 @@
                 <table><thead><tr><th></th><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th></th></tr></thead><tbody id="tgBody"></tbody></table>
               </div>
               <div class="row2" style="margin-top:12px">
-                <label class="field"><span class="lab">Playlist name</span><input id="plName" type="text" placeholder="County dispatch" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Playlist name <span class="mono faint">the talkgroups ticked above, shared by every site of this system that follows it</span></span><input id="plName" type="text" placeholder="MESA" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="plSave" style="width:100%">Save playlist</button></label>
               </div>
             </div>
@@ -821,10 +821,18 @@
 
         <div class="stack">
           <div class="panel">
+            <div class="head"><span class="eyebrow">Sites</span><span class="meta" id="stMeta"></span></div>
+            <div class="body">
+              <div id="stList" class="list tall"></div>
+              <div class="empty" id="stEmpty"><span class="big">No sites yet</span>Load a system, then add the sites you can hear — each is picked in the top bar and follows a playlist.</div>
+              <p class="help">A site is what the radio tunes. Several sites of one system can follow the same playlist: lock a talkgroup out there and it is locked on all of them, but not on another system that happens to reuse the number.</p>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Playlists</span><span class="meta" id="plMeta"></span></div>
             <div class="body">
               <div id="plList" class="list tall"></div>
-              <div class="empty" id="plEmpty"><span class="big">No playlists yet</span>Find a system, pick a site and talkgroups, save — then choose it in the top bar.</div>
+              <div class="empty" id="plEmpty"><span class="big">No playlists yet</span>Load a system, tick its talkgroups, name the playlist and save — then point its sites at it.</div>
             </div>
           </div>
         </div>
