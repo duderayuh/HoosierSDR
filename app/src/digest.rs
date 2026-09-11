@@ -253,8 +253,7 @@ fn fmt_window(secs: u32) -> String {
 }
 
 fn fmt_time(epoch: i64) -> String {
-    let s = epoch.rem_euclid(86_400);
-    format!("{:02}:{:02} UTC", s / 3600, (s % 3600) / 60)
+    crate::library::local_hm(epoch)
 }
 
 fn log_it(

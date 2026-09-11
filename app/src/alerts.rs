@@ -236,6 +236,10 @@ pub struct LogEntry {
     pub tg_name: String,
     pub message: String,
     pub ok: bool,
+    /// `sent` | `failed` | `quiet` (the AI check said no — working as
+    /// intended, not an error) | `held` (the AI check could not be reached
+    /// and the alert fails closed).
+    pub status: String,
     pub detail: String,
 }
 
@@ -267,6 +271,49 @@ pub struct CallFacts {
     pub emergency: bool,
     pub audio: Option<String>,
     pub transcript: Option<String>,
+    /// The system the call was heard on (its RadioReference name), so a
+    /// rule can tell TG 10202 on one system from TG 10202 on another.
+    pub system: String,
+}
+
+/// The RadioReference description of `tg` on the named system.
+pub fn tg_desc_for(app: &AppHandle, system: &str, tg: u16) -> Option<String> {
+    let state = app.state::<AppState>();
+    let sid = crate::playlists::sids_by_system_name(app)
+        .get(system)
+        .copied();
+    let desc = state
+        .catalog
+        .lock()
+        .unwrap()
+        .get(sid, tg)
+        .and_then(|t| t.description.clone());
+    desc.filter(|d| !d.trim().is_empty())
+}
+
+/// What a rule is judged against, from a stored call. `transcript` wins
+/// over the row's own (it is the corrected text that just landed); without
+/// one the listener's edit, then the machine text, is used.
+pub fn facts_from_row(
+    app: &AppHandle,
+    r: crate::library::CallRow,
+    transcript: Option<String>,
+) -> CallFacts {
+    let transcript = transcript.or(r.transcript_edited).or(r.transcript);
+    CallFacts {
+        id: Some(r.id),
+        start: r.start,
+        tg_desc: tg_desc_for(app, &r.system, r.tg),
+        tg: r.tg,
+        tg_name: r.tg_name,
+        unit: r.unit,
+        unit_name: r.unit_name,
+        secs: r.secs,
+        emergency: r.emergency,
+        audio: r.audio,
+        transcript,
+        system: r.system,
+    }
 }
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -362,7 +409,11 @@ pub fn matches(a: &Alert, f: &CallFacts) -> Option<Vec<String>> {
 }
 
 pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai: &str) -> String {
-    let time = chrono_like(crate::library::now());
+    let time = crate::library::local_hms(if f.start > 0 {
+        f.start
+    } else {
+        crate::library::now()
+    });
     template
         .replace("{alert}", &a.name)
         .replace("{tg}", &f.tg.to_string())
@@ -380,13 +431,6 @@ pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai:
         .replace("{ai}", ai)
         .trim()
         .to_string()
-}
-
-fn chrono_like(epoch: i64) -> String {
-    // Local-ish HH:MM:SS without a date crate: use the system's TZ offset via
-    // `date` is overkill; show UTC and say so.
-    let s = epoch.rem_euclid(86_400);
-    format!("{:02}:{:02}:{:02} UTC", s / 3600, (s % 3600) / 60, s % 60)
 }
 
 // ---------------------------------------------------------------------------
@@ -437,28 +481,7 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
-    let sid = crate::playlists::sids_by_system_name(app)
-        .get(&r.system)
-        .copied();
-    let tg_desc = state
-        .catalog
-        .lock()
-        .unwrap()
-        .get(sid, r.tg)
-        .and_then(|t| t.description.clone());
-    let f = CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text.to_string()),
-    };
+    let f = facts_from_row(app, r, Some(text.to_string()));
     for a in alerts {
         if let Some(kw) = matches(&a, &f) {
             fire(app.clone(), a, f.clone(), kw);
@@ -505,12 +528,13 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
             match ask_ollama(&ollama, &a.ai_prompt, &f, a.ai_think) {
                 Ok((true, summary)) => ai_note = summary,
                 Ok((false, summary)) => {
+                    // The check doing its job: logged, but not an error.
                     log_entry(
                         &app,
                         &a,
                         &f,
-                        false,
-                        format!("AI gate said no: {summary}"),
+                        "quiet",
+                        format!("AI check said no: {summary}"),
                         String::new(),
                     );
                     return;
@@ -521,13 +545,13 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
                             &app,
                             &a,
                             &f,
-                            false,
-                            format!("AI gate unavailable, alert held: {e}"),
+                            "held",
+                            format!("AI check unavailable, alert held: {e}"),
                             String::new(),
                         );
                         return;
                     }
-                    ai_note = format!("(AI gate unavailable: {e})");
+                    ai_note = format!("(AI check unavailable: {e})");
                 }
             }
         }
@@ -573,11 +597,13 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
         if ok {
             state.alerts.lock().unwrap().last_fired.insert(key, now);
         }
-        log_entry(&app, &a, &f, ok, detail, message);
+        log_entry(&app, &a, &f, if ok { "sent" } else { "failed" }, detail, message);
     });
 }
 
-fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, ok: bool, detail: String, message: String) {
+/// Record one outcome. Only a failed send or a held alert is an error the
+/// listener is told about; a quiet AI verdict is the check working.
+fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, status: &str, detail: String, message: String) {
     let state = app.state::<AppState>();
     let mut st = state.alerts.lock().unwrap();
     st.log.push_front(LogEntry {
@@ -586,11 +612,13 @@ fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, ok: bool, detail: String
         tg: f.tg,
         tg_name: f.tg_name.clone(),
         message,
-        ok,
+        ok: status == "sent",
+        status: status.to_string(),
         detail: detail.clone(),
     });
     st.log.truncate(200);
-    if !ok {
+    drop(st);
+    if status == "failed" || status == "held" {
         let _ = app.emit("alert_error", format!("{}: {detail}", a.name));
     }
 }
@@ -1213,34 +1241,19 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
             crate::library::latest_call(&c, &a.trigger.tgs)?
         };
         let f = match row {
-            Some(r) => CallFacts {
-                id: Some(r.id),
-                start: r.start,
-                tg: r.tg,
-                tg_name: r.tg_name,
-                tg_desc: None,
-                unit: r.unit,
-                unit_name: r.unit_name,
-                secs: r.secs,
-                emergency: r.emergency,
-                audio: r.audio,
-                transcript: r
-                    .transcript_edited
-                    .or(r.transcript)
-                    .or(Some("(no transcript yet)".into())),
-            },
+            Some(r) => {
+                let mut f = facts_from_row(&app, r, None);
+                if f.transcript.is_none() {
+                    f.transcript = Some("(no transcript yet)".into());
+                }
+                f
+            }
             None => CallFacts {
-                id: None,
                 start: crate::library::now(),
                 tg: a.trigger.tgs.first().copied().unwrap_or(0),
                 tg_name: "Test talkgroup".into(),
-                tg_desc: None,
-                unit: 0,
-                unit_name: None,
-                secs: 0.0,
-                emergency: false,
-                audio: None,
                 transcript: Some("test message — no calls in the library yet".into()),
+                ..Default::default()
             },
         };
         let keywords = f
@@ -1357,6 +1370,7 @@ mod tests {
             emergency: false,
             audio: None,
             transcript: Some(text.into()),
+            system: String::new(),
         }
     }
 

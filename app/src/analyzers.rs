@@ -257,19 +257,7 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
-    let f = CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc: None,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text.to_string()),
-    };
+    let f = crate::alerts::facts_from_row(app, r, Some(text.to_string()));
     for rule in rules {
         if pre_filter(&rule, &f) {
             let app = app.clone();
@@ -418,10 +406,13 @@ fn send_telegram(
     match clip {
         None => crate::alerts::send_text_id(chat, message).map(|_| "sent".into()),
         Some(path) => {
-            let p = std::path::Path::new(path);
-            let is_mp3 = path.to_ascii_lowercase().ends_with(".mp3");
-            crate::alerts::send_audio_id(chat, p, is_mp3, message, &r.name, &f.tg_name)
-                .map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "audio" }))
+            // Through the same encoder as alerts: a stored WAV (or Opus/M4A)
+            // becomes the MP3 Telegram plays inline, not a file to download.
+            let (tmp, is_mp3) = crate::alerts::combine_clips(&[path.to_string()], &format!("az_{}", f.tg))?;
+            let res = crate::alerts::send_audio_id(chat, &tmp, is_mp3, message, &r.name, &f.tg_name)
+                .map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }));
+            let _ = std::fs::remove_file(&tmp);
+            res
         }
     }
 }
@@ -762,8 +753,11 @@ fn value_to_string(v: Option<&serde_json::Value>) -> String {
 // ---------------------------------------------------------------------------
 
 fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Value) -> String {
-    let s = crate::library::now().rem_euclid(86_400);
-    let time = format!("{:02}:{:02}:{:02} UTC", s / 3600, (s % 3600) / 60, s % 60);
+    let time = crate::library::local_hms(if f.start > 0 {
+        f.start
+    } else {
+        crate::library::now()
+    });
     let mut out = template
         .replace("{name}", &r.name)
         .replace("{tg}", &f.tg.to_string())
@@ -1205,7 +1199,7 @@ pub fn analyzer_templates() -> Vec<AnalyzerRule> {
 /// pre-filter, so the rule can be seen working without waiting for traffic.
 #[tauri::command]
 pub async fn analyzer_test(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<String, String> {
@@ -1254,19 +1248,7 @@ pub async fn analyzer_test(
             .clone()
             .or_else(|| c.transcript.clone())
             .filter(|t| !t.trim().is_empty())?;
-        let f = CallFacts {
-            id: Some(c.id),
-            start: c.start,
-            tg: c.tg,
-            tg_name: c.tg_name,
-            tg_desc: None,
-            unit: c.unit,
-            unit_name: c.unit_name,
-            secs: c.secs,
-            emergency: c.emergency,
-            audio: c.audio,
-            transcript: Some(text),
-        };
+        let f = crate::alerts::facts_from_row(&app, c, Some(text));
         pre_filter(&r, &f).then_some(f)
     });
     let Some(f) = f else {

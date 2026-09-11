@@ -1386,19 +1386,7 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
     if channel_for(&settings, r.tg).is_none() {
         return;
     }
-    let f = CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc: None,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text.to_string()),
-    };
+    let f = crate::alerts::facts_from_row(app, r, Some(text.to_string()));
     let app = app.clone();
     std::thread::spawn(move || {
         let _ = process(&app, &f);
@@ -1673,25 +1661,13 @@ fn log_it(app: &AppHandle, f: &CallFacts, outcome: &str, detail: String, inciden
     let _ = app.emit("dispatch", ());
 }
 
-fn facts_of(r: crate::library::CallRow) -> Option<CallFacts> {
+fn facts_of(app: &AppHandle, r: crate::library::CallRow) -> Option<CallFacts> {
     let text = r
         .transcript_edited
         .clone()
         .or_else(|| r.transcript.clone())
         .filter(|t| !t.trim().is_empty())?;
-    Some(CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc: None,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text),
-    })
+    Some(crate::alerts::facts_from_row(app, r, Some(text)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1997,7 +1973,7 @@ pub async fn dispatch_test(
         }
     }
     calls.sort_by_key(|c| std::cmp::Reverse(c.start));
-    let f = calls.into_iter().find_map(facts_of);
+    let f = calls.into_iter().find_map(|r| facts_of(&app, r));
     let Some(f) = f else {
         return Ok("no transcribed call found on those talkgroups yet".into());
     };
@@ -2093,7 +2069,7 @@ pub fn dispatch_backfill(
         calls.retain(|r| !call_attached(&c, r.id));
     }
     calls.sort_by_key(|c| c.start);
-    let facts: Vec<CallFacts> = calls.into_iter().filter_map(facts_of).collect();
+    let facts: Vec<CallFacts> = calls.into_iter().filter_map(|r| facts_of(&app, r)).collect();
     let n = facts.len();
     let app2 = app.clone();
     std::thread::spawn(move || {

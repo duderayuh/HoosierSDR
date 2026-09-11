@@ -519,8 +519,7 @@ fn fmt_duration(secs: i64) -> String {
 }
 
 fn fmt_time(epoch: i64) -> String {
-    let s = epoch.rem_euclid(86_400);
-    format!("{:02}:{:02} UTC", s / 3600, (s % 3600) / 60)
+    crate::library::local_hm(epoch)
 }
 
 /// The stitched transcript with speaker labels, oldest first.
@@ -1872,8 +1871,10 @@ mod tests {
             m.starts_with("🏥 Hospitals · Methodist ER\nChest pain, ETA unknown."),
             "{m}"
         );
+        // Wall-clock local time, whatever zone the test machine is in.
+        let started = crate::library::local_hm(100);
         assert!(
-            m.contains("Medic 3 · 3 transmissions · 30 s · 00:01 UTC · revised ×1"),
+            m.contains(&format!("Medic 3 · 3 transmissions · 30 s · {started} · revised ×1")),
             "{m}"
         );
     }

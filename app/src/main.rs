@@ -1353,6 +1353,7 @@ fn start_follow(
                             emergency: *emergency,
                             audio: wav.clone(),
                             transcript: None,
+                            system: params.system_name.clone(),
                         },
                     );
                     alerts::on_call(
@@ -1369,6 +1370,7 @@ fn start_follow(
                             emergency: *emergency,
                             audio: wav.clone(),
                             transcript: None,
+                            system: params.system_name.clone(),
                         },
                     );
                     if let Some(h) = app.state::<AppState>().hook.lock().unwrap().as_ref() {

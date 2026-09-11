@@ -463,6 +463,30 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// `epoch` as the listener's wall-clock time, "15:33:07". Messages used to
+/// say "19:33:07 UTC", which nobody on the air thinks in.
+pub fn local_hms(epoch: i64) -> String {
+    local_fmt(epoch, "%H:%M:%S")
+}
+
+/// `epoch` as local "15:33".
+pub fn local_hm(epoch: i64) -> String {
+    local_fmt(epoch, "%H:%M")
+}
+
+fn local_fmt(epoch: i64, f: &str) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_opt(epoch, 0) {
+        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
+            t.format(f).to_string()
+        }
+        chrono::LocalResult::None => {
+            let s = epoch.rem_euclid(86_400);
+            format!("{:02}:{:02}:{:02} UTC", s / 3600, (s % 3600) / 60, s % 60)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Export with chain of custody.
 // ---------------------------------------------------------------------------
@@ -634,6 +658,14 @@ pub fn utc(t: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_times_are_wall_clock_without_a_utc_label() {
+        let t = local_hms(1_757_619_180);
+        assert_eq!(t.len(), 8, "{t}");
+        assert!(!t.contains("UTC"));
+        assert_eq!(local_hm(1_757_619_180), t[..5]);
+    }
 
     fn tmp() -> PathBuf {
         let d = std::env::temp_dir().join(format!("hs_lib_{}", std::process::id()));
