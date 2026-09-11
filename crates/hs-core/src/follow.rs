@@ -1016,16 +1016,29 @@ impl TrunkFollower {
                 } else {
                     (Some(Modulation::Cqpsk), s.pcm_cqpsk)
                 };
-                // A grant does not always name the radio; Link Control, which
-                // the traffic channel sends about itself, usually does. Take
-                // the first confirmed word of *this transmission* — the radio
-                // that opened it — rather than the last, which on a shared
-                // talkgroup may be someone else. After the first cut the
-                // grant's radio no longer applies, so Link Control decides.
-                let lc = (lc_lo < lc_hi).then(|| lc_all.get(lc_lo)).flatten();
-                let source_unit = match (s.source_unit, lc) {
-                    (0, Some(l)) => l.source_unit,
-                    (u, _) => u,
+                // Which radio spoke: Link Control, which the traffic channel
+                // sends about itself, names the transmitting radio; a grant
+                // names whoever the control channel last granted the channel
+                // to, and after a terminator that is often the *previous*
+                // keyup's grant, still being re-broadcast through the hang
+                // (a reply was credited to the dispatcher that way). So a
+                // confirmed Link Control word for this talkgroup wins; the
+                // grant fills in when the channel never identified itself.
+                // Take the first word of *this transmission* — the radio that
+                // opened it — rather than the last, which on a shared
+                // talkgroup may be someone else.
+                let lc = (lc_lo < lc_hi)
+                    .then(|| lc_all.get(lc_lo))
+                    .flatten()
+                    .filter(|l| {
+                        l.source_unit != 0
+                            && (l.talkgroup == c.talkgroup
+                                || l.talkgroup == 0
+                                || patched_with.contains(&l.talkgroup))
+                    });
+                let source_unit = match lc {
+                    Some(l) => l.source_unit,
+                    None => s.source_unit,
                 };
                 let emergency = lc_c4[s.start.lc_c4.min(lc_c4.len())..s.end.lc_c4.min(lc_c4.len())]
                     .iter()
@@ -1886,6 +1899,60 @@ mod priority_tests {
         let silent = f.retire(c);
         assert_eq!(silent.len(), 1);
         assert!(silent[0].pcm.is_empty());
+    }
+
+    /// The reply's own Link Control names the radio that spoke, even when
+    /// the previous keyup's grant was still being re-broadcast and had
+    /// been taken as the reply's radio.
+    #[test]
+    fn link_control_names_the_radio_over_a_stale_grant() {
+        let lc = |tg: u16, src: u32| crate::diag::LcStat {
+            talkgroup: tg,
+            source_unit: src,
+            emergency: false,
+        };
+        // Keyup 1: the dispatcher (grant and Link Control agree).
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().source_unit = 790041;
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(100, 790041));
+        cut(f.only_call());
+        // Keyup 2: the truck. Its grant was missed; the dispatcher's grant,
+        // re-broadcast through the hang, was taken as the radio — but the
+        // channel's own Link Control says who is really talking.
+        f.only_call().source_unit = 790041;
+        f.only_call().pcm_c4fm.extend_from_slice(&[3, 4]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(100, 4917041));
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].source_unit, 790041);
+        assert_eq!(calls[1].source_unit, 4917041);
+
+        // Link Control for some other talkgroup (a decoder that has not
+        // resynced yet) does not override the grant.
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().source_unit = 790041;
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(555, 31701));
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!(calls[0].source_unit, 790041);
+
+        // No grant radio at all: Link Control still fills it in.
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(100, 4917041));
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!(calls[0].source_unit, 4917041);
     }
 
     /// A call with no sync is retired after the quiet time in *seconds*,

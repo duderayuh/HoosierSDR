@@ -422,6 +422,12 @@ impl ChannelDecoder {
         &self.diag
     }
 
+    /// Tests plant Link Control words here to stand in for a decoded channel.
+    #[cfg(test)]
+    pub(crate) fn diagnostics_mut(&mut self) -> &mut crate::diag::Diagnostics {
+        &mut self.diag
+    }
+
     /// Process a slice of interleaved-IQ f32 samples.
     pub fn process(&mut self, iq: &[f32]) -> DecodeOutput {
         let mut out = DecodeOutput::default();
