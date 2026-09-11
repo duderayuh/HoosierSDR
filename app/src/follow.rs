@@ -5,7 +5,6 @@
 //! recording (see the tests) — the loop is verified on real off-air IQ; only
 //! the button that starts it needs a human.
 
-use hs_core::catalog::CsvCatalog;
 use hs_core::follow::{in_band, GrantGate, TrunkFollower};
 use hs_core::stream::{Buffered, Normalized};
 use hs_source::{SdrSource, SourceError};
@@ -38,6 +37,9 @@ pub struct FollowParams {
     pub hang_secs: Option<(f64, f64)>,
     /// Label written into sidecars (the playlist's system name, if any).
     pub system_name: String,
+    /// RadioReference system id, when the run knows it: talkgroup and radio
+    /// aliases are looked up in that system's catalog, never another's.
+    pub sid: Option<u32>,
     /// Site label, for filenames and sidecars.
     pub site_name: String,
     /// Filename template for stored calls (see `names`).
@@ -61,7 +63,7 @@ pub struct Live<'a> {
     /// Locked-out and prioritised talkgroup ranges (inclusive).
     pub lockout_ranges: &'a std::sync::Mutex<Vec<(u16, u16)>>,
     pub priority_ranges: &'a std::sync::Mutex<Vec<(u16, u16, u8)>>,
-    pub units: &'a std::sync::Mutex<std::collections::HashMap<u32, String>>,
+    pub units: &'a std::sync::Mutex<crate::units::UnitTable>,
     /// Wildcard rules naming radios the table does not list.
     pub unit_rules: &'a std::sync::Mutex<Vec<crate::units::Rule>>,
     /// Which talkgroups' audio is stored: `None` = all; `Some((all, except))`
@@ -262,7 +264,7 @@ pub struct ExtraRadio {
 pub fn run<S: SdrSource + Send + 'static>(
     src: S,
     p: &FollowParams,
-    catalog: &std::sync::Mutex<Option<CsvCatalog>>,
+    catalog: &std::sync::Mutex<crate::rr::Catalogs>,
     live: &Live<'_>,
     running: &AtomicBool,
     emit: &mut dyn FnMut(FollowEvent),
@@ -278,7 +280,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     src: S,
     extras: Vec<ExtraRadio>,
     p: &FollowParams,
-    catalog: &std::sync::Mutex<Option<CsvCatalog>>,
+    catalog: &std::sync::Mutex<crate::rr::Catalogs>,
     live: &Live<'_>,
     running: &AtomicBool,
     emit: &mut dyn FnMut(FollowEvent),
@@ -442,6 +444,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
     let mut last_site = f.site_info();
     let mut rep = Reporter {
         catalog,
+        sid: p.sid,
         record: live.record,
         units: live.units,
         unit_rules: live.unit_rules,
@@ -733,11 +736,13 @@ const ENC_QUIET_SECS: f64 = 5.0;
 
 /// Turns follower output into events and keeps the running counts.
 struct Reporter<'a> {
-    catalog: &'a std::sync::Mutex<Option<CsvCatalog>>,
+    catalog: &'a std::sync::Mutex<crate::rr::Catalogs>,
+    /// The run's RadioReference system, scoping every alias lookup.
+    sid: Option<u32>,
     record: &'a std::sync::Mutex<crate::Policy>,
     /// Talkgroups already reported as unnamed, so the hint fires once each.
     unnamed: std::collections::HashSet<u16>,
-    units: &'a std::sync::Mutex<std::collections::HashMap<u32, String>>,
+    units: &'a std::sync::Mutex<crate::units::UnitTable>,
     unit_rules: &'a std::sync::Mutex<Vec<crate::units::Rule>>,
     db: Option<&'a std::sync::Mutex<rusqlite::Connection>>,
     calls_dir: Option<&'a std::path::Path>,
@@ -771,14 +776,9 @@ struct Reporter<'a> {
 
 impl Reporter<'_> {
     fn name_of(&self, tg: u16) -> String {
-        match self
-            .catalog
-            .lock()
-            .ok()
-            .and_then(|c| c.as_ref().map(|k| k.label(tg)))
-        {
-            Some(l) => l,
-            None => format!("TG {tg}"),
+        match self.catalog.lock() {
+            Ok(c) => c.label(self.sid, tg),
+            Err(_) => format!("TG {tg}"),
         }
     }
 
@@ -786,34 +786,33 @@ impl Reporter<'_> {
     /// human-readable alias shown alongside the alpha tag. `None` when the
     /// talkgroup is unknown or has no description.
     fn description_of(&self, tg: u16) -> Option<String> {
-        self.catalog.lock().ok().and_then(|c| {
-            c.as_ref()
-                .and_then(|k| k.get(tg).and_then(|t| t.description.clone()))
-        })
+        self.catalog
+            .lock()
+            .ok()
+            .and_then(|c| c.get(self.sid, tg).and_then(|t| t.description.clone()))
     }
 
     /// The catalog's service type (RadioReference "Tag") for a talkgroup —
     /// e.g. "Law Dispatch", "Fire-Tac". `None` when unknown or untagged.
     fn service_of(&self, tg: u16) -> Option<String> {
-        self.catalog.lock().ok().and_then(|c| {
-            c.as_ref()
-                .and_then(|k| k.get(tg).and_then(|t| t.tag.clone()))
-        })
+        self.catalog
+            .lock()
+            .ok()
+            .and_then(|c| c.get(self.sid, tg).and_then(|t| t.tag.clone()))
     }
 
     /// The catalog's agency/group (RadioReference "Category") for a talkgroup.
     fn category_of(&self, tg: u16) -> Option<String> {
-        self.catalog.lock().ok().and_then(|c| {
-            c.as_ref()
-                .and_then(|k| k.get(tg).and_then(|t| t.category.clone()))
-        })
+        self.catalog
+            .lock()
+            .ok()
+            .and_then(|c| c.get(self.sid, tg).and_then(|t| t.category.clone()))
     }
 
     fn is_named(&self, tg: u16) -> bool {
         self.catalog
             .lock()
-            .ok()
-            .and_then(|c| c.as_ref().map(|k| k.get(tg).is_some()))
+            .map(|c| c.get(self.sid, tg).is_some())
             .unwrap_or(false)
     }
 
@@ -830,7 +829,7 @@ impl Reporter<'_> {
     fn unit_name(&self, id: u32) -> Option<String> {
         let units = self.units.lock().ok()?;
         let rules = self.unit_rules.lock().ok()?;
-        crate::units::name_for(&units, &rules, id)
+        crate::units::name_for(&units, &rules, self.sid, id)
     }
 
     /// Track encrypted grants so each encrypted transmission becomes one muted
@@ -1399,7 +1398,7 @@ mod tests {
         std::sync::Mutex<Option<std::collections::HashSet<u16>>>,
         std::sync::Mutex<Option<u16>>,
         std::sync::Mutex<std::collections::HashMap<u16, u8>>,
-        std::sync::Mutex<std::collections::HashMap<u32, String>>,
+        std::sync::Mutex<crate::units::UnitTable>,
     ) {
         Default::default()
     }
@@ -1438,6 +1437,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            sid: None,
             format: Default::default(),
             max_calls: 6,
             channelizer: true,
@@ -1466,7 +1466,7 @@ mod tests {
         run(
             src,
             &p,
-            &std::sync::Mutex::new(None),
+            &std::sync::Mutex::new(crate::rr::Catalogs::default()),
             &live,
             &running,
             &mut |e| events.push(e),
@@ -1537,6 +1537,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            sid: None,
             format: Default::default(),
             max_calls: 6,
             channelizer: true,
@@ -1566,7 +1567,7 @@ mod tests {
         run(
             src,
             &p,
-            &std::sync::Mutex::new(None),
+            &std::sync::Mutex::new(crate::rr::Catalogs::default()),
             &live,
             &running,
             &mut |e| events.push(e),
@@ -1603,6 +1604,7 @@ mod tests {
                 calls_dir: None,
                 hang_secs: None,
                 system_name: String::new(),
+                sid: None,
                 format: Default::default(),
                 max_calls: 6,
                 channelizer: true,
@@ -1632,7 +1634,7 @@ mod tests {
             run(
                 src,
                 &p,
-                &std::sync::Mutex::new(None),
+                &std::sync::Mutex::new(crate::rr::Catalogs::default()),
                 &live,
                 &running,
                 &mut |e| {
@@ -1669,6 +1671,7 @@ mod tests {
                 calls_dir: None,
                 hang_secs: None,
                 system_name: String::new(),
+                sid: None,
                 format: Default::default(),
                 max_calls: 6,
                 channelizer: true,
@@ -1698,7 +1701,7 @@ mod tests {
             run(
                 src,
                 &p,
-                &std::sync::Mutex::new(None),
+                &std::sync::Mutex::new(crate::rr::Catalogs::default()),
                 &live,
                 &running,
                 &mut |e| {
@@ -1737,6 +1740,7 @@ mod tests {
             calls_dir: None,
             hang_secs: None,
             system_name: String::new(),
+            sid: None,
             format: Default::default(),
             max_calls: 6,
             channelizer: true,
@@ -1775,7 +1779,7 @@ mod tests {
         run(
             src,
             &p,
-            &std::sync::Mutex::new(None),
+            &std::sync::Mutex::new(crate::rr::Catalogs::default()),
             &live,
             &running,
             &mut |e| match e {

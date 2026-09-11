@@ -893,6 +893,7 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Radio IDs</span><span class="meta" id="unitsMeta"></span></div>
             <div class="body">
+              <label class="field"><span class="lab">System <span class="mono faint">a radio ID is only unique within one system</span></span><select id="unitSid"><option value="">Any system</option></select></label>
               <div class="row3">
                 <label class="field"><span class="lab">Unit ID</span><input id="unitId" type="text" inputmode="numeric" placeholder="4900165" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Name</span><input id="unitName" type="text" placeholder="Car 12" spellcheck="false" /></label>
@@ -900,7 +901,7 @@
               </div>
               <label class="field"><span class="lab">Import CSV <span class="mono faint">id,name — trunk-recorder unitTagsFile</span></span>
                 <span class="inline"><input id="unitsCsv" type="text" placeholder="~/units.csv" spellcheck="false" /><button class="btn ghost" id="unitsImport">Import</button></span></label>
-              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
+              <div class="tablewrap tgs" style="max-height:220px"><table><thead><tr><th>Unit</th><th>Name</th><th>System</th></tr></thead><tbody id="unitsBody"></tbody></table></div>
               <div class="lab" style="margin-top:10px">Wildcard rules <span class="mono faint">regex over the radio ID · $1 captures · first match wins</span></div>
               <div class="row3">
                 <label class="field"><span class="lab">Pattern</span><input id="urPat" type="text" placeholder="^49001(\d\d)$" spellcheck="false" /></label>

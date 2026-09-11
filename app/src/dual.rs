@@ -9,7 +9,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode};
 use hs_core::dual::{DualSdrFollower, Retune};
 use hs_core::priority::PriorityMap;
@@ -19,8 +18,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::follow::FollowEvent;
 
-/// The app's shared catalog: `Arc<Mutex<Option<CsvCatalog>>>`.
-type CatalogHandle = Arc<Mutex<Option<CsvCatalog>>>;
+/// The app's shared catalog, seen from one system (`sid` scopes lookups;
+/// `None` = every loaded catalog).
+#[derive(Clone)]
+pub(crate) struct CatalogHandle {
+    cats: Arc<Mutex<crate::rr::Catalogs>>,
+    sid: Option<u32>,
+}
 
 /// A call being followed on the voice radio.
 struct CurrentCall {
@@ -40,20 +44,16 @@ fn mod_name(cqpsk: bool) -> String {
 }
 
 fn name_of(catalog: &CatalogHandle, tg: u16) -> String {
-    catalog
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|c| c.label(tg))
-        .unwrap_or_else(|| format!("TG {tg}"))
+    catalog.cats.lock().unwrap().label(catalog.sid, tg)
 }
 
 fn desc_of(catalog: &CatalogHandle, tg: u16) -> Option<String> {
     catalog
+        .cats
         .lock()
         .unwrap()
-        .as_ref()
-        .and_then(|c| c.get(tg).and_then(|t| t.description.clone()))
+        .get(catalog.sid, tg)
+        .and_then(|t| t.description.clone())
 }
 
 /// Run the dual-SDR loop until `running` clears. `control_hz` is the control
@@ -320,7 +320,10 @@ pub fn dual_start(
     let running = Arc::new(AtomicBool::new(true));
     *state.run_flag.lock().unwrap() = Some(running.clone());
 
-    let catalog = state.catalog.clone();
+    let catalog = CatalogHandle {
+        cats: state.catalog.clone(),
+        sid: crate::playlists::sid_for_control(&app, control),
+    };
     let priorities = state.priorities.clone();
     let priority_ranges = state.priority_ranges.clone();
 
@@ -359,13 +362,9 @@ pub fn dual_start(
                 // Priority: explicit entries + ranges, defaulting to 50 (matching
                 // the single-wideband follow), then catalog base below it.
                 let mut prio = PriorityMap::new();
-                if let Some(cat) = catalog.lock().unwrap().as_ref() {
-                    if let Ok(tgs) = hs_core::catalog::Catalog::talkgroups(cat, 0) {
-                        for tg in tgs {
-                            if let Some(p) = tg.priority {
-                                prio.set_base(tg.id, p);
-                            }
-                        }
+                for tg in catalog.cats.lock().unwrap().talkgroups(catalog.sid) {
+                    if let Some(p) = tg.priority {
+                        prio.set_base(tg.id, p);
                     }
                 }
                 for (tg, p) in priorities.lock().unwrap().iter() {

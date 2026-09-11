@@ -108,37 +108,130 @@ fn prefs_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(config_dir(app)?.join("radioreference.json"))
 }
 
-/// One CSV per source under `catalogs/`; all are merged into the live
-/// catalog, so several systems can be named at once.
+/// One CSV per source under `catalogs/`. RadioReference downloads are
+/// `rr_<sid>.csv`, names the listener gave a system's talkgroups are
+/// `user_<sid>.csv`; anything else (hand imports `csv_*.csv`, the legacy
+/// single `talkgroups.csv`) has no system and applies everywhere.
 pub fn catalogs_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let d = config_dir(app)?.join("catalogs");
     std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     Ok(d)
 }
 
-/// Merge every saved catalog file (and the legacy single file, if present).
-pub fn merged_catalog(app: &AppHandle) -> Option<CsvCatalog> {
-    let mut cat = CsvCatalog::default();
-    if let Ok(d) = catalogs_dir(app) {
-        let mut files: Vec<_> = std::fs::read_dir(&d)
-            .ok()?
+/// The loaded talkgroup names, kept apart per RadioReference system.
+///
+/// Talkgroup numbers are only unique within a system: MESA's TG 10001 and
+/// SAFE-T's TG 10001 are different talkgroups. A lookup that knows the
+/// system (a follow run started from a playlist) sees that system's
+/// catalog plus the unscoped files, never another system's; a lookup that
+/// does not (a bare capture, an offline decode, an old library row) sees
+/// everything merged, as before.
+#[derive(Default, Clone)]
+pub struct Catalogs {
+    /// `rr_<sid>.csv` with `user_<sid>.csv` layered on top.
+    by_sid: std::collections::HashMap<u32, CsvCatalog>,
+    /// Files that name no system.
+    unscoped: CsvCatalog,
+    /// Everything, in file-name order (later files win).
+    merged: CsvCatalog,
+}
+
+impl Catalogs {
+    /// Read every catalog file in `dir` (and the legacy `talkgroups.csv`
+    /// beside it, if any).
+    pub fn load_dir(dir: &std::path::Path, legacy: Option<&std::path::Path>) -> Self {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "csv"))
             .collect();
         files.sort();
+        let mut out = Self::default();
         for f in files {
-            if let Ok(t) = std::fs::read_to_string(&f) {
-                cat.merge(&CsvCatalog::parse(&t));
+            let Ok(t) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let stem = f
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.add(&stem, &CsvCatalog::parse(&t));
+        }
+        if let Some(t) = legacy.and_then(|p| std::fs::read_to_string(p).ok()) {
+            out.add("talkgroups", &CsvCatalog::parse(&t));
+        }
+        out
+    }
+
+    /// Add one source by file stem: `rr_<sid>` / `user_<sid>` are scoped to
+    /// that system; anything else is unscoped. Later sources replace
+    /// earlier same-ID rows within their scope, so `user_<sid>` (sorted
+    /// after `rr_<sid>`) wins for that system.
+    pub fn add(&mut self, stem: &str, cat: &CsvCatalog) {
+        match sid_of_stem(stem) {
+            Some(sid) => self.by_sid.entry(sid).or_default().merge(cat),
+            None => self.unscoped.merge(cat),
+        }
+        self.merged.merge(cat);
+    }
+
+    /// The talkgroup, for a run on system `sid` (or any system, `None`).
+    pub fn get(&self, sid: Option<u32>, tg: u16) -> Option<&hs_catalog::Talkgroup> {
+        if let Some(c) = sid.and_then(|s| self.by_sid.get(&s)) {
+            return c.get(tg).or_else(|| self.unscoped.get(tg));
+        }
+        self.merged.get(tg)
+    }
+
+    /// Display label: the alias, else "TG <n>".
+    pub fn label(&self, sid: Option<u32>, tg: u16) -> String {
+        match self.get(sid, tg).and_then(|t| t.alias.as_deref()) {
+            Some(a) => a.to_string(),
+            None => format!("TG {tg}"),
+        }
+    }
+
+    /// Every talkgroup a run on `sid` could see (the merged set when the
+    /// system is unknown).
+    pub fn talkgroups(&self, sid: Option<u32>) -> Vec<hs_catalog::Talkgroup> {
+        let cat = match sid.and_then(|s| self.by_sid.get(&s)) {
+            Some(c) => {
+                let mut scoped = self.unscoped.clone();
+                scoped.merge(c);
+                scoped
             }
-        }
+            None => self.merged.clone(),
+        };
+        hs_catalog::Catalog::talkgroups(&cat, 0).unwrap_or_default()
     }
-    if let Ok(legacy) = config_dir(app).map(|d| d.join("talkgroups.csv")) {
-        if let Ok(t) = std::fs::read_to_string(legacy) {
-            cat.merge(&CsvCatalog::parse(&t));
-        }
+
+    /// Distinct talkgroups across every source.
+    pub fn len(&self) -> usize {
+        self.merged.len()
     }
-    (!cat.is_empty()).then_some(cat)
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.merged.is_empty()
+    }
+}
+
+/// `rr_5737` / `user_5737` → 5737.
+fn sid_of_stem(stem: &str) -> Option<u32> {
+    stem.strip_prefix("rr_")
+        .or_else(|| stem.strip_prefix("user_"))
+        .and_then(|n| n.parse().ok())
+}
+
+/// Every saved catalog file, scoped per system.
+pub fn load_catalogs(app: &AppHandle) -> Catalogs {
+    let legacy = config_dir(app).ok().map(|d| d.join("talkgroups.csv"));
+    match catalogs_dir(app) {
+        Ok(d) => Catalogs::load_dir(&d, legacy.as_deref()),
+        Err(_) => Catalogs::default(),
+    }
 }
 
 /// Saved catalog sources, for the UI.
@@ -183,6 +276,8 @@ pub struct AliasRow {
     pub category: String,
     pub encrypted: bool,
     pub source: String,
+    /// RadioReference system the source belongs to; `None` = every system.
+    pub sid: Option<u32>,
 }
 
 /// Every named talkgroup across all saved catalogs, with its source.
@@ -219,6 +314,7 @@ pub fn catalog_rows(app: AppHandle) -> Vec<AliasRow> {
                     category: tg.category.unwrap_or_default(),
                     encrypted: tg.encrypted,
                     source: source.clone(),
+                    sid: sid_of_stem(&source),
                 });
             }
         }
@@ -244,16 +340,18 @@ pub fn catalog_remove(
 ) -> Result<usize, String> {
     let p = catalogs_dir(&app)?.join(format!("{}.csv", name.replace(['/', '\\'], "_")));
     std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-    let cat = merged_catalog(&app);
-    let n = cat.as_ref().map_or(0, |c| c.len());
+    let cat = load_catalogs(&app);
+    let n = cat.len();
     *state.catalog.lock().unwrap() = cat;
     Ok(n)
 }
 
 /// Name a talkgroup by hand (discovery: "I heard TG 20308, call it Sheriff
-/// Patrol"). Rows go into `csv_user.csv` in the catalogs folder — a plain
-/// RadioReference-shaped CSV the merge already reads, newest source wins —
-/// and the live catalog is reloaded. An empty alias removes the row.
+/// Patrol"). With `sid`, the row goes into `user_<sid>.csv` and names that
+/// system's talkgroup only, over its RadioReference row; without, into
+/// `csv_user.csv`, which every system sees but only where its own catalog
+/// has no row. Plain RadioReference-shaped CSVs the merge already reads;
+/// the live catalog is reloaded. An empty alias removes the row.
 #[tauri::command]
 pub fn catalog_user_set(
     app: AppHandle,
@@ -261,8 +359,13 @@ pub fn catalog_user_set(
     tg: u16,
     alias: String,
     category: Option<String>,
+    sid: Option<u32>,
 ) -> Result<usize, String> {
-    let p = catalogs_dir(&app)?.join("csv_user.csv");
+    let file = match sid {
+        Some(s) => format!("user_{s}.csv"),
+        None => "csv_user.csv".into(),
+    };
+    let p = catalogs_dir(&app)?.join(file);
     let mut rows: Vec<(u16, String, String)> = std::fs::read_to_string(&p)
         .ok()
         .map(|t| {
@@ -303,8 +406,8 @@ pub fn catalog_user_set(
     } else {
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
     }
-    let cat = merged_catalog(&app);
-    let n = cat.as_ref().map_or(0, |c| c.len());
+    let cat = load_catalogs(&app);
+    let n = cat.len();
     *state.catalog.lock().unwrap() = cat;
     Ok(n)
 }
@@ -342,9 +445,9 @@ fn get_secret(user: &str) -> Option<String> {
     crate::secrets::get(user)
 }
 
-/// The catalogs saved on previous runs, merged.
-pub fn saved_catalog(app: &AppHandle) -> Option<CsvCatalog> {
-    merged_catalog(app)
+/// The catalogs saved on previous runs.
+pub fn saved_catalog(app: &AppHandle) -> Catalogs {
+    load_catalogs(app)
 }
 
 #[derive(Serialize)]
@@ -369,12 +472,7 @@ pub fn rr_settings(app: AppHandle, state: State<AppState>) -> RrSettings {
         username: p.username,
         sid: p.sid,
         system_name: p.system_name,
-        catalog_len: state
-            .catalog
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(0, |c| c.len()),
+        catalog_len: state.catalog.lock().unwrap().len(),
     }
 }
 
@@ -467,7 +565,7 @@ fn rr_download_blocking(app: AppHandle, sid: u32) -> Result<RrDownload, String> 
     if let Ok(d) = catalogs_dir(&app) {
         let _ = std::fs::write(d.join(format!("rr_{sid}.csv")), &csv);
     }
-    *state.catalog.lock().unwrap() = merged_catalog(&app);
+    *state.catalog.lock().unwrap() = load_catalogs(&app);
     report("done", 3, 3);
 
     p.sid = Some(sid);
@@ -699,5 +797,76 @@ mod tests {
         assert_eq!(super::unmask(&masked), key);
         assert_ne!(masked, key.as_bytes());
         assert_eq!(super::unmask(&[]), "");
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    const HDR: &str = "Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority\n";
+
+    fn cat(rows: &str) -> CsvCatalog {
+        CsvCatalog::parse(&format!("{HDR}{rows}"))
+    }
+
+    #[test]
+    fn same_id_on_two_systems_stays_apart() {
+        let mut c = Catalogs::default();
+        c.add(
+            "rr_5737",
+            &cat("10001,2711,S1-TECH 1,D,MESA tech,Other,Other,\n10002,2712,S1-TECH 2,D,,,,\n"),
+        );
+        c.add("rr_8084", &cat("10001,2711,EXCISE-CEN DISP,D,Excise,Law Dispatch,Police,\n10003,2713,01-EMA,D,,,,\n"));
+        // A run that knows its system sees only that system's names.
+        assert_eq!(c.label(Some(5737), 10001), "S1-TECH 1");
+        assert_eq!(c.label(Some(8084), 10001), "EXCISE-CEN DISP");
+        // ... and never another system's row for a talkgroup it lacks.
+        assert_eq!(c.label(Some(5737), 10003), "TG 10003");
+        assert!(c.get(Some(5737), 10003).is_none());
+        // Unknown system: the merged table, later file wins (as before).
+        assert_eq!(c.label(None, 10001), "EXCISE-CEN DISP");
+        assert_eq!(c.label(None, 10002), "S1-TECH 2");
+        assert_eq!(c.len(), 3);
+        // A system with no catalog of its own falls back to everything.
+        assert_eq!(c.label(Some(999), 10001), "EXCISE-CEN DISP");
+    }
+
+    #[test]
+    fn user_names_layer_over_their_system_only() {
+        let mut c = Catalogs::default();
+        c.add(
+            "csv_user",
+            &cat("10002,2712,Global name,D,,,Discovered,\n10009,2719,Only here,D,,,,\n"),
+        );
+        c.add(
+            "rr_5737",
+            &cat("10001,2711,S1-TECH 1,D,,,,\n10002,2712,S1-TECH 2,D,,,,\n"),
+        );
+        c.add("rr_8084", &cat("10001,2711,EXCISE,D,,,,\n"));
+        c.add("user_5737", &cat("10001,2711,My Tech 1,D,,,Discovered,\n"));
+        assert_eq!(c.label(Some(5737), 10001), "My Tech 1");
+        assert_eq!(c.label(Some(8084), 10001), "EXCISE");
+        // The system's own row beats an unscoped user row ...
+        assert_eq!(c.label(Some(5737), 10002), "S1-TECH 2");
+        // ... which still names what the system's catalog lacks.
+        assert_eq!(c.label(Some(5737), 10009), "Only here");
+        assert_eq!(c.label(Some(8084), 10009), "Only here");
+        let tgs = c.talkgroups(Some(8084));
+        let ids: Vec<u16> = {
+            let mut v: Vec<u16> = tgs.iter().map(|t| t.id).collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(ids, vec![10001, 10002, 10009]);
+    }
+
+    #[test]
+    fn stems_name_their_system() {
+        assert_eq!(sid_of_stem("rr_5737"), Some(5737));
+        assert_eq!(sid_of_stem("user_8084"), Some(8084));
+        assert_eq!(sid_of_stem("csv_user"), None);
+        assert_eq!(sid_of_stem("csv_mesa"), None);
+        assert_eq!(sid_of_stem("rr_x"), None);
     }
 }

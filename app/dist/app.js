@@ -891,6 +891,9 @@ function setRuns(list) {
 const runDiag = {};
 function showRunDiag(id) { const d = runDiag[id]; if (!d) return; for (const k of ["measured", "site"]) if (d[k]) handleFollow(d[k]); }
 const runLabel = (ev) => runsNow.length > 1 && ev.system ? ev.system : "";
+// The RadioReference system behind an event's run (runs started from a
+// playlist know theirs), so names and rosters stay apart per system.
+const runSid = (ev) => { const r = ev && ev.run != null ? runsNow.find((x) => x.id === ev.run) : null; return r && r.sid != null ? r.sid : null; };
 
 function handleFollow(ev) {
   evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
@@ -1049,10 +1052,15 @@ $("wfConst").onchange = () => { wfCfg.constellation = $("wfConst").checked; save
 $("wfConst").checked = wfCfg.constellation !== false; $("constBox").style.display = wfCfg.constellation === false ? "none" : "";
 
 /* ---------- discovery: talkgroups and channels the control channel actually uses ---------- */
-const disc = store("hs.discovery", { tgs: {}, freqs: {} });   // tg → {name, named, n, freq, unit, first, last}; freq → {n, tgs:{}, last}
+// tgs: "<tg>" or "<sid>:<tg>" → {tg, sid, system, name, named, n, freq, unit, first, last}; freqs: freq → {n, tgs:{}, last}.
+// The same talkgroup number on two systems is two talkgroups, so a grant
+// from a run that knows its system is filed under that system.
+const disc = store("hs.discovery", { tgs: {}, freqs: {} });
 let discDirty = false;
 function discoveryGrant(ev) {
-  const t = disc.tgs[ev.tg] || (disc.tgs[ev.tg] = { first: Date.now(), n: 0 });
+  const sid = runSid(ev), key = sid != null ? `${sid}:${ev.tg}` : String(ev.tg);
+  const t = disc.tgs[key] || (disc.tgs[key] = { first: Date.now(), n: 0, tg: ev.tg });
+  if (sid != null) { t.sid = sid; if (ev.system) t.system = ev.system; }
   t.n++; t.last = Date.now(); t.name = ev.name; t.named = ev.named; t.freq = ev.freq_mhz; if (ev.unit) t.unit = ev.unit; t.enc = ev.encrypted;
   const k = ev.freq_mhz.toFixed(4), f = disc.freqs[k] || (disc.freqs[k] = { n: 0, tgs: {} });
   f.n++; f.last = Date.now(); f.tgs[ev.tg] = 1;
@@ -1063,17 +1071,20 @@ const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000));
 let bandLo = 0, bandHi = 0;
 function renderDiscovery() {
   const q = $("dcFilter").value.trim().toLowerCase(), un = $("dcUnnamed").checked;
-  const rows = Object.entries(disc.tgs).map(([tg, t]) => ({ tg: +tg, ...t })).filter((t) => (!un || !t.named) && (!q || `${t.tg} ${t.name || ""} ${t.freq || ""}`.toLowerCase().includes(q))).sort((a, b) => b.last - a.last);
-  $("dcBody").innerHTML = rows.slice(0, 1000).map((t) => `<tr data-tg="${t.tg}"><td class="mono">${t.tg}</td><td>${t.named ? esc(t.name) : `<span class="faint">unnamed</span>`}${t.enc ? ' <span class="badge enc">enc</span>' : ""}</td><td class="mono">${t.n}</td><td class="mono">${t.freq != null ? t.freq.toFixed(4) : "—"}</td><td class="mono">${t.unit || "—"}</td><td class="mono">${ago(t.last)}</td>` +
-    `<td class="act"><button data-dcplay="${t.tg}" title="Play the newest recorded call on this talkgroup">▶</button><input type="text" data-name="${t.tg}" placeholder="${t.named ? "rename" : "name it"}" style="width:120px;padding:2px 6px;font-size:11px" /><button data-namego="${t.tg}">✔</button>` +
+  const rows = Object.entries(disc.tgs).map(([key, t]) => ({ tg: +key, ...t, key })).filter((t) => (!un || !t.named) && (!q || `${t.tg} ${t.name || ""} ${t.system || ""} ${t.freq || ""}`.toLowerCase().includes(q))).sort((a, b) => b.last - a.last);
+  const multi = new Set(rows.map((t) => t.sid ?? "")).size > 1;
+  $("dcBody").innerHTML = rows.slice(0, 1000).map((t) => `<tr data-tg="${t.tg}"><td class="mono">${t.tg}${multi && t.system ? `<span class="faint" style="display:block;font-size:10.5px">${esc(t.system)}</span>` : ""}</td><td>${t.named ? esc(t.name) : `<span class="faint">unnamed</span>`}${t.enc ? ' <span class="badge enc">enc</span>' : ""}</td><td class="mono">${t.n}</td><td class="mono">${t.freq != null ? t.freq.toFixed(4) : "—"}</td><td class="mono">${t.unit || "—"}</td><td class="mono">${ago(t.last)}</td>` +
+    `<td class="act"><button data-dcplay="${t.tg}" title="Play the newest recorded call on this talkgroup">▶</button><input type="text" data-name="${esc(t.key)}" placeholder="${t.named ? "rename" : "name it"}" style="width:120px;padding:2px 6px;font-size:11px" /><button data-namego="${esc(t.key)}">✔</button>` +
     `<input type="number" class="priin" data-pri="${t.tg}" min="1" max="99" value="${prio.get(t.tg) || 50}" title="Priority 1–99 (1 = highest)"><button data-lock="${t.tg}" class="${lockout.has(t.tg) ? "on" : ""}">⊘</button></td></tr>`).join("");
   $("dcEmpty").style.display = rows.length ? "none" : "";
   const all = Object.keys(disc.tgs).length, unnamed = Object.values(disc.tgs).filter((t) => !t.named).length;
   $("dcMeta").textContent = all ? `${all} talkgroups · ${unnamed} unnamed` : "";
   const tb = $("dcBody");
   tb.querySelectorAll("[data-namego]").forEach((b) => b.onclick = async () => {
-    const tg = +b.dataset.namego, inp = tb.querySelector(`input[data-name="${tg}"]`), name = inp.value.trim(); if (!name || !TAURI) return;
-    try { await invoke("catalog_user_set", { tg, alias: name, category: "Discovered" }); disc.tgs[tg].name = name; disc.tgs[tg].named = true; save("hs.discovery", disc); renderDiscovery(); if (typeof aliasesRefresh === "function") aliasesRefresh(); logEvent(`named TG ${tg} “${name}”`); } catch (e) { alert(e); }
+    const key = b.dataset.namego, t = disc.tgs[key]; if (!t) return;
+    const tg = t.tg != null ? t.tg : +key, sid = t.sid != null ? t.sid : null;
+    const inp = tb.querySelector(`input[data-name="${key.replace(/[^0-9:]/g, "")}"]`), name = inp ? inp.value.trim() : ""; if (!name || !TAURI) return;
+    try { await invoke("catalog_user_set", { tg, alias: name, category: "Discovered", sid }); t.name = name; t.named = true; save("hs.discovery", disc); renderDiscovery(); if (typeof aliasesRefresh === "function") aliasesRefresh(); logEvent(`named TG ${tg}${t.system ? " on " + t.system : ""} “${name}”`); } catch (e) { alert(e); }
   });
   tb.querySelectorAll("button[data-dcplay]").forEach((b) => b.onclick = async () => {
     if (!TAURI) return;
@@ -1102,22 +1113,26 @@ $("dcExportGo").onclick = async () => {
 window.discoveryOnShow = renderDiscovery;
 
 /* ---------- affiliations (who is on which talkgroup) ---------- */
-const affil = new Map();   // unit → {tg, name, unit_name, status, last}
+// "<run>:<unit>" → {unit, run, system, tg, name, unit_name, status, last}.
+// Radio IDs are only unique within a system, so each run keeps its own roster.
+const affil = new Map();
 function affiliationEvent(ev) {
-  if (ev.what === "deregistered") { affil.delete(ev.unit); }
+  const key = `${ev.run != null ? ev.run : ""}:${ev.unit}`;
+  if (ev.what === "deregistered") { affil.delete(key); }
   else {
-    const a = affil.get(ev.unit) || {};
-    a.last = Date.now(); a.unit_name = ev.unit_name || a.unit_name; a.status = ev.what;
+    const a = affil.get(key) || { unit: ev.unit, run: ev.run };
+    a.last = Date.now(); a.unit_name = ev.unit_name || a.unit_name; a.status = ev.what; if (ev.system) a.system = ev.system;
     if (ev.tg != null && ev.what !== "refused") { a.tg = ev.tg; a.name = ev.name; }
-    affil.set(ev.unit, a);
+    affil.set(key, a);
     if (affil.size > 4096) affil.delete(affil.keys().next().value);
   }
   if (discoveryVisible()) renderAffiliations();
 }
 function renderAffiliations() {
   const q = $("afFilter").value.trim().toLowerCase();
-  const rows = [...affil].map(([unit, a]) => ({ unit, ...a })).filter((a) => !q || `${a.unit} ${a.unit_name || ""} ${a.tg || ""} ${a.name || ""}`.toLowerCase().includes(q)).sort((a, b) => b.last - a.last);
-  $("afBody").innerHTML = rows.slice(0, 500).map((a) => `<tr><td class="mono">${a.unit_name ? `${esc(a.unit_name)} <span class="faint">${a.unit}</span>` : a.unit}</td><td>${a.tg != null ? `${esc(a.name || "")} <span class="faint mono">TG ${a.tg}</span>` : "—"}</td><td><span class="badge ${a.status === "refused" ? "enc" : "clear"}">${a.status}</span></td><td class="mono">${ago(a.last)}</td></tr>`).join("");
+  const rows = [...affil.values()].filter((a) => !q || `${a.unit} ${a.unit_name || ""} ${a.tg || ""} ${a.name || ""} ${a.system || ""}`.toLowerCase().includes(q)).sort((a, b) => b.last - a.last);
+  const multi = new Set(rows.map((a) => a.run)).size > 1;
+  $("afBody").innerHTML = rows.slice(0, 500).map((a) => `<tr><td class="mono">${a.unit_name ? `${esc(a.unit_name)} <span class="faint">${a.unit}</span>` : a.unit}${multi && a.system ? `<span class="faint" style="display:block;font-size:10.5px">${esc(a.system)}</span>` : ""}</td><td>${a.tg != null ? `${esc(a.name || "")} <span class="faint mono">TG ${a.tg}</span>` : "—"}</td><td><span class="badge ${a.status === "refused" ? "enc" : "clear"}">${a.status}</span></td><td class="mono">${ago(a.last)}</td></tr>`).join("");
   $("afEmpty").style.display = affil.size ? "none" : "";
   $("afMeta").textContent = affil.size ? `${affil.size} radios` : "";
 }
@@ -2098,21 +2113,32 @@ if (TAURI) {
   listen("hook_error", (e) => logEvent(`script hook: ${e.payload}`, "warn"));
   hkRefresh(); setInterval(() => { if ($("view-settings").style.display !== "none") hkRefresh(false); }, 5000);
 
-  /* ---------- radio-ID aliases ---------- */
+  /* ---------- radio-ID aliases (per system: a radio ID is only unique within one) ---------- */
+  let unitSystems = null;   // sid → system name, from the playlists
+  async function unitSystemNames() {
+    if (unitSystems) return unitSystems;
+    unitSystems = new Map();
+    try { for (const p of (await invoke("playlists_list")) || []) if (p.sid && !unitSystems.has(p.sid)) unitSystems.set(p.sid, p.system_name || `system ${p.sid}`); } catch (_) {}
+    const sel = $("unitSid");
+    if (sel && sel.options.length <= 1) for (const [sid, name] of unitSystems) sel.add(new Option(name, sid));
+    return unitSystems;
+  }
+  const unitSid = () => { const v = $("unitSid") ? $("unitSid").value : ""; return v ? +v : null; };
   async function renderUnits() {
     try {
+      const names = await unitSystemNames();
       const u = await invoke("units_list");
       $("unitsMeta").textContent = u.length ? `${u.length} named` : "";
-      $("unitsBody").innerHTML = u.map((r) => `<tr><td class="mono">${r.id}</td><td>${esc(r.name)}</td></tr>`).join("");
+      $("unitsBody").innerHTML = u.map((r) => `<tr><td class="mono">${r.id}</td><td>${esc(r.name)}</td><td class="faint">${r.sid != null ? esc(names.get(r.sid) || `system ${r.sid}`) : "any system"}</td></tr>`).join("");
     } catch (e) { log(`units: ${e}`); }
   }
   $("unitSave").onclick = async () => {
     const id = parseInt($("unitId").value, 10); if (!Number.isFinite(id)) return;
-    try { await invoke("unit_set", { id, name: $("unitName").value }); $("unitId").value = ""; $("unitName").value = ""; renderUnits(); } catch (e) { alert(e); }
+    try { await invoke("unit_set", { id, name: $("unitName").value, sid: unitSid() }); $("unitId").value = ""; $("unitName").value = ""; renderUnits(); } catch (e) { alert(e); }
   };
   $("unitsImport").onclick = async () => {
     const path = $("unitsCsv").value.trim(); if (!path) return;
-    try { const n = await invoke("units_import", { path }); $("unitsMeta").textContent = `${n} named`; renderUnits(); } catch (e) { alert(e); }
+    try { const n = await invoke("units_import", { path, sid: unitSid() }); $("unitsMeta").textContent = `${n} named`; renderUnits(); } catch (e) { alert(e); }
   };
   renderUnits();
 
@@ -2459,7 +2485,7 @@ if (TAURI) {
     const pattern = $("urPat").value.trim(), name = $("urName").value.trim(); if (!pattern || !name) return;
     try { await invoke("unit_rules_set", { rules: [...unitRules, { pattern, name }] }); $("urPat").value = ""; $("urName").value = ""; urRender(); } catch (e) { alert(e); }
   };
-  $("urTry").oninput = async () => { const id = parseInt($("urTry").value, 10); if (!Number.isFinite(id)) { $("urTryOut").textContent = ""; return; } try { const n = await invoke("unit_resolve", { id }); $("urTryOut").textContent = n ? `${id} → ${n}` : `${id} → no alias or rule matches`; } catch (_) {} };
+  $("urTry").oninput = async () => { const id = parseInt($("urTry").value, 10); if (!Number.isFinite(id)) { $("urTryOut").textContent = ""; return; } try { const n = await invoke("unit_resolve", { id, sid: unitSid() }); $("urTryOut").textContent = n ? `${id} → ${n}` : `${id} → no alias or rule matches`; } catch (_) {} };
   urRender();
   async function srcRender() {
     try {

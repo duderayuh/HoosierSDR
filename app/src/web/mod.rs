@@ -616,7 +616,7 @@ struct Status {
 async fn status(State(st): State<Arc<WebState>>, _auth: Auth) -> Json<Status> {
     let s = st.app.state::<AppState>();
     let running = s.running.load(std::sync::atomic::Ordering::SeqCst);
-    let catalog_len = s.catalog.lock().unwrap().as_ref().map_or(0, |c| c.len());
+    let catalog_len = s.catalog.lock().unwrap().len();
     let server_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
