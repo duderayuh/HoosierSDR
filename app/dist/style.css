@@ -464,14 +464,14 @@ th.sortable:hover { color: var(--ink); }
 th.sortable.asc::after { content: " ▲"; } th.sortable.desc::after { content: " ▼"; }
 td.act button.on-ok { color: var(--clear); border-color: var(--clear); }
 td.act button.off { opacity: .35; text-decoration: line-through; }
-#view-aliases .tablewrap.tgs { max-height: none; flex: 1; }
-#view-aliases .panel:first-child { display: flex; flex-direction: column; height: 100%; }
-#view-aliases .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#set-aliases .tablewrap.tgs { max-height: none; flex: 1; }
+#set-aliases .panel:first-child { display: flex; flex-direction: column; height: 100%; }
+#set-aliases .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .wrap { margin-bottom: calc(24px + 8px); }   /* the fixed status bar is 24px here */
-#view-aliases .panel:first-child { display: block; height: auto; }
-#view-aliases .panel:first-child > .body { display: block; }
-#view-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
-#view-aliases .stack:first-child > .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#set-aliases .panel:first-child { display: block; height: auto; }
+#set-aliases .panel:first-child > .body { display: block; }
+#set-aliases .stack:first-child > .panel:first-child { display: flex; flex-direction: column; height: 100%; }
+#set-aliases .stack:first-child > .panel:first-child > .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* Settings: left sidebar + one page per topic (multicol removed) */
 #view-settings .settings-layout { display: flex; gap: 10px; height: 100%; }
 #view-settings .settings-nav { width: 160px; flex: 0 0 auto; padding: 2px 0; }
@@ -680,3 +680,6 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .cvstats3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
 #cvStBody td:last-child { text-align: right; font-family: var(--mono); }
 #cvStBody tr { cursor: pointer; }
+
+/* ---------- draggable top tabs ---------- */
+.seg.nav button.dragging { opacity: .35; }

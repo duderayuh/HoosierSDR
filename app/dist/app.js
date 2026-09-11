@@ -76,37 +76,44 @@ function wireSeg(el, onPick) {
 function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === v))); }
 
 /* ---------- views ---------- */
+const VIEWS = ["monitor", "library", "conversations", "dispatch", "settings"];
 function showView(v) {
-  ["monitor", "library", "conversations", "playlists", "aliases", "alerts", "analyzers", "dispatch", "devices", "settings"].forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
-  if (v === "alerts" && typeof alertsOnShow === "function") alertsOnShow();
-  if (v === "analyzers" && typeof analyzersOnShow === "function") analyzersOnShow();
+  VIEWS.forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
-  if (v === "devices" && typeof devicesOnShow === "function") devicesOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
-  if (v === "aliases" && typeof aliasesOnShow === "function") aliasesOnShow();
   if (v === "conversations" && typeof conversationsOnShow === "function") conversationsOnShow();
+  // Coming back to Settings refreshes whichever page was left open.
+  if (v === "settings") setPage(curPage);
   setSeg($("navSeg"), v);
 }
 $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView(b.dataset.v));
 
 /* ---------- settings sidebar (left-bar pages) ---------- */
+// Pages that load something when shown. Playlists, Aliases, Alerts,
+// Analyzers, Devices and Discovery were top-level tabs once; their code
+// still refreshes only while on screen, via settingsPageVisible().
+const PAGE_HOOKS = { discovery: "discoveryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow" };
+let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
   if (!nav) return;
+  curPage = p;
   nav.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.p === p));
   document.querySelectorAll("#setPages .settings-page").forEach((pg) => pg.style.display = pg.id === "set-" + p ? "" : "none");
-  if (p === "discovery" && typeof discoveryOnShow === "function") discoveryOnShow();
+  const h = PAGE_HOOKS[p]; if (h && typeof window[h] === "function") window[h]();
 }
-// Discovery lives on a Settings page: it is on screen only when both are.
-function discoveryVisible() { return $("view-settings").style.display !== "none" && $("set-discovery").style.display !== "none"; }
+// A Settings page is on screen only when Settings is and it is the open page.
+function settingsPageVisible(p) { const pg = $("set-" + p); return $("view-settings").style.display !== "none" && !!pg && pg.style.display !== "none"; }
+function discoveryVisible() { return settingsPageVisible("discovery"); }
 $("setNav").querySelectorAll("button").forEach((b) => b.onclick = () => setPage(b.dataset.p));
 setPage("appearance");
 
 setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
-  if (location.hash === "#discovery") { showView("settings"); setPage("discovery"); return; }
-  if (["#playlists", "#library", "#conversations", "#aliases", "#alerts", "#analyzers", "#dispatch", "#devices"].includes(location.hash)) showView(location.hash.slice(1));
+  const page = location.hash.slice(1);
+  if (["discovery", "playlists", "aliases", "alerts", "analyzers", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
+  if (["library", "conversations", "dispatch"].includes(page)) showView(page);
 }, 0);
 
 /* ---------- tuning state ---------- */
@@ -340,6 +347,35 @@ function applyFs(k) {
   chips.innerHTML = FS_STEPS.map(([v, label]) => `<span class="chip ${saved === v ? "on" : ""}" data-fs="${v}">${label}</span>`).join("");
   chips.querySelectorAll("[data-fs]").forEach((c) => c.onclick = () => { applyFs(c.dataset.fs); chips.querySelectorAll("[data-fs]").forEach((x) => x.classList.toggle("on", x.dataset.fs === c.dataset.fs)); });
 })();
+/* ---------- nav order: drag a top tab to move it ---------- */
+(function navOrder() {
+  const seg = $("navSeg");
+  const apply = (order) => {
+    const btns = [...seg.querySelectorAll("button")]; const byV = new Map(btns.map((b) => [b.dataset.v, b])); const seen = new Set();
+    (order || []).forEach((v) => { const b = byV.get(v); if (b) { seg.appendChild(b); seen.add(v); } });
+    btns.forEach((b) => { if (!seen.has(b.dataset.v)) seg.appendChild(b); });   // tabs added later keep their default place
+  };
+  apply(store("hs.navorder", []));
+  const persist = () => save("hs.navorder", [...seg.querySelectorAll("button")].map((b) => b.dataset.v));
+  let dragging = null;
+  seg.querySelectorAll("button").forEach((b) => {
+    b.draggable = true;
+    b.addEventListener("dragstart", (e) => { dragging = b; b.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", b.dataset.v); });
+    b.addEventListener("dragend", () => { b.classList.remove("dragging"); dragging = null; persist(); });
+    b.addEventListener("dragover", (e) => {
+      if (!dragging || dragging === b) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = "move";
+      const r = b.getBoundingClientRect();
+      seg.insertBefore(dragging, e.clientX < r.left + r.width / 2 ? b : b.nextSibling);
+    });
+    b.addEventListener("drop", (e) => e.preventDefault());
+  });
+  seg.addEventListener("dragover", (e) => { if (dragging) e.preventDefault(); });
+  seg.addEventListener("drop", (e) => e.preventDefault());
+  window.navOrderReset = () => { localStorage.removeItem("hs.navorder"); apply(VIEWS); uiToast("Tab order reset"); };
+  const reset = $("navOrderReset"); if (reset) reset.onclick = () => window.navOrderReset();
+})();
+
 const prio = new Map(Object.entries(store("hs.prio", {})).map(([k, v]) => [+k, +v]));   // tg → 1–99 priority (1 = highest; absent = 50/default)
 const bells = new Set(store("hs.bells", []));
 const avoidUntil = new Map(Object.entries(store("hs.avoid", {})).map(([k, v]) => [+k, +v])); // tg → epoch ms
@@ -1569,8 +1605,8 @@ if (TAURI) {
       $("cvLog").innerHTML = st.log.map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)}<br><small>${esc(l.tg_name)}</small></td><td>${esc(l.units)} <small>· ${l.calls}${l.revision ? " · rev " + l.revision : ""}</small></td><td><span class="badge ${l.ok ? "clear" : "enc"}">${l.ok ? "sent" : "failed"}</span> <small title="${esc(l.summary)}">${esc(l.detail)}</small></td></tr>`).join("");
     } catch (e) { log(`conversations_state: ${e}`); }
   }
-  listen("conversations", () => { if ($("view-alerts").style.display !== "none") cvStateRefresh(); });
-  setInterval(() => { if ($("view-alerts").style.display !== "none") cvStateRefresh(); }, 10000);
+  listen("conversations", () => { if (settingsPageVisible("alerts")) cvStateRefresh(); });
+  setInterval(() => { if (settingsPageVisible("alerts")) cvStateRefresh(); }, 10000);
   $("cvNew").onclick = () => { const id = `c${Date.now()}`; cvView.settings.rules.push({ ...CV_DEFAULT, id, name: "Hospitals" }); cvRenderList(); cvEdit(id); };
   $("cvSave").onclick = async () => { if (!cvRead()) return; if (await cvPersist()) { uiToast("Conversation rule saved"); cvEdit(cvSel); if (!$("trEnabled").checked) uiToast("Summaries need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model above for the summaries", "err"); } };
   $("cvDelete").onclick = async () => { if (!(await uiConfirm("Delete this conversation rule?", "Delete"))) return; cvView.settings.rules = cvView.settings.rules.filter((x) => x.id !== cvSel); cvSel = null; $("cvEditor").style.display = "none"; await cvPersist(); };
@@ -1619,8 +1655,8 @@ if (TAURI) {
       $("dgLog").innerHTML = log.map((l) => `<tr><td class="mono">${new Date(l.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(l.rule)} <small>· ${l.calls} transmissions</small></td><td><span class="badge ${l.ok ? "clear" : "enc"}">${l.ok ? "sent" : "failed"}</span> <small title="${esc(l.summary)}">${esc(l.detail)}</small></td></tr>`).join("");
     } catch (e) { log(`digests_log: ${e}`); }
   }
-  listen("digests", () => { if ($("view-alerts").style.display !== "none") dgLogRefresh(); });
-  setInterval(() => { if ($("view-alerts").style.display !== "none") dgLogRefresh(); }, 15000);
+  listen("digests", () => { if (settingsPageVisible("alerts")) dgLogRefresh(); });
+  setInterval(() => { if (settingsPageVisible("alerts")) dgLogRefresh(); }, 15000);
   $("dgNew").onclick = () => { if (!dgView) return; const id = `d${Date.now()}`; dgView.rules.push({ ...DG_DEFAULT, id, name: "Digest" }); dgRenderList(); dgEdit(id); };
   $("dgSave").onclick = async () => { if (!dgRead()) return; if (await dgPersist()) { uiToast("Digest saved"); dgEdit(dgSel); if (!$("trEnabled").checked) uiToast("Digests need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model above for the summaries", "err"); } };
   $("dgDelete").onclick = async () => { if (!(await uiConfirm("Delete this digest?", "Delete"))) return; dgView.rules = dgView.rules.filter((x) => x.id !== dgSel); dgSel = null; $("dgEditor").style.display = "none"; await dgPersist(); };
@@ -1792,9 +1828,9 @@ if (TAURI) {
     catch (e) { uiToast(`Could not save: ${e}`, "err"); }
   };
   $("azcClear").onclick = async () => { if (!(await uiConfirm("Forget the saved cloud API key?", "Forget"))) return; try { await invoke("analyzer_cloud_clear_key"); $("azcKey").value = ""; uiToast("Key forgotten"); azcLoad(); } catch (e) { uiToast(`${e}`, "err"); } };
-  listen("analyzers", () => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); });
+  listen("analyzers", () => { if (settingsPageVisible("analyzers")) azLogRefresh(); });
   listen("analyzer", (e) => { const p = e.payload; logEvent(`ANALYZER ${p.name}: ${String(p.message).split("\n")[0]}`, "alarm"); });
-  setInterval(() => { if ($("view-analyzers").style.display !== "none") azLogRefresh(); }, 15000);
+  setInterval(() => { if (settingsPageVisible("analyzers")) azLogRefresh(); }, 15000);
   window.analyzersOnShow = () => { if (!azView) { azRefresh(); azcLoad(); } else azLogRefresh(); };
   azRefresh(); azLogRefresh(); azcLoad();
 
@@ -2116,7 +2152,7 @@ if (TAURI) {
     $("alBody").innerHTML = shown.slice(0, 3000).map(alRowHtml).join("");
     $("alEmpty").style.display = alRows.length ? "none" : "";
     $("alMeta").textContent = alRows.length ? (q || src ? `${shown.length} of ${alRows.length}` : `${alRows.length} talkgroups`) : "";
-    document.querySelectorAll("#view-aliases th[data-sort]").forEach((th) => { th.classList.toggle("asc", th.dataset.sort === k && d > 0); th.classList.toggle("desc", th.dataset.sort === k && d < 0); });
+    document.querySelectorAll("#set-aliases th[data-sort]").forEach((th) => { th.classList.toggle("asc", th.dataset.sort === k && d > 0); th.classList.toggle("desc", th.dataset.sort === k && d < 0); });
     const tb = $("alBody");
     tb.querySelectorAll("input[data-tick]").forEach((c) => c.onchange = () => { c.checked ? alTicked.add(+c.dataset.tick) : alTicked.delete(+c.dataset.tick); $("grpMeta").textContent = alTicked.size ? `${alTicked.size} ticked` : ""; });
     tb.querySelectorAll("button[data-pol]").forEach((b) => b.onclick = () => { const [k, tg] = b.dataset.pol.split(":"); polSet(k, +tg, !polAllows(k, +tg)); pushPolicies(); alRender(); });
@@ -2129,7 +2165,7 @@ if (TAURI) {
   }
   $("alFilter").oninput = alRender;
   $("alSource").onchange = alRender;
-  document.querySelectorAll("#view-aliases th[data-sort]").forEach((th) => th.onclick = () => { alSort = { key: th.dataset.sort, dir: alSort.key === th.dataset.sort ? -alSort.dir : 1 }; save("hs.alsort", alSort); alRender(); });
+  document.querySelectorAll("#set-aliases th[data-sort]").forEach((th) => th.onclick = () => { alSort = { key: th.dataset.sort, dir: alSort.key === th.dataset.sort ? -alSort.dir : 1 }; save("hs.alsort", alSort); alRender(); });
   document.querySelectorAll("[data-bulk]").forEach((b) => b.onclick = () => { const [k, v] = b.dataset.bulk.split(":"); alShown.forEach((r) => polSet(k, r.id, v === "on")); pushPolicies(); alRender(); uiToast(`${alShown.length} talkgroups: ${k} ${v}`); });
   $("alTickAll").onchange = () => { alShown.forEach((r) => $("alTickAll").checked ? alTicked.add(r.id) : alTicked.delete(r.id)); alRender(); $("grpMeta").textContent = alTicked.size ? `${alTicked.size} ticked` : ""; };
   window.renderGroupList = function renderGroupList() {
@@ -2796,7 +2832,7 @@ async function obZipLookup() {
 function obGoPlaylists() {
   const zip = parseInt((obWrap.querySelector("#obZip") || {}).value, 10);
   obFinish();
-  showView("playlists");
+  showView("settings"); setPage("playlists");
   if (Number.isFinite(zip) && $("bZip")) { $("bZip").value = String(zip); const g = $("bZipGo"); if (g && g.onclick) g.onclick(); }
 }
 
