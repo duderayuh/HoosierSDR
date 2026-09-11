@@ -166,7 +166,7 @@ struct Radio {
 
 /// What the UI shows for a run (chips in the top bar, the run picker).
 #[derive(Serialize, Clone)]
-struct RunInfo {
+pub(crate) struct RunInfo {
     id: u64,
     label: String,
     system: String,
@@ -176,7 +176,7 @@ struct RunInfo {
     playlist: Option<String>,
 }
 
-fn runs_info(state: &AppState) -> Vec<RunInfo> {
+pub(crate) fn runs_info(state: &AppState) -> Vec<RunInfo> {
     state
         .runs
         .lock()

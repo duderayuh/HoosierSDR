@@ -877,15 +877,25 @@ function renderRuns() {
   bar.hidden = runsNow.length < 2;
   bar.innerHTML = runsNow.length < 2 ? "" : `<span class="lab">Systems</span>` + runsNow.map((r) =>
     `<span class="runchip${r.id === viewRun ? " on" : ""}" data-run="${r.id}" title="Show this system's tuning, site and waterfall panels">${esc(r.label)} <span class="f">${r.control_mhz.toFixed(4)}</span><button class="x" data-stoprun="${r.id}" title="Stop this system">✕</button></span>`).join("");
-  bar.querySelectorAll("[data-run]").forEach((el) => el.onclick = (e) => { if (e.target.closest("[data-stoprun]")) return; viewRun = +el.dataset.run; renderRuns(); });
+  bar.querySelectorAll("[data-run]").forEach((el) => el.onclick = (e) => { if (e && e.target && e.target.closest && e.target.closest("[data-stoprun]")) return; viewRun = +el.dataset.run; renderRuns(); showRunDiag(viewRun); });
   bar.querySelectorAll("[data-stoprun]").forEach((b) => b.onclick = () => invoke("stop_run", { id: +b.dataset.stoprun }).catch((e) => alert(e)));
 }
-function setRuns(list) { runsNow = Array.isArray(list) ? list : []; renderRuns(); }
+function setRuns(list) {
+  runsNow = Array.isArray(list) ? list : [];
+  for (const id of Object.keys(runDiag)) if (!runsNow.some((r) => r.id === +id)) delete runDiag[id];
+  const before = viewRun; renderRuns();
+  if (viewRun !== before) showRunDiag(viewRun);
+}
+// The last measured/site frame per run, replayed into the panels when the
+// picked chip changes.
+const runDiag = {};
+function showRunDiag(id) { const d = runDiag[id]; if (!d) return; for (const k of ["measured", "site"]) if (d[k]) handleFollow(d[k]); }
 const runLabel = (ev) => runsNow.length > 1 && ev.system ? ev.system : "";
 
 function handleFollow(ev) {
   evCounts[ev.kind] = (evCounts[ev.kind] || 0) + 1;
   // Another system's diagnostics: keep the panels on the picked run.
+  if (ev.run != null && (ev.kind === "measured" || ev.kind === "site")) (runDiag[ev.run] = runDiag[ev.run] || {})[ev.kind] = ev;
   if (ev.run != null && viewRun != null && ev.run !== viewRun && DIAG_KINDS.has(ev.kind)) return;
   if (ev.kind === "notice" && runsNow.length > 1 && ev.system) ev = { ...ev, text: `${ev.system}: ${ev.text}` };
   // Spectrum, status and constellation stream continuously — a counter line
@@ -1303,6 +1313,7 @@ if (TAURI) {
   // A remote desktop page opening mid-run: show the same controls and state
   // as the local one (the shim then replays the run's key frames).
   window.applySnapshot = (snap) => {
+    if (snap && Array.isArray(snap.runs)) setRuns(snap.runs);
     const st = snap && snap.start;
     if (st) {
       const key = `${st.source}|${st.device || ""}`;
@@ -1316,8 +1327,9 @@ if (TAURI) {
       if (st.hang_ms) $("hangMs").value = st.hang_ms;
       modeSel = st.mode === "capture" ? "capture" : st.mode === "dual" ? "dual" : "follow";
       setSeg($("modeSeg"), modeSel); applyMode();
-      if (st.system_name) invoke("playlists_list").then((list) => {
-        const pl = (list || []).find((p) => p.system_name === st.system_name && p.site_name === st.site_name);
+      const first = (snap.runs || [])[0];
+      if (st.system_name || (first && first.playlist)) invoke("playlists_list").then((list) => {
+        const pl = (list || []).find((p) => first && first.playlist ? p.id === first.playlist : p.system_name === st.system_name && p.site_name === st.site_name);
         if (pl) { $("playlist").value = pl.id; $("followMeta").textContent = `playlist: ${pl.name} · ${pl.tgs.length ? pl.tgs.length + " talkgroups" : "all talkgroups"}`; }
       }).catch(() => {});
     }
