@@ -13,8 +13,10 @@
 //! commands, replies to it, and mentions — so the setup copy asks for a
 //! `/start@bot` in each topic, which always arrives. `getUpdates` refuses
 //! while a webhook is set on the token; manual entry stays as the fallback.
-//! Updates are read without acknowledging them (no `offset`), so nothing
-//! else that polls the same bot loses its messages.
+//! Telegram returns at most 100 pending updates a call, oldest first, so
+//! discovery pages through them with `offset` — which acknowledges them.
+//! Nothing else reads this bot's updates, and every chat seen is kept in
+//! `known_chats`, so nothing is lost by draining the queue.
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -151,6 +153,15 @@ pub fn parse_updates(v: &serde_json::Value) -> Vec<KnownChat> {
         }
     }
     out
+}
+
+/// The newest `update_id` in a `getUpdates` reply, to page past it.
+pub fn last_update_id(v: &serde_json::Value) -> Option<i64> {
+    v["result"]
+        .as_array()?
+        .iter()
+        .filter_map(|u| u["update_id"].as_i64())
+        .max()
 }
 
 /// Fold newly seen chats into the saved list: titles and topic names
@@ -315,23 +326,33 @@ pub async fn telegram_verify() -> Result<BotInfo, String> {
 pub async fn telegram_discover(app: AppHandle) -> Result<Vec<KnownChat>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let url = crate::alerts::telegram_api("getUpdates")?;
-        let body = serde_json::json!({
-            "limit": 100,
-            "timeout": 0,
-            "allowed_updates": ["message", "edited_message", "channel_post", "my_chat_member"],
-        });
-        let mut r = agent(20)
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .send(body.to_string().as_bytes())
-            .map_err(|e| format!("telegram: {e}"))?;
-        let status = r.status().as_u16();
-        let text = r.body_mut().read_to_string().unwrap_or_default();
-        if status != 200 {
-            return Err(tg_error(status, &text));
+        // No `allowed_updates`: Telegram keeps that filter for the bot from
+        // then on, and later features want other update kinds.
+        let mut offset: Option<i64> = None;
+        let mut fresh = Vec::new();
+        for _ in 0..20 {
+            let mut body = serde_json::json!({ "limit": 100, "timeout": 0 });
+            if let Some(o) = offset {
+                body["offset"] = o.into();
+            }
+            let mut r = agent(20)
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .send(body.to_string().as_bytes())
+                .map_err(|e| format!("telegram: {e}"))?;
+            let status = r.status().as_u16();
+            let text = r.body_mut().read_to_string().unwrap_or_default();
+            if status != 200 {
+                return Err(tg_error(status, &text));
+            }
+            let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let page = v["result"].as_array().map(|a| a.len()).unwrap_or(0);
+            merge_chats(&mut fresh, parse_updates(&v));
+            match last_update_id(&v) {
+                Some(id) if page >= 100 => offset = Some(id + 1),
+                _ => break,
+            }
         }
-        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        let fresh = parse_updates(&v);
         crate::alerts::update_known_chats(&app, fresh)
     })
     .await
@@ -408,6 +429,15 @@ mod tests {
         assert_eq!(
             chats.iter().find(|c| c.id == "-1002").unwrap().kind,
             "channel"
+        );
+    }
+
+    #[test]
+    fn paging_starts_after_the_newest_update() {
+        assert_eq!(last_update_id(&updates()), Some(6));
+        assert_eq!(
+            last_update_id(&serde_json::json!({ "ok": true, "result": [] })),
+            None
         );
     }
 

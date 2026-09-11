@@ -362,38 +362,42 @@ pub fn protected(c: &Connection) -> Protected {
 
 /// Carry a plan out: delete records (and their audio and sidecars), drop
 /// audio from the rest. Returns (records deleted, recordings removed).
-pub fn apply(c: &Connection, p: &Plan) -> Result<(usize, usize), String> {
+/// Apply a plan to the database, in one transaction. Returns how many calls
+/// went and the recordings whose files should now be removed — the caller
+/// removes them after releasing the library lock, so a large first cleanup
+/// does not stall every other library command while the disk works.
+pub fn apply(c: &Connection, p: &Plan) -> Result<(usize, Vec<String>), String> {
+    let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
     let audio_of = |id: i64| -> Option<String> {
-        c.query_row("SELECT audio FROM calls WHERE id = ?1", params![id], |r| {
+        tx.query_row("SELECT audio FROM calls WHERE id = ?1", params![id], |r| {
             r.get(0)
         })
         .ok()
         .flatten()
     };
-    let remove = |a: &str| {
-        let _ = std::fs::remove_file(a);
-        let _ = std::fs::remove_file(std::path::Path::new(a).with_extension("json"));
-    };
-    let mut files = 0;
+    let mut files = Vec::new();
     for id in &p.delete {
-        if let Some(a) = audio_of(*id) {
-            remove(&a);
-            files += 1;
-        }
-        c.execute("DELETE FROM calls WHERE id = ?1", params![id])
+        files.extend(audio_of(*id));
+        tx.execute("DELETE FROM calls WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
     }
     for id in &p.drop_audio {
-        if let Some(a) = audio_of(*id) {
-            remove(&a);
-            files += 1;
-        }
+        files.extend(audio_of(*id));
         // The capture hash stays: the record still says what was heard and
         // what the file was, only the file is gone.
-        c.execute("UPDATE calls SET audio = NULL WHERE id = ?1", params![id])
+        tx.execute("UPDATE calls SET audio = NULL WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok((p.delete.len(), files))
+}
+
+/// Remove recordings (and their JSON sidecars) from disk.
+pub fn remove_files(files: &[String]) {
+    for a in files {
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(std::path::Path::new(a).with_extension("json"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,9 +520,11 @@ pub fn run_once(app: &AppHandle, s: &Settings) -> Result<String, String> {
     let p = plan_now(app, s)?;
     let db = db_of(app).ok_or("the call library is not open")?;
     let c = db.lock().unwrap();
-    let (deleted, files) = apply(&c, &p)?;
+    let (deleted, paths) = apply(&c, &p)?;
     let _ = crate::events::prune(&c, s.history_days);
     drop(c);
+    remove_files(&paths);
+    let files = paths.len();
     let msg = format!(
         "{deleted} call{} deleted, {files} recording{} removed, {} freed",
         if deleted == 1 { "" } else { "s" },
@@ -715,6 +721,55 @@ mod tests {
             transcribed: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn applying_changes_the_rows_and_hands_back_the_files() {
+        let d = std::env::temp_dir().join(format!("hs_ret_apply_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let c = crate::library::open(&d).unwrap();
+        let mut ids = vec![];
+        for n in 0..3 {
+            let a = d.join(format!("{n}.m4a"));
+            std::fs::write(&a, b"x").unwrap();
+            std::fs::write(a.with_extension("json"), b"{}").unwrap();
+            ids.push(
+                crate::library::insert(
+                    &c,
+                    &crate::library::CallRow {
+                        start: 100 + n,
+                        tg: 1,
+                        audio: Some(a.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        let p = Plan {
+            delete: vec![ids[0]],
+            drop_audio: vec![ids[1]],
+            ..Default::default()
+        };
+        let (deleted, files) = apply(&c, &p).unwrap();
+        assert_eq!((deleted, files.len()), (1, 2));
+        let left: Vec<(i64, Option<String>)> = c
+            .prepare("SELECT id, audio FROM calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0], (ids[1], None));
+        assert!(left[1].1.is_some());
+        // The files are still there until the caller removes them.
+        assert!(d.join("0.m4a").exists());
+        remove_files(&files);
+        assert!(!d.join("0.m4a").exists() && !d.join("0.json").exists());
+        assert!(!d.join("1.m4a").exists());
+        assert!(d.join("2.m4a").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
