@@ -308,6 +308,11 @@ pub fn dual_start(
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("already running".into());
     }
+    *state.last_start.lock().unwrap() = Some(serde_json::json!({
+        "mode": "dual", "source": control_source, "device": control_device, "rate": control_rate,
+        "voice_source": voice_source, "voice_device": voice_device, "freq": control, "control": control,
+        "gain": gain, "cqpsk": cqpsk, "play": play,
+    }));
     if control <= 0.0 {
         state.running.store(false, Ordering::SeqCst);
         return Err("control channel frequency is required".into());
@@ -323,6 +328,7 @@ pub fn dual_start(
     let prev = crate::take_previous(&state);
     let handle = std::thread::spawn(move || {
         crate::join_previous(prev);
+        crate::join_idle_radios(&app.state::<crate::AppState>());
         let res =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
                 // Open both radios. SDR B starts parked on the control channel.
