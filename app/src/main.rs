@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use hs_catalog::CsvCatalog;
 use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
+mod addr;
 mod alerts;
 mod analyzers;
 mod channels;
@@ -2296,6 +2297,18 @@ fn main() {
             {
                 *state.format.lock().unwrap() = f;
             }
+            // Learn what the dispatch grid means from calls that already
+            // placed, so a call whose address will not geocode still gets a
+            // pin. Off the startup path: it reads a few hundred rows.
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    let db = h.state::<AppState>().db.lock().unwrap().clone();
+                    if let Some(db) = db {
+                        dispatch::refresh_calibration(&h, &db);
+                    }
+                });
+            }
             transcribe::spawn_pump(app.handle().clone());
             stream::autostart(app.handle());
             status::on_start(app.handle());
@@ -2377,6 +2390,7 @@ fn main() {
             dispatch::dispatch_backfill,
             dispatch::dispatch_geocode,
             dispatch::dispatch_regeocode,
+            dispatch::dispatch_calibrate,
             dispatch::incidents_list,
             dispatch::incident_get,
             dispatch::incident_delete,

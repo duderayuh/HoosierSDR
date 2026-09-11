@@ -428,6 +428,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         )
         .await?),
         "dispatch_regeocode" => jv(crate::dispatch::dispatch_regeocode(app.clone(), state).await?),
+        "dispatch_calibrate" => jv(crate::dispatch::dispatch_calibrate(app.clone(), state)?),
         "dispatch_geocode" => jv(crate::dispatch::dispatch_geocode(state, arg(args, "q")?).await?),
         "dispatch_test" => jv(crate::dispatch::dispatch_test(app.clone(), state, arg(args, "tg")?).await?),
         "dispatch_backfill" => jv(crate::dispatch::dispatch_backfill(app.clone(), state, arg(args, "hours")?)?),
