@@ -49,6 +49,8 @@ struct StartArgs {
     modulation: Option<String>,
     #[serde(default)]
     extra: Option<Vec<ExtraSpec>>,
+    #[serde(default)]
+    playlist: Option<String>,
 }
 
 /// Dispatch one command. `args` is the JSON object the client sent.
@@ -116,8 +118,8 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
                 a.device,
                 a.modulation,
                 a.extra,
-            )
-            .map_err(|e| e)?;
+                a.playlist,
+            )?;
             Ok(Value::Null)
         }
         "stop_capture" => {
@@ -333,6 +335,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::analyzers::analyzers_set(app.clone(), state, rules)?;
             Ok(Value::Null)
         }
+
+        "runs_list" => jv(crate::runs_list(state)),
+        "stop_run" => jv(crate::stop_run(arg(args, "id")?, state)?),
 
         other => Err(format!("unknown command: {other}")),
     }

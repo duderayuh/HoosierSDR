@@ -38,6 +38,7 @@ const FRAME_BUFFER: usize = 64;
 /// phone sees the same live feed the desktop window does.
 const APP_EVENTS: &[&str] = &[
     "follow",
+    "runs",
     "error",
     "stopped",
     "hook_error",

@@ -931,3 +931,23 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 td.tr.editing { padding: 2px 4px; white-space: normal; }
 .tr-edit { width: 100%; min-width: 240px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.4; background: var(--panel-2); color: var(--ink); border: 1px solid var(--signal); border-radius: 6px; padding: 4px 6px; resize: vertical; }
 td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
+
+/* ---------- several systems at once ---------- */
+.plpick { gap: 4px; }
+.plpick .plmore { padding: 2px 8px; font-size: 13px; line-height: 1; position: relative; }
+.plpick .plmore.on { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
+.plpick .plmore .n { position: absolute; top: -6px; right: -6px; min-width: 14px; height: 14px; border-radius: 7px; background: var(--amber); color: #fff; font-size: 9px; line-height: 14px; text-align: center; padding: 0 3px; }
+.plmore-pop { position: absolute; z-index: 30; top: 56px; right: 40%; width: 320px; max-width: calc(100vw - 32px); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; }
+.plmore-head { font-family: var(--display); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; color: var(--ink-faint); margin-bottom: 6px; }
+.plmore-list { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow: auto; }
+.plmore-list label { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+.plmore-list label small { color: var(--ink-faint); font-family: var(--mono); font-size: 10.5px; }
+.plmore-list .none { color: var(--ink-faint); font-size: 12px; }
+.runsbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 5px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.runsbar .lab { font-family: var(--display); text-transform: uppercase; letter-spacing: .12em; font-size: 9.5px; color: var(--ink-faint); margin-right: 4px; }
+.runchip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; cursor: pointer; }
+.runchip.on { border-color: color-mix(in srgb, var(--clear) 50%, var(--line)); color: var(--clear); }
+.runchip .f { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+.runchip .x { border: 0; background: transparent; color: var(--ink-dim); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 6px; border-radius: 999px; }
+.runchip .x:hover { background: var(--enc); color: #fff; }
+.call .sys { display: block; font-size: 10px; color: var(--ink-faint); letter-spacing: .04em; }

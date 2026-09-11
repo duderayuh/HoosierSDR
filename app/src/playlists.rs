@@ -37,7 +37,7 @@ fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(d.join("playlists.json"))
 }
 
-fn load(app: &AppHandle) -> Vec<Playlist> {
+pub fn load(app: &AppHandle) -> Vec<Playlist> {
     path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
