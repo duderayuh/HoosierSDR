@@ -977,3 +977,17 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .lockbar .chip.lab { background: transparent; border-style: dashed; cursor: default; opacity: .8; }
 .list .row input.plname { font: inherit; font-weight: 600; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; color: inherit; min-width: 12ch; }
 .list .row input.plname:hover, .list .row input.plname:focus { border-color: var(--line, #8884); outline: none; }
+
+/* ---------- Connections: bot, discovered chats, destinations ---------- */
+.cxsteps { margin: 0 0 10px; padding-left: 1.3em; color: var(--ink-dim); font-size: 12.5px; line-height: 1.55; }
+.cxsteps li { margin: 2px 0; }
+.cxbot { margin-top: 8px; font-size: 13px; }
+.cxbot .help { margin-top: 4px; }
+.cxchat { border-bottom: 1px solid var(--line); padding: 2px 0; }
+.cxchat:last-child { border-bottom: 0; }
+.cxrow.sub { padding-left: 14px; }
+.cxrow .badge { margin-left: 4px; }
+.cxdest .cxname { width: auto; min-width: 12em; max-width: 100%; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 2px 4px; margin-left: -5px; }
+.cxdest .cxname:hover, .cxdest .cxname:focus { border-color: var(--line); background: var(--panel2, transparent); }
+.destother { display: inline-flex; gap: 8px; margin-top: 4px; }
+.destother input { min-width: 12em; }

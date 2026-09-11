@@ -429,6 +429,7 @@ const SHIM_JS: &str = include_str!("shim.js");
 const DIST: &[(&str, &str, &str)] = &[
     ("index.html", "text/html; charset=utf-8", include_str!("../../dist/index.html")),
     ("app.js", "text/javascript; charset=utf-8", include_str!("../../dist/app.js")),
+    ("connections.js", "text/javascript; charset=utf-8", include_str!("../../dist/connections.js")),
     ("style.css", "text/css; charset=utf-8", include_str!("../../dist/style.css")),
     ("vendor/leaflet.js", "text/javascript; charset=utf-8", include_str!("../../dist/vendor/leaflet.js")),
     ("vendor/leaflet.css", "text/css; charset=utf-8", include_str!("../../dist/vendor/leaflet.css")),

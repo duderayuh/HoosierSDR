@@ -398,8 +398,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         // ---- the rest of the desktop's commands, so the remote desktop page
         // can do everything the local one can ----
         "telegram_save" => jv(crate::alerts::telegram_save(arg(args, "token")?)?),
-        "bluesky_save" => jv(crate::alerts::bluesky_save(arg(args, "password")?)?),
-        "bluesky_test" => jv(crate::alerts::bluesky_test(state).await?),
+        "telegram_verify" => jv(crate::connections::telegram_verify().await?),
+        "telegram_discover" => jv(crate::connections::telegram_discover(app.clone()).await?),
+        "telegram_test_destination" => jv(crate::connections::telegram_test_destination(arg(args, "destination")?).await?),
         "alerts_test" => jv(crate::alerts::alerts_test(app.clone(), arg(args, "id")?).await?),
         "ollama_models" => jv(crate::alerts::ollama_models(arg(args, "url")?).await?),
         "analyzer_cloud_get" => jv(crate::analyzers::analyzer_cloud_get(state)),

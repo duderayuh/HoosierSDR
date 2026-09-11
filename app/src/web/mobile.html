@@ -201,8 +201,8 @@
 
         <details class="card">
           <summary class="h1">Notifications</summary>
-          <label for="tgChat">Telegram chat ID</label>
-          <input id="tgChat" type="text" placeholder="123456789" spellcheck="false" />
+          <label for="tgDefault">Send alerts to <span class="hint">destinations are named in the desktop's Settings → Connections</span></label>
+          <select id="tgDefault"></select>
           <label for="olUrl">Ollama server</label>
           <input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" />
           <label for="olModel">Ollama model</label>
@@ -484,7 +484,13 @@
     try { const n = await command("names_get"); $("fnTemplate").value = n.settings.template; $("fnExample").textContent = n.example; } catch {}
     // notifications
     try { const v = await command("alerts_get"); alertsSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id || ""; $("olUrl").value = v.settings.ollama.url || ""; $("olModel").value = v.settings.ollama.model || ""; } catch {}
+      const t = v.settings.telegram, cur = t.topic_id ? `${t.chat_id}:${t.topic_id}` : (t.chat_id || "");
+      const dests = v.settings.destinations || [], tgt = (d) => d.topic_id ? `${d.chat_id}:${d.topic_id}` : d.chat_id;
+      $("tgDefault").innerHTML = dests.map(d => `<option value="${esc(tgt(d))}">${esc(d.name)}</option>`).join("")
+        + (cur && !dests.some(d => tgt(d) === cur) ? `<option value="${esc(cur)}">chat ${esc(cur)}</option>` : "")
+        + (!cur ? '<option value="">— none —</option>' : "");
+      $("tgDefault").value = cur;
+      $("olUrl").value = v.settings.ollama.url || ""; $("olModel").value = v.settings.ollama.model || ""; } catch {}
     // stream
     try { const v = await command("stream_get"); const s = v.settings;
       $("stOn").checked = s.enabled; $("stHost").value = s.host; $("stPort").value = s.port; $("stMount").value = s.mount; } catch {}
@@ -546,7 +552,8 @@
   };
   $("ntSave").onclick = async () => {
     try { if (!alertsSettings) { const v = await command("alerts_get"); alertsSettings = v.settings; }
-      alertsSettings.telegram.chat_id = $("tgChat").value.trim();
+      const m = /^(.+):(\d+)$/.exec($("tgDefault").value);
+      alertsSettings.telegram.chat_id = m ? m[1] : $("tgDefault").value; alertsSettings.telegram.topic_id = m ? m[2] : "";
       alertsSettings.ollama.url = $("olUrl").value.trim(); alertsSettings.ollama.model = $("olModel").value.trim();
       await command("alerts_set", { settings: alertsSettings }); toast("Notifications saved"); }
     catch (e) { toast(e, true); }

@@ -1243,7 +1243,6 @@ fn extraction_rule(s: &Settings, ch: &Channel) -> AnalyzerRule {
         message: String::new(),
         chat_id: String::new(),
         telegram: false,
-        bluesky: false,
         attach_audio: false,
         cooldown_secs: 0,
     }

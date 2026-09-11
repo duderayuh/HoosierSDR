@@ -17,6 +17,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod alerts;
 mod analyzers;
+mod connections;
 mod conversations;
 mod devices;
 mod digest;
@@ -2329,10 +2330,11 @@ fn main() {
             alerts::alerts_test,
             alerts::alerts_log,
             alerts::telegram_save,
-            alerts::bluesky_save,
-            alerts::bluesky_test,
             alerts::ollama_models,
             alerts::ollama_capabilities,
+            connections::telegram_verify,
+            connections::telegram_discover,
+            connections::telegram_test_destination,
             conversations::conversations_get,
             conversations::conversations_set,
             conversations::conversations_state,

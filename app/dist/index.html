@@ -331,7 +331,7 @@
             <div class="head"><span class="eyebrow">Extraction &amp; grouping</span></div>
             <div class="body tight">
               <div class="row3">
-                <label class="field"><span class="lab">Model</span><select id="dpEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (Analyzers → Cloud model)</option></select></label>
+                <label class="field"><span class="lab">Model</span><select id="dpEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (Settings → Connections)</option></select></label>
                 <label class="field"><span class="lab">Group window (min) <span class="mono faint">how long an incident stays open</span></span><input id="dpWindowMin" type="text" inputmode="numeric" /></label>
                 <label class="field"><span class="lab">Group radius (m)</span><input id="dpRadiusM" type="text" inputmode="numeric" /></label>
               </div>
@@ -342,7 +342,7 @@
               <label class="field"><span class="lab">Call types <span class="mono faint">one per line: emoji, then the name</span></span><textarea id="dpTypesText" style="min-height:120px" spellcheck="false"></textarea></label>
               <label class="field"><span class="lab">Local notes for the model <span class="mono faint">optional · street quirks, unit naming, how your dispatcher talks</span></span><textarea id="dpExtra" style="min-height:56px"></textarea></label>
               <div class="inline"><button class="btn primary" id="dpSave">Save</button><button class="btn ghost" id="dpTest">Run on latest call</button><span class="inline"><button class="btn ghost" id="dpBackfill">Backfill</button><input id="dpBackfillHours" type="text" inputmode="numeric" value="24" style="width:56px" title="hours" /><span class="help">hours</span></span><span class="help" id="dpBackfillState"></span><button class="btn ghost" id="dpRegeocode" title="Try the geocoder again on every incident it could not place (about a second each)">Retry unmapped</button><span class="help" id="dpRegeocodeState"></span></div>
-              <p class="help">Uses the Ollama server and model from <b>Alerts → AI gate</b>, or the cloud provider from <b>Analyzers</b>. Transcription must be on (Settings → Transcription).</p>
+              <p class="help">Uses the local or cloud model set up in <b>Settings → Connections</b>. Transcription must be on (Settings → Transcription).</p>
             </div>
           </div>
         </div>
@@ -454,6 +454,7 @@
           <button data-p="scanning">Scanning</button>
           <button data-p="playlists">Playlists</button>
           <button data-p="aliases">Aliases</button>
+          <button data-p="connections">Connections</button>
           <button data-p="alerts">Alerts</button>
           <button data-p="analyzers">Analyzers</button>
           <button data-p="devices">Devices</button>
@@ -931,6 +932,89 @@
         </div>
       </section>
         </div>
+        <div class="stack settings-page" id="set-connections" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Telegram bot</span><span class="meta" id="tgMeta2"></span></div>
+            <div class="body">
+              <ol class="cxsteps">
+                <li>Create a bot with <span class="mono">@BotFather</span> in Telegram and paste its token below.</li>
+                <li>Send the bot a message — or add it to your group, and in each topic you want to use, send <span class="mono" id="cxStartCmd">/start@yourbot</span> (a bot in a group only hears commands and mentions).</li>
+                <li>Press <b>Find chats</b> and name the chats and topics you want. Rules pick them by name.</li>
+              </ol>
+              <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac · blank keeps the saved one</span></span>
+                <span class="inline"><input id="tgToken" type="password" spellcheck="false" placeholder="123456:ABC-DEF…" /><button class="btn primary" id="tgSave">Save &amp; check</button></span></label>
+              <div class="cxbot" id="cxBot"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Chats the bot can see</span><span class="meta" id="cxChatsMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="cxFind">Find chats</button></div>
+            <div class="body tight">
+              <div id="cxChats" class="list"></div>
+              <div class="empty small" id="cxChatsEmpty">None found yet. Message the bot (or send /start@yourbot in a group topic), then press Find chats. Telegram keeps a bot's messages for a day, so do it shortly before.</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Add a destination by hand</span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Name</span><input id="cxManName" type="text" placeholder="ECPR team › Arrests" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Chat id</span><input id="cxManChat" type="text" placeholder="-1001234567890" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Topic id <span class="mono faint">optional</span></span><input id="cxManTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
+              </div>
+              <div class="inline"><button class="btn ghost" id="cxManAdd">Add</button><span class="help">A person's chat id looks like 123456789, a group's like -1001234567890. A topic id is the last number in a topic's link (t.me/c/…/57).</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Destinations</span><span class="meta" id="cxDestMeta"></span></div>
+            <div class="body tight">
+              <div id="cxDests" class="list"></div>
+              <div class="empty small" id="cxDestsEmpty">No destinations yet. Add chats and topics from “Chats the bot can see”, or by hand.</div>
+              <div id="cxFound"></div>
+              <label class="field" style="margin-top:8px"><span class="lab">Default <span class="mono faint">where a rule sends when it doesn't pick one</span></span><select id="cxDefault"></select></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Status messages</span></div>
+            <div class="body">
+              <label class="check" title="A message when HoosierSDR starts and when it shuts down. If the app is killed or crashes, the next start says so."><input id="tgAnnounce" type="checkbox" /> Announce when the app starts and shuts down</label>
+              <label class="field"><span class="lab">Send them to</span><select id="tgAnnounceDest"></select></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">AI · local model (Ollama)</span><span class="meta" id="olMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Server</span><input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Model</span><span class="inline"><select id="olModel"><option value="">—</option></select><button class="btn ghost sm" id="olRefresh" title="List models">↻</button></span></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="olTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="check"><input id="olFailOpen" type="checkbox" checked /> If the model can't be reached, send alerts anyway (and say so)</label>
+              <p class="help">Used by every rule's AI check, conversation and digest summaries, and the dispatch map. Runs on this Mac; nothing leaves it.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">AI · cloud model</span><span class="meta" id="azcMeta"></span></div>
+            <div class="body">
+              <div class="row2">
+                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
+                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
+                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
+              </div>
+              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
+              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
+              <p class="help">For rules and the dispatch map set to "Cloud". OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
         <div class="stack settings-page" id="set-alerts" style="display:none">
       <section class="two-col">
         <div class="stack">
@@ -964,9 +1048,11 @@
               </div>
               <div class="inline" style="gap:16px;flex-wrap:wrap">
                 <label class="check" style="margin:0"><input id="akTelegram" type="checkbox" checked /> Telegram</label>
-                <label class="field" style="margin:0;min-width:200px"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat</span></span><input id="akChat" type="text" placeholder="-1001234567890" spellcheck="false" /></label>
-                <label class="field" style="margin:0;min-width:120px"><span class="lab">Topic <span class="mono faint">forum topic id; blank = default</span></span><input id="akTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
-                <label class="check" style="margin:0"><input id="akBluesky" type="checkbox" /> Bluesky</label>
+                <label class="field" style="margin:0;min-width:220px"><span class="lab">Send to</span><select id="akDest" class="destsel"></select></label>
+                <span class="destother inline" id="akDestOther" style="display:none;gap:8px">
+                  <label class="field" style="margin:0;min-width:180px"><span class="lab">Chat id</span><input id="akChat" type="text" placeholder="-1001234567890" spellcheck="false" /></label>
+                  <label class="field" style="margin:0;min-width:100px"><span class="lab">Topic id</span><input id="akTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
+                </span>
                 <label class="check" style="margin:0"><input id="akAudio" type="checkbox" checked /> attach audio</label>
                 <label class="check" style="margin:0"><input id="akTone" type="checkbox" checked /> tone in the app</label>
                 <label class="check" style="margin:0"><input id="akAi" type="checkbox" /> AI gate (Ollama)</label>
@@ -1004,11 +1090,11 @@
               <label class="field"><span class="lab">Summary prompt <span class="mono faint">what the model should extract</span></span><textarea id="cvPrompt" style="min-height:64px"></textarea></label>
               <label class="field"><span class="lab">Message <span class="mono faint">{summary} {rule} {tg} {tgname} {tgdesc} {units} {unitnames} {calls} {duration} {started} {transcript} {revision}</span></span><textarea id="cvMessage" style="min-height:56px"></textarea></label>
               <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = the alerts' chat · add :topic for a forum topic</span></span><input id="cvChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Send to</span><select id="cvDest" class="destsel"></select><span class="destother" id="cvDestOther" style="display:none"><input id="cvChat" type="text" placeholder="chat or chat:topic" spellcheck="false" /></span></label>
                 <label class="field"><span class="lab">Min transmissions</span><input id="cvMin" type="text" inputmode="numeric" value="1" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><span class="inline"><label class="check" style="margin:0"><input id="cvAudio" type="checkbox" checked /> combined audio</label><label class="check" style="margin:0"><input id="cvNoTr" type="checkbox" /> send without transcript</label></span></label>
               </div>
-              <p class="help">Needs transcription on (Settings) and an Ollama model chosen above. The summary waits up to 90 s past the quiet gap for transcripts to land.</p>
+              <p class="help">Needs transcription on (Settings → Transcription) and a local model (Settings → Connections). The summary waits up to 90 s past the quiet gap for transcripts to land.</p>
             </div>
           </div>
           <div class="panel">
@@ -1030,7 +1116,7 @@
               <div class="row3">
                 <label class="field"><span class="lab">Every (min)</span><input id="dgInterval" type="text" inputmode="numeric" value="15" /></label>
                 <label class="field"><span class="lab">Window (min) <span class="mono faint">how far back</span></span><input id="dgWindow" type="text" inputmode="numeric" value="15" /></label>
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat · add :topic for a forum topic</span></span><input id="dgChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Send to</span><select id="dgDest" class="destsel"></select><span class="destother" id="dgDestOther" style="display:none"><input id="dgChat" type="text" placeholder="chat or chat:topic" spellcheck="false" /></span></label>
               </div>
               <label class="field"><span class="lab">Prompt <span class="mono faint">the question the model answers</span></span><textarea id="dgPrompt" style="min-height:64px"></textarea></label>
               <label class="field"><span class="lab">Message <span class="mono faint">{summary} {name} {count} {window} {time} {transcript}</span></span><textarea id="dgMessage" style="min-height:56px"></textarea></label>
@@ -1039,43 +1125,6 @@
           </div>
         </div>
         <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Telegram</span><span class="meta" id="tgMeta2"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Bot token <span class="mono faint">from @BotFather · saved on this Mac</span></span><input id="tgToken" type="password" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Chat ID <span class="mono faint">your user or group id</span></span><input id="tgChat" type="text" placeholder="123456789" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Topic <span class="mono faint">forum topic id, if the group uses topics; blank = none</span></span><input id="tgTopic" type="text" inputmode="numeric" placeholder="57" spellcheck="false" /></label>
-              </div>
-              <div class="row2">
-                <label class="check" title="A message when HoosierSDR starts and when it shuts down. If the app is killed or crashes, the next start says so."><input id="tgAnnounce" type="checkbox" /> Announce when the app starts and shuts down</label>
-                <label class="field"><span class="lab">Status chat <span class="mono faint">chat or chat:topic · blank = above</span></span><input id="tgAnnounceChat" type="text" placeholder="-1001234567890:57" spellcheck="false" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="tgSave">Save</button><button class="btn ghost" id="tgTest">Send a test message</button><span class="help">Audio goes as MP3 via ffmpeg (as a WAV document without it).</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Bluesky</span><span class="meta" id="bsMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Handle <span class="mono faint">e.g. you.bsky.social</span></span><input id="bsHandle" type="text" spellcheck="false" /></label>
-                <label class="field"><span class="lab">App password <span class="mono faint">from Bluesky → Settings → App passwords</span></span><input id="bsPassword" type="password" spellcheck="false" /></label>
-              </div>
-              <div class="inline"><button class="btn primary" id="bsSave">Save</button><button class="btn ghost" id="bsTest">Post a test</button><span class="help">Tick "Bluesky" on an alert to post it there. Text only (audio can't go to Bluesky); long messages are truncated to 280 chars.</span></div>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="head"><span class="eyebrow">AI gate · Ollama</span><span class="meta" id="olMeta"></span></div>
-            <div class="body">
-              <div class="row3">
-                <label class="field"><span class="lab">Server</span><input id="olUrl" type="text" value="http://localhost:11434" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Model</span><span class="inline"><select id="olModel"><option value="">—</option></select><button class="btn ghost sm" id="olRefresh" title="List models">↻</button></span></label>
-                <label class="field"><span class="lab">Timeout (s)</span><input id="olTimeout" type="text" inputmode="numeric" value="60" /></label>
-              </div>
-              <label class="check"><input id="olFailOpen" type="checkbox" checked /> If the model can't be reached, send the alert anyway (and say so)</label>
-              <p class="help">The model sees the transcript and your prompt and answers with JSON. Keep prompts specific: what makes it a real event, and what should <i>not</i> fire.</p>
-            </div>
-          </div>
           <div class="panel">
             <div class="head"><span class="eyebrow">Conversations in progress</span><span class="meta" id="cvLiveMeta"></span></div>
             <div class="body tight">
@@ -1122,36 +1171,20 @@
               <div id="azConds" class="list" style="max-height:calc(18vh / var(--z))"></div>
               <label class="field"><span class="lab">Message <span class="mono faint">{name} {tg} {tgname} {tgdesc} {unit} {unitname} {time} {secs} {transcript} {json} · {field.KEY} for each field</span></span><textarea id="azMessage" style="min-height:80px"></textarea></label>
               <div class="row3">
-                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (see panel →)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
-                <label class="field"><span class="lab">Send to</span><span class="inline"><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Telegram</label><label class="check" style="margin:0"><input id="azBluesky" type="checkbox" /> Bluesky</label></span></label>
+                <label class="field"><span class="lab">Model <span class="mono faint">which engine extracts</span></span><span class="inline"><select id="azEngine"><option value="ollama">Local Ollama</option><option value="cloud">Cloud (Settings → Connections)</option></select><label class="check" style="margin:0;white-space:nowrap" id="azThinkWrap" title="Let a thinking model reason before extracting. Slower; only offered when the Ollama model has a thinking mode."><input id="azThink" type="checkbox" /> reasoning</label></span><span class="mono faint" id="azThinkHint"></span></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azTelegram" type="checkbox" checked /> Send to Telegram</label></label>
                 <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="azAudio" type="checkbox" /> attach the call audio</label></label>
               </div>
               <div class="row3">
-                <label class="field"><span class="lab">Telegram chat <span class="mono faint">blank = alerts' chat · add :topic for a forum topic</span></span><input id="azChat" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Send to</span><select id="azDest" class="destsel"></select><span class="destother" id="azDestOther" style="display:none"><input id="azChat" type="text" placeholder="chat or chat:topic" spellcheck="false" /></span></label>
                 <label class="field"><span class="lab">Cooldown (s) <span class="mono faint">per talkgroup</span></span><input id="azCooldown" type="text" inputmode="numeric" value="120" /></label>
                 <label class="field"><span class="lab">&nbsp;</span></label>
               </div>
-              <p class="help">Local Ollama uses the server/model set in <b>Alerts → AI gate · Ollama</b>. Cloud uses the provider configured in the panel on the right. Bluesky posts to the account set in <b>Settings → Bluesky</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
+              <p class="help">The local and cloud models are set up in <b>Settings → Connections</b>. Analyzers need transcription enabled (Settings → Transcription).</p>
             </div>
           </div>
         </div>
         <div class="stack">
-          <div class="panel">
-            <div class="head"><span class="eyebrow">Cloud model · for analyzers set to "Cloud"</span><span class="meta" id="azcMeta"></span></div>
-            <div class="body">
-              <div class="row2">
-                <label class="field"><span class="lab">Provider</span><select id="azcProvider"><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option></select></label>
-                <label class="field"><span class="lab">Model</span><input id="azcModel" type="text" spellcheck="false" placeholder="anthropic/claude-opus-4.1" /></label>
-              </div>
-              <div class="row2">
-                <label class="field"><span class="lab">API key <span class="mono faint">saved on this Mac · leave blank to keep</span></span><input id="azcKey" type="password" spellcheck="false" placeholder="sk-…" /></label>
-                <label class="field"><span class="lab">Timeout (s)</span><input id="azcTimeout" type="text" inputmode="numeric" value="60" /></label>
-              </div>
-              <label class="field"><span class="lab">Base URL <span class="mono faint">optional override · blank = provider default</span></span><input id="azcBase" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1" /></label>
-              <div class="inline"><button class="btn primary" id="azcSave">Save</button><button class="btn ghost" id="azcClear">Forget key</button><span class="help" id="azcKeyState"></span></div>
-              <p class="help">OpenRouter reaches Claude and GPT through one key (model e.g. <span class="mono">anthropic/claude-opus-4.1</span> or <span class="mono">openai/gpt-4o</span>). Choose Anthropic or OpenAI to go direct (models <span class="mono">claude-opus-4-8</span>, <span class="mono">gpt-4o</span>). The key never leaves this machine; extraction runs in the app.</p>
-            </div>
-          </div>
           <div class="panel">
             <div class="head"><span class="eyebrow">How it works</span></div>
             <div class="body">
@@ -1253,5 +1286,6 @@
   </footer>
   <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
+  <script src="connections.js"></script>
 </body>
 </html>
