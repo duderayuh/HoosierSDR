@@ -32,6 +32,7 @@ mod hook;
 mod library;
 mod models;
 mod names;
+mod places;
 mod player;
 mod playlists;
 mod remotes;
@@ -117,6 +118,7 @@ struct AppState {
     tripwires: tripwires::Shared,
     /// Dispatch channels → geocoded, grouped incidents on the live map.
     dispatch: dispatch::Shared,
+    places: places::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -2302,6 +2304,7 @@ fn main() {
             // from their rule files, and every run compiles them back.
             tripwires::init(app.handle());
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
+            *state.places.lock().unwrap() = places::load(app.handle());
             *state.retention.lock().unwrap() = retention::load(app.handle());
             retention::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
@@ -2428,6 +2431,11 @@ fn main() {
             dispatch::dispatch_geocode,
             dispatch::dispatch_regeocode,
             dispatch::dispatch_calibrate,
+            places::places_get,
+            places::places_set,
+            places::places_suggest,
+            places::place_features,
+            places::place_locate,
             dispatch::incidents_list,
             dispatch::incident_get,
             dispatch::incident_delete,
