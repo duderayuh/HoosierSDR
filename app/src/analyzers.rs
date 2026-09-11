@@ -92,9 +92,6 @@ pub struct AnalyzerRule {
     /// Send the message to Telegram.
     #[serde(default = "default_true")]
     pub telegram: bool,
-    /// Also post the message to the alerts' Bluesky account.
-    #[serde(default)]
-    pub bluesky: bool,
     #[serde(default)]
     pub attach_audio: bool,
     /// Seconds before the same analyzer may fire again for the same talkgroup.
@@ -158,7 +155,6 @@ impl Default for AnalyzerRule {
             message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}".into(),
             chat_id: String::new(),
             telegram: true,
-            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         }
@@ -257,19 +253,7 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
-    let f = CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc: None,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text.to_string()),
-    };
+    let f = crate::alerts::facts_from_row(app, r, Some(text.to_string()));
     for rule in rules {
         if pre_filter(&rule, &f) {
             let app = app.clone();
@@ -317,6 +301,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
                 false,
                 format!("extraction failed: {e}"),
                 String::new(),
+                Sent::default(),
             );
             return;
         }
@@ -332,6 +317,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
             true,
             "condition not met".into(),
             extracted,
+            Sent::default(),
         );
         return;
     }
@@ -339,18 +325,31 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
     let message = render(&r.message, &r, &f, &obj);
     let _ = app.emit(
         "analyzer",
-        serde_json::json!({ "name": r.name, "tg": f.tg, "message": message }),
+        serde_json::json!({ "name": r.name, "tg": f.tg, "message": message, "call": f.id }),
     );
     let chat = if r.chat_id.trim().is_empty() {
         tg_settings.destination()
     } else {
         r.chat_id.clone()
     };
-    let (ok, detail) = deliver(&state, &chat, &r, &f, &message);
+    let (ok, detail, ids) = deliver(&chat, &r, &f, &message);
     if ok {
         state.analyzers.lock().unwrap().last_fired.insert(key, now);
     }
-    log_it(&app, &r, &f, true, ok, detail, extracted);
+    let sent = Sent {
+        message,
+        chat: if r.telegram { chat } else { String::new() },
+        ids,
+    };
+    log_it(&app, &r, &f, true, ok, detail, extracted, sent);
+}
+
+/// What went out, for the tripwire history.
+#[derive(Default)]
+struct Sent {
+    message: String,
+    chat: String,
+    ids: Vec<i64>,
 }
 
 /// Pick the extraction engine (local Ollama or the shared cloud model) and run it.
@@ -370,38 +369,32 @@ pub(crate) fn run_extract(
 }
 
 /// Send the rendered message to the analyzer's chosen destinations. Returns
-/// (all-ok, joined detail).
+/// (all-ok, joined detail, Telegram message ids).
 fn deliver(
-    state: &AppState,
     chat: &str,
     r: &AnalyzerRule,
     f: &CallFacts,
     message: &str,
-) -> (bool, String) {
+) -> (bool, String, Vec<i64>) {
     let mut ok = true;
     let mut parts: Vec<String> = Vec::new();
+    let mut ids = Vec::new();
     if r.telegram {
         match send_telegram(chat, r, f, message) {
-            Ok(d) => parts.push(d),
+            Ok((d, sent)) => {
+                parts.push(d);
+                ids = sent;
+            }
             Err(e) => {
                 ok = false;
                 parts.push(format!("telegram: {e}"));
             }
         }
     }
-    if r.bluesky {
-        match crate::alerts::bluesky_post(state, message) {
-            Ok(_) => parts.push("bluesky ok".into()),
-            Err(e) => {
-                ok = false;
-                parts.push(format!("bluesky: {e}"));
-            }
-        }
-    }
     if parts.is_empty() {
         parts.push("no destination selected".into());
     }
-    (ok, parts.join("; "))
+    (ok, parts.join("; "), ids)
 }
 
 fn send_telegram(
@@ -409,23 +402,27 @@ fn send_telegram(
     r: &AnalyzerRule,
     f: &CallFacts,
     message: &str,
-) -> Result<String, String> {
+) -> Result<(String, Vec<i64>), String> {
     let clip = if r.attach_audio {
         f.audio.as_deref().filter(|p| !p.is_empty())
     } else {
         None
     };
     match clip {
-        None => crate::alerts::send_text_id(chat, message).map(|_| "sent".into()),
+        None => crate::alerts::send_text_id(chat, message).map(|id| ("sent".into(), vec![id])),
         Some(path) => {
-            let p = std::path::Path::new(path);
-            let is_mp3 = path.to_ascii_lowercase().ends_with(".mp3");
-            crate::alerts::send_audio_id(chat, p, is_mp3, message, &r.name, &f.tg_name)
-                .map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "audio" }))
+            // Through the same encoder as alerts: a stored WAV (or Opus/M4A)
+            // becomes the MP3 Telegram plays inline, not a file to download.
+            let (tmp, is_mp3) = crate::alerts::combine_clips(&[path.to_string()], &format!("az_{}", f.tg))?;
+            let res = crate::alerts::send_audio_id(chat, &tmp, is_mp3, message, &r.name, &f.tg_name)
+                .map(|ids| (format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }), ids));
+            let _ = std::fs::remove_file(&tmp);
+            res
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_it(
     app: &AppHandle,
     r: &AnalyzerRule,
@@ -434,6 +431,7 @@ fn log_it(
     ok: bool,
     detail: String,
     extracted: String,
+    sent: Sent,
 ) {
     let state = app.state::<AppState>();
     let mut st = state.analyzers.lock().unwrap();
@@ -445,9 +443,33 @@ fn log_it(
         matched,
         ok,
         detail: detail.clone(),
-        extracted,
+        extracted: extracted.clone(),
     });
     st.log.truncate(200);
+    drop(st);
+    crate::events::record(
+        app,
+        crate::events::NewEvent {
+            source: "analyzer",
+            rule_id: r.id.clone(),
+            rule_name: r.name.clone(),
+            tg: f.tg,
+            tg_name: f.tg_name.clone(),
+            status: match (matched, ok) {
+                (true, true) => "sent",
+                (false, true) => "quiet",
+                _ => "failed",
+            }
+            .into(),
+            detail: detail.clone(),
+            message: sent.message,
+            chat: sent.chat,
+            message_ids: sent.ids,
+            data: extracted,
+            calls: f.id.into_iter().collect(),
+            ..Default::default()
+        },
+    );
     if matched && !ok {
         let _ = app.emit("alert_error", format!("{}: {detail}", r.name));
     }
@@ -762,8 +784,11 @@ fn value_to_string(v: Option<&serde_json::Value>) -> String {
 // ---------------------------------------------------------------------------
 
 fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Value) -> String {
-    let s = crate::library::now().rem_euclid(86_400);
-    let time = format!("{:02}:{:02}:{:02} UTC", s / 3600, (s % 3600) / 60, s % 60);
+    let time = crate::library::local_hms(if f.start > 0 {
+        f.start
+    } else {
+        crate::library::now()
+    });
     let mut out = template
         .replace("{name}", &r.name)
         .replace("{tg}", &f.tg.to_string())
@@ -798,7 +823,7 @@ fn render(template: &str, r: &AnalyzerRule, f: &CallFacts, obj: &serde_json::Val
 // a message template), so the risks are size, hidden/spoofed text, and the
 // two fields that would let a template redirect the listener's own bot at
 // someone else's chat or public feed. Imported rules are additionally
-// quarantined: fresh id, disabled, no chat, no Bluesky.
+// quarantined: fresh id, disabled, no chat.
 // ---------------------------------------------------------------------------
 
 pub const MAX_RULES: usize = 200;
@@ -960,14 +985,13 @@ pub fn sanitize_rule(r: &mut AnalyzerRule) -> Result<(), String> {
 }
 
 /// What an imported rule may never bring with it: an id that could replace
-/// an existing rule, the enabled flag, a Telegram chat (the listener's bot
-/// token would deliver transcripts wherever the file said), and Bluesky
-/// (public posting). The listener turns each of those on deliberately.
+/// an existing rule, the enabled flag, and a Telegram chat (the listener's
+/// bot token would deliver transcripts wherever the file said). The
+/// listener turns each of those on deliberately.
 pub fn quarantine(r: &mut AnalyzerRule, i: usize) {
     r.id = format!("z{}-i{i}", crate::library::now());
     r.enabled = false;
     r.chat_id.clear();
-    r.bluesky = false;
 }
 
 /// A shareable bundle of analyzers. `format` and `version` are checked on
@@ -1052,8 +1076,7 @@ pub fn make_template(
             r.id = format!("t{}", i + 1);
             r.enabled = false;
             r.chat_id.clear();
-            r.bluesky = false;
-            r
+                    r
         })
         .collect();
     Template {
@@ -1205,7 +1228,7 @@ pub fn analyzer_templates() -> Vec<AnalyzerRule> {
 /// pre-filter, so the rule can be seen working without waiting for traffic.
 #[tauri::command]
 pub async fn analyzer_test(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<String, String> {
@@ -1254,19 +1277,7 @@ pub async fn analyzer_test(
             .clone()
             .or_else(|| c.transcript.clone())
             .filter(|t| !t.trim().is_empty())?;
-        let f = CallFacts {
-            id: Some(c.id),
-            start: c.start,
-            tg: c.tg,
-            tg_name: c.tg_name,
-            tg_desc: None,
-            unit: c.unit,
-            unit_name: c.unit_name,
-            secs: c.secs,
-            emergency: c.emergency,
-            audio: c.audio,
-            transcript: Some(text),
-        };
+        let f = crate::alerts::facts_from_row(&app, c, Some(text));
         pre_filter(&r, &f).then_some(f)
     });
     let Some(f) = f else {
@@ -1337,7 +1348,6 @@ fn templates() -> Vec<AnalyzerRule> {
             message: "🫀 Possible ECPR candidate — {candidate}\n{tgname} (TG {tg}) · {time}\nCriteria met {field.criteriaMet}/4 · likelihood {field.likelihoodPct}%\n{field.reason}\n\n{transcript}".into(),
             chat_id: String::new(),
             telegram: true,
-            bluesky: false,
             attach_audio: true,
             cooldown_secs: 120,
         },
@@ -1360,7 +1370,6 @@ fn templates() -> Vec<AnalyzerRule> {
             message: "🧠 Stroke alert\n{tgname} (TG {tg}) · {time}\nLKW: {field.lastKnownWell}\nDeficits: {field.deficits}\n\n{transcript}".into(),
             chat_id: String::new(),
             telegram: true,
-            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         },
@@ -1403,7 +1412,6 @@ fn templates() -> Vec<AnalyzerRule> {
             message: "🫀 CPR in progress\n{tgname} (TG {tg}) · {time}\nStatus: {field.status}\n{field.note}\n\n{transcript}".into(),
             chat_id: String::new(),
             telegram: true,
-            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         },
@@ -1442,7 +1450,6 @@ fn templates() -> Vec<AnalyzerRule> {
             message: "⏹️ Arrest outcome — {field.outcome}\n{tgname} (TG {tg}) · {time}\n{field.note}\n\n{transcript}".into(),
             chat_id: String::new(),
             telegram: true,
-            bluesky: false,
             attach_audio: false,
             cooldown_secs: 120,
         },
@@ -1530,20 +1537,17 @@ mod tests {
         let mut r = rule();
         r.enabled = true;
         r.chat_id = "12345".into();
-        r.bluesky = true;
         let text = serde_json::to_string(&make_template(vec![r.clone()], "N", "A", "D")).unwrap();
         assert!(!text.contains("12345"));
         // Tamper: put the personal fields back and try to reuse an id.
         let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
         v["rules"][0]["chat_id"] = "666".into();
         v["rules"][0]["enabled"] = true.into();
-        v["rules"][0]["bluesky"] = true.into();
         v["rules"][0]["id"] = "abc".into();
         let t = parse_template(&v.to_string()).unwrap();
         let got = &t.rules[0];
         assert!(!got.enabled);
         assert!(got.chat_id.is_empty());
-        assert!(!got.bluesky);
         assert_ne!(got.id, "abc");
     }
 
