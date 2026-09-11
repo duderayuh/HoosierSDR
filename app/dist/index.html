@@ -317,6 +317,10 @@
                 <label class="field"><span class="lab">Home longitude</span><input id="dpHomeLon" type="text" inputmode="decimal" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="dpHomeFromMap" style="justify-self:start">Use map centre</button></label>
               </div>
+              <div class="row2" style="align-items:start">
+                <label class="check"><input id="dpGridFallback" type="checkbox" checked /> Place calls the geocoder can't find from the grid reference the dispatcher reads out</label>
+                <div class="inline"><button class="btn ghost sm" id="dpCalibrate" title="Work out what the grid means from calls that did place">Re-fit the grid</button><span class="meta" id="dpCalMeta"></span></div>
+              </div>
               <div class="row2">
                 <label class="field"><span class="lab">Region hint <span class="mono faint">added to every address</span></span><input id="dpRegion" type="text" placeholder="Indianapolis, IN" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Search radius (km) <span class="mono faint">results outside are ignored</span></span><input id="dpRadiusKm" type="text" inputmode="numeric" /></label>

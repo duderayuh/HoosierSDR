@@ -1141,3 +1141,10 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .ctxmenu { position: fixed; z-index: 1200; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; min-width: 210px; }
 .ctxmenu button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--ink); padding: 7px 10px; border-radius: 5px; font-size: 12.5px; cursor: pointer; }
 .ctxmenu button:hover { background: color-mix(in srgb, var(--signal) 14%, transparent); }
+
+/* Dispatch: how good the pin is. A call placed from the grid reference is
+   a few hundred metres out, and says so rather than pretending. */
+.dpcard .approx, .dpcard .fixedup { font-size: 11px; padding: 0 5px; border-radius: 9px; margin-left: 6px; white-space: nowrap; }
+.dpcard .approx { color: var(--warn, #d8a657); border: 1px solid color-mix(in srgb, var(--warn, #d8a657) 40%, transparent); }
+.dpcard .fixedup { color: var(--accent, #7bd); border: 1px solid color-mix(in srgb, var(--accent, #7bd) 40%, transparent); }
+.dpmk.approx { opacity: .78; border-style: dashed; }
