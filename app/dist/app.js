@@ -2379,7 +2379,7 @@ if (TAURI) {
     } catch (e) { log(`transcribe_probe: ${e}`); }
   }
   $("trSave").onclick = async () => {
-    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); }
+    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); setTimeout(trModelsRender, 900); }
     catch (e) { alert(e); }
   };
   $("trEnabled").onchange = $("trSave").onclick;
@@ -2603,15 +2603,26 @@ if (TAURI) {
   /* ---------- whisper models: what's downloaded, download ahead of time ---------- */
   const MODEL_SIZES = { tiny: "75 MB", base: "145 MB", small: "480 MB", medium: "1.5 GB", "large-v3": "3 GB", "distil-large-v3": "1.5 GB", turbo: "1.6 GB" };
   const downloading = new Set();
+  const gb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`;
   async function trModelsRender() {
     try {
       const rows = await invoke("transcribe_models"); const names = [...new Set(rows.map((r) => r.model))];
+      const total = rows.filter((r) => r.downloaded).reduce((a, r) => a + (r.bytes || 0), 0);
+      const meta = $("trModelsMeta"); if (meta) meta.textContent = total ? `${gb(total)} on disk` : "";
       $("trModels").innerHTML = names.map((m) => {
         const cell = (eng) => { const r = rows.find((x) => x.model === m && x.engine === eng); const key = `${eng}/${m}`;
-          return r && r.downloaded ? `<span class="badge clear">✔ downloaded</span>` : downloading.has(key) ? `<span class="meta">downloading…</span>` : `<button class="btn ghost sm" data-dl="${key}">Download</button>`; };
-        return `<tr><td class="mono">${m} <small class="faint">${MODEL_SIZES[m] || ""}</small></td><td>${cell("faster-whisper")}</td><td>${cell("openai-whisper")}</td></tr>`;
+          if (!r) return "";
+          if (r.downloaded) return `<span class="badge clear" title="${esc(r.path || "")}">✔ ${gb(r.bytes || 0)}</span>${r.in_use ? ' <span class="badge">in use</span>' : ` <button class="btn ghost sm" data-rmmodel="${key}" title="Delete this model from disk">Delete</button>`}`;
+          return downloading.has(key) ? `<span class="meta">downloading…</span>` : `<button class="btn ghost sm" data-dl="${key}">Download</button>`; };
+        return `<tr><td class="mono">${m} <small class="faint">${MODEL_SIZES[m] || ""}</small></td><td>${cell("faster-whisper")}</td><td>${cell("openai-whisper")}</td><td>${cell("mlx-whisper")}</td></tr>`;
       }).join("");
       $("trModels").querySelectorAll("[data-dl]").forEach((b) => b.onclick = () => { const [engine, model] = b.dataset.dl.split("/"); downloading.add(b.dataset.dl); trModelsRender(); invoke("transcribe_download", { engine, model }).catch((e) => { downloading.delete(b.dataset.dl); alert(e); trModelsRender(); }); });
+      $("trModels").querySelectorAll("[data-rmmodel]").forEach((b) => b.onclick = async () => {
+        const [engine, model] = b.dataset.rmmodel.split("/"); const r = rows.find((x) => x.engine === engine && x.model === model);
+        if (!(await uiConfirm(`Delete ${engine} ${model} (${gb((r && r.bytes) || 0)}) from this Mac? It downloads again if you choose it later.`, "Delete"))) return;
+        try { const freed = await invoke("transcribe_delete", { engine, model }); uiToast(`Deleted ${engine} ${model} — ${gb(freed)} freed`); } catch (e) { uiToast(`${e}`, "err"); }
+        trModelsRender();
+      });
     } catch (e) { log(`transcribe_models: ${e}`); }
   }
   listen("transcribe_download", (e) => {

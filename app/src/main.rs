@@ -29,6 +29,7 @@ mod events;
 mod follow;
 mod hook;
 mod library;
+mod models;
 mod names;
 mod player;
 mod playlists;
@@ -2413,7 +2414,8 @@ fn main() {
             transcribe::transcribe_probe,
             transcribe::transcribe_configure,
             transcribe::transcribe_call,
-            transcribe::transcribe_models,
+            models::transcribe_models,
+            models::transcribe_delete,
             transcribe::transcribe_download,
             play_wav,
             ui_log,

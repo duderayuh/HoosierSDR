@@ -329,7 +329,8 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::transcribe::transcribe_configure(app.clone(), state, settings)?;
             Ok(Value::Null)
         }
-        "transcribe_models" => jv(crate::transcribe::transcribe_models()),
+        "transcribe_models" => jv(crate::models::transcribe_models(app.clone())),
+        "transcribe_delete" => jv(crate::models::transcribe_delete(app.clone(), arg(args, "engine")?, arg(args, "model")?)?),
 
         // ---- settings: hook / stream / uploads ----
         "hook_get" => jv(crate::hook::hook_get(app.clone(), state)),
