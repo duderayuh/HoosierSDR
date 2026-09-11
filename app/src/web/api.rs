@@ -259,7 +259,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "library_search" => {
             let q: crate::library::Query =
                 serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
-            jv(crate::library_search(state, q)?)
+            jv(crate::library_search(app.clone(), state, q)?)
         }
         "library_stats" => {
             let (count, seconds, transcribed, dir) = crate::library_stats(state)?;
@@ -270,7 +270,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
                 "dir": dir,
             }))
         }
-        "library_get" => jv(crate::library_get(state, arg(args, "id")?)?),
+        "library_get" => jv(crate::library_get(app.clone(), state, arg(args, "id")?)?),
         "library_play" => {
             let id = arg(args, "id")?;
             crate::library_play(app.clone(), id).await?;
@@ -526,6 +526,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "tg")?,
             arg(args, "alias")?,
             arg(args, "category")?,
+            arg(args, "sid")?,
         )?),
         "save_text" => jv(crate::rr::save_text(arg(args, "path")?, arg(args, "text")?)?),
         "rr_save" => jv(crate::rr::rr_save(
@@ -547,9 +548,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "transcribe_call" => jv(crate::transcribe::transcribe_call(app.clone(), state, arg(args, "id")?)?),
         "unit_rules_list" => jv(crate::units::unit_rules_list(state)),
         "unit_rules_set" => jv(crate::units::unit_rules_set(app.clone(), state, arg(args, "rules")?)?),
-        "unit_resolve" => jv(crate::units::unit_resolve(state, arg(args, "id")?)),
-        "unit_set" => jv(crate::units::unit_set(app.clone(), state, arg(args, "id")?, arg(args, "name")?)?),
-        "units_import" => jv(crate::units::units_import(app.clone(), state, arg(args, "path")?)?),
+        "unit_resolve" => jv(crate::units::unit_resolve(state, arg(args, "id")?, arg(args, "sid")?)),
+        "unit_set" => jv(crate::units::unit_set(app.clone(), state, arg(args, "id")?, arg(args, "name")?, arg(args, "sid")?)?),
+        "units_import" => jv(crate::units::units_import(app.clone(), state, arg(args, "path")?, arg(args, "sid")?)?),
         "uploads_test" => jv(crate::upload::uploads_test(arg(args, "service")?, arg(args, "settings")?).await?),
         "upload_call" => jv(crate::upload::upload_call(app.clone(), state, arg(args, "id")?)?),
         "web_access_get" => jv(crate::web::web_access_get(app.clone())),

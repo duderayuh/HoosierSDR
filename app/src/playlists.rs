@@ -92,6 +92,26 @@ pub fn playlist_delete(app: AppHandle, id: String) -> Result<Vec<Playlist>, Stri
     Ok(all)
 }
 
+/// The RadioReference system a control channel belongs to, from the saved
+/// playlists — so a run started by hand on a playlist's control channel
+/// still names talkgroups from the right system.
+pub fn sid_for_control(app: &AppHandle, control_hz: f64) -> Option<u32> {
+    load(app)
+        .into_iter()
+        .find(|p| (p.control_mhz * 1e6 - control_hz).abs() < 1.0)
+        .map(|p| p.sid)
+}
+
+/// System name (as written into library rows and sidecars) → system id,
+/// for rows recorded before the id was stored.
+pub fn sids_by_system_name(app: &AppHandle) -> std::collections::HashMap<String, u32> {
+    load(app)
+        .into_iter()
+        .filter(|p| !p.system_name.trim().is_empty())
+        .map(|p| (p.system_name, p.sid))
+        .collect()
+}
+
 /// Make a playlist current: its talkgroups become the follower's allowlist
 /// (live, if following) and its tuning comes back for the UI to apply.
 /// `None` clears the restriction.

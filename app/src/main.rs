@@ -74,7 +74,8 @@ struct AppState {
     /// Serialises radio opening, so two runs started together see one
     /// opened radio instead of both trying to open the same device.
     start_lock: Mutex<()>,
-    catalog: Arc<Mutex<Option<CsvCatalog>>>,
+    /// Talkgroup names, kept apart per RadioReference system.
+    catalog: Arc<Mutex<rr::Catalogs>>,
     /// Talkgroups the listener has locked out; read by the follower live.
     lockout: Arc<Mutex<std::collections::HashSet<u16>>>,
     /// The active playlist's talkgroups (`None` = follow everything).
@@ -153,6 +154,9 @@ struct Run {
     radio: String,
     flag: Arc<AtomicBool>,
     playlist: Option<String>,
+    /// RadioReference system id, when known (from the playlist, else a
+    /// playlist on the same control channel).
+    sid: Option<u32>,
 }
 
 /// An opened radio, shared by every run whose control channel fits.
@@ -174,6 +178,7 @@ pub(crate) struct RunInfo {
     control_mhz: f64,
     radio: String,
     playlist: Option<String>,
+    sid: Option<u32>,
 }
 
 pub(crate) fn runs_info(state: &AppState) -> Vec<RunInfo> {
@@ -190,6 +195,7 @@ pub(crate) fn runs_info(state: &AppState) -> Vec<RunInfo> {
             control_mhz: r.control_hz / 1e6,
             radio: r.radio.clone(),
             playlist: r.playlist.clone(),
+            sid: r.sid,
         })
         .collect()
 }
@@ -640,21 +646,28 @@ fn with_db<T>(
 
 #[tauri::command]
 fn library_search(
+    app: AppHandle,
     state: State<AppState>,
     query: library::Query,
 ) -> Result<Vec<library::CallRow>, String> {
     let mut rows = with_db(&state, |c| library::search(c, &query))?;
+    let sids = playlists::sids_by_system_name(&app);
     for r in rows.iter_mut() {
-        r.tg_desc = upload::tg_meta(&state.catalog, r.tg).desc;
+        r.tg_desc = upload::tg_meta(&state.catalog, sids.get(&r.system).copied(), r.tg).desc;
     }
     Ok(rows)
 }
 
 #[tauri::command]
-fn library_get(state: State<AppState>, id: i64) -> Result<Option<library::CallRow>, String> {
+fn library_get(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+) -> Result<Option<library::CallRow>, String> {
     let mut row = with_db(&state, |c| library::get(c, id))?;
     if let Some(r) = row.as_mut() {
-        r.tg_desc = upload::tg_meta(&state.catalog, r.tg).desc;
+        let sid = playlists::sids_by_system_name(&app).get(&r.system).copied();
+        r.tg_desc = upload::tg_meta(&state.catalog, sid, r.tg).desc;
     }
     Ok(row)
 }
@@ -828,9 +841,9 @@ fn load_catalog(app: AppHandle, path: String, state: State<AppState>) -> Result<
             .unwrap_or_else(|| "import".into());
         let _ = std::fs::write(d.join(format!("csv_{stem}.csv")), &text);
     }
-    let merged = rr::merged_catalog(&app);
-    let total = merged.as_ref().map_or(n, |c| c.len());
-    *state.catalog.lock().unwrap() = merged;
+    let all = rr::load_catalogs(&app);
+    let total = all.len().max(n);
+    *state.catalog.lock().unwrap() = all;
     Ok(total)
 }
 
@@ -1110,7 +1123,7 @@ fn start_follow(
             ));
         }
     }
-    let (pl_allow, pl_name) = match playlist.as_deref().filter(|s| !s.is_empty()) {
+    let (pl_allow, pl_name, pl_sid) = match playlist.as_deref().filter(|s| !s.is_empty()) {
         Some(id) => {
             let p = playlists::load(&app)
                 .into_iter()
@@ -1118,10 +1131,13 @@ fn start_follow(
                 .ok_or("no such playlist")?;
             let tgs: Option<std::collections::HashSet<u16>> =
                 (!p.tgs.is_empty()).then(|| p.tgs.iter().copied().collect());
-            (Some(Arc::new(Mutex::new(tgs))), Some(p.name))
+            (Some(Arc::new(Mutex::new(tgs))), Some(p.name), Some(p.sid))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
+    // Which system's names apply: the playlist's, else whichever playlist
+    // uses this control channel. Without one, every loaded catalog merged.
+    let sid = pl_sid.or_else(|| playlists::sid_for_control(&app, control));
     let label = pl_name
         .or_else(|| site_name.clone().filter(|s| !s.is_empty()))
         .or_else(|| system_name.clone().filter(|s| !s.is_empty()))
@@ -1138,6 +1154,7 @@ fn start_follow(
         radio: radio_key.clone(),
         flag: running.clone(),
         playlist: playlist.clone(),
+        sid,
     });
     emit_runs(&app);
     let max_calls = state.max_calls.load(Ordering::SeqCst).clamp(1, 24);
@@ -1272,6 +1289,7 @@ fn start_follow(
                 calls_dir: library_dir.or(calls_dir),
                 hang_secs,
                 system_name: system_name.unwrap_or_default(),
+                sid,
                 site_name: site_name.unwrap_or_default(),
                 name_template,
                 format,
@@ -1323,7 +1341,7 @@ fn start_follow(
                 } = &ev
                 {
                     if let Some(u) = uploader.lock().unwrap().as_ref().filter(|_| allowed(&upload_policy, *tg)) {
-                        let meta = upload::tg_meta(&catalog, *tg);
+                        let meta = upload::tg_meta(&catalog, sid, *tg);
                         u.submit(upload::Job {
                             id: *id,
                             audio: wav.clone(),
@@ -1366,7 +1384,7 @@ fn start_follow(
                     // listener already did.
                     if learn_aliases.load(Ordering::SeqCst) {
                         if let (Some(alias), true) = (talker_alias.as_deref(), *source != 0) {
-                            if units::learn(&app, app.state::<AppState>().inner(), *source, alias) {
+                            if units::learn(&app, app.state::<AppState>().inner(), sid, *source, alias) {
                                 emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
                                         text: format!("learned alias “{alias}” for radio {source}"),
                                     });
@@ -1594,7 +1612,7 @@ fn slugify(s: &str) -> String {
 fn capture_loop(
     app: &AppHandle,
     running: &AtomicBool,
-    catalog: &Mutex<Option<CsvCatalog>>,
+    catalog: &Mutex<rr::Catalogs>,
     source: &str,
     freq: f64,
     rate: f64,
@@ -1654,12 +1672,7 @@ fn capture_loop(
         total_pcm += out.pcm.len();
 
         for g in &out.grants {
-            let name = catalog
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|c| c.label(g.talkgroup))
-                .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+            let name = catalog.lock().unwrap().label(None, g.talkgroup);
             let _ = app.emit(
                 "grant",
                 GrantMsg {
@@ -1967,10 +1980,7 @@ async fn decode_file(
         let out = dec.process(&iq);
         let cat = state.catalog.lock().unwrap();
         for g in &out.grants {
-            let name = cat
-                .as_ref()
-                .map(|c| c.label(g.talkgroup))
-                .unwrap_or_else(|| format!("TG {}", g.talkgroup));
+            let name = cat.label(None, g.talkgroup);
             let _ = app.emit(
                 "grant",
                 GrantMsg {
@@ -2213,9 +2223,7 @@ fn main() {
             crate::web::spawn(app.handle().clone());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
-            if let Some(cat) = rr::saved_catalog(app.handle()) {
-                *state.catalog.lock().unwrap() = Some(cat);
-            }
+            *state.catalog.lock().unwrap() = rr::saved_catalog(app.handle());
             *state.units.lock().unwrap() = units::load(app.handle());
             *state.unit_rules.lock().unwrap() = units::load_rules(app.handle());
             if let Some(n) = app

@@ -279,12 +279,16 @@ pub struct TgMeta {
     pub tag: String,
 }
 
-pub fn tg_meta(catalog: &std::sync::Mutex<Option<hs_catalog::CsvCatalog>>, tg: u16) -> TgMeta {
+pub fn tg_meta(
+    catalog: &std::sync::Mutex<crate::rr::Catalogs>,
+    sid: Option<u32>,
+    tg: u16,
+) -> TgMeta {
     catalog
         .lock()
         .ok()
         .and_then(|cat| {
-            cat.as_ref().and_then(|c| c.get(tg)).map(|t| TgMeta {
+            cat.get(sid, tg).map(|t| TgMeta {
                 group: t.category.clone().unwrap_or_default(),
                 desc: t.description.clone().unwrap_or_default(),
                 tag: t.tag.clone().unwrap_or_default(),
@@ -690,7 +694,10 @@ pub fn upload_call(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
             );
         }
     }
-    let meta = tg_meta(&state.catalog, row.tg);
+    let sid = crate::playlists::sids_by_system_name(&app)
+        .get(&row.system)
+        .copied();
+    let meta = tg_meta(&state.catalog, sid, row.tg);
     let job = Job {
         id: row.id,
         audio,

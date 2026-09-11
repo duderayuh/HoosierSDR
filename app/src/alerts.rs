@@ -362,12 +362,14 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
+    let sid = crate::playlists::sids_by_system_name(app)
+        .get(&r.system)
+        .copied();
     let tg_desc = state
         .catalog
         .lock()
         .unwrap()
-        .as_ref()
-        .and_then(|c| c.get(r.tg))
+        .get(sid, r.tg)
         .and_then(|t| t.description.clone());
     let f = CallFacts {
         id: Some(r.id),
