@@ -36,6 +36,8 @@ mod playlists;
 mod remotes;
 mod retention;
 mod tripwires;
+mod backtest;
+mod fuzzy;
 mod rr;
 mod secrets;
 mod status;
@@ -2314,6 +2316,7 @@ fn main() {
                         dispatch::ensure_schema(&c);
                         conversations::ensure_schema(&c);
                         events::ensure_schema(&c);
+                        backtest::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2399,6 +2402,9 @@ fn main() {
             tripwires::tripwire_test,
             tripwires::tripwires_import,
             tripwires::tripwires_export,
+            backtest::tripwire_preview,
+            backtest::tripwire_try,
+            backtest::tripwire_draft,
             analyzers::analyzer_cloud_save,
             analyzers::analyzer_cloud_clear_key,
             dispatch::dispatch_get,

@@ -1289,6 +1289,20 @@ fn run_check(state: &AppState, t: &Tripwire, f: &CallFacts) -> Verdict {
     }
 }
 
+/// Run the check once, for the preview: (`send` | `quiet` | `unavailable`,
+/// the model's note, extracted fields).
+pub fn check_once(
+    state: &AppState,
+    t: &Tripwire,
+    f: &CallFacts,
+) -> (String, String, Option<serde_json::Value>) {
+    match run_check(state, t, f) {
+        Verdict::Pass { note, fields } => ("send".into(), note, fields),
+        Verdict::Quiet { why, fields } => ("quiet".into(), why, fields),
+        Verdict::Unavailable(e) => ("unavailable".into(), e, None),
+    }
+}
+
 /// Is there a live reply thread this tripwire's repeat on `tg` belongs to?
 fn open_thread(st: &TripState, rule: &str, tg: u16, now: i64) -> Option<(String, i64)> {
     st.threads
