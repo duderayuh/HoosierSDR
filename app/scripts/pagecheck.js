@@ -93,7 +93,31 @@ w.__exercise = async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!shown("twMapWrap")) console.log("PAGE ERROR: a run tripwire is not offered a map");
     if (!w.document.getElementById("twMap").checked) console.log("PAGE ERROR: the saved map setting did not reach the form");
-    if (shown("twAudioWrap")) console.log("PAGE ERROR: a run tripwire is offered call audio");
+    // A run gets the radio traffic behind it, and the label says so rather
+    // than calling it "the audio" as a single call's clip is.
+    if (!shown("twAudioWrap")) console.log("PAGE ERROR: a run tripwire is not offered its radio traffic");
+    if (!/radio traffic/.test(w.document.getElementById("twAudioWrap").textContent)) console.log("PAGE ERROR: a run's audio is labelled as a call's");
+    // Formatting: the buttons wrap the selection, and the preview shows it
+    // as style rather than as tags.
+    {
+      const fb = w.document.querySelector('#twFormat [data-tag="b"]');
+      if (!fb) console.log("PAGE ERROR: no formatting buttons");
+      else {
+        const ta = w.document.getElementById("twMessage");
+        const was = ta.value;
+        ta.value = "Arrest at 1400 Example St"; ta.selectionStart = 0; ta.selectionEnd = 6;
+        fb.onclick();
+        if (ta.value !== "<b>Arrest</b> at 1400 Example St") console.log("PAGE ERROR: the bold button did not wrap the selection: " + ta.value);
+        const prev = w.document.getElementById("twMsgPrev").innerHTML;
+        if (/&lt;b&gt;/.test(prev)) console.log("PAGE ERROR: the preview shows tags instead of formatting");
+        if (!/<b>Arrest<\/b>/.test(prev)) console.log("PAGE ERROR: the preview does not render the bold");
+        // Put the tripwire's own message back, or every later check reads
+        // the one this test typed.
+        ta.value = was;
+        ta.dispatchEvent(new w.Event("input", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 30));
+      }
+    }
     if (!w.document.getElementById("twMsgPrev").innerHTML.includes("with a map of the run")) console.log("PAGE ERROR: the preview does not mention the map");
     if (!w.document.getElementById("twMsgPrev").innerHTML.includes("opens Google Maps")) console.log("PAGE ERROR: nothing says the address becomes a link");
     w.twEdit("t1", JSON.parse(JSON.stringify(TW())), null);

@@ -1235,3 +1235,7 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dpstep .mins { font-size: 11px; opacity: .5; }
 .dpstep .body { font-size: 12px; opacity: .85; margin-top: 2px; }
 .dpstep .how { font-size: 11px; opacity: .55; margin-top: 3px; font-style: italic; }
+/* A spoiler in the message preview, as Telegram hides it until tapped. */
+.tw-bubble .spoil { background: var(--ink-dim); color: transparent; border-radius: 3px; }
+.tw-bubble blockquote { margin: 2px 0 2px 8px; padding-left: 8px; border-left: 2px solid var(--line); }
+.tw-bubble code { font-family: var(--mono); font-size: 12px; }
