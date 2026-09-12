@@ -434,6 +434,7 @@ const DIST: &[(&str, &str, &str)] = &[
     ("tripwires.js", "text/javascript; charset=utf-8", include_str!("../../dist/tripwires.js")),
     ("places.js", "text/javascript; charset=utf-8", include_str!("../../dist/places.js")),
     ("pathways.js", "text/javascript; charset=utf-8", include_str!("../../dist/pathways.js")),
+    ("backup.js", "text/javascript; charset=utf-8", include_str!("../../dist/backup.js")),
     ("style.css", "text/css; charset=utf-8", include_str!("../../dist/style.css")),
     ("vendor/leaflet.js", "text/javascript; charset=utf-8", include_str!("../../dist/vendor/leaflet.js")),
     ("vendor/leaflet.css", "text/css; charset=utf-8", include_str!("../../dist/vendor/leaflet.css")),

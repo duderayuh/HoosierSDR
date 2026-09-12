@@ -18,6 +18,7 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 mod addr;
 mod alerts;
 mod analyzers;
+mod backup;
 mod channels;
 mod connections;
 mod conversations;
@@ -45,6 +46,7 @@ mod tripwires;
 mod backtest;
 mod fuzzy;
 mod rr;
+mod s3;
 mod secrets;
 mod status;
 mod stream;
@@ -160,6 +162,8 @@ struct AppState {
     retention: Mutex<retention::Settings>,
     /// What a dispatch run needs, and where the nearest one is.
     pathways: Mutex<pathways::Settings>,
+    /// Where copies of the library go, and how often.
+    backup: backup::Shared,
 }
 
 /// One live trunk-following run: a site (usually a playlist) being followed.
@@ -2267,6 +2271,9 @@ fn main() {
     tiles::register(tauri::Builder::default())
         .manage(AppState::default())
         .setup(|app| {
+            // Before anything is read or opened: a restore staged its files
+            // beside the live ones and is waiting to be swapped in.
+            crate::backup::apply_pending(app.handle());
             crate::secrets::init(app.handle());
             crate::web::spawn(app.handle().clone());
             // A talkgroup catalog downloaded earlier is loaded on start.
@@ -2332,6 +2339,8 @@ fn main() {
             *state.routing.lock().unwrap() = routing::load(app.handle());
             *state.retention.lock().unwrap() = retention::load(app.handle());
             retention::spawn_ticker(app.handle().clone());
+            *state.backup.lock().unwrap() = backup::load(app.handle());
+            backup::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -2487,6 +2496,18 @@ fn main() {
             channels::channel_sets_set,
             retention::retention_get,
             retention::retention_set,
+            backup::backup_get,
+            backup::backup_sizes,
+            backup::backup_set,
+            backup::backup_credentials,
+            backup::backup_passphrase,
+            backup::backup_check,
+            backup::backup_run,
+            backup::backup_list,
+            backup::backup_forget,
+            backup::backup_peek,
+            backup::backup_restore,
+            backup::backup_cancel_restore,
             retention::retention_migrate,
             retention::retention_preview,
             retention::retention_apply,
