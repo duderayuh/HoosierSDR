@@ -342,7 +342,7 @@ fn run(app: AppHandle, r: AnalyzerRule, f: CallFacts) {
         serde_json::json!({ "name": r.name, "tg": f.tg, "message": message }),
     );
     let chat = if r.chat_id.trim().is_empty() {
-        tg_settings.chat_id.clone()
+        tg_settings.destination()
     } else {
         r.chat_id.clone()
     };

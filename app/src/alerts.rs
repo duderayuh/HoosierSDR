@@ -53,6 +53,13 @@ pub struct Alert {
     /// Seconds before the same alert may fire again for the same talkgroup.
     pub cooldown_secs: u32,
     pub telegram: bool,
+    /// Telegram chat this alert goes to; blank = the alerts' default chat.
+    #[serde(default)]
+    pub chat_id: String,
+    /// Forum topic (Telegram's `message_thread_id`) inside that chat; blank
+    /// = the default topic, or the chat itself when it has no topics.
+    #[serde(default)]
+    pub topic_id: String,
     /// Also post to Bluesky.
     #[serde(default)]
     pub bluesky: bool,
@@ -85,6 +92,8 @@ impl Default for Alert {
             message: "🚨 {alert}\n{tgname} (TG {tg}) · {unitname} · {time}\n{transcript}".into(),
             cooldown_secs: 300,
             telegram: true,
+            chat_id: String::new(),
+            topic_id: String::new(),
             bluesky: false,
             tone: true,
             attach_audio: true,
@@ -100,6 +109,62 @@ impl Default for Alert {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Telegram {
     pub chat_id: String,
+    /// Default forum topic (`message_thread_id`) for the chat; blank = none.
+    #[serde(default)]
+    pub topic_id: String,
+}
+
+impl Telegram {
+    /// The destination as one string: `chat` or `chat:topic`, the form every
+    /// send helper accepts (so rules that keep a single chat field can name
+    /// a topic too).
+    pub fn destination(&self) -> String {
+        join_destination(&self.chat_id, &self.topic_id)
+    }
+}
+
+/// `chat` + optional topic → `chat:topic`.
+pub fn join_destination(chat: &str, topic: &str) -> String {
+    let (chat, topic) = (chat.trim(), topic.trim());
+    if topic.is_empty() {
+        chat.to_string()
+    } else {
+        format!("{chat}:{topic}")
+    }
+}
+
+/// Split a destination into the chat id and, when it carries one, the
+/// forum topic: `-1001234:57` → (`-1001234`, Some(57)). A chat id never
+/// contains a colon (`-100…`, `123…` or `@name`), so the last `:` followed
+/// by digits is the topic.
+pub fn chat_parts(dest: &str) -> (String, Option<i64>) {
+    let d = dest.trim();
+    if let Some((chat, topic)) = d.rsplit_once(':') {
+        if !chat.is_empty() && !topic.is_empty() && topic.chars().all(|c| c.is_ascii_digit()) {
+            return (chat.to_string(), topic.parse().ok());
+        }
+    }
+    (d.to_string(), None)
+}
+
+/// The JSON body every text send starts from: chat, and the topic when set.
+fn text_body(dest: &str, text: &str) -> serde_json::Value {
+    let (chat, topic) = chat_parts(dest);
+    let mut body = serde_json::json!({ "chat_id": chat, "text": text });
+    if let Some(t) = topic {
+        body["message_thread_id"] = serde_json::Value::from(t);
+    }
+    body
+}
+
+/// A multipart send starts from the chat and, when set, the topic.
+fn multipart_for(dest: &str) -> crate::upload::Multipart {
+    let (chat, topic) = chat_parts(dest);
+    let mut m = crate::upload::Multipart::new().text("chat_id", &chat);
+    if let Some(t) = topic {
+        m = m.text("message_thread_id", &t.to_string());
+    }
+    m
 }
 
 /// Bluesky account to post alerts to. The handle is public; the app password
@@ -140,6 +205,7 @@ impl Default for Settings {
             alerts: Vec::new(),
             telegram: Telegram {
                 chat_id: String::new(),
+                topic_id: String::new(),
             },
             ollama: Ollama {
                 url: "http://localhost:11434".into(),
@@ -411,6 +477,19 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
             let st = state.alerts.lock().unwrap();
             (st.settings.telegram.clone(), st.settings.ollama.clone())
         };
+        // The alert's own chat and topic, where it names them.
+        let tg_settings = Telegram {
+            chat_id: if a.chat_id.trim().is_empty() {
+                tg_settings.chat_id
+            } else {
+                a.chat_id.trim().to_string()
+            },
+            topic_id: if a.topic_id.trim().is_empty() {
+                tg_settings.topic_id
+            } else {
+                a.topic_id.trim().to_string()
+            },
+        };
         let mut ai_note = String::new();
         if a.ai_gate && !a.ai_prompt.trim().is_empty() {
             match ask_ollama(&ollama, &a.ai_prompt, &f, a.ai_think) {
@@ -624,7 +703,7 @@ pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
     if tg.chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body = serde_json::json!({ "chat_id": tg.chat_id.trim(), "text": text });
+    let body = text_body(&tg.destination(), text);
     let (status, out) = crate::upload::post(
         &telegram_api("sendMessage")?,
         "application/json",
@@ -736,7 +815,7 @@ pub(crate) fn send_text_id(chat_id: &str, text: &str) -> Result<i64, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body = serde_json::json!({ "chat_id": chat_id.trim(), "text": text });
+    let body = text_body(chat_id, text);
     let (status, out) = crate::upload::post(
         &telegram_api("sendMessage")?,
         "application/json",
@@ -782,8 +861,7 @@ pub(crate) fn send_audio_id(
     } else {
         ("sendDocument", "document", "audio/wav")
     };
-    let mut m = crate::upload::Multipart::new()
-        .text("chat_id", chat_id.trim())
+    let mut m = multipart_for(chat_id)
         .text("caption", &cap)
         .file(field, &name, mime, &data);
     if is_mp3 {
@@ -798,7 +876,7 @@ pub(crate) fn send_audio_id(
 
 /// Delete a message the bot sent (Telegram allows this for 48 hours).
 pub(crate) fn delete_message(chat_id: &str, id: i64) -> Result<(), String> {
-    let body = serde_json::json!({ "chat_id": chat_id.trim(), "message_id": id });
+    let body = serde_json::json!({ "chat_id": chat_parts(chat_id).0, "message_id": id });
     let (status, out) = crate::upload::post(
         &telegram_api("deleteMessage")?,
         "application/json",
@@ -812,7 +890,8 @@ pub(crate) fn edit_message(chat_id: &str, id: i64, text: &str) -> Result<(), Str
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body = serde_json::json!({ "chat_id": chat_id.trim(), "message_id": id, "text": text });
+    let body =
+        serde_json::json!({ "chat_id": chat_parts(chat_id).0, "message_id": id, "text": text });
     let (status, out) = crate::upload::post(
         &telegram_api("editMessageText")?,
         "application/json",
@@ -901,8 +980,7 @@ fn send_telegram(
             } else {
                 ("sendDocument", "document", "audio/wav")
             };
-            let mut m = crate::upload::Multipart::new()
-                .text("chat_id", tg.chat_id.trim())
+            let mut m = multipart_for(&tg.destination())
                 .text("caption", &caption)
                 .file(field, &name, mime, &data);
             if is_mp3 {
@@ -1040,6 +1118,14 @@ pub fn alerts_set(
         if a.name.trim().is_empty() {
             a.name = format!("Alert {}", i + 1);
         }
+        a.chat_id = a.chat_id.trim().chars().take(64).collect();
+        a.topic_id = a
+            .topic_id
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .take(16)
+            .collect();
     }
     store(&app, &settings)?;
     state.alerts.lock().unwrap().settings = settings;
@@ -1338,5 +1424,33 @@ mod tests {
             Some((false, String::new()))
         );
         assert_eq!(parse_verdict("I cannot tell."), None);
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+
+    #[test]
+    fn destinations_split_into_chat_and_topic() {
+        assert_eq!(
+            chat_parts("-1001234567890:57"),
+            ("-1001234567890".into(), Some(57))
+        );
+        assert_eq!(
+            chat_parts("-1001234567890"),
+            ("-1001234567890".into(), None)
+        );
+        assert_eq!(chat_parts("@mychannel"), ("@mychannel".into(), None));
+        assert_eq!(chat_parts(" 123456789:7 "), ("123456789".into(), Some(7)));
+        // Not a topic: nothing before the colon, or non-digits after it.
+        assert_eq!(chat_parts(":7"), (":7".into(), None));
+        assert_eq!(chat_parts("-100:abc"), ("-100:abc".into(), None));
+        assert_eq!(join_destination("-100", "12"), "-100:12");
+        assert_eq!(join_destination("-100", " "), "-100");
+        let body = text_body("-100:12", "hi");
+        assert_eq!(body["chat_id"], "-100");
+        assert_eq!(body["message_thread_id"], 12);
+        assert!(text_body("-100", "hi").get("message_thread_id").is_none());
     }
 }

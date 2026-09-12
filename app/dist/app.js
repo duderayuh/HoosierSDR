@@ -1782,7 +1782,7 @@ if (TAURI) {
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
     $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
+    $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akTopic").value = a.topic_id || ""; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
     akKindUi();
   }
@@ -1794,11 +1794,11 @@ if (TAURI) {
     a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
     a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
     a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
+    a.telegram = $("akTelegram").checked; a.chat_id = $("akChat").value.trim(); a.topic_id = $("akTopic").value.trim(); a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
     return a;
   }
   async function akPersist() {
-    akSettings.telegram.chat_id = $("tgChat").value.trim();
+    akSettings.telegram.chat_id = $("tgChat").value.trim(); akSettings.telegram.topic_id = $("tgTopic").value.trim();
     akSettings.bluesky = { handle: $("bsHandle").value.trim() };
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
     try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
@@ -1819,7 +1819,7 @@ if (TAURI) {
   async function akRefresh() {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
+      $("tgChat").value = v.settings.telegram.chat_id; $("tgTopic").value = v.settings.telegram.topic_id || ""; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
       $("bsHandle").value = v.settings.bluesky.handle; $("bsPassword").placeholder = v.has_bluesky ? "saved on this Mac" : "xxxx-xxxx-xxxx-xxxx"; $("bsMeta").textContent = v.has_bluesky ? (v.settings.bluesky.handle ? "configured" : "password saved — add a handle") : "no app password";
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;

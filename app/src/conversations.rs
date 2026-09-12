@@ -694,7 +694,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let n_pieces = c.pieces.len();
     let (tg, ollama) = crate::alerts::shared_settings(&state);
     let chat = if r.chat_id.trim().is_empty() {
-        tg.chat_id.clone()
+        tg.destination()
     } else {
         r.chat_id.clone()
     };
