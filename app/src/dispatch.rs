@@ -888,11 +888,23 @@ fn url_encode(s: &str) -> String {
 /// Ask Nominatim for `address` near home. Bounded to the search box so a
 /// mis-heard street cannot land in another state.
 fn nominatim(s: &Settings, address: &str) -> Result<Geo, String> {
-    let q = if s.region_hint.is_empty() {
-        address.to_string()
-    } else {
-        format!("{address}, {}", s.region_hint)
-    };
+    // The hint names one town, and the metro has a dozen. A hospital in the
+    // next one along ("IU Health Fishers" against a hint of "Indianapolis,
+    // IN") matches nothing at all, even though it sits well inside the
+    // search box — so when the hint finds nothing, ask again without it.
+    // The viewbox is what actually stops a mis-heard street landing in
+    // another state; the hint only ever helped a bare street address.
+    if !s.region_hint.is_empty() {
+        let hinted = nominatim_q(s, &format!("{address}, {}", s.region_hint))?;
+        if hinted.is_some() {
+            return Ok(hinted);
+        }
+    }
+    nominatim_q(s, address)
+}
+
+fn nominatim_q(s: &Settings, q: &str) -> Result<Geo, String> {
+    let q = q.to_string();
     // Bounding box: search_radius_km around home (1° lat ≈ 111 km).
     let dlat = s.search_radius_km / 111.0;
     let dlon = s.search_radius_km / (111.0 * s.home_lat.to_radians().cos().abs().max(0.05));
@@ -2440,6 +2452,82 @@ mod tests {
         assert_eq!(
             geocode_query("7510 Rogate Drive, Indianapolis", ""),
             "7510 Rogate Drive, Indianapolis"
+        );
+    }
+
+    /// A stand-in for Nominatim that behaves the way the real one does here:
+    /// a query naming the wrong town finds nothing, the bare name finds the
+    /// hospital. Records what it was asked, so the retry can be seen.
+    fn fake_geocoder(hits: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            for stream in l.incoming().take(4) {
+                let mut s = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut line = String::new();
+                BufReader::new(&s).read_line(&mut line).unwrap_or(0);
+                let _ = tx.send(line.clone());
+                // Only the query that does not name a town is answered.
+                let found = line.contains(hits) && !line.contains("Indianapolis");
+                let body = if found {
+                    r#"[{"lat":"39.9870156","lon":"-85.9294681","display_name":"IU Health Fishers Hospital"}]"#
+                } else {
+                    "[]"
+                };
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn a_place_in_the_next_town_is_still_found() {
+        let (url, asked) = fake_geocoder("Fishers");
+        let mut s = Settings {
+            geocoder_url: url,
+            region_hint: "Indianapolis, IN".into(),
+            home_lat: 39.7684,
+            home_lon: -86.1581,
+            search_radius_km: 40.0,
+            geocoder_email: String::new(),
+            ..Default::default()
+        };
+        let got = nominatim(&s, "IU Health Fishers").expect("the geocoder errored");
+        let (lat, lon, _) = got.expect("the hospital was not found at all");
+        assert!((lat - 39.987).abs() < 0.01 && (lon + 85.929).abs() < 0.01, "({lat}, {lon})");
+
+        // It asked twice: with the hint, then without it once that missed.
+        let first = asked.recv().unwrap();
+        let second = asked.recv().unwrap();
+        assert!(first.contains("Indianapolis"), "the hint was never tried: {first}");
+        assert!(!second.contains("Indianapolis"), "the retry kept the hint: {second}");
+        // And the box still bounds both, which is what keeps a mis-heard
+        // street out of another state.
+        for q in [&first, &second] {
+            assert!(q.contains("bounded=1"), "an unbounded search: {q}");
+            assert!(q.contains("viewbox="), "no viewbox: {q}");
+        }
+
+        // With no hint configured there is only ever one request.
+        let (url2, asked2) = fake_geocoder("Fishers");
+        s.geocoder_url = url2;
+        s.region_hint = String::new();
+        assert!(nominatim(&s, "IU Health Fishers").unwrap().is_some());
+        assert!(asked2.recv().is_ok());
+        assert!(
+            asked2.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "asked twice with no hint to drop"
         );
     }
 
