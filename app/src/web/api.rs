@@ -152,6 +152,49 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "retention_preview" => jv(crate::retention::retention_preview(app.clone(), arg(args, "settings")?).await?),
         "retention_apply" => jv(crate::retention::retention_apply(app.clone(), state).await?),
         "retention_usage" => jv(crate::retention::retention_usage(app.clone()).await?),
+        "backup_get" => jv(crate::backup::backup_get(app.clone(), state)),
+        "backup_sizes" => jv(crate::backup::backup_sizes(app.clone(), state)),
+        "backup_set" => jv(crate::backup::backup_set(app.clone(), state, arg(args, "settings")?)?),
+        "backup_credentials" => jv(crate::backup::backup_credentials(
+            arg(args, "dest")?,
+            arg(args, "access")?,
+            arg(args, "secret")?,
+        )?),
+        // `show` is forced off here whatever was asked for: the passphrase
+        // is the only way into every sealed backup, and it does not cross
+        // the network the way no other secret does. It can be set from a
+        // phone; it can only be read on the computer itself.
+        "backup_passphrase" => jv(crate::backup::backup_passphrase(
+            app.clone(),
+            state,
+            arg(args, "set")?,
+            false,
+        )?),
+        "backup_check" => jv(crate::backup::backup_check(state, arg(args, "dest")?)?),
+        "backup_run" => jv(crate::backup::backup_run(app.clone(), state, arg(args, "dest")?)?),
+        "backup_list" => jv(crate::backup::backup_list(state, arg(args, "dest")?)?),
+        "backup_forget" => jv(crate::backup::backup_forget(
+            state,
+            arg(args, "dest")?,
+            arg(args, "name")?,
+        )?),
+        "backup_peek" => jv(crate::backup::backup_peek(
+            app.clone(),
+            state,
+            arg(args, "dest")?,
+            arg(args, "name")?,
+        )?),
+        "backup_restore" => jv(crate::backup::backup_restore(
+            app.clone(),
+            state,
+            arg(args, "dest")?,
+            arg(args, "name")?,
+            arg(args, "passphrase")?,
+            arg(args, "database")?,
+            arg(args, "config")?,
+            arg(args, "audio")?,
+        )?),
+        "backup_cancel_restore" => jv(crate::backup::backup_cancel_restore(app.clone())?),
         "channel_sets_get" => jv(crate::channels::channel_sets_get(app.clone())),
         "channel_sets_set" => jv(crate::channels::channel_sets_set(app.clone(), arg(args, "settings")?)?),
         "events_stats" => jv(crate::events::events_stats(
