@@ -534,6 +534,62 @@ fn check(status: u16, text: &str) -> Result<String, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// addresses that can be tapped
+// ---------------------------------------------------------------------------
+
+/// A link that opens this place in Google Maps.
+///
+/// Coordinates win when the run has them: the address as heard on the radio
+/// is often a hundred-block ("1400 block of Main") that Google will guess
+/// at, while the pin the app already worked out is the actual place. The
+/// address is the fallback, with the region appended so a bare street name
+/// does not land in another state.
+pub fn maps_url(lat: Option<f64>, lon: Option<f64>, address: &str, region: &str) -> String {
+    const BASE: &str = "https://www.google.com/maps/search/?api=1&query=";
+    if let (Some(a), Some(b)) = (lat, lon) {
+        if (-90.0..=90.0).contains(&a) && (-180.0..=180.0).contains(&b) {
+            return format!("{BASE}{a:.6}%2C{b:.6}");
+        }
+    }
+    let addr = address.trim();
+    if addr.is_empty() {
+        return String::new();
+    }
+    let q = if region.trim().is_empty() {
+        addr.to_string()
+    } else {
+        format!("{addr}, {}", region.trim())
+    };
+    format!("{BASE}{}", crate::dispatch::url_encode(&q))
+}
+
+/// The three characters Telegram's HTML mode reads as markup.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// `text` as Telegram HTML, with every occurrence of `needle` turned into a
+/// link to `url`. `None` when the needle is not in the text, so the caller
+/// keeps sending plain text rather than paying for a parse mode it does not
+/// need.
+///
+/// The whole message is escaped first and the anchor put in afterwards, so
+/// a transcript containing `<` or `&` cannot break the markup — and the
+/// anchor, being added last, is the only markup in the message.
+pub fn link_in(text: &str, needle: &str, url: &str) -> Option<String> {
+    let needle = needle.trim();
+    if needle.is_empty() || url.is_empty() || !text.contains(needle) {
+        return None;
+    }
+    let anchor = format!(
+        "<a href=\"{}\">{}</a>",
+        html_escape(url),
+        html_escape(needle)
+    );
+    Some(html_escape(text).replace(&html_escape(needle), &anchor))
+}
+
 /// A plain text message to `dest` (`chat` or `chat:topic`), giving up after
 /// `timeout_secs`.
 pub fn send_text(dest: &str, text: &str, timeout_secs: u64) -> Result<String, String> {
@@ -611,18 +667,47 @@ pub(crate) fn send_text_reply(
     text: &str,
     reply_to: Option<i64>,
 ) -> Result<i64, String> {
+    send_text_reply_html(chat_id, text, None, reply_to)
+}
+
+/// The same, optionally sent as Telegram HTML so an address can be a link.
+///
+/// If Telegram refuses the markup, the plain text goes instead: a tappable
+/// address is a convenience, and losing a cardiac arrest over an unescaped
+/// character would not be.
+pub(crate) fn send_text_reply_html(
+    chat_id: &str,
+    text: &str,
+    html: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<i64, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let mut body = text_body(chat_id, text);
-    if let Some(id) = reply_to {
-        body["reply_parameters"] = reply_json(id);
+    let send = |as_html: Option<&str>| -> Result<(u16, String), String> {
+        let mut body = text_body(chat_id, as_html.unwrap_or(text));
+        if as_html.is_some() {
+            body["parse_mode"] = "HTML".into();
+            // Otherwise every run arrives with a Google Maps preview card
+            // stapled underneath it.
+            body["link_preview_options"] = serde_json::json!({ "is_disabled": true });
+        }
+        if let Some(id) = reply_to {
+            body["reply_parameters"] = reply_json(id);
+        }
+        crate::upload::post(
+            &telegram_api("sendMessage")?,
+            "application/json",
+            body.to_string().into_bytes(),
+        )
+    };
+    let (mut status, mut out) = send(html)?;
+    if html.is_some() && !(200..300).contains(&status) {
+        eprintln!(
+            "[alerts] Telegram refused the linked message ({status}), sending it plain"
+        );
+        (status, out) = send(None)?;
     }
-    let (status, out) = crate::upload::post(
-        &telegram_api("sendMessage")?,
-        "application/json",
-        body.to_string().into_bytes(),
-    )?;
     check(status, &out)?;
     message_id(&out).ok_or("Telegram reply had no message id".into())
 }
@@ -700,20 +785,34 @@ pub(crate) fn send_photo_reply(
     chat_id: &str,
     png: &[u8],
     caption: &str,
+    html: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<i64, String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let cap: String = caption.chars().take(1000).collect();
-    let mut m = multipart_for(chat_id)
-        .text("caption", &cap)
-        .file("photo", "map.png", "image/png", png);
-    if let Some(id) = reply_to {
-        m = m.text("reply_parameters", &reply_json(id).to_string());
+    let plain: String = caption.chars().take(1000).collect();
+    // The link markup costs characters the 1024 cap does not know about, so
+    // the HTML form is only used when it still fits.
+    let linked = html.map(|h| h.to_string()).filter(|h| h.chars().count() <= 1000);
+    let send = |as_html: Option<&String>| -> Result<(u16, String), String> {
+        let mut m = multipart_for(chat_id)
+            .text("caption", as_html.unwrap_or(&plain))
+            .file("photo", "map.png", "image/png", png);
+        if as_html.is_some() {
+            m = m.text("parse_mode", "HTML");
+        }
+        if let Some(id) = reply_to {
+            m = m.text("reply_parameters", &reply_json(id).to_string());
+        }
+        let (ctype, body) = m.finish();
+        crate::upload::post(&telegram_api("sendPhoto")?, &ctype, body)
+    };
+    let (mut status, mut out) = send(linked.as_ref())?;
+    if linked.is_some() && !(200..300).contains(&status) {
+        eprintln!("[alerts] Telegram refused the linked caption ({status}), sending it plain");
+        (status, out) = send(None)?;
     }
-    let (ctype, body) = m.finish();
-    let (status, out) = crate::upload::post(&telegram_api("sendPhoto")?, &ctype, body)?;
     check(status, &out)?;
     message_id(&out).ok_or_else(|| "Telegram photo had no message id".into())
 }
@@ -982,6 +1081,65 @@ pub async fn ollama_capabilities(url: String, model: String) -> Result<Vec<Strin
 }
 
 #[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn a_placed_run_links_to_its_pin_not_its_wording() {
+        // "1400 block of" is not a place Google can find; the pin is.
+        let u = maps_url(Some(39.7684), Some(-86.1581), "1400 block of Example St", "Testville, EX");
+        assert_eq!(
+            u,
+            "https://www.google.com/maps/search/?api=1&query=39.768400%2C-86.158100"
+        );
+    }
+
+    #[test]
+    fn an_unplaced_run_falls_back_to_the_address_with_its_town() {
+        let u = maps_url(None, None, "8241 East 41st Street", "Testville, EX");
+        assert!(u.contains("8241+East+41st+Street"), "{u}");
+        assert!(u.contains("Testville%2C+EX"), "the town was dropped: {u}");
+        // Nothing to point at at all.
+        assert_eq!(maps_url(None, None, "  ", "Testville, EX"), "");
+        // A nonsense pin is not a pin.
+        let bad = maps_url(Some(999.0), Some(0.0), "8241 East 41st Street", "");
+        assert!(bad.contains("8241"), "an out-of-range pin was used: {bad}");
+    }
+
+    #[test]
+    fn the_address_becomes_the_link_and_nothing_else_becomes_markup() {
+        let msg = "Cardiac Arrest · 8241 East 41st Street\nMedic 21\nCaller said <hold> & wait";
+        let html = link_in(msg, "8241 East 41st Street", "https://maps.example/?q=1&z=2")
+            .expect("the address was not linked");
+        assert!(
+            html.contains("<a href=\"https://maps.example/?q=1&amp;z=2\">8241 East 41st Street</a>"),
+            "{html}"
+        );
+        // The transcript's own angle brackets and ampersand are escaped, so
+        // Telegram cannot read them as tags and reject the message.
+        assert!(html.contains("&lt;hold&gt; &amp; wait"), "{html}");
+        // Exactly one tag pair: the anchor. Nothing else opened a tag.
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
+        assert_eq!(html.matches('<').count() - html.matches("</a>").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn a_message_that_never_names_the_address_is_left_alone() {
+        // No markup and no parse mode for a template that doesn't use it.
+        assert!(link_in("🚨 Arrest on the north side", "8241 East 41st Street", "https://x/").is_none());
+        assert!(link_in("8241 East 41st Street", "", "https://x/").is_none());
+        assert!(link_in("8241 East 41st Street", "8241 East 41st Street", "").is_none());
+    }
+
+    #[test]
+    fn an_address_named_twice_is_linked_both_times() {
+        let msg = "8241 East 41st Street — units to 8241 East 41st Street";
+        let html = link_in(msg, "8241 East 41st Street", "https://x/").unwrap();
+        assert_eq!(html.matches("<a href").count(), 2, "{html}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -996,7 +1154,7 @@ mod tests {
         // A picture is a send like any other. This is the only thing
         // standing between a test build and a real chat.
         assert!(telegram_api("sendPhoto").is_err());
-        let blocked = send_photo_reply("-1001", &[1, 2, 3], "caption", None);
+        let blocked = send_photo_reply("-1001", &[1, 2, 3], "caption", None, None);
         assert!(
             blocked
                 .as_ref()

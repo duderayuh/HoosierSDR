@@ -95,6 +95,7 @@ w.__exercise = async () => {
     if (!w.document.getElementById("twMap").checked) console.log("PAGE ERROR: the saved map setting did not reach the form");
     if (shown("twAudioWrap")) console.log("PAGE ERROR: a run tripwire is offered call audio");
     if (!w.document.getElementById("twMsgPrev").innerHTML.includes("with a map of the run")) console.log("PAGE ERROR: the preview does not mention the map");
+    if (!w.document.getElementById("twMsgPrev").innerHTML.includes("opens Google Maps")) console.log("PAGE ERROR: nothing says the address becomes a link");
     w.twEdit("t1", JSON.parse(JSON.stringify(TW())), null);
     await new Promise((r) => setTimeout(r, 50));
     if (shown("twMapWrap")) console.log("PAGE ERROR: a call tripwire is offered a map it cannot draw");

@@ -18,7 +18,7 @@
     call: ["{name}", "{tgname}", "{tgdesc}", "{unitname}", "{time}", "{transcript}", "{keywords}", "{ai}"],
     conversation: ["{rule}", "{summary}", "{tgname}", "{tgdesc}", "{unitnames}", "{calls}", "{duration}", "{started}", "{transcript}", "{revision}"],
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
-    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{where}", "{pathway}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
+    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{where}", "{pathway}", "{maps}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
   let list = [], folders = [], stats = {}, view = null, recipes = null;
   // Which folders are rolled up, per listener rather than per install.
@@ -706,10 +706,11 @@
         .replaceAll("{address}", "1400 block of Example Street").replaceAll("{units}", "Medic 21, Engine 9")
         .replaceAll("{summary}", "…what the dispatcher said…").replaceAll("{time}", "12:34:56")
         .replaceAll("{pathway}", "‹the pathway that matched›")
+        .replaceAll("{maps}", "https://www.google.com/maps/search/?api=1&query=…")
         .replaceAll("{where}", "Closest hospital: Example General — 3.0 mi, 8 min by road\nECMO centre: Example Heart — 6.8 mi, 15 min by road")
         .replaceAll("{place}", "Example General").replaceAll("{nearest}", "Example Heart").replaceAll("{km}", "10.9").replaceAll("{mins}", "15")
         .replaceAll("{hospital}", "Example General").replaceAll("{report}", "…the crew's report…").replaceAll("{ai}", "");
-      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${esc(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}</div>`;
+      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${esc(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}${/\{address\}/.test(tpl) ? " · the address opens Google Maps" : ""}</div>`;
       return;
     }
     const tr = s && tried.get(s.id);

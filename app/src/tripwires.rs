@@ -1022,7 +1022,7 @@ pub fn is_narrowed(t: &Tripwire) -> bool {
 
 /// What an incident tripwire can say in its message, beyond the standard
 /// tokens: `{calltype}`, `{address}`, `{units}`, `{place}`, `{km}`,
-/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`, `{where}`,
+/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`, `{where}`, `{maps}`,
 /// `{pathway}`.
 ///
 /// `{where}` is the care pathway's answer — every hospital the run needs,
@@ -1034,6 +1034,7 @@ pub fn incident_fields(
     places: &crate::places::Settings,
     feature: &str,
     reports: &[crate::link::LinkedReport],
+    region: &str,
 ) -> serde_json::Value {
     let mut v = serde_json::json!({
         "calltype": i.call_type,
@@ -1048,6 +1049,10 @@ pub fn incident_fields(
         "report": "",
         "where": crate::pathways::say_all(&i.targets),
         "pathway": i.pathway,
+        // The address in the message is turned into a link to this, and it
+        // is a token in its own right for anyone who would rather place it
+        // themselves.
+        "maps": crate::alerts::maps_url(i.lat, i.lon, &i.address, region),
     });
     if let (Some(lat), Some(lon)) = (i.lat, i.lon) {
         // The nearest place that can do the thing this tripwire cares
@@ -1164,7 +1169,18 @@ fn send_map(
         })
         .collect();
     let shot = crate::mapshot::draw(app, (lat, lon), &legs)?;
-    crate::alerts::send_photo_reply(dest, &shot.png, &photo_caption(&i, &shot), reply_to)
+    let caption = photo_caption(&i, &shot);
+    // The caption names the address too, so it gets the same link.
+    let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
+    let url = crate::alerts::maps_url(i.lat, i.lon, &i.address, &region);
+    let linked = crate::alerts::link_in(&caption, &i.address, &url);
+    crate::alerts::send_photo_reply(
+        dest,
+        &shot.png,
+        &caption,
+        linked.as_deref(),
+        reply_to,
+    )
 }
 
 /// Does this run trip this tripwire?
@@ -1573,6 +1589,9 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
     if list.is_empty() {
         return;
     }
+    // For the map link, when the run never got a pin and the address is all
+    // there is to go on.
+    let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
     let (places, reports) = {
         let places = state.places.lock().unwrap().settings.clone();
         let db = state.db.lock().unwrap().clone();
@@ -1602,7 +1621,8 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
             continue;
         }
         let f = incident_facts(i);
-        let mut extra = incident_fields(i, &places, &t.when.incident.near_feature, &reports);
+        let mut extra =
+            incident_fields(i, &places, &t.when.incident.near_feature, &reports, &region);
         // By road if a router is running; the straight line otherwise, and
         // the message never pretends otherwise.
         if let (Some(lat), Some(lon)) = (i.lat, i.lon) {
@@ -1917,6 +1937,16 @@ fn fire_with(
             fields.as_ref(),
         )
     };
+    // The address, made tappable. Only when the rendered message actually
+    // contains it — a template that never mentions the address gets no
+    // markup and no parse mode.
+    let linked = fields.as_ref().and_then(|v| {
+        crate::alerts::link_in(
+            &message,
+            v["address"].as_str().unwrap_or(""),
+            v["maps"].as_str().unwrap_or(""),
+        )
+    });
     let _ = app.emit(
         "alert",
         serde_json::json!({ "name": t.name, "tg": f.tg, "message": message, "tone": t.send.tone && !is_reply, "call": f.id, "follow": is_reply }),
@@ -1962,6 +1992,7 @@ fn fire_with(
         &dest,
         &f,
         &message,
+        linked.as_deref(),
         &t.name,
         t.send.audio,
         if is_reply { 0 } else { t.send.earlier_calls },
@@ -2113,6 +2144,7 @@ fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
                 &th.dest,
                 &f,
                 &message,
+                None,
                 &t.name,
                 t.send.audio,
                 0,
@@ -2155,6 +2187,9 @@ fn deliver(
     dest: &str,
     f: &CallFacts,
     message: &str,
+    // The same message as Telegram HTML, when the address in it can be a
+    // link. `None` sends plain text, as everything did before.
+    html: Option<&str>,
     title: &str,
     audio: bool,
     earlier: u32,
@@ -2167,7 +2202,7 @@ fn deliver(
         None
     };
     match clip {
-        None => crate::alerts::send_text_reply(dest, message, reply_to)
+        None => crate::alerts::send_text_reply_html(dest, message, html, reply_to)
             .map(|id| ("sent".to_string(), vec![id])),
         Some((path, is_mp3)) => {
             let res = crate::alerts::send_audio_reply(
@@ -3204,7 +3239,7 @@ mod tests {
             summary: "Medic 7 inbound, ROSC".into(),
             how: "Medic 7 was sent to this run".into(),
         }];
-        let fields = incident_fields(&r, &places, "stemi", &reports);
+        let fields = incident_fields(&r, &places, "stemi", &reports, "Testville, EX");
         assert_eq!(fields["nearest"], "Example Heart");
         assert_eq!(fields["km"], "2.2");
         assert_eq!(fields["place"], "Example General", "the nearest place of any kind");
@@ -3245,7 +3280,7 @@ mod tests {
             target("Closest hospital", "Example General", 3200.0, 420.0, "road"),
             target("ECMO centre", "Example Heart", 21000.0, 1500.0, "road"),
         ];
-        let fields = incident_fields(&r, &places, "stemi", &[]);
+        let fields = incident_fields(&r, &places, "stemi", &[], "Testville, EX");
         assert_eq!(fields["pathway"], "Cardiac arrest");
 
         let msg = render(
@@ -3362,13 +3397,13 @@ mod tests {
         // The pathway reached the same place {nearest} names, but only as
         // the crow flies.
         r.targets = vec![target("Cath lab", "Example Heart", 2200.0, 300.0, "straight")];
-        let fields = incident_fields(&r, &places, "stemi", &[]);
+        let fields = incident_fields(&r, &places, "stemi", &[], "Testville, EX");
         assert_eq!(fields["nearest"], "Example Heart");
         assert_eq!(fields["mins"], "", "a guess was offered as an ETA");
 
         // Routed by road, the same leg does fill the token.
         r.targets = vec![target("Cath lab", "Example Heart", 2200.0, 300.0, "road")];
-        let fields = incident_fields(&r, &places, "stemi", &[]);
+        let fields = incident_fields(&r, &places, "stemi", &[], "Testville, EX");
         assert_eq!(fields["mins"], "5");
     }
 
