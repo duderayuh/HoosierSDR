@@ -31,6 +31,7 @@ mod follow;
 mod hook;
 mod library;
 mod link;
+mod mapshot;
 mod models;
 mod names;
 mod pathways;

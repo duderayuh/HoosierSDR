@@ -233,6 +233,11 @@ pub struct Send {
     pub chat: String,
     pub message: String,
     pub audio: bool,
+    /// Attach a map of the run: where it is, and the way to each hospital
+    /// the care pathway picked. Runs only (a call has no position), and off
+    /// unless asked for — it costs map tiles and a router call.
+    #[serde(default)]
+    pub map: bool,
     /// Also attach this many earlier calls on the talkgroup…
     pub earlier_calls: u32,
     /// …heard within this many seconds before.
@@ -257,6 +262,7 @@ impl Default for Send {
             chat: String::new(),
             message: "🚨 {name}\n{tgname} · {unitname} · {time}\n{transcript}".into(),
             audio: true,
+            map: false,
             earlier_calls: 0,
             earlier_window_secs: 120,
             tone: true,
@@ -446,6 +452,7 @@ pub fn migrate(
                 chat,
                 message: a.message.clone(),
                 audio: a.attach_audio,
+                map: false,
                 earlier_calls: a.combine_prev,
                 earlier_window_secs: a.combine_window_secs,
                 tone: a.tone,
@@ -574,6 +581,7 @@ fn from_analyzer(r: &crate::analyzers::AnalyzerRule, al: &crate::alerts::Setting
             chat,
             message: r.message.clone(),
             audio: r.attach_audio,
+            map: false,
             earlier_calls: 0,
             earlier_window_secs: 120,
             tone: false,
@@ -873,7 +881,8 @@ pub fn is_narrowed(t: &Tripwire) -> bool {
 
 /// What an incident tripwire can say in its message, beyond the standard
 /// tokens: `{calltype}`, `{address}`, `{units}`, `{place}`, `{km}`,
-/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`, `{where}`.
+/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`, `{where}`,
+/// `{pathway}`.
 ///
 /// `{where}` is the care pathway's answer — every hospital the run needs,
 /// with the drive to each — and it is the one worth putting in a message
@@ -926,6 +935,95 @@ pub fn incident_fields(
         v["report"] = r.summary.clone().into();
     }
     v
+}
+
+/// How many hospitals get a drawn route. Each one is a router call on the
+/// send thread, and a picture with four lines crossing it says less than
+/// one with two.
+const DRAWN: usize = 2;
+
+/// The caption under the picture: what the run is, and where it would go.
+/// Kept short — Telegram allows 1024 characters here, and the alert itself
+/// has already said everything else.
+pub fn photo_caption(i: &crate::dispatch::Incident, shot: &crate::mapshot::Shot) -> String {
+    let mut out = format!("{} {} · {}", i.emoji, i.call_type, i.address);
+    let where_to = crate::pathways::say_all(&i.targets);
+    if !where_to.is_empty() {
+        out.push('\n');
+        // Capped so the footer below always survives: the credit at the end
+        // of it is a condition of using the tiles, not decoration, and the
+        // sender truncates from the front.
+        if where_to.chars().count() > 700 {
+            out.extend(where_to.chars().take(700));
+            out.push('…');
+        } else {
+            out.push_str(&where_to);
+        }
+    }
+    let mut foot = Vec::new();
+    // A pin fitted from the hundred-block grid is good to a few hundred
+    // metres. Drawn, it looks exactly as certain as a rooftop match, so the
+    // caption has to say which one this is.
+    if !matches!(i.geocode.as_str(), "ok" | "manual" | "corrected") {
+        foot.push("position approximate".into());
+    }
+    if shot.bar_m > 0.0 {
+        foot.push(format!("bar {}", crate::mapshot::say_bar(shot.bar_m)));
+    }
+    if shot.missing > 0 {
+        // Say so rather than let the reader wonder what the grey squares
+        // were hiding.
+        foot.push(format!(
+            "{} map tile{} missing",
+            shot.missing,
+            if shot.missing == 1 { "" } else { "s" }
+        ));
+    }
+    foot.push("© OpenStreetMap contributors".into());
+    out.push('\n');
+    out.push_str(&foot.join(" · "));
+    out
+}
+
+/// Draw the run and send it as a reply to the alert. Returns the photo's
+/// message id.
+///
+/// A failure here is reported but never fails the alert: the words are the
+/// alert, and a missing tile server is no reason to lose a cardiac arrest.
+fn send_map(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    dest: &str,
+    incident: i64,
+    reply_to: Option<i64>,
+) -> Result<i64, String> {
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return Err("library not open".into());
+    };
+    let i = {
+        let c = db.lock().unwrap();
+        crate::dispatch::inc_get(&c, incident)?.ok_or("no such run")?
+    };
+    let Some((lat, lon)) = i.lat.zip(i.lon) else {
+        return Err("the run has no position".into());
+    };
+    // The route shapes, which the stored targets don't carry — they hold
+    // the distance, not the line.
+    let legs: Vec<crate::mapshot::Leg> = i
+        .targets
+        .iter()
+        .take(DRAWN)
+        .map(|t| {
+            let r = crate::routing::shape(state, (lat, lon), (t.lat, t.lon));
+            crate::mapshot::Leg {
+                to: (t.lat, t.lon),
+                line: r.line,
+                road: r.how == "road",
+            }
+        })
+        .collect();
+    let shot = crate::mapshot::draw(app, (lat, lon), &legs)?;
+    crate::alerts::send_photo_reply(dest, &shot.png, &photo_caption(&i, &shot), reply_to)
 }
 
 /// Does this run trip this tripwire?
@@ -1741,7 +1839,7 @@ fn fire_with(
         reply_to.as_ref().map(|r| r.1),
     );
     match res {
-        Ok((detail, ids)) => {
+        Ok((detail, mut ids)) => {
             {
                 let mut st = state.tripwires.lock().unwrap();
                 if let Some((_, root)) = &reply_to {
@@ -1773,11 +1871,25 @@ fn fire_with(
                     }
                 }
             }
-            let detail = if is_reply {
+            let mut detail = if is_reply {
                 format!("follow-up {detail}")
             } else {
                 detail
             };
+            // The picture hangs off the message that was just sent, so it
+            // is drawn after it and never in its way. The thread root is
+            // already recorded above, so a photo id can't become one.
+            if t.send.map {
+                if let Some(inc) = incident {
+                    match send_map(app, &state, &dest, inc, ids.first().copied()) {
+                        Ok(id) => {
+                            ids.push(id);
+                            detail.push_str(", with a map");
+                        }
+                        Err(e) => detail.push_str(&format!(", map failed: {e}")),
+                    }
+                }
+            }
             rec(
                 app,
                 &t,
@@ -2049,6 +2161,8 @@ pub fn recipes() -> Vec<Recipe> {
                 },
                 send: Send {
                     message: "{calltype} · {address}\n{units}\n{summary}\n{where}".into(),
+                    // This recipe is about runs on a map, so it shows one.
+                    map: true,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2788,6 +2902,96 @@ mod tests {
         assert!(msg.contains("ECMO centre"), "{msg}");
         assert!(msg.contains("Example Heart"), "{msg}");
         assert!(msg.contains('7'), "no drive time for the 420 s leg: {msg}");
+    }
+
+    #[test]
+    fn the_picture_is_credited_and_says_what_it_is_showing() {
+        let mut r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        r.targets = vec![
+            target("Closest hospital", "Example General", 3200.0, 420.0, "road"),
+            target("ECMO centre", "Example Heart", 21000.0, 1500.0, "road"),
+        ];
+        let shot = crate::mapshot::Shot {
+            png: Vec::new(),
+            bar_m: 3218.688,
+            missing: 0,
+        };
+        let cap = photo_caption(&r, &shot);
+        assert!(!cap.contains("approximate"), "an exact pin was hedged: {cap}");
+        assert!(cap.contains("Cardiac Arrest · 1 Example Street"), "{cap}");
+        assert!(cap.contains("Example General"), "{cap}");
+        assert!(cap.contains("ECMO centre"), "{cap}");
+        assert!(cap.contains("bar 2 mi"), "the scale bar is unexplained: {cap}");
+        assert!(
+            cap.contains("© OpenStreetMap contributors"),
+            "the tiles are uncredited: {cap}"
+        );
+        // Telegram's own limit, which the sender also truncates to.
+        assert!(cap.chars().count() <= 1024, "{} chars", cap.chars().count());
+
+        // A picture with holes in it says so.
+        let holes = crate::mapshot::Shot {
+            png: Vec::new(),
+            bar_m: 0.0,
+            missing: 3,
+        };
+        let cap = photo_caption(&r, &holes);
+        assert!(cap.contains("3 map tiles missing"), "{cap}");
+        assert!(!cap.contains("bar "), "a bar was described but not drawn: {cap}");
+    }
+
+    #[test]
+    fn a_pin_fitted_from_the_grid_is_not_drawn_as_a_certainty() {
+        let shot = crate::mapshot::Shot {
+            png: Vec::new(),
+            bar_m: 1609.344,
+            missing: 0,
+        };
+        let mut r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        r.geocode = "grid".into();
+        let cap = photo_caption(&r, &shot);
+        assert!(
+            cap.contains("position approximate"),
+            "a grid pin was drawn as exact: {cap}"
+        );
+        // A corrected street name is a real geocode, not a guess.
+        r.geocode = "corrected".into();
+        assert!(!photo_caption(&r, &shot).contains("approximate"));
+        r.geocode = "manual".into();
+        assert!(!photo_caption(&r, &shot).contains("approximate"));
+    }
+
+    #[test]
+    fn the_credit_survives_a_caption_that_runs_long() {
+        let mut r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        // Six legs with names far longer than any real hospital's.
+        r.targets = (0..6)
+            .map(|n| {
+                target(
+                    &format!("Destination number {n} with a very long label indeed"),
+                    &format!("{} Regional Medical Center and Trauma Campus", "Example ".repeat(8)),
+                    4000.0,
+                    600.0,
+                    "road",
+                )
+            })
+            .collect();
+        let shot = crate::mapshot::Shot {
+            png: Vec::new(),
+            bar_m: 1609.344,
+            missing: 0,
+        };
+        let cap = photo_caption(&r, &shot);
+        assert!(
+            cap.contains("© OpenStreetMap contributors"),
+            "the credit was pushed out: {cap}"
+        );
+        // And it is still there after the sender's own truncation.
+        let sent: String = cap.chars().take(1000).collect();
+        assert!(
+            sent.contains("© OpenStreetMap contributors"),
+            "the credit was truncated away by the sender: {sent}"
+        );
     }
 
     #[test]
