@@ -19,7 +19,7 @@
 //! the local model, and if it cannot be reached nothing is linked, because a
 //! wrong join is worse than none.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -35,9 +35,7 @@ const CLEAR_WIN_RATIO: f64 = 0.45;
 /// What a hospital report says about itself.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
-    pub id: i64,
     pub at: i64,
-    pub tg: u16,
     /// Summary and transcript, which is where the callsign is said.
     pub text: String,
 }
@@ -290,19 +288,6 @@ pub fn reports_for(c: &Connection, incident: i64, places: &crate::places::Settin
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
 }
 
-/// The run a conversation was linked to, if any.
-pub fn incident_of(c: &Connection, conversation: i64) -> Option<i64> {
-    c.query_row(
-        "SELECT incident FROM conversations WHERE id = ?1",
-        [conversation],
-        |r| r.get::<_, Option<i64>>(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .flatten()
-}
-
 /// Join a stored conversation to a run, if the rules can see which one.
 ///
 /// Called after a conversation is stored. Everything here is rules; the
@@ -315,20 +300,18 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
 
     let (report, open, vocab) = {
         let c = db.lock().unwrap();
-        let (at, tg, summary, transcript, already): (i64, i64, String, String, Option<i64>) = c
+        let (at, summary, transcript, already): (i64, String, String, Option<i64>) = c
             .query_row(
-                "SELECT first_at, tg, summary, transcript, incident FROM conversations WHERE id = ?1",
+                "SELECT first_at, summary, transcript, incident FROM conversations WHERE id = ?1",
                 [conversation],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .ok()?;
         if already.is_some() {
             return None;
         }
         let report = Report {
-            id: conversation,
             at,
-            tg: tg as u16,
             text: format!("{summary}\n{transcript}"),
         };
         (report, open_dispatches(&c, at), vocabulary(&c))
@@ -420,9 +403,7 @@ mod tests {
 
     fn report(at: i64, text: &str) -> Report {
         Report {
-            id: 1,
             at,
-            tg: 10259,
             text: text.into(),
         }
     }
@@ -573,9 +554,7 @@ mod real {
         let (mut no_sign, mut no_runs, mut unmatched) = (0, 0, 0);
         for (id, at, tg, tg_name, summary, transcript) in &rows {
             let report = Report {
-                id: *id,
                 at: *at,
-                tg: *tg,
                 text: format!("{summary}\n{transcript}"),
             };
             let open = open_dispatches(&c, *at);
