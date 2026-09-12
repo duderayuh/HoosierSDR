@@ -72,7 +72,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · ➖ deliberately out of scope
 | Decoder-state panel (NAC, WACN, site, neighbours, bandplan) | ✅ | ✅ | — | ✅ NAC, WACN, system, RFSS/site, alternates, band plans, patches, neighbours (0x3C) |
 | Event log (moves, affiliations, patches, denials) | ✅ | ✅ | — | ✅ moves, patches, busy, out-of-band, emergency, aliases, positions; affiliations in their own table |
 | Emergency indication + alert | ✅ | ✅ | LED | ✅ (parser-tested; not yet seen live) |
-| Per-TG alert sound / LED color | actions | — | ✅ | ✅ sound; **Alerts tab**: keyword / emergency / talkgroup / radio triggers → Telegram message + MP3 (with earlier calls combined), optional Ollama AI gate, per-talkgroup cooldown, firing log |
+| Per-TG alert sound / LED color | actions | — | ✅ | ✅ sound; **Tripwires tab**: phrases / emergency / talkgroup / radio → Telegram message + MP3 (with earlier calls combined), optional AI check, quiet window, follow-up replies, history |
 | Themes | nightly | settings | — | ✅ light/dark |
 | Multi-window / detachable | ✅ | — | — | ❌ → P3 |
 
@@ -122,7 +122,7 @@ Call library with capture-time SHA-256, full-text search (names + transcripts), 
 
 **Out of scope for v1:** Phase II, DMR/NXDN/EDACS/LTR, HackRF/SDRplay — per the roadmap; everything else above is on the list.
 
-## Alerts (2026-08-21)
+## Alerts (2026-08-21) — superseded by Tripwires (below)
 
 `app/src/alerts.rs`. Trigger → optional AI gate → actions. Keyword triggers run when the transcript lands (whole-word, case-insensitive, any of the phrases, on the chosen talkgroups); emergency / talkgroup / radio triggers run when the call completes. Telegram: `sendMessage`, or `sendAudio` with an MP3 made by ffmpeg (WAV as `sendDocument` without it); the triggering call can be concatenated with the previous N calls on the same talkgroup within a window. The AI gate posts the transcript and the alert's prompt to a local Ollama `/api/generate` in JSON mode with `think: false` (a thinking model otherwise returns an empty response — measured with qwen3.6 and gemma4 locally) and expects `{"fire", "summary"}`; when Ollama is unreachable the alert **fails open** by default and says so in the message. Bot token in the Keychain; all HTTP from Rust. The webview has no native `alert`/`confirm` (Tauri v2), which is why playlist deletion and cart export looked stuck; both now use in-app dialogs.
 
@@ -140,7 +140,7 @@ Traffic channels are now sliced out of one FFT of the band per block (`hs_dsp::c
 
 ## Conversations (2026-08-21)
 
-`app/src/conversations.rs`. A rule names talkgroups and the fixed party's radio IDs (listed, and/or learned: a radio heard in ≥3 and ≥60 % of conversations on the talkgroup is proposed in the editor). Transmissions group into incidents keyed by (talkgroup, mobile unit); a fixed party's transmission joins the most recently active incident; a different mobile unit is a different incident. After `end_gap_secs` (90 s default) of quiet — waiting up to 90 s more for whisper — the transcripts are stitched with UNIT/FIXED labels, Ollama writes a summary from the rule's prompt (free-text completion, `think:false`), every transmission's audio is combined into one MP3, and it goes to the rule's Telegram chat (default: the alerts' chat). A transmission within `late_window_secs` reopens the incident; the revised summary deletes the earlier Telegram messages (ids kept) and sends again, marked "revised ×n". "Test on recent calls" runs the whole path on the newest run of calls on the rule's talkgroups. Alerts tab → Conversations.
+`app/src/conversations.rs`. A rule names talkgroups and the fixed party's radio IDs (listed, and/or learned: a radio heard in ≥3 and ≥60 % of conversations on the talkgroup is proposed in the editor). Transmissions group into incidents keyed by (talkgroup, mobile unit); a fixed party's transmission joins the most recently active incident; a different mobile unit is a different incident. After `end_gap_secs` (90 s default) of quiet — waiting up to 90 s more for whisper — the transcripts are stitched with UNIT/FIXED labels, Ollama writes a summary from the rule's prompt (free-text completion, `think:false`), every transmission's audio is combined into one MP3, and it goes to the rule's Telegram chat (default: the alerts' chat). A transmission within `late_window_secs` reopens the incident; the revised summary deletes the earlier Telegram messages (ids kept) and sends again, marked "revised ×n". "Test on recent calls" runs the whole path on the newest run of calls on the rule's talkgroups. Conversation rules are conversation **tripwires** now; the engine is unchanged.
 
 ## Band coverage with several radios (2026-08-21)
 
@@ -157,3 +157,15 @@ The speaker path upsampled 8 kHz audio to the device rate by **linear interpolat
 ## Instances on your tailnet (2026-09-11)
 
 The "link to my Tailscale account" is the Tailscale login already on each machine. **Settings → Remote access** now lists every device on that account (`tailscale status --json`), probes the online ones for a running HoosierSDR (`/api/health`, which answers JSON identity: app, version, host, whether it trusts its tailnet), and opens any instance found in its own window: the phone page that instance serves, so its live feed, calls, and audio as each transmission completes. Auth between two instances of one account: tick **Trust devices on my Tailscale account** on the far machine and its server admits any request from a Tailscale address that `tailscale whois` puts on the same user (loopback and LAN never qualify, so `tailscale serve`/Funnel traffic still needs the token); or paste the far machine's token into its row, which the desktop hands to the remote page once in the URL. Code: `app/src/remotes.rs`; the web server's `Auth` extractor now sees the caller's address via axum connect-info.
+
+## Tripwires (2026-09-11)
+
+`app/src/tripwires.rs`, `app/src/backtest.rs`, `app/dist/tripwires.js`. One rule model replaces alerts, analyzers, conversation rules and digests: **when** (a call is heard — talkgroups scoped to one system, phrases, "but not" phrases, radios, emergency; a conversation ends; or a timer), **check** (none, *ask* the model a yes/no question, *extract* named fields and test conditions over them, or *summarise*), **send** (a destination by reference from Connections, the audio with earlier calls, a quiet window per talkgroup, and follow-ups). Call tripwires run in a new engine here; conversation and digest tripwires are compiled into the `conversations` and `digest` engines, which keep their state (the tripwire id *is* the engine rule's id, so history and library badges line up).
+
+**Follow-ups**: after a tripwire fires, later traffic in its scope — the radio that tripped it on any channel, everything on that talkgroup, or the tripwire firing again — goes out as a Telegram *reply* to the first message (`reply_parameters`, `message_thread_id` in forums), so one incident reads as one thread. Capped at 10 replies per thread and a window in minutes.
+
+**Migration**: the first start builds tripwires from `alerts.json`, `analyzers.json`, `conversations.json` and `digests.json` (each copied to `*.pre-tripwires.bak`), keeping every rule id, and leaves the old files untouched so an older build still runs. Verified against a real config: compiled conversation and digest rules come back byte-identical.
+
+**Preview**: the editor runs the draft over the library (FTS5, transcript columns only) and reports what it would have done — fired *n* times → *m* messages after the quiet window, a day histogram, the calls it would have caught, and per-phrase hits. A phrase never heard on those channels is shown dead, with what the transcriber writes instead: `fts5vocab` for the vocabulary, edit distance and a consonant-skeleton key (`fuzzy.rs`) for the candidates, each verified by counting it in the library ("v fib" → *vfib ×12*). "Try the check on these" runs the AI check on the newest few matches; right-clicking a call drafts a tripwire from it (dispatch's own call type when it knows one, else the call's most specific content phrase).
+
+**AI verdict key**: the gate used to ask the model for `{"fire": …}` — on fire/EMS radio a model reads that as "is there a fire?". It is `{"send": …}` now (replies using `fire` still parse). Measured on a real arrest transcript with qwen3.8: "no" before, "yes" after.

@@ -388,9 +388,8 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                             "transcript",
                             serde_json::json!({ "id": id, "text": corrected, "model": model }),
                         );
-                        crate::alerts::on_transcript(&app2, id, &corrected);
+                        crate::tripwires::on_transcript(&app2, id, &corrected);
                         crate::conversations::on_transcript(&app2, id, &corrected);
-                        crate::analyzers::on_transcript(&app2, id, &corrected);
                         crate::dispatch::on_transcript(&app2, id, &corrected);
                     }
                 } else if let Some(err) = v["error"].as_str() {
