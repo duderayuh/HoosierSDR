@@ -707,6 +707,87 @@ pub fn pathways_reset(
     Ok(s)
 }
 
+/// A drawn route from a run to one of its facilities, for the map.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct Leg {
+    pub label: String,
+    pub place_name: String,
+    pub to: (f64, f64),
+    pub meters: f64,
+    pub secs: f64,
+    pub how: String,
+    pub line: Vec<(f64, f64)>,
+    /// The same wording the popup and a message use.
+    pub say: String,
+}
+
+/// The way from a run to the facility it needs, with the shape to draw.
+///
+/// `which` picks among the run's targets: a label, a place id, or empty for
+/// the first — which is the pathway's own first choice, since a pathway
+/// lists what it needs in order.
+///
+/// The targets were worked out and stored when the run came in, so this
+/// only asks the router for the shape. If the run has no targets — nothing
+/// matched, or it has no position — there is nothing to draw and the page
+/// is told so rather than being given a straight line to nowhere.
+#[tauri::command]
+pub fn incident_route(
+    state: tauri::State<crate::AppState>,
+    id: i64,
+    which: String,
+) -> Result<Option<Leg>, String> {
+    let db = state.db.lock().unwrap().clone().ok_or("no library open")?;
+    let i = {
+        let c = db.lock().unwrap();
+        crate::dispatch::inc_get(&c, id)?.ok_or("no such run")?
+    };
+    let Some((lat, lon)) = i.lat.zip(i.lon) else {
+        return Ok(None);
+    };
+    let want = which.trim().to_lowercase();
+    let t = i
+        .targets
+        .iter()
+        .find(|t| {
+            want.is_empty()
+                || t.place_id.eq_ignore_ascii_case(&want)
+                || t.label.to_lowercase() == want
+        })
+        .or_else(|| i.targets.first());
+    let Some(t) = t else {
+        return Ok(None);
+    };
+    let r = crate::routing::shape(&state, (lat, lon), (t.lat, t.lon));
+    // The stored target already knows the distance; the route is asked for
+    // the shape. Where the router answered now, its numbers are the fresher
+    // ones and are used — so a popup opened after the router came up stops
+    // saying "direct".
+    let (meters, secs, how) = if r.how == "road" {
+        (r.meters, r.secs, r.how.clone())
+    } else {
+        (t.meters, t.secs, t.how.clone())
+    };
+    let said = Target {
+        label: t.label.clone(),
+        place_name: t.place_name.clone(),
+        meters,
+        secs,
+        how: how.clone(),
+        ..t.clone()
+    };
+    Ok(Some(Leg {
+        label: t.label.clone(),
+        place_name: t.place_name.clone(),
+        to: (t.lat, t.lon),
+        meters,
+        secs,
+        how,
+        line: r.line,
+        say: said.say(),
+    }))
+}
+
 #[tauri::command]
 pub fn pathways_preview(
     state: tauri::State<crate::AppState>,

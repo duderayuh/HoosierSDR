@@ -18,7 +18,7 @@
     call: ["{name}", "{tgname}", "{tgdesc}", "{unitname}", "{time}", "{transcript}", "{keywords}", "{ai}"],
     conversation: ["{rule}", "{summary}", "{tgname}", "{tgdesc}", "{unitnames}", "{calls}", "{duration}", "{started}", "{transcript}", "{revision}"],
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
-    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
+    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{where}", "{pathway}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
   let list = [], folders = [], stats = {}, view = null, recipes = null;
   // Which folders are rolled up, per listener rather than per install.
@@ -367,6 +367,7 @@
     markDirty();
     schedulePreview(0);
   }
+  window.twEdit = edit;   // so the page check can open the editor
   function closeEditor() { sel = null; draft = null; words = null; $("twEdit").style.display = "none"; $("twGallery").style.display = ""; showGallery(); }
   const isDirty = () => draft && stable(tidy(read())) !== saved;
   function markDirty() { $("twDirty").textContent = sel === "new" ? "not saved yet" : isDirty() ? "unsaved changes" : ""; }
@@ -412,7 +413,7 @@
     fillDest();
     $("twQuiet").innerHTML = QUIET.map(([v, l]) => `<option value="${v}">${l}</option>`).join("") + (QUIET.some(([v]) => v === s.quiet_secs) ? "" : `<option value="${s.quiet_secs}">once per ${s.quiet_secs} s per talkgroup</option>`);
     $("twQuiet").value = String(s.quiet_secs);
-    $("twMessage").value = s.message; $("twAudio").checked = s.audio; $("twTone").checked = s.tone; $("twTelegram").checked = s.telegram;
+    $("twMessage").value = s.message; $("twAudio").checked = s.audio; $("twMap").checked = !!s.map; $("twTone").checked = s.tone; $("twTelegram").checked = s.telegram;
     $("twEarlier").innerHTML = EARLIER.map(([v, l]) => `<option value="${v}">${l}</option>`).join("") + (s.earlier_calls > 3 ? `<option value="${s.earlier_calls}">+ ${s.earlier_calls} calls before</option>` : "");
     $("twEarlier").value = String(s.earlier_calls);
     $("twFollow").value = s.follow;
@@ -472,7 +473,7 @@
     syncRows(); k.match_mode = $("twMatch").value;
     s.dest = $("twDest").value; s.chat = $("twChat").value.trim();
     s.quiet_secs = int($("twQuiet").value, 300); s.message = $("twMessage").value;
-    s.audio = $("twAudio").checked; s.tone = $("twTone").checked; s.telegram = $("twTelegram").checked;
+    s.audio = $("twAudio").checked; s.map = $("twMap").checked; s.tone = $("twTone").checked; s.telegram = $("twTelegram").checked;
     s.earlier_calls = int($("twEarlier").value, 0);
     s.follow = $("twFollow").value; s.follow_mins = int($("twFollowMins").value, 30);
     return t;
@@ -505,6 +506,8 @@
     $("twToneWrap").style.display = kind === "call" ? "" : "none";
     $("twAudioWrap").style.display = kind === "incident" ? "none" : "";
     $("twEarlier").style.display = kind === "call" && $("twAudio").checked ? "" : "none";
+    // A map needs a place, and only a run has one.
+    $("twMapWrap").style.display = kind === "incident" ? "" : "none";
     $("twChatWrap").style.display = $("twDest").value === "custom" ? "" : "none";
     const toks = [...TOKENS[kind] || TOKENS.call, ...(asksModel && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
     $("twTokens").innerHTML = toks.map((x) => `<button class="tw-token" data-tok="${esc(x)}" title="Insert">${esc(x)}</button>`).join("");
@@ -691,7 +694,24 @@
     if (!draft) return;
     const t = draft, tpl = $("twMessage").value;
     const s = preview && preview.samples[0];
-    if (t.when.kind !== "call" || !tpl.trim()) { $("twMsgPrev").innerHTML = ""; return; }
+    const kind = t.when.kind;
+    if ((kind !== "call" && kind !== "incident") || !tpl.trim()) { $("twMsgPrev").innerHTML = ""; return; }
+    // A run message is worth previewing too: it is the one with the
+    // hospitals in it, and {where} is hard to picture from the token alone.
+    // The run itself is made up — a tripwire is usually written before the
+    // kind of run it waits for has happened.
+    if (kind === "incident") {
+      const ct = (t.when.incident && t.when.incident.call_types || [])[0] || "Cardiac Arrest";
+      const out = tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{calltype}", ct)
+        .replaceAll("{address}", "1400 block of Example Street").replaceAll("{units}", "Medic 21, Engine 9")
+        .replaceAll("{summary}", "…what the dispatcher said…").replaceAll("{time}", "12:34:56")
+        .replaceAll("{pathway}", "‹the pathway that matched›")
+        .replaceAll("{where}", "Closest hospital: Example General — 3.0 mi, 8 min by road\nECMO centre: Example Heart — 6.8 mi, 15 min by road")
+        .replaceAll("{place}", "Example General").replaceAll("{nearest}", "Example Heart").replaceAll("{km}", "10.9").replaceAll("{mins}", "15")
+        .replaceAll("{hospital}", "Example General").replaceAll("{report}", "…the crew's report…").replaceAll("{ai}", "");
+      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${esc(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}</div>`;
+      return;
+    }
     const tr = s && tried.get(s.id);
     const f = { tg: s ? s.tg : 1234, tgname: s ? s.tg_name : "Talkgroup", unit: s ? s.unit_name : "Medic 1", time: s ? new Date(s.start * 1000).toLocaleTimeString("en-US", { hour12: false }) : "12:34:56", transcript: s ? s.transcript : "…the transcript…", keywords: s ? (s.keywords || []).join(", ") : "" };
     let out = tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{alert}", t.name || "Tripwire").replaceAll("{tg}", String(f.tg)).replaceAll("{tgname}", f.tgname).replaceAll("{tgdesc}", "‹description›")

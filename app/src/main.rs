@@ -32,6 +32,7 @@ mod follow;
 mod hook;
 mod library;
 mod link;
+mod mapshot;
 mod models;
 mod names;
 mod pathways;
@@ -2474,6 +2475,7 @@ fn main() {
             pathways::pathways_set,
             pathways::pathways_reset,
             pathways::pathways_preview,
+            pathways::incident_route,
             places::place_features,
             places::place_locate,
             routing::routing_get,

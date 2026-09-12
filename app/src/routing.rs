@@ -130,6 +130,89 @@ pub fn distance(state: &State<AppState>, from: (f64, f64), to: (f64, f64)) -> Di
     }
 }
 
+/// A route with its shape, for drawing on the map.
+///
+/// Separate from [`Distance`], which is `Copy` and deliberately small: it
+/// is worked out for every candidate hospital on every run, and hanging a
+/// few hundred coordinates off it would make the cheap case expensive.
+/// This is asked for once, when somebody clicks.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Route {
+    pub meters: f64,
+    pub secs: f64,
+    /// `road` — a real route; `straight` — the two ends joined up.
+    pub how: String,
+    /// (lat, lon) along the way, in this app's order rather than OSRM's.
+    pub line: Vec<(f64, f64)>,
+}
+
+/// The shape of the drive, when a router can give one. Falls back to the
+/// two ends joined by a straight line, marked as such, so the map always
+/// has something to draw and never implies a road that was not checked.
+pub fn shape(state: &State<AppState>, from: (f64, f64), to: (f64, f64)) -> Route {
+    let plain = || Route {
+        meters: crate::dispatch::haversine_m(from.0, from.1, to.0, to.1),
+        secs: 0.0,
+        how: "straight".into(),
+        line: vec![from, to],
+    };
+    let (url, quiet) = {
+        let st = state.routing.lock().unwrap();
+        if !st.settings.enabled {
+            return plain();
+        }
+        (st.settings.url.clone(), st.quiet_until)
+    };
+    if crate::library::now() < quiet {
+        return plain();
+    }
+    match route_line(&url, from, to) {
+        Ok(r) => r,
+        Err(_) => {
+            state.routing.lock().unwrap().quiet_until = crate::library::now() + SULK_SECS;
+            plain()
+        }
+    }
+}
+
+/// `overview=full&geometries=geojson` — the whole shape, as coordinate
+/// pairs rather than an encoded polyline, so nothing has to decode it.
+fn route_line(url: &str, from: (f64, f64), to: (f64, f64)) -> Result<Route, String> {
+    let u = format!(
+        "{}/route/v1/driving/{:.6},{:.6};{:.6},{:.6}?overview=full&geometries=geojson",
+        url.trim_end_matches('/'),
+        from.1,
+        from.0,
+        to.1,
+        to.0
+    );
+    let body = get(&u)?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let r = v["routes"].get(0).ok_or("no route")?;
+    Ok(Route {
+        meters: r["distance"].as_f64().ok_or("no distance")?,
+        secs: r["duration"].as_f64().unwrap_or(0.0),
+        how: "road".into(),
+        line: parse_line(&r["geometry"]["coordinates"]),
+    })
+}
+
+/// GeoJSON is [lon, lat]; everything else here is (lat, lon).
+pub fn parse_line(coords: &serde_json::Value) -> Vec<(f64, f64)> {
+    coords
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    let lon = p.get(0)?.as_f64()?;
+                    let lat = p.get(1)?.as_f64()?;
+                    Some((lat, lon))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// OSRM wants longitude first, which is the opposite of every other line in
 /// this app, so the swap happens here and nowhere else.
 fn route(url: &str, from: (f64, f64), to: (f64, f64)) -> Result<Distance, String> {
@@ -507,6 +590,98 @@ fn download(url: &str, to: &std::path::Path, app: &AppHandle) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // GeoJSON is [lon, lat] and everything else in this app is (lat, lon).
+    // Getting that backwards puts a route in the Indian Ocean, and it looks
+    // plausible in code, so it is pinned here.
+    #[test]
+    fn a_route_shape_comes_back_as_lat_lon() {
+        let coords = serde_json::json!([
+            [-86.1581, 39.7684],
+            [-86.1400, 39.7700],
+            [-86.1200, 39.7800]
+        ]);
+        let line = parse_line(&coords);
+        assert_eq!(line.len(), 3);
+        // Latitude first: around 39 north, not around -86.
+        assert!((line[0].0 - 39.7684).abs() < 1e-9, "{:?}", line[0]);
+        assert!((line[0].1 + 86.1581).abs() < 1e-9, "{:?}", line[0]);
+        assert!(line.iter().all(|(lat, lon)| *lat > 0.0 && *lon < 0.0));
+        // Anything malformed is dropped rather than turned into a zero,
+        // which would draw a line through the Atlantic.
+        let messy = serde_json::json!([[-86.1, 39.7], "nonsense", [1], [-86.2, 39.8]]);
+        assert_eq!(parse_line(&messy).len(), 2);
+        assert!(parse_line(&serde_json::Value::Null).is_empty());
+    }
+
+    /// The same two functions against a real OSRM, rather than a fixture I
+    /// wrote to match my own reading of the docs. Ignored: it needs a
+    /// router. Any extract will do — Monaco is 700 KB and builds in
+    /// seconds:
+    ///
+    ///   docker run --rm -t -v $D:/data ghcr.io/project-osrm/osrm-backend \
+    ///     osrm-extract -p /opt/car.lua /data/monaco.osm.pbf      # then
+    ///     osrm-partition /data/monaco.osrm, osrm-customize likewise
+    ///   docker run -d -p 5099:5000 -v $D:/data <image> \
+    ///     osrm-routed --algorithm mld /data/monaco.osrm
+    ///   HS_OSRM=http://127.0.0.1:5099 HS_OSRM_AT=43.7311,7.4198 \
+    ///   HS_OSRM_TO=43.7396,7.4290 cargo test -- --ignored a_live_router
+    #[test]
+    #[ignore]
+    fn a_live_router_answers_in_the_order_this_app_reads() {
+        let url = std::env::var("HS_OSRM").expect("HS_OSRM is not set");
+        let pair = |v: String| {
+            let (a, b) = v.split_once(',').expect("want lat,lon");
+            (a.trim().parse::<f64>().unwrap(), b.trim().parse().unwrap())
+        };
+        let from = pair(std::env::var("HS_OSRM_AT").expect("HS_OSRM_AT"));
+        let to = pair(std::env::var("HS_OSRM_TO").expect("HS_OSRM_TO"));
+
+        // The cheap question: a distance, with no shape.
+        let d = route(&url, from, to).expect("the router did not answer");
+        assert_eq!(d.how, "road");
+        assert!(d.meters > 0.0 && d.secs > 0.0, "{d:?}");
+        // A route is never shorter than the straight line between its ends.
+        let crow = straight(from, to);
+        assert!(
+            d.meters >= crow.meters * 0.99,
+            "a {:.0} m route between points {:.0} m apart",
+            d.meters,
+            crow.meters
+        );
+
+        // The expensive one: the shape, which is where the coordinate order
+        // matters. Both ends must land on the ends that were asked for —
+        // if the swap in parse_line were missing, latitude and longitude
+        // would be exchanged and this would be somewhere off Somalia.
+        let r = route_line(&url, from, to).expect("no shape");
+        assert_eq!(r.how, "road");
+        assert!(r.line.len() >= 2, "a shape of {} points", r.line.len());
+        let near = |a: (f64, f64), b: (f64, f64)| {
+            crate::dispatch::haversine_m(a.0, a.1, b.0, b.1) < 60.0
+        };
+        assert!(near(*r.line.first().unwrap(), from), "starts at {:?}, asked for {from:?}", r.line.first());
+        assert!(near(*r.line.last().unwrap(), to), "ends at {:?}, asked for {to:?}", r.line.last());
+        // And the whole line stays in the same corner of the world.
+        for p in &r.line {
+            assert!(
+                near_enough(*p, from, 60_000.0),
+                "the route wanders to {p:?}"
+            );
+        }
+        eprintln!(
+            "live router: {:.0} m, {:.0} s, {} points (crow {:.0} m)",
+            r.meters,
+            r.secs,
+            r.line.len(),
+            crow.meters
+        );
+    }
+
+    #[cfg(test)]
+    fn near_enough(a: (f64, f64), b: (f64, f64), m: f64) -> bool {
+        crate::dispatch::haversine_m(a.0, a.1, b.0, b.1) < m
+    }
 
     #[test]
     fn a_straight_line_is_always_available() {

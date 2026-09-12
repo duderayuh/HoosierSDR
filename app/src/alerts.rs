@@ -693,6 +693,31 @@ pub(crate) fn send_audio_reply(
     Ok(ids)
 }
 
+/// A picture, with a short caption. Telegram caps a photo caption at 1024
+/// characters — shorter than a message — so the caller keeps it to the
+/// hospitals and the attribution and lets the alert itself carry the rest.
+pub(crate) fn send_photo_reply(
+    chat_id: &str,
+    png: &[u8],
+    caption: &str,
+    reply_to: Option<i64>,
+) -> Result<i64, String> {
+    if chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let cap: String = caption.chars().take(1000).collect();
+    let mut m = multipart_for(chat_id)
+        .text("caption", &cap)
+        .file("photo", "map.png", "image/png", png);
+    if let Some(id) = reply_to {
+        m = m.text("reply_parameters", &reply_json(id).to_string());
+    }
+    let (ctype, body) = m.finish();
+    let (status, out) = crate::upload::post(&telegram_api("sendPhoto")?, &ctype, body)?;
+    check(status, &out)?;
+    message_id(&out).ok_or_else(|| "Telegram photo had no message id".into())
+}
+
 /// The audio for a call: the call itself, after up to `earlier` earlier
 /// calls on its talkgroup heard within `window_secs`, oldest first, as one
 /// clip (MP3 when ffmpeg is there). `None` when the call has no audio.
@@ -968,6 +993,16 @@ mod tests {
         assert!(sending_blocked());
         assert!(telegram_api("sendMessage").is_err());
         assert!(telegram_api("sendAudio").is_err());
+        // A picture is a send like any other. This is the only thing
+        // standing between a test build and a real chat.
+        assert!(telegram_api("sendPhoto").is_err());
+        let blocked = send_photo_reply("-1001", &[1, 2, 3], "caption", None);
+        assert!(
+            blocked
+                .as_ref()
+                .is_err_and(|e| e.contains("HS_NO_SEND")),
+            "a photo was stopped for some other reason, or not at all: {blocked:?}"
+        );
         let read = telegram_api("getUpdates");
         assert!(
             read.is_ok() || read.as_ref().is_err_and(|e| e.contains("no Telegram bot token")),

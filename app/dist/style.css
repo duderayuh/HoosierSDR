@@ -851,6 +851,18 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .dpmkwrap { background: none !important; border: none !important; }
 .dpmk { position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: rgba(13,18,19,.9); border: 2px solid rgba(255,255,255,.85); box-shadow: 0 4px 14px rgba(0,0,0,.55); font-size: 19px; line-height: 1; cursor: pointer; transform-origin: center; transition: transform .12s; }
 .dpmk:hover { transform: scale(1.12); z-index: 10; }
+/* The far end of a drawn route: the hospital the pathway chose. Squared
+   off so it reads as a destination rather than another incident. */
+.dpmk.dest { border-radius: 10px; border-color: var(--amber, #f5b544); background: rgba(13,18,19,.95); }
+.dpmk.dest .lbl { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+  font-size: 10.5px; background: rgba(13,18,19,.9); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+/* Where the run's patient would go, inside the popup. The one being drawn
+   is marked, because the others are a click away. */
+.dpwhere { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+.dpwrow { display: flex; gap: 6px; align-items: flex-start; font-size: 11.5px; line-height: 1.35; }
+.dpwrow .grow { flex: 1; min-width: 0; }
+.dpwrow.on { color: var(--ink); }
+.dpwrow:not(.on) { color: var(--ink-dim); }
 .dpmk .em { filter: drop-shadow(0 1px 1px rgba(0,0,0,.4)); }
 .dpmk.sel { border-color: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 40%, transparent), 0 4px 14px rgba(0,0,0,.55); }
 .dpmk.fresh::before { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--signal); animation: dppulse 1.8s ease-out infinite; }

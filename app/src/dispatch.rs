@@ -456,17 +456,27 @@ const INC_COLS: &str = "id, created, updated, tg, tg_name, call_type, emoji, add
 /// router takes. Each step takes its own short lock instead.
 pub fn apply_pathways(app: &AppHandle, i: &mut Incident) {
     let state = app.state::<AppState>();
-    let Some((lat, lon)) = i.lat.zip(i.lon) else {
-        // Nowhere to measure from. Anything worked out earlier is stale.
+    let db = state.db.lock().unwrap().clone();
+    // Anything worked out earlier is stale the moment the run moves, so a
+    // branch that cannot produce targets has to clear the ones on the row
+    // rather than leave them pointing at the old location.
+    let forget = |i: &mut Incident| {
         i.pathway.clear();
         i.targets.clear();
+        if let Some(db) = &db {
+            let _ = store_pathways(db, i);
+        }
+    };
+    let Some((lat, lon)) = i.lat.zip(i.lon) else {
+        forget(i);
         return;
     };
     let settings = state.pathways.lock().unwrap().clone();
     if !settings.enabled || settings.pathways.is_empty() {
+        forget(i);
         return;
     }
-    let Some(db) = state.db.lock().unwrap().clone() else {
+    let Some(db) = db.clone() else {
         return;
     };
     // What was actually said on the radio matters: "working arrest" and
@@ -2048,6 +2058,10 @@ fn locate_blocking(
         let c = db.lock().unwrap();
         inc_update(&c, &i, &key)?;
     }
+    // Dropping a pin by hand is the commonest way a run moves, and the
+    // reason is usually that the first answer was wrong — so the old
+    // hospitals are the ones least worth keeping.
+    apply_pathways(app, &mut i);
     let _ = app.emit("incident", &i);
     Ok(i)
 }
@@ -2148,6 +2162,9 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                     let c = db.lock().unwrap();
                     inc_update(&c, &i, &key)?;
                 }
+                // The run moved, so where it would be taken has to be
+                // worked out again from the new position.
+                apply_pathways(app, &mut i);
                 let _ = app.emit("incident", &i);
                 if was_grid {
                     upgraded += 1;
@@ -2174,6 +2191,7 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                         let c = db.lock().unwrap();
                         inc_update(&c, &i, &key)?;
                     }
+                    apply_pathways(app, &mut i);
                     let _ = app.emit("incident", &i);
                     placed += 1;
                 }

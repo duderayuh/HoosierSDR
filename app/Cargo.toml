@@ -39,6 +39,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 base64 = "0.22"
+# Map tiles, in and out: the picture attached to a run is stitched from the
+# same PNGs the map draws. Already compiled as a dependency of the tray.
+png = "0.17"
 # Local wall-clock time for message timestamps ("15:33", not "19:33 UTC").
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
