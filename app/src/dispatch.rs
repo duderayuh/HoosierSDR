@@ -871,7 +871,7 @@ fn cache_put(c: &Connection, q: &str, g: &Geo) {
     );
 }
 
-fn url_encode(s: &str) -> String {
+pub fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
