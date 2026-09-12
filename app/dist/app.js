@@ -2774,6 +2774,12 @@ if (TAURI) {
     renderSavedSites(sites);
     migrateLocalFilters();
     renderLockout();
+    // Now that the playlists are known, send their filters again. The first
+    // push happened before this list arrived, so it only reached the
+    // unscoped set — and the part that carries muted listen groups (`extra`)
+    // is deliberately never saved on the Rust side, so a run started now
+    // would have nothing muted at all.
+    pushLockout(); pushPriorities();
     // Auto-start: opt-in, and only if the last-used site still exists.
     const pr = store("hs.prefs", {});
     if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
