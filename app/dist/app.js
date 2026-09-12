@@ -1485,22 +1485,41 @@ if (TAURI) {
         const also = pl ? plAlsoSelected().filter((p) => p.id !== pl.id) : [];
         const group = pl ? [pl, ...also] : [];
         let center = parseFreq($("center").value);
-        if (group.length > 1) {
-          const fit = commonCentre(group.map((p) => p.control_mhz * 1e6), o.rate);
-          if (!fit.ok) { setState("standby"); alert(`These playlists can't be followed together on one radio at ${(o.rate / 1e6).toFixed(1)} MSPS — their control channels are ${(fit.span / 1e6).toFixed(2)} MHz apart and the radio reaches ±${(fit.half / 1e6).toFixed(2)} MHz:\n\n${group.map((p) => `${p.name} · ${p.control_mhz.toFixed(4)} MHz`).join("\n")}\n\nUntick one in the + list, or pick a wider rate.`); return; }
-          center = fit.center;
-          $("center").value = (center / 1e6).toFixed(4) + "M";
-          logEvent(`following ${group.length} sites from one radio: ${group.map((p) => p.name).join(" · ")} — band centre ${(center / 1e6).toFixed(4)} MHz`);
-        }
-        bandLo = (center - o.rate * 0.4) / 1e6; bandHi = (center + o.rate * 0.4) / 1e6;
         const common = { source: o.source, freq: center, rate: o.rate, gain: o.gain, callsDir: $("callsdir").value.trim() || null, play: $("play").checked,
           hangMs: parseInt($("hangMs").value, 10) || null, ppm: ppmVal(), device: srcId() || null, modulation: $("tmod").value };
-        if (!group.length) {
-          await invoke("start_follow", { ...common, control: o.freq, systemName: null, siteName: null, extra: coverageExtras(), playlist: null });
+        if (group.length > 1) {
+          // Several sites: spread their control channels over the radios,
+          // each run on the radio that holds its control channel, reading
+          // every other radio for voice (the backend shares them).
+          const radios = radiosForStart();
+          const plan = planRadios(group, radios);
+          if (!plan.ok) {
+            setState("standby");
+            const fit = commonCentre(group.map((p) => p.control_mhz * 1e6), o.rate);
+            alert(`These sites' control channels don't fit on the ${radios.length} radio${radios.length === 1 ? "" : "s"} available (${radios.map((r) => `${r.label} ±${(r.width / 2).toFixed(2)} MHz`).join(", ")}) — they span ${(fit.span / 1e6).toFixed(2)} MHz:\n\n${group.map((p) => `${p.name} · ${p.control_mhz.toFixed(4)} MHz`).join("\n")}\n\nUntick one in the + list, plug in another radio, or switch a radio on for coverage under Settings → Devices.`);
+            return;
+          }
+          const hosts = plan.radios.filter((r) => r.sites.length);
+          logEvent(`following ${group.length} sites on ${hosts.length} radio${hosts.length === 1 ? "" : "s"}: ${hosts.map((r) => `${r.label} @ ${r.center.toFixed(4)} MHz (${r.sites.map((p) => p.name).join(", ")})`).join(" · ")}${plan.gaps.length ? ` — uncovered ${plan.gaps.map(([x, y]) => `${x.toFixed(3)}–${y.toFixed(3)}`).join(", ")} MHz` : " — the whole span is covered"}`);
+          const primary = hosts[0];
+          center = primary.center * 1e6;
+          $("center").value = primary.center.toFixed(4) + "M";
+          bandLo = primary.lo; bandHi = primary.hi;
+          const spec = (r) => ({ source: r.source, device: r.device, center: Math.round(r.center * 1e6), rate: r.rate, gain: r.gain, ppm: r.ppm, label: r.label });
+          for (const r of hosts) {
+            const extra = plan.radios.filter((x) => x.key !== r.key).map(spec);
+            for (const p of r.sites) {
+              await invoke("start_follow", { ...common, source: r.source, device: r.device, freq: Math.round(r.center * 1e6), rate: r.rate, gain: r.gain, ppm: r.ppm,
+                control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.name, extra, playlist: p.playlist || null });
+            }
+          }
         } else {
-          for (const [i, p] of group.entries()) {
-            await invoke("start_follow", { ...common, control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.name,
-              extra: i === 0 ? coverageExtras() : null, playlist: p.playlist || null });
+          bandLo = (center - o.rate * 0.4) / 1e6; bandHi = (center + o.rate * 0.4) / 1e6;
+          if (!group.length) {
+            await invoke("start_follow", { ...common, control: o.freq, systemName: null, siteName: null, extra: coverageExtras(), playlist: null });
+          } else {
+            const p = group[0];
+            await invoke("start_follow", { ...common, control: p.control_mhz * 1e6, systemName: p.system_name, siteName: p.name, extra: coverageExtras(), playlist: p.playlist || null });
           }
         }
       } else {
@@ -1646,7 +1665,9 @@ if (TAURI) {
 
   /* ---------- band coverage: park the other radios over the rest of the site ---------- */
   const roles = store("hs.roles", {});   // "kind|id" → "cover" | "off"
-  const usable = (d) => { const r = (devView.settings[`${d.kind}|${d.id}`] || {}).rate || d.rates[0]; return { rate: r, width: r * 0.8 / 1e6 }; };
+  // Usable width: the backend normalises 10 → 9.6 MSPS and 2.5 → 2.4 and decodes ±0.4 of that.
+  const normRate = (r) => (r >= 9_000_000 ? 9_600_000 : r >= 2_450_000 && r < 2_550_000 ? 2_400_000 : r);
+  const usable = (d) => { const r = (devView.settings[`${d.kind}|${d.id}`] || {}).rate || d.rates[0]; return { rate: r, width: normRate(r) * 0.8 / 1e6 }; };
   { const sp = store("hs.span", null); if (sp) { $("cpLo").value = sp[0]; $("cpHi").value = sp[1]; } $("cpEnabled").checked = store("hs.coverage", true) !== false; }
   $("cpLo").onchange = $("cpHi").onchange = () => { const lo = parseFloat($("cpLo").value), hi = parseFloat($("cpHi").value); if (Number.isFinite(lo) && Number.isFinite(hi)) save("hs.span", [lo, hi]); coveragePlan(); };
   $("cpEnabled").onchange = () => { save("hs.coverage", $("cpEnabled").checked); coveragePlan(); };
@@ -1682,6 +1703,83 @@ if (TAURI) {
     return plan;
   };
   window.coverageExtras = () => coveragePlan().map(({ source, device, center, rate, gain, ppm, label }) => ({ source, device, center, rate, gain, ppm, label }));
+
+  /* ---------- several sites on several radios ----------
+     Every picked site needs its control channel inside some radio's band, and
+     every run then decodes voice from every open radio (the backend pools
+     them). So: hand the control channels to the radios (fewest radios, each
+     one's spread within its width), centre each radio where it covers the
+     most of the sites' spans while keeping its controls inside, and park the
+     radios left over on whatever is still uncovered. */
+  const MARGIN_MHZ = 0.025;
+  window.planRadios = function planRadios(group, radiosIn) {
+    const radios = radiosIn.map((r) => ({ ...r, width: r.width - MARGIN_MHZ, half: (r.width - MARGIN_MHZ) / 2 }));
+    const ctrls = group.map((p) => p.control_mhz);
+    const spans = group.map((p) => p.span_mhz || [p.control_mhz, p.control_mhz]);
+    const lo = Math.min(...spans.map((x) => x[0])), hi = Math.max(...spans.map((x) => x[1]));
+    // Coverage of [lo, hi] by a set of bands, in MHz.
+    const covered = (bands) => { let gaps = [[lo, hi]]; for (const [a, b] of bands) gaps = gaps.flatMap(([x, y]) => (b <= x || a >= y) ? [[x, y]] : [[x, Math.min(y, a)], [Math.max(x, b), y]].filter(([p, q]) => q - p > 1e-6)); return { len: (hi - lo) - gaps.reduce((t, [x, y]) => t + (y - x), 0), gaps }; };
+    // Try every assignment of sites to radios (a few sites × a few radios), keep the best.
+    let best = null;
+    const n = group.length, k = radios.length;
+    const assign = new Array(n).fill(0);
+    const total = Math.pow(k, n);
+    for (let code = 0; code < total; code++) {
+      let c = code; for (let i = 0; i < n; i++) { assign[i] = c % k; c = Math.floor(c / k); }
+      // Feasible: each radio's controls fit in its width. Candidate centres per radio.
+      const per = radios.map(() => []); assign.forEach((r, i) => per[r].push(i));
+      let ok = true; const ranges = [];
+      for (let r = 0; r < k; r++) {
+        if (!per[r].length) { ranges.push(null); continue; }
+        const cs = per[r].map((i) => ctrls[i]), cmin = Math.min(...cs), cmax = Math.max(...cs);
+        if (cmax - cmin > radios[r].width) { ok = false; break; }
+        ranges.push([cmax - radios[r].half, cmin + radios[r].half]);
+      }
+      if (!ok) continue;
+      const used = ranges.filter(Boolean).length;
+      // Centres: each radio tries its low end, high end and the middle of its allowed range; pick the combination covering most.
+      const clamp = (v, rg) => Math.min(rg[1], Math.max(rg[0], v));
+      const opts = ranges.map((rg, r) => rg ? [...new Set([rg[0], (rg[0] + rg[1]) / 2, rg[1], clamp(lo + radios[r].half, rg), clamp(hi - radios[r].half, rg)])] : [null]);
+      const walk = (r, chosen) => {
+        if (r === k) {
+          const bands = chosen.map((c, i) => c == null ? null : [c - radios[i].half, c + radios[i].half]).filter(Boolean);
+          const cov = covered(bands);
+          // Fewest radios, then most of the span covered, then the least band wasted outside it.
+          const outside = bands.reduce((t, [a, b]) => t + Math.max(0, lo - a) + Math.max(0, b - hi), 0);
+          const score = [-used, cov.len, -outside];
+          const better = (x, y) => x[0] !== y[0] ? x[0] > y[0] : Math.abs(x[1] - y[1]) > 1e-9 ? x[1] > y[1] : x[2] > y[2] + 1e-9;
+          if (!best || better(score, best.score)) best = { score, assign: [...assign], centres: [...chosen] };
+          return;
+        }
+        for (const c of opts[r]) walk(r + 1, [...chosen, c]);
+      };
+      walk(0, []);
+    }
+    if (!best) return { ok: false, lo, hi };
+    // Radios left without a control channel park on the biggest gaps.
+    const plan = radios.map((r, i) => ({ ...r, center: best.centres[i], sites: group.filter((_, j) => best.assign[j] === i) }));
+    let { gaps } = covered(plan.filter((r) => r.center != null).map((r) => [r.center - r.half, r.center + r.half]));
+    for (const r of plan.filter((x) => x.center == null)) {
+      if (!gaps.length) break;
+      gaps.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]));
+      const [x, y] = gaps[0];
+      r.center = (y - x) <= r.width ? (x + y) / 2 : x + r.half;
+      gaps = covered(plan.filter((z) => z.center != null).map((z) => [z.center - z.half, z.center + z.half])).gaps;
+    }
+    return { ok: true, lo, hi, gaps, radios: plan.filter((r) => r.center != null).map((r) => ({ ...r, lo: r.center - r.half, hi: r.center + r.half })) };
+  };
+  // The radios Start may use: the picked one first, then every other radio not switched off for coverage.
+  function radiosForStart() {
+    const primaryKey = $("source").value;
+    const list = [];
+    for (const d of devView.devices) {
+      const k = `${d.kind}|${d.id}`, u = usable(d), st = devView.settings[k] || {};
+      if (k !== primaryKey && (roles[k] === "off" || !$("cpEnabled").checked)) continue;
+      list.push({ key: k, source: d.kind, device: d.id, rate: u.rate, width: u.width, gain: st.gain ?? null, ppm: st.ppm || null, label: st.nickname || d.label, primary: k === primaryKey });
+    }
+    list.sort((a, b) => (b.primary - a.primary) || (b.width - a.width));
+    return list;
+  }
   $("source").addEventListener("change", () => setTimeout(coveragePlan, 0));
   $("rate").addEventListener("change", () => setTimeout(coveragePlan, 0));
 

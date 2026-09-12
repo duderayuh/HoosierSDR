@@ -642,6 +642,7 @@ impl ChannelDecoder {
                 }
                 match self.enc {
                     EncState::Encrypted => {
+                        self.diag.voice_ldus_encrypted += 1;
                         if let Some(tg) = self.active_tg {
                             out.encrypted_skips.push(tg);
                             self.diag.encrypted_skips.push(tg);
