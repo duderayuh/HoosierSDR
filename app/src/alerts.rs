@@ -569,6 +569,68 @@ pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// The formatting a message template may ask for, as Telegram reads it.
+/// Anything else a listener types stays literal text.
+pub const TAGS: &[&str] = &[
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "code",
+    "pre",
+    "blockquote",
+    "tg-spoiler",
+];
+
+/// Is this what a tag for one of `TAGS` looks like? `<b>`, `</b>`, and the
+/// two Telegram allows attributes on.
+fn known_tag(inner: &str) -> bool {
+    let t = inner.trim().trim_start_matches('/').trim();
+    let name = t
+        .split([' ', '\t', '\n'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if TAGS.contains(&name.as_str()) {
+        return true;
+    }
+    // `<a href="…">` and `<span class="tg-spoiler">`, the only two that
+    // carry anything.
+    name == "a" || name == "span"
+}
+
+/// The same text with the formatting tags taken out, for somewhere markup
+/// means nothing: the in-app notice, the history, and the plain-text
+/// message sent if Telegram ever refuses the formatted one.
+pub fn strip_tags(s: &str) -> String {
+    if !s.contains('<') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('<') {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        // An unclosed `<` is just a less-than sign.
+        let Some(end) = from.find('>') else {
+            out.push_str(from);
+            return out;
+        };
+        let inner = &from[1..end];
+        if !known_tag(inner) {
+            out.push_str(&from[..=end]);
+        }
+        rest = &from[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `text` as Telegram HTML, with every occurrence of `needle` turned into a
 /// link to `url`. `None` when the needle is not in the text, so the caller
 /// keeps sending plain text rather than paying for a parse mode it does not
@@ -578,16 +640,23 @@ pub fn html_escape(s: &str) -> String {
 /// a transcript containing `<` or `&` cannot break the markup — and the
 /// anchor, being added last, is the only markup in the message.
 pub fn link_in(text: &str, needle: &str, url: &str) -> Option<String> {
+    link_html(&html_escape(text), needle, url)
+}
+
+/// The same, for text that is already Telegram HTML — a message rendered
+/// with its values escaped and its own formatting left standing. The needle
+/// is escaped to match what is in there, and nothing else is touched.
+pub fn link_html(html: &str, needle: &str, url: &str) -> Option<String> {
     let needle = needle.trim();
-    if needle.is_empty() || url.is_empty() || !text.contains(needle) {
+    if needle.is_empty() || url.is_empty() {
         return None;
     }
-    let anchor = format!(
-        "<a href=\"{}\">{}</a>",
-        html_escape(url),
-        html_escape(needle)
-    );
-    Some(html_escape(text).replace(&html_escape(needle), &anchor))
+    let escaped = html_escape(needle);
+    if !html.contains(&escaped) {
+        return None;
+    }
+    let anchor = format!("<a href=\"{}\">{escaped}</a>", html_escape(url));
+    Some(html.replace(&escaped, &anchor))
 }
 
 /// A plain text message to `dest` (`chat` or `chat:topic`), giving up after
@@ -723,7 +792,7 @@ pub(crate) fn send_audio_id(
     title: &str,
     performer: &str,
 ) -> Result<Vec<i64>, String> {
-    send_audio_reply(chat_id, path, is_mp3, caption, title, performer, None)
+    send_audio_reply(chat_id, path, is_mp3, caption, None, title, performer, None)
 }
 
 /// `send_audio_id`, as a reply to `reply_to` when set.
@@ -732,6 +801,7 @@ pub(crate) fn send_audio_reply(
     path: &std::path::Path,
     is_mp3: bool,
     caption: &str,
+    html: Option<&str>,
     title: &str,
     performer: &str,
     reply_to: Option<i64>,
@@ -741,8 +811,12 @@ pub(crate) fn send_audio_reply(
     }
     let mut ids = Vec::new();
     let mut cap = caption.to_string();
+    // A caption longer than Telegram allows becomes its own message, with
+    // the formatting and links intact, and the clip keeps a short label.
+    let mut cap_html = html.map(|h| h.to_string());
     if caption.chars().count() > 1000 {
-        ids.push(send_text_reply(chat_id, caption, reply_to)?);
+        ids.push(send_text_reply_html(chat_id, caption, html, reply_to)?);
+        cap_html = None;
         cap = caption
             .lines()
             .next()
@@ -761,18 +835,29 @@ pub(crate) fn send_audio_reply(
     } else {
         ("sendDocument", "document", "audio/wav")
     };
-    let mut m = multipart_for(chat_id)
-        .text("caption", &cap)
-        .file(field, &name, mime, &data);
-    if is_mp3 {
-        m = m.text("title", title).text("performer", performer);
+    let linked = cap_html.filter(|h| h.chars().count() <= 1000);
+    let send = |as_html: Option<&String>| -> Result<(u16, String), String> {
+        let mut m = multipart_for(chat_id)
+            .text("caption", as_html.unwrap_or(&cap))
+            .file(field, &name, mime, &data);
+        if as_html.is_some() {
+            m = m.text("parse_mode", "HTML");
+        }
+        if is_mp3 {
+            m = m.text("title", title).text("performer", performer);
+        }
+        if let Some(id) = reply_to {
+            // Multipart fields are strings; Telegram parses this one as JSON.
+            m = m.text("reply_parameters", &reply_json(id).to_string());
+        }
+        let (ctype, body) = m.finish();
+        crate::upload::post(&telegram_api(method)?, &ctype, body)
+    };
+    let (mut status, mut out) = send(linked.as_ref())?;
+    if linked.is_some() && !(200..300).contains(&status) {
+        eprintln!("[alerts] Telegram refused the formatted caption ({status}), sending it plain");
+        (status, out) = send(None)?;
     }
-    if let Some(id) = reply_to {
-        // Multipart fields are strings; Telegram parses this one as JSON.
-        m = m.text("reply_parameters", &reply_json(id).to_string());
-    }
-    let (ctype, body) = m.finish();
-    let (status, out) = crate::upload::post(&telegram_api(method)?, &ctype, body)?;
     check(status, &out)?;
     ids.push(message_id(&out).ok_or("Telegram reply had no message id")?);
     Ok(ids)
@@ -1129,6 +1214,36 @@ mod link_tests {
         assert!(link_in("🚨 Arrest on the north side", "8241 East 41st Street", "https://x/").is_none());
         assert!(link_in("8241 East 41st Street", "", "https://x/").is_none());
         assert!(link_in("8241 East 41st Street", "8241 East 41st Street", "").is_none());
+    }
+
+    #[test]
+    fn formatting_a_listener_asked_for_survives_and_nothing_else_does() {
+        // The tags Telegram knows come out for plain text…
+        assert_eq!(strip_tags("<b>Arrest</b> at <i>1400</i>"), "Arrest at 1400");
+        assert_eq!(strip_tags("<tg-spoiler>quiet</tg-spoiler>"), "quiet");
+        assert_eq!(strip_tags("<a href=\"https://x/\">here</a>"), "here");
+        // …and anything else stays exactly as typed, because it is text.
+        assert_eq!(strip_tags("2 < 3 and 4 > 1"), "2 < 3 and 4 > 1");
+        assert_eq!(strip_tags("<marquee>no</marquee>"), "<marquee>no</marquee>");
+        assert_eq!(strip_tags("an unclosed <b tag"), "an unclosed <b tag");
+        assert_eq!(strip_tags("plain"), "plain");
+    }
+
+    #[test]
+    fn a_link_goes_into_a_message_that_already_has_formatting() {
+        // What render_html would have produced: the template's own bold
+        // kept, the transcript's angle brackets escaped.
+        let html = "<b>Cardiac Arrest</b> · 8241 East 41st Street\n&lt;unintelligible&gt;";
+        let out = link_html(html, "8241 East 41st Street", "https://maps.example/?a=1&b=2")
+            .expect("not linked");
+        assert!(out.starts_with("<b>Cardiac Arrest</b>"), "the bold was lost: {out}");
+        assert!(
+            out.contains("<a href=\"https://maps.example/?a=1&amp;b=2\">8241 East 41st Street</a>"),
+            "{out}"
+        );
+        // The already-escaped transcript is not escaped a second time.
+        assert!(out.contains("&lt;unintelligible&gt;"), "{out}");
+        assert!(!out.contains("&amp;lt;"), "double-escaped: {out}");
     }
 
     #[test]

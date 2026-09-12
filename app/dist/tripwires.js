@@ -18,7 +18,7 @@
     call: ["{name}", "{tgname}", "{tgdesc}", "{unitname}", "{time}", "{transcript}", "{keywords}", "{ai}"],
     conversation: ["{rule}", "{summary}", "{tgname}", "{tgdesc}", "{unitnames}", "{calls}", "{duration}", "{started}", "{transcript}", "{revision}"],
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
-    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{where}", "{pathway}", "{maps}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
+    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{transcript}", "{where}", "{pathway}", "{maps}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
   let list = [], folders = [], stats = {}, view = null, recipes = null;
   // Which folders are rolled up, per listener rather than per install.
@@ -504,7 +504,9 @@
     $("twFollowRow").style.display = kind === "call" ? "" : "none";
     $("twFollowFor").style.display = $("twFollow").value === "off" ? "none" : "";
     $("twToneWrap").style.display = kind === "call" ? "" : "none";
-    $("twAudioWrap").style.display = kind === "incident" ? "none" : "";
+    // A run has audio too — every call the incident is made of, as one clip.
+    $("twAudioWrap").style.display = kind === "call" || kind === "incident" ? "" : "none";
+    $("twAudioWrap").lastChild.textContent = kind === "incident" ? " with the radio traffic" : " with the audio";
     $("twEarlier").style.display = kind === "call" && $("twAudio").checked ? "" : "none";
     // A map needs a place, and only a run has one.
     $("twMapWrap").style.display = kind === "incident" ? "" : "none";
@@ -512,6 +514,18 @@
     const toks = [...TOKENS[kind] || TOKENS.call, ...(asksModel && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
     $("twTokens").innerHTML = toks.map((x) => `<button class="tw-token" data-tok="${esc(x)}" title="Insert">${esc(x)}</button>`).join("");
     $("twTokens").querySelectorAll("[data-tok]").forEach((b) => b.onclick = () => { const ta = $("twMessage"); const at = ta.selectionStart ?? ta.value.length; ta.value = ta.value.slice(0, at) + b.dataset.tok + ta.value.slice(ta.selectionEnd ?? at); ta.focus(); ta.selectionStart = ta.selectionEnd = at + b.dataset.tok.length; changed(); });
+    // Wrap whatever is selected in a Telegram tag. With nothing selected
+    // the pair is dropped in and the cursor put between them.
+    $("twFormat").querySelectorAll("[data-tag]").forEach((b) => b.onclick = () => {
+      const ta = $("twMessage"), tag = b.dataset.tag;
+      const a = ta.selectionStart ?? ta.value.length, z = ta.selectionEnd ?? a;
+      const open = `<${tag}>`, close = `</${tag}>`;
+      ta.value = ta.value.slice(0, a) + open + ta.value.slice(a, z) + close + ta.value.slice(z);
+      ta.focus();
+      ta.selectionStart = a + open.length;
+      ta.selectionEnd = a + open.length + (z - a);
+      changed();
+    });
     renderMsgPreview();
   }
   wireSeg($("twKind"), (v) => {
@@ -689,6 +703,14 @@
     finally { b.disabled = false; b.textContent = "Try the check on these"; }
   };
 
+  // The preview shows formatting rather than tags. Everything is escaped
+  // first and then exactly the tags Telegram understands are put back —
+  // none of them carry attributes, so nothing from the template can turn
+  // into markup of its own.
+  const FMT = /&lt;(\/?)(b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler)&gt;/g;
+  const fmt = (t) => esc(t).replace(FMT, (_m, slash, tag) =>
+    tag === "tg-spoiler" ? (slash ? "</span>" : '<span class="spoil">') : `<${slash}${tag}>`);
+
   /* what the message will look like, filled from the newest match */
   function renderMsgPreview() {
     if (!draft) return;
@@ -704,13 +726,14 @@
       const ct = (t.when.incident && t.when.incident.call_types || [])[0] || "Cardiac Arrest";
       const out = tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{calltype}", ct)
         .replaceAll("{address}", "1400 block of Example Street").replaceAll("{units}", "Medic 21, Engine 9")
-        .replaceAll("{summary}", "…what the dispatcher said…").replaceAll("{time}", "12:34:56")
+        .replaceAll("{summary}", "…what the dispatcher said…")
+        .replaceAll("{transcript}", "Dispatch: Medic 21 respond cardiac arrest…\nMedic 21: en route").replaceAll("{time}", "12:34:56")
         .replaceAll("{pathway}", "‹the pathway that matched›")
         .replaceAll("{maps}", "https://www.google.com/maps/search/?api=1&query=…")
         .replaceAll("{where}", "Closest hospital: Example General — 3.0 mi, 8 min by road\nECMO centre: Example Heart — 6.8 mi, 15 min by road")
         .replaceAll("{place}", "Example General").replaceAll("{nearest}", "Example Heart").replaceAll("{km}", "10.9").replaceAll("{mins}", "15")
         .replaceAll("{hospital}", "Example General").replaceAll("{report}", "…the crew's report…").replaceAll("{ai}", "");
-      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${esc(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}${/\{address\}/.test(tpl) ? " · the address opens Google Maps" : ""}</div>`;
+      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}${/\{address\}/.test(tpl) ? " · the address opens Google Maps" : ""}</div>`;
       return;
     }
     const tr = s && tried.get(s.id);
@@ -719,7 +742,7 @@
       .replaceAll("{unitname}", f.unit).replaceAll("{unit}", f.unit).replaceAll("{time}", f.time).replaceAll("{secs}", "6").replaceAll("{transcript}", f.transcript).replaceAll("{keywords}", f.keywords)
       .replaceAll("{ai}", tr && tr.note ? tr.note : t.check.kind === "ask" ? "‹the model's reason›" : "").replaceAll("{json}", tr && tr.fields ? JSON.stringify(tr.fields, null, 1) : "");
     for (const fld of t.check.fields || []) { if (!fld.key) continue; const v = tr && tr.fields && tr.fields[fld.key] != null ? String(tr.fields[fld.key]) : `‹${fld.key}›`; out = out.replaceAll(`{field.${fld.key}}`, v).replaceAll(`{${fld.key}}`, v); }
-    $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like${s ? "" : " (with made-up values)"}</div><div class="tw-bubble">${esc(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.audio ? " · with the audio" : ""}${t.send.follow !== "off" ? ` · follow-ups for ${t.send.follow_mins} min` : ""}</div>`;
+    $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like${s ? "" : " (with made-up values)"}</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.audio ? " · with the audio" : ""}${t.send.follow !== "off" ? ` · follow-ups for ${t.send.follow_mins} min` : ""}</div>`;
   }
 
   /* ---------- conversations open right now ---------- */

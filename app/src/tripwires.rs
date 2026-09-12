@@ -1083,6 +1083,62 @@ pub fn incident_fields(
     v
 }
 
+/// The radio traffic behind a run: what was said, and the recordings it was
+/// said on, oldest first.
+///
+/// A run is not a call — it is however many calls the model stitched into
+/// one incident — so both the transcript and the audio have to be gathered
+/// across all of them.
+pub struct Traffic {
+    /// Every transcribed call, oldest first, one line each.
+    pub transcript: String,
+    /// The recordings, in the same order, for one combined clip.
+    pub audio: Vec<String>,
+}
+
+pub fn traffic_for(db: &crate::dispatch::Db, incident: i64) -> Traffic {
+    let mut transcript = String::new();
+    let mut audio = Vec::new();
+    let c = match db.lock() {
+        Ok(c) => c,
+        Err(_) => return Traffic { transcript, audio },
+    };
+    let rows = c
+        .prepare(
+            "SELECT c.unit_name, c.transcript, c.audio FROM incident_calls ic
+             JOIN calls c ON c.id = ic.call WHERE ic.incident = ?1
+             ORDER BY c.start LIMIT 60",
+        )
+        .and_then(|mut st| {
+            st.query_map(rusqlite::params![incident], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    for (unit, text, file) in rows {
+        if let Some(t) = text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            if !transcript.is_empty() {
+                transcript.push('\n');
+            }
+            // The radio that said it, when the alias is known — a dispatch
+            // and a crew's reply read very differently.
+            match unit.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+                Some(u) => transcript.push_str(&format!("{u}: {t}")),
+                None => transcript.push_str(t),
+            }
+        }
+        if let Some(f) = file.filter(|f| !f.trim().is_empty()) {
+            audio.push(f);
+        }
+    }
+    Traffic { transcript, audio }
+}
+
 /// How many hospitals get a drawn route. Each one is a router call on the
 /// send thread, and a picture with four lines crossing it says less than
 /// one with two.
@@ -1321,6 +1377,38 @@ pub fn render(
     ai: &str,
     fields: Option<&serde_json::Value>,
 ) -> String {
+    // Plain text: whatever formatting the template asks for is not markup
+    // here, so the tags come out rather than being shown as `<b>`.
+    render_with(&crate::alerts::strip_tags(template), name, f, keywords, ai, fields, &|s| {
+        s.to_string()
+    })
+}
+
+/// The same message as Telegram HTML: the template's own `<b>`, `<i>` and
+/// the rest are left standing, and every value put into it is escaped, so
+/// nothing a dispatcher or a transcript contains can become markup.
+pub fn render_html(
+    template: &str,
+    name: &str,
+    f: &CallFacts,
+    keywords: &[String],
+    ai: &str,
+    fields: Option<&serde_json::Value>,
+) -> String {
+    render_with(template, name, f, keywords, ai, fields, &|s| {
+        crate::alerts::html_escape(s)
+    })
+}
+
+fn render_with(
+    template: &str,
+    name: &str,
+    f: &CallFacts,
+    keywords: &[String],
+    ai: &str,
+    fields: Option<&serde_json::Value>,
+    esc: &dyn Fn(&str) -> String,
+) -> String {
     let time = crate::library::local_hms(if f.start > 0 {
         f.start
     } else {
@@ -1334,22 +1422,22 @@ pub fn render(
         }
     });
     let mut out = template
-        .replace("{name}", name)
-        .replace("{alert}", name)
+        .replace("{name}", &esc(name))
+        .replace("{alert}", &esc(name))
         .replace("{tg}", &f.tg.to_string())
-        .replace("{tgname}", &f.tg_name)
-        .replace("{tgdesc}", f.tg_desc.as_deref().unwrap_or(""))
+        .replace("{tgname}", &esc(&f.tg_name))
+        .replace("{tgdesc}", &esc(f.tg_desc.as_deref().unwrap_or("")))
         .replace("{unit}", &f.unit.to_string())
-        .replace("{unitname}", &unit)
+        .replace("{unitname}", &esc(&unit))
         .replace("{time}", &time)
         .replace("{secs}", &format!("{:.0}", f.secs))
-        .replace("{transcript}", f.transcript.as_deref().unwrap_or(""))
-        .replace("{keywords}", &keywords.join(", "))
-        .replace("{ai}", ai);
+        .replace("{transcript}", &esc(f.transcript.as_deref().unwrap_or("")))
+        .replace("{keywords}", &esc(&keywords.join(", ")))
+        .replace("{ai}", &esc(ai));
     if let Some(obj) = fields {
         out = out.replace(
             "{json}",
-            &serde_json::to_string_pretty(obj).unwrap_or_default(),
+            &esc(&serde_json::to_string_pretty(obj).unwrap_or_default()),
         );
         if let Some(map) = obj.as_object() {
             for (k, v) in map {
@@ -1358,6 +1446,7 @@ pub fn render(
                     serde_json::Value::Null => String::new(),
                     other => other.to_string(),
                 };
+                let s = esc(&s);
                 out = out.replace(&format!("{{field.{k}}}"), &s);
                 // `{candidate}` works too, unless it names a standard token.
                 if !STANDARD_TOKENS.contains(&k.as_str()) {
@@ -1592,6 +1681,18 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
     // For the map link, when the run never got a pin and the address is all
     // there is to go on.
     let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
+    // The radio behind the run, for `{transcript}`, the AI check, and the
+    // clip that goes with the alert.
+    let traffic = state
+        .db
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|db| traffic_for(&db, i.id))
+        .unwrap_or(Traffic {
+            transcript: String::new(),
+            audio: Vec::new(),
+        });
     let (places, reports) = {
         let places = state.places.lock().unwrap().settings.clone();
         let db = state.db.lock().unwrap().clone();
@@ -1620,7 +1721,13 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
         if !matches_incident(&t, i, &places, linked || !reports.is_empty()) {
             continue;
         }
-        let f = incident_facts(i);
+        let mut f = incident_facts(i);
+        // What was actually said on the radio, rather than the one-line
+        // summary the model wrote. The check reads it too, because "CPR in
+        // progress" is said aloud and appears nowhere else.
+        if !traffic.transcript.is_empty() {
+            f.transcript = Some(traffic.transcript.clone());
+        }
         let mut extra =
             incident_fields(i, &places, &t.when.incident.near_feature, &reports, &region);
         // By road if a router is running; the straight line otherwise, and
@@ -1937,16 +2044,31 @@ fn fire_with(
             fields.as_ref(),
         )
     };
-    // The address, made tappable. Only when the rendered message actually
-    // contains it — a template that never mentions the address gets no
-    // markup and no parse mode.
-    let linked = fields.as_ref().and_then(|v| {
-        crate::alerts::link_in(
-            &message,
-            v["address"].as_str().unwrap_or(""),
-            v["maps"].as_str().unwrap_or(""),
-        )
-    });
+    // The same message as HTML, when there is any reason for it: the
+    // template asked for formatting, or the address can be a link. When
+    // neither is true this is `None` and plain text goes, exactly as
+    // before.
+    let linked = if is_reply {
+        None
+    } else {
+        let html = render_html(
+            &t.send.message,
+            &t.name,
+            &f,
+            &keywords,
+            &note,
+            fields.as_ref(),
+        );
+        let addressed = fields.as_ref().and_then(|v| {
+            crate::alerts::link_html(
+                &html,
+                v["address"].as_str().unwrap_or(""),
+                v["maps"].as_str().unwrap_or(""),
+            )
+        });
+        // Nothing to link, but the template may still be asking for bold.
+        addressed.or_else(|| (html != message).then_some(html))
+    };
     let _ = app.emit(
         "alert",
         serde_json::json!({ "name": t.name, "tg": f.tg, "message": message, "tone": t.send.tone && !is_reply, "call": f.id, "follow": is_reply }),
@@ -1987,6 +2109,19 @@ fn fire_with(
             return;
         }
     };
+    // The clip for a run: every recording the incident is made of, as one
+    // piece. Gathered here rather than passed in, so a follow-up reply does
+    // not drag the whole run's audio along with it.
+    let run_audio: Vec<String> = match incident.filter(|_| t.send.audio && !is_reply) {
+        Some(id) => state
+            .db
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|db| traffic_for(&db, id).audio)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let res = deliver(
         &state,
         &dest,
@@ -1998,6 +2133,7 @@ fn fire_with(
         if is_reply { 0 } else { t.send.earlier_calls },
         t.send.earlier_window_secs,
         reply_to.as_ref().map(|r| r.1),
+        &run_audio,
     );
     match res {
         Ok((detail, mut ids)) => {
@@ -2042,7 +2178,7 @@ fn fire_with(
             // already recorded above, so a photo id can't become one.
             if t.send.map {
                 if let Some(inc) = incident {
-                    match send_map(app, &state, &dest, inc, ids.first().copied()) {
+                    match send_map(app, &state, &dest, inc, ids.last().copied()) {
                         Ok(id) => {
                             ids.push(id);
                             detail.push_str(", with a map");
@@ -2150,6 +2286,7 @@ fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
                 0,
                 0,
                 Some(th.root),
+                &[],
             );
             match res {
                 Ok((d, ids)) => record(
@@ -2195,18 +2332,23 @@ fn deliver(
     earlier: u32,
     earlier_window: u32,
     reply_to: Option<i64>,
+    // The recordings behind a run. A run has no single call of its own, so
+    // when these are here they are the clip.
+    run_audio: &[String],
 ) -> Result<(String, Vec<i64>), String> {
-    let clip = if audio {
-        crate::alerts::clip_for_call(f, earlier, earlier_window, state)?
-    } else {
+    let clip = if !audio {
         None
+    } else if !run_audio.is_empty() {
+        crate::alerts::combine_clips(run_audio, &format!("tw_run_{}", f.tg)).ok()
+    } else {
+        crate::alerts::clip_for_call(f, earlier, earlier_window, state)?
     };
     match clip {
         None => crate::alerts::send_text_reply_html(dest, message, html, reply_to)
             .map(|id| ("sent".to_string(), vec![id])),
         Some((path, is_mp3)) => {
             let res = crate::alerts::send_audio_reply(
-                dest, &path, is_mp3, message, title, &f.tg_name, reply_to,
+                dest, &path, is_mp3, message, html, title, &f.tg_name, reply_to,
             );
             let _ = std::fs::remove_file(&path);
             res.map(|ids| {
@@ -3298,6 +3440,33 @@ mod tests {
         assert!(msg.contains("ECMO centre"), "{msg}");
         assert!(msg.contains("Example Heart"), "{msg}");
         assert!(msg.contains('7'), "no drive time for the 420 s leg: {msg}");
+    }
+
+    #[test]
+    fn a_template_may_ask_for_bold_but_a_transcript_may_not() {
+        let mut f = crate::alerts::CallFacts::default();
+        f.tg = 1001;
+        f.tg_name = "Dispatch".into();
+        // A transcriber writing angle brackets is ordinary, and so is an
+        // ampersand in a talkgroup name.
+        f.transcript = Some("caller said <hold> & wait".into());
+        let tpl = "<b>{name}</b> on {tgname}\n{transcript}";
+
+        // Plain: the tags are gone, the text is untouched.
+        let plain = render(tpl, "Arrest", &f, &[], "", None);
+        assert_eq!(plain, "Arrest on Dispatch\ncaller said <hold> & wait");
+
+        // HTML: the template's bold stands, the transcript is escaped so
+        // Telegram cannot read `<hold>` as a tag and refuse the message.
+        let html = render_html(tpl, "Arrest", &f, &[], "", None);
+        assert!(html.starts_with("<b>Arrest</b> on Dispatch"), "{html}");
+        assert!(html.contains("&lt;hold&gt; &amp; wait"), "{html}");
+        // The only tags in it are the ones the template asked for.
+        assert_eq!(html.matches('<').count(), 2, "{html}");
+
+        // A name with markup in it is data, not formatting.
+        let sneaky = render_html("{name}", "<b>loud</b>", &f, &[], "", None);
+        assert_eq!(sneaky, "&lt;b&gt;loud&lt;/b&gt;");
     }
 
     #[test]
