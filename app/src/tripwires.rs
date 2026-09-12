@@ -57,6 +57,10 @@ pub struct Tripwire {
     pub enabled: bool,
     /// The recipe it started from — a hint for the editor, nothing more.
     pub recipe: String,
+    /// The folder this sits in; empty = the top of the list. A tripwire in
+    /// a switched-off folder does not run, however its own switch is set.
+    #[serde(default)]
+    pub parent: String,
     pub when: When,
     pub check: Check,
     pub send: Send,
@@ -69,6 +73,7 @@ impl Default for Tripwire {
             name: String::new(),
             enabled: true,
             recipe: String::new(),
+            parent: String::new(),
             when: When::default(),
             check: Check::default(),
             send: Send::default(),
@@ -267,10 +272,42 @@ impl Default for Send {
     }
 }
 
+/// A folder in the tripwire list. Folders nest: a folder's own `parent` is
+/// another folder, or empty for the top level. Switching one off switches
+/// off everything inside it, however deep — one hand movement to silence a
+/// whole category without losing how each tripwire was set.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub parent: String,
+}
+
+impl Default for Folder {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            enabled: true,
+            parent: String::new(),
+        }
+    }
+}
+
+pub const MAX_FOLDERS: usize = 100;
+/// How deeply folders may nest. Deep enough for any real filing, shallow
+/// enough that the list stays readable at the right-hand edge.
+pub const MAX_DEPTH: usize = 5;
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Settings {
     #[serde(default)]
     pub tripwires: Vec<Tripwire>,
+    /// Folders, in the order they are shown within their parent.
+    #[serde(default)]
+    pub folders: Vec<Folder>,
 }
 
 /// An open reply thread: later traffic in its scope goes out as replies to
@@ -366,6 +403,7 @@ pub fn init(app: &AppHandle) {
             let cv = state.conversations.lock().unwrap().settings.clone();
             let dg = state.digests.lock().unwrap().settings.clone();
             let mut s = Settings {
+                folders: Vec::new(),
                 tripwires: migrate(&al, &az, &cv, &dg),
             };
             for t in &mut s.tripwires {
@@ -413,6 +451,7 @@ pub fn migrate(
             &crate::alerts::join_destination(&a.chat_id, &a.topic_id),
         );
         out.push(Tripwire {
+            parent: String::new(),
             id: a.id.clone(),
             name: a.name.clone(),
             enabled: a.enabled,
@@ -461,6 +500,7 @@ pub fn migrate(
     for r in &cv.rules {
         let (dest, chat) = dest_for(al, &r.chat_id);
         out.push(Tripwire {
+            parent: String::new(),
             id: r.id.clone(),
             name: r.name.clone(),
             enabled: r.enabled,
@@ -499,6 +539,7 @@ pub fn migrate(
     for r in &dg.rules {
         let (dest, chat) = dest_for(al, &r.chat_id);
         out.push(Tripwire {
+            parent: String::new(),
             id: r.id.clone(),
             name: r.name.clone(),
             enabled: r.enabled,
@@ -547,6 +588,7 @@ fn from_analyzer(r: &crate::analyzers::AnalyzerRule, al: &crate::alerts::Setting
         name: r.name.clone(),
         enabled: r.enabled,
         recipe: "analyzer".into(),
+        parent: String::new(),
         when: When {
             kind: "call".into(),
             tgs: r.tgs.clone(),
@@ -610,6 +652,9 @@ pub struct Bundle {
 fn quarantine(t: &mut Tripwire, i: usize) {
     t.id = format!("t{}-i{i}", crate::library::now());
     t.enabled = false;
+    // Somebody else's folder ids mean nothing here, and a tripwire that
+    // claimed one would be filed inside whatever happened to share it.
+    t.parent.clear();
     t.send.dest.clear();
     t.send.chat.clear();
 }
@@ -704,6 +749,102 @@ fn valid_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Is every folder above this one switched on? A tripwire only runs when
+/// its own switch *and* the whole chain of folders above it are on.
+///
+/// Walks upward with a step limit rather than trusting the tree, because
+/// this runs on the call path: `sanitize_tree` breaks cycles when settings
+/// are saved, but a hand-edited `tripwires.json` reaches here first.
+pub fn folders_on<'a>(folders: &'a [Folder], mut parent: &'a str) -> bool {
+    for _ in 0..=MAX_DEPTH {
+        if parent.is_empty() {
+            return true;
+        }
+        let Some(f) = folders.iter().find(|f| f.id == parent) else {
+            // A folder that is not there cannot be switched off; the
+            // tripwire behaves as though it sat at the top level.
+            return true;
+        };
+        if !f.enabled {
+            return false;
+        }
+        parent = &f.parent;
+    }
+    false
+}
+
+/// Everything that is on and of one kind, in list order, with the folders
+/// above each one taken into account.
+fn live<'a>(s: &'a Settings, kind: &'a str) -> impl Iterator<Item = &'a Tripwire> + 'a {
+    let folders = &s.folders;
+    s.tripwires
+        .iter()
+        .filter(move |t| t.enabled && t.when.kind == kind && folders_on(folders, &t.parent))
+}
+
+/// Tidy the folder tree: drop nameless and ill-named folders, point
+/// anything hanging off a folder that is not there back at the top level,
+/// break cycles, and flatten anything nested deeper than [`MAX_DEPTH`].
+///
+/// A cycle is not a hypothetical: dragging a folder into its own child is
+/// two gestures away, and the page is not the only thing that can save
+/// settings — the phone and a hand-edited file can too.
+pub fn sanitize_tree(s: &mut Settings) {
+    let now = crate::library::now();
+    s.folders.truncate(MAX_FOLDERS);
+    let mut seen: HashSet<String> = HashSet::new();
+    for (i, f) in s.folders.iter_mut().enumerate() {
+        f.id = clean_line(&f.id, 64);
+        if !valid_id(&f.id) || !seen.insert(f.id.clone()) {
+            f.id = format!("f{now}-{i}");
+            seen.insert(f.id.clone());
+        }
+        f.name = clean_line(&f.name, 80);
+        if f.name.is_empty() {
+            f.name = "Folder".into();
+        }
+        f.parent = clean_line(&f.parent, 64);
+    }
+    // A parent must exist, must not be the folder itself, and must not be
+    // reachable from it. Resolved top-down so each decision is made against
+    // a tree that is already sound above it.
+    let ids: HashSet<String> = s.folders.iter().map(|f| f.id.clone()).collect();
+    for i in 0..s.folders.len() {
+        let mut parent = s.folders[i].parent.clone();
+        if parent == s.folders[i].id || !ids.contains(&parent) {
+            parent = String::new();
+        }
+        // Walk up from the proposed parent, counting how deep this folder
+        // would sit. Coming back to itself, running past the limit, or
+        // finding a broken link all mean the top level.
+        let me = s.folders[i].id.clone();
+        let mut up = parent.clone();
+        let mut depth = 0usize;
+        while !up.is_empty() {
+            depth += 1;
+            if up == me || depth > MAX_DEPTH {
+                parent = String::new();
+                break;
+            }
+            match s.folders.iter().find(|f| f.id == up) {
+                Some(f) => up = f.parent.clone(),
+                None => {
+                    parent = String::new();
+                    break;
+                }
+            }
+        }
+        s.folders[i].parent = parent;
+    }
+    // Now the tripwires: a folder that is not there means the top level.
+    for t in s.tripwires.iter_mut() {
+        t.parent = clean_line(&t.parent, 64);
+        if !t.parent.is_empty() && !ids.contains(&t.parent) {
+            t.parent.clear();
+        }
+    }
 }
 
 fn clean_list(v: &[String], max: usize) -> Vec<String> {
@@ -1224,9 +1365,9 @@ pub fn destinations_changed(
 /// (learned consoles, last runs) is keyed by the same ids and kept.
 pub fn compile(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let list = state.tripwires.lock().unwrap().settings.tripwires.clone();
+    let s = state.tripwires.lock().unwrap().settings.clone();
     let al = state.alerts.lock().unwrap().settings.clone();
-    let (convs, digests) = compile_rules(&list, &al);
+    let (convs, digests) = compile_rules(&s.tripwires, &s.folders, &al);
     crate::conversations::set_rules(app, convs);
     crate::digest::set_rules(app, digests);
 }
@@ -1234,6 +1375,7 @@ pub fn compile(app: &AppHandle) {
 /// Pure half of `compile`, so it is tested.
 pub fn compile_rules(
     list: &[Tripwire],
+    folders: &[Folder],
     al: &crate::alerts::Settings,
 ) -> (
     Vec<crate::conversations::Rule>,
@@ -1255,7 +1397,7 @@ pub fn compile_rules(
                 convs.push(crate::conversations::Rule {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    enabled: t.enabled && t.send.telegram,
+                    enabled: t.enabled && folders_on(folders, &t.parent) && t.send.telegram,
                     tgs: t.when.tgs.clone(),
                     fixed_units: o.fixed_units.clone(),
                     learn_fixed: o.learn_fixed,
@@ -1276,7 +1418,7 @@ pub fn compile_rules(
                 digests.push(crate::digest::DigestRule {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    enabled: t.enabled && t.send.telegram,
+                    enabled: t.enabled && folders_on(folders, &t.parent) && t.send.telegram,
                     tgs: t.when.tgs.clone(),
                     interval_secs: o.every_mins * 60,
                     window_secs: o.window_mins * 60,
@@ -1296,16 +1438,9 @@ pub fn compile_rules(
 // ---------------------------------------------------------------------------
 
 fn call_tripwires(app: &AppHandle) -> Vec<Tripwire> {
-    app.state::<AppState>()
-        .tripwires
-        .lock()
-        .unwrap()
-        .settings
-        .tripwires
-        .iter()
-        .filter(|t| t.enabled && t.when.kind == "call")
-        .cloned()
-        .collect()
+    let st = app.state::<AppState>();
+    let st = st.tripwires.lock().unwrap();
+    live(&st.settings, "call").cloned().collect()
 }
 
 /// A run appeared on the dispatch map, or grew. Incident tripwires are
@@ -1318,12 +1453,7 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
     let state = app.state::<AppState>();
     let list: Vec<Tripwire> = {
         let st = state.tripwires.lock().unwrap();
-        st.settings
-            .tripwires
-            .iter()
-            .filter(|t| t.enabled && t.when.kind == "incident")
-            .cloned()
-            .collect()
+        live(&st.settings, "incident").cloned().collect()
     };
     if list.is_empty() {
         return;
@@ -2259,6 +2389,8 @@ pub struct Stat {
 #[derive(Serialize)]
 pub struct View {
     pub tripwires: Vec<Tripwire>,
+    #[serde(default)]
+    pub folders: Vec<Folder>,
     pub stats: HashMap<String, Stat>,
     pub has_token: bool,
     pub ffmpeg: bool,
@@ -2285,11 +2417,15 @@ fn stats_by_rule(state: &AppState, since: i64) -> HashMap<String, Stat> {
 
 #[tauri::command]
 pub fn tripwires_get(state: State<AppState>) -> View {
-    let tripwires = state.tripwires.lock().unwrap().settings.tripwires.clone();
+    let (tripwires, folders) = {
+        let st = state.tripwires.lock().unwrap();
+        (st.settings.tripwires.clone(), st.settings.folders.clone())
+    };
     let stats = stats_by_rule(&state, crate::library::now() - 7 * 86_400);
     let transcribing = state.transcriber.lock().unwrap().settings.enabled;
     View {
         tripwires,
+        folders,
         stats,
         has_token: crate::secrets::get("bot-token").is_some(),
         ffmpeg: crate::encode::ffmpeg_available().is_some(),
@@ -2303,6 +2439,9 @@ pub fn tripwires_set(
     app: AppHandle,
     state: State<AppState>,
     tripwires: Vec<Tripwire>,
+    // `folders` left out means "leave the folders as they are": the
+    // phone's page saves the list without knowing about them.
+    folders: Option<Vec<Folder>>,
 ) -> Result<Vec<Tripwire>, String> {
     if tripwires.len() > MAX_TRIPWIRES {
         return Err(format!(
@@ -2322,14 +2461,22 @@ pub fn tripwires_set(
             t.name = format!("Tripwire {}", i + 1);
         }
     }
-    {
+    let list = {
         let mut st = state.tripwires.lock().unwrap();
-        st.settings.tripwires = list.clone();
-        let keep: HashSet<&String> = list.iter().map(|t| &t.id).collect();
+        st.settings.tripwires = list;
+        if let Some(f) = folders {
+            st.settings.folders = f;
+        }
+        // Ids, names, dangling parents, cycles and over-deep nesting are
+        // all settled here, so nothing unsound is ever written to disk or
+        // reaches the matching path.
+        sanitize_tree(&mut st.settings);
+        let keep: HashSet<String> = st.settings.tripwires.iter().map(|t| t.id.clone()).collect();
         st.last_sent.retain(|k, _| keep.contains(&k.0));
         st.threads.retain(|th| keep.contains(&th.rule));
         store(&app, &st.settings)?;
-    }
+        st.settings.tripwires.clone()
+    };
     compile(&app);
     let _ = app.emit("tripwires", ());
     Ok(list)
@@ -2468,6 +2615,220 @@ pub async fn tripwire_test(app: AppHandle, id: String) -> Result<String, String>
         })
         .await
         .map_err(|e| e.to_string())?,
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    fn folder(id: &str, parent: &str, enabled: bool) -> Folder {
+        Folder {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            parent: parent.into(),
+        }
+    }
+
+    fn in_folder(id: &str, parent: &str, kind: &str) -> Tripwire {
+        Tripwire {
+            id: id.into(),
+            name: id.into(),
+            parent: parent.into(),
+            when: When {
+                kind: kind.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    // The whole point of a folder switch: one gesture silences a category
+    // without touching how each tripwire inside it was set.
+    #[test]
+    fn switching_a_folder_off_switches_off_everything_inside_it() {
+        let folders = vec![
+            folder("fire", "", false),
+            folder("ems", "", true),
+            folder("cardiac", "ems", true),
+        ];
+        assert!(!folders_on(&folders, "fire"));
+        assert!(folders_on(&folders, "ems"));
+        assert!(folders_on(&folders, "cardiac"));
+        assert!(folders_on(&folders, ""), "the top level is always on");
+
+        // A folder off two levels up still stops what is under it, and the
+        // tripwires' own switches are left exactly as they were.
+        let folders = vec![folder("ems", "", false), folder("cardiac", "ems", true)];
+        assert!(!folders_on(&folders, "cardiac"));
+
+        // A folder id that is not there behaves like the top level rather
+        // than silently muting the tripwire.
+        assert!(folders_on(&folders, "deleted-folder"));
+    }
+
+    #[test]
+    fn a_tripwire_in_a_closed_folder_does_not_run() {
+        let s = Settings {
+            folders: vec![folder("quiet", "", false), folder("loud", "", true)],
+            tripwires: vec![
+                in_folder("a", "quiet", "call"),
+                in_folder("b", "loud", "call"),
+                in_folder("c", "", "call"),
+                in_folder("d", "loud", "incident"),
+            ],
+        };
+        let calls: Vec<&str> = live(&s, "call").map(|t| t.id.as_str()).collect();
+        assert_eq!(calls, vec!["b", "c"], "a tripwire in a closed folder ran");
+        let runs: Vec<&str> = live(&s, "incident").map(|t| t.id.as_str()).collect();
+        assert_eq!(runs, vec!["d"]);
+
+        // Its own switch still counts for something.
+        let mut s = s;
+        s.tripwires[1].enabled = false;
+        let calls: Vec<&str> = live(&s, "call").map(|t| t.id.as_str()).collect();
+        assert_eq!(calls, vec!["c"]);
+    }
+
+    // Dragging a folder into its own child is two gestures away, and the
+    // page is not the only thing that can save settings.
+    #[test]
+    fn a_folder_cannot_end_up_inside_itself() {
+        let mut s = Settings {
+            folders: vec![
+                folder("a", "b", true),
+                folder("b", "a", true),
+                folder("c", "c", true),
+            ],
+            tripwires: vec![],
+        };
+        sanitize_tree(&mut s);
+        // The cycle is broken by putting the offender at the top level —
+        // never by dropping a folder, which would take its contents with it.
+        assert_eq!(s.folders.len(), 3);
+        for f in &s.folders {
+            assert!(folders_on(&s.folders, &f.id) || !f.enabled);
+            // And every chain now terminates.
+            let mut up = f.parent.clone();
+            let mut steps = 0;
+            while !up.is_empty() {
+                steps += 1;
+                assert!(steps <= MAX_DEPTH + 1, "{} still loops", f.id);
+                up = s
+                    .folders
+                    .iter()
+                    .find(|x| x.id == up)
+                    .map(|x| x.parent.clone())
+                    .unwrap_or_default();
+            }
+        }
+        assert_eq!(s.folders[2].parent, "", "a folder was its own parent");
+    }
+
+    #[test]
+    fn nesting_past_the_limit_is_flattened() {
+        let mut s = Settings {
+            folders: (0..MAX_DEPTH + 3)
+                .map(|i| {
+                    folder(
+                        &format!("f{i}"),
+                        &if i == 0 {
+                            String::new()
+                        } else {
+                            format!("f{}", i - 1)
+                        },
+                        true,
+                    )
+                })
+                .collect(),
+            tripwires: vec![],
+        };
+        sanitize_tree(&mut s);
+        // Every folder is reachable within the limit.
+        for f in &s.folders {
+            let mut depth = 0;
+            let mut up = f.parent.clone();
+            while !up.is_empty() {
+                depth += 1;
+                assert!(depth <= MAX_DEPTH, "{} is {depth} deep", f.id);
+                up = s
+                    .folders
+                    .iter()
+                    .find(|x| x.id == up)
+                    .map(|x| x.parent.clone())
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    #[test]
+    fn a_tripwire_pointing_at_a_folder_that_is_gone_comes_back_to_the_top() {
+        let mut s = Settings {
+            folders: vec![folder("here", "", true)],
+            tripwires: vec![
+                in_folder("a", "here", "call"),
+                in_folder("b", "vanished", "call"),
+            ],
+        };
+        sanitize_tree(&mut s);
+        assert_eq!(s.tripwires[0].parent, "here");
+        assert_eq!(s.tripwires[1].parent, "", "a lost tripwire stayed hidden");
+    }
+
+    #[test]
+    fn folders_are_given_names_and_ids_when_they_arrive_without_them() {
+        let mut s = Settings {
+            folders: vec![
+                Folder::default(),
+                folder("ok", "", true),
+                folder("ok", "", true),
+                folder("bad id!", "", true),
+            ],
+            tripwires: vec![],
+        };
+        sanitize_tree(&mut s);
+        let ids: HashSet<&str> = s.folders.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 4, "two folders share an id: {ids:?}");
+        for f in &s.folders {
+            assert!(valid_id(&f.id), "{}", f.id);
+            assert!(!f.name.is_empty());
+        }
+    }
+
+    // A shared bundle carries somebody else's folder ids.
+    #[test]
+    fn an_imported_tripwire_does_not_claim_a_folder() {
+        let mut t = in_folder("theirs", "their-folder", "call");
+        quarantine(&mut t, 0);
+        assert_eq!(t.parent, "");
+        assert!(!t.enabled);
+    }
+
+    // The conversation and digest engines get their own copy of the rules,
+    // so the folder switch has to reach them too.
+    #[test]
+    fn a_closed_folder_reaches_the_conversation_and_digest_engines() {
+        let al = crate::alerts::Settings::default();
+        let mut a = in_folder("conv", "quiet", "conversation");
+        a.send.telegram = true;
+        let mut b = in_folder("dig", "quiet", "digest");
+        b.send.telegram = true;
+        let list = vec![a, b];
+        let folders = vec![folder("quiet", "", false)];
+
+        let (convs, digests) = compile_rules(&list, &folders, &al);
+        assert!(
+            convs.iter().all(|r| !r.enabled),
+            "a conversation rule in a closed folder is still live"
+        );
+        assert!(digests.iter().all(|r| !r.enabled));
+
+        // Open the folder and both come back on.
+        let folders = vec![folder("quiet", "", true)];
+        let (convs, digests) = compile_rules(&list, &folders, &al);
+        assert!(convs.iter().all(|r| r.enabled));
+        assert!(digests.iter().all(|r| r.enabled));
     }
 }
 
@@ -2964,7 +3325,7 @@ mod tests {
     fn compiling_gives_the_engines_back_their_rules() {
         let (al, az, cv, dg) = old_settings();
         let list = migrate(&al, &az, &cv, &dg);
-        let (convs, digests) = compile_rules(&list, &al);
+        let (convs, digests) = compile_rules(&list, &[], &al);
         assert_eq!(convs.len(), 1);
         let mut expect = cv.rules[0].clone();
         expect.chat_id = "-1001:57".into();
@@ -3145,7 +3506,7 @@ mod real_config {
             super::sanitize(t).unwrap_or_else(|e| panic!("{}: {e}", t.name));
         }
         println!("{}", serde_json::to_string_pretty(&list).unwrap());
-        let (convs, digests) = super::compile_rules(&list, &al);
+        let (convs, digests) = super::compile_rules(&list, &[], &al);
         for (a, b) in convs.iter().zip(&cv.rules) {
             if a != b {
                 println!("CONVERSATION DIFFERS {}:\n  old {b:?}\n  new {a:?}", a.id);
