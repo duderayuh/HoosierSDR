@@ -358,6 +358,15 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
         "incident_linked",
         serde_json::json!({ "conversation": conversation, "incident": incident, "how": how }),
     );
+    // A tripwire waiting for the outcome — "tell me where the arrest went" —
+    // has been waiting for exactly this.
+    {
+        let c = db.lock().unwrap();
+        if let Ok(Some(run)) = crate::dispatch::inc_get(&c, incident) {
+            drop(c);
+            crate::tripwires::on_incident(app, &run, true);
+        }
+    }
     Some((incident, how))
 }
 

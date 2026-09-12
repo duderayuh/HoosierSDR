@@ -341,7 +341,13 @@ fn day_label(epoch: i64) -> String {
 }
 
 /// Run `t` over the last `days` of the library.
-pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Preview, String> {
+pub fn preview(
+    c: &Connection,
+    t: &Tripwire,
+    days: u32,
+    now: i64,
+    places: &crate::places::Settings,
+) -> Result<Preview, String> {
     let days = days.clamp(1, 30);
     let since = now - days as i64 * 86_400;
     let mut p = Preview {
@@ -362,6 +368,90 @@ pub fn preview(c: &Connection, t: &Tripwire, days: u32, now: i64) -> Result<Prev
         b[n - 1 - i].2 += 1;
     };
     match t.when.kind.as_str() {
+        "incident" => {
+            // Runs are few and already stored, so this is a plain scan of
+            // the dispatch history rather than of the whole library.
+            let mut q = c
+                .prepare(
+                    "SELECT id, created, updated, tg, tg_name, call_type, emoji, address, validated,
+                            lat, lon, geocode, units, summary, confidence, calls, revision
+                       FROM incidents WHERE created >= ?1 ORDER BY created ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let runs: Vec<crate::dispatch::Incident> = q
+                .query_map([since], |r| {
+                    Ok(crate::dispatch::Incident {
+                        id: r.get(0)?,
+                        created: r.get(1)?,
+                        updated: r.get(2)?,
+                        tg: r.get::<_, i64>(3)? as u16,
+                        tg_name: r.get(4)?,
+                        call_type: r.get(5)?,
+                        emoji: r.get(6)?,
+                        address: r.get(7)?,
+                        validated: r.get(8)?,
+                        lat: r.get(9)?,
+                        lon: r.get(10)?,
+                        geocode: r.get(11)?,
+                        units: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+                        summary: r.get(13)?,
+                        confidence: r.get(14)?,
+                        calls: r.get(15)?,
+                        revision: r.get(16)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            p.scanned = runs.len() as u32;
+            p.transcribed = runs.len() as u32;
+            let linked: std::collections::HashSet<i64> = {
+                let mut set = std::collections::HashSet::new();
+                if let Ok(mut lq) =
+                    c.prepare("SELECT DISTINCT incident FROM conversations WHERE incident IS NOT NULL")
+                {
+                    if let Ok(rows) = lq.query_map([], |r| r.get::<_, i64>(0)) {
+                        set.extend(rows.flatten());
+                    }
+                }
+                set
+            };
+            let mut last = 0i64;
+            for run in &runs {
+                if !tripwires::matches_incident(t, run, places, linked.contains(&run.id)) {
+                    continue;
+                }
+                p.matches += 1;
+                bucket(run.created, &mut buckets);
+                if t.send.quiet_secs == 0 || run.created - last >= t.send.quiet_secs as i64 {
+                    p.messages += 1;
+                    last = run.created;
+                }
+                if p.samples.len() < 12 {
+                    p.samples.push(Sample {
+                        id: run.id,
+                        start: run.created,
+                        tg: run.tg,
+                        tg_name: run.tg_name.clone(),
+                        unit_name: run.units.join(", "),
+                        transcript: format!(
+                            "{} {} · {} · {}",
+                            run.emoji, run.call_type, run.address, run.summary
+                        ),
+                        keywords: Vec::new(),
+                        audio: false,
+                        emergency: false,
+                    });
+                }
+            }
+            p.samples.reverse();
+            if p.scanned == 0 {
+                p.warnings.push(
+                    "No runs on the dispatch map in this window — the Dispatch tab builds them."
+                        .into(),
+                );
+            }
+        }
         "conversation" | "digest" => {
             // Only the timing matters here, so leave the transcripts in the
             // library rather than dragging them all through the lock.
@@ -565,6 +655,7 @@ pub async fn tripwire_preview(
         let mut t = tripwire;
         tripwires::sanitize(&mut t)?;
         let state = app.state::<AppState>();
+        let places = state.places.lock().unwrap().settings.clone();
         let db = state
             .db
             .lock()
@@ -573,7 +664,7 @@ pub async fn tripwire_preview(
             .ok_or("the call library is not open")?;
         let mut p = {
             let c = db.lock().unwrap();
-            preview(&c, &t, days.unwrap_or(7), crate::library::now())?
+            preview(&c, &t, days.unwrap_or(7), crate::library::now(), &places)?
         };
         let mut w = setup_warnings(&state, &t);
         w.append(&mut p.warnings);
@@ -984,7 +1075,7 @@ mod tests {
             name: "Anything".into(),
             ..Default::default()
         };
-        let p = preview(&c, &t, 7, now).unwrap();
+        let p = preview(&c, &t, 7, now, &Default::default()).unwrap();
         assert_eq!(p.scanned, 5, "it still says how much there is");
         assert_eq!(p.matches, 0);
         assert!(p.samples.is_empty());
@@ -1027,7 +1118,7 @@ mod tests {
         t.when.phrases = vec!["cardiac arrest".into(), "v fib".into()];
         t.when.except = vec!["history of cardiac arrest".into()];
         t.send.quiet_secs = 300;
-        let p = preview(&c, &t, 7, now).unwrap();
+        let p = preview(&c, &t, 7, now, &Default::default()).unwrap();
         assert_eq!(p.matches, 3, "three arrests on TG 1, one excepted");
         assert_eq!(p.excepted, 1);
         assert_eq!(p.messages, 2, "the two within five minutes are one message");
@@ -1118,7 +1209,7 @@ mod tests {
         let mut t = Tripwire::default();
         t.when.kind = "conversation".into();
         t.when.tgs = vec![5];
-        let p = preview(&c, &t, 1, now).unwrap();
+        let p = preview(&c, &t, 1, now, &Default::default()).unwrap();
         assert_eq!((p.scanned, p.messages), (5, 2));
         let _ = std::fs::remove_dir_all(&d);
     }

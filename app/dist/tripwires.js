@@ -18,6 +18,7 @@
     call: ["{name}", "{tgname}", "{tgdesc}", "{unitname}", "{time}", "{transcript}", "{keywords}", "{ai}"],
     conversation: ["{rule}", "{summary}", "{tgname}", "{tgdesc}", "{unitnames}", "{calls}", "{duration}", "{started}", "{transcript}", "{revision}"],
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
+    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{place}", "{nearest}", "{km}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
   let list = [], stats = {}, view = null, recipes = null;
   let sel = null, draft = null, saved = "", words = null;
@@ -144,9 +145,15 @@
   }
   function edit(id, t, w) {
     sel = id; draft = t; words = w; tried = new Map(); preview = null;
-    saved = id === "new" ? "" : stable(tidy(t));
     $("twGallery").style.display = "none"; $("twEdit").style.display = "";
-    renderList(); fill(); schedulePreview(0);
+    renderList(); fill();
+    // What "unchanged" looks like is whatever the form itself reads back
+    // from the tripwire it was just filled with. Comparing against the
+    // stored object instead would call a tripwire dirty the moment the
+    // form writes a field the stored one happened not to carry.
+    saved = id === "new" ? "" : stable(tidy(read()));
+    markDirty();
+    schedulePreview(0);
   }
   function closeEditor() { sel = null; draft = null; words = null; $("twEdit").style.display = "none"; $("twGallery").style.display = ""; showGallery(); }
   const isDirty = () => draft && stable(tidy(read())) !== saved;
@@ -185,6 +192,7 @@
     $("twGap").value = c.end_gap_secs; $("twReply").value = c.reply_gap_secs; $("twLate").value = c.late_window_secs;
     $("twMax").value = c.max_secs; $("twMin").value = c.min_calls; $("twNoTr").checked = c.send_without_transcript;
     $("twEvery").value = w.digest.every_mins; $("twWindow").value = w.digest.window_mins;
+    fillIncident(w.incident || {});
     setSeg($("twCheck"), k.kind === "summarize" ? "none" : k.kind);
     $("twPrompt").value = k.prompt; $("twEngine").value = k.engine; $("twThink").checked = k.think; $("twUnavail").value = k.if_unavailable;
     $("twMatch").value = k.match_mode;
@@ -202,11 +210,45 @@
     renderWords(); kindUi(); markDirty();
     if (typeof window.olThinkUi === "function") window.olThinkUi();
   }
+  // The place book, for "near …". Loaded once and left alone: a listener
+  // who adds a hospital re-opens the editor anyway.
+  let places = null;
+  async function loadPlaces() {
+    if (places) return places;
+    try { places = (await invoke("places_get")).places || []; } catch (e) { places = []; }
+    return places;
+  }
+  function fillIncident(o) {
+    $("twIncTypes").value = (o.call_types || []).join(", ");
+    $("twIncKm").value = o.within_km || 0;
+    $("twIncPlaced").checked = !!o.placed_only;
+    $("twIncLinked").checked = !!o.linked_only;
+    loadPlaces().then((list) => {
+      const feats = [...new Set(list.flatMap((p) => p.features || []))];
+      const opts = [`<option value="">anywhere</option>`]
+        .concat(feats.map((f) => `<option value="f:${esc(f)}">the nearest that can do ${esc(f)}</option>`))
+        .concat(list.map((p) => `<option value="p:${esc(p.id)}">${esc(p.name)}</option>`));
+      $("twIncNear").innerHTML = opts.join("");
+      $("twIncNear").value = o.near_feature ? `f:${o.near_feature}` : o.near_place ? `p:${o.near_place}` : "";
+    });
+  }
+  function readIncident(w) {
+    const near = $("twIncNear").value || "";
+    w.incident = {
+      call_types: $("twIncTypes").value.split(",").map((x) => x.trim()).filter(Boolean),
+      near_place: near.startsWith("p:") ? near.slice(2) : "",
+      near_feature: near.startsWith("f:") ? near.slice(2) : "",
+      within_km: +$("twIncKm").value || 0,
+      placed_only: $("twIncPlaced").checked,
+      linked_only: $("twIncLinked").checked,
+    };
+  }
   function read() {
     if (!draft) return null;
     const t = draft, w = t.when, k = t.check, s = t.send;
     t.name = $("twName").value.trim(); t.enabled = $("twEnabled").checked;
     w.system = $("twSystem").value;
+    readIncident(w);
     w.phrases = lines($("twPhrases").value); w.except = lines($("twExcept").value);
     w.units = nums($("twUnits").value); w.emergency = $("twEmergency").checked;
     const c = w.conversation;
@@ -227,28 +269,30 @@
     const kind = draft.when.kind, check = draft.check.kind;
     $("twCallWhen").style.display = kind === "call" ? "" : "none";
     $("twConvWhen").style.display = kind === "conversation" ? "" : "none";
+    $("twIncWhen").style.display = kind === "incident" ? "" : "none";
     $("twDigestWhen").style.display = kind === "digest" ? "" : "none";
-    $("twCheck").style.display = kind === "call" ? "" : "none";
-    const showBody = kind !== "call" || check !== "none";
+    const asksModel = kind === "call" || kind === "incident";
+    $("twCheck").style.display = asksModel ? "" : "none";
+    const showBody = !asksModel || check !== "none";
     $("twCheckBody").style.display = showBody ? "" : "none";
-    $("twExtract").style.display = kind === "call" && check === "extract" ? "" : "none";
-    $("twUnavail").style.display = kind === "call" ? "" : "none";
-    $("twEngine").style.display = kind === "call" ? "" : "none";
-    $("twThinkWrap").style.display = kind === "call" && $("twEngine").value === "local" ? "" : "none";
-    $("twPromptLab").textContent = kind !== "call" ? "What the summary should say" : check === "ask" ? "The question — answered yes (send) or no (stay quiet)" : "What to look for and how to judge it";
+    $("twExtract").style.display = asksModel && check === "extract" ? "" : "none";
+    $("twUnavail").style.display = asksModel ? "" : "none";
+    $("twEngine").style.display = asksModel ? "" : "none";
+    $("twThinkWrap").style.display = asksModel && $("twEngine").value === "local" ? "" : "none";
+    $("twPromptLab").textContent = !asksModel ? "What the summary should say" : check === "ask" ? "The question — answered yes (send) or no (stay quiet)" : "What to look for and how to judge it";
     $("twPrompt").placeholder = check === "ask" ? "Is this a cardiac arrest happening now — not a history of one, a training call or a cancelled response?" : "";
     $("twCheckHelp").textContent = kind === "conversation" ? "When the exchange goes quiet, the transcripts are stitched with who said what and the local model writes a hand-off note. A late transmission revises it." :
       kind === "digest" ? "On each run the transcripts from the window are rolled up and the local model says what is happening." :
       check === "none" ? "Every matching call is sent (after the quiet window below)." :
       check === "ask" ? "The model reads the transcript and your question; “no” keeps it quiet. Its one-line reason fills {ai}." :
       "The model returns the details you list as fields; the message is sent only when your conditions over them hold. Each detail is also a {token}.";
-    $("twQuietField").style.display = kind === "call" ? "" : "none";
+    $("twQuietField").style.display = asksModel ? "" : "none";
     $("twFollowRow").style.display = kind === "call" ? "" : "none";
     $("twFollowFor").style.display = $("twFollow").value === "off" ? "none" : "";
     $("twToneWrap").style.display = kind === "call" ? "" : "none";
     $("twEarlier").style.display = kind === "call" && $("twAudio").checked ? "" : "none";
     $("twChatWrap").style.display = $("twDest").value === "custom" ? "" : "none";
-    const toks = [...TOKENS[kind] || TOKENS.call, ...(kind === "call" && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
+    const toks = [...TOKENS[kind] || TOKENS.call, ...(asksModel && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
     $("twTokens").innerHTML = toks.map((x) => `<button class="tw-token" data-tok="${esc(x)}" title="Insert">${esc(x)}</button>`).join("");
     $("twTokens").querySelectorAll("[data-tok]").forEach((b) => b.onclick = () => { const ta = $("twMessage"); const at = ta.selectionStart ?? ta.value.length; ta.value = ta.value.slice(0, at) + b.dataset.tok + ta.value.slice(ta.selectionEnd ?? at); ta.focus(); ta.selectionStart = ta.selectionEnd = at + b.dataset.tok.length; changed(); });
     renderMsgPreview();

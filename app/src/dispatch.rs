@@ -459,7 +459,7 @@ fn inc_row(r: &rusqlite::Row) -> rusqlite::Result<(Incident, String)> {
     ))
 }
 
-fn inc_get(c: &Connection, id: i64) -> Result<Option<Incident>, String> {
+pub(crate) fn inc_get(c: &Connection, id: i64) -> Result<Option<Incident>, String> {
     c.query_row(
         &format!("SELECT {INC_COLS} FROM incidents WHERE id = ?1"),
         params![id],
@@ -1605,6 +1605,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             inc_attach_call(&c, i.id, f, &role, &x.summary, &extracted)?;
             drop(c);
             let _ = app.emit("incident", &i);
+            crate::tripwires::on_incident(app, &i, false);
             log_it(app, f, "update", format!("{how} → #{}", i.id), Some(i.id));
             Ok((format!("updated incident #{} ({how})", i.id), Some(i)))
         }
@@ -1649,6 +1650,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             prune(&c, settings.retention_days);
             drop(c);
             let _ = app.emit("incident", &i);
+            crate::tripwires::on_incident(app, &i, false);
             log_it(
                 app,
                 f,

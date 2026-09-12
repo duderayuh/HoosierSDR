@@ -79,7 +79,7 @@ impl Default for Tripwire {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct When {
-    /// `call` | `conversation` | `digest`
+    /// `call` | `conversation` | `digest` | `incident`
     pub kind: String,
     /// Talkgroups; empty = any (a call tripwire then needs phrases, radios
     /// or the emergency flag to narrow it).
@@ -96,6 +96,7 @@ pub struct When {
     pub emergency: bool,
     pub conversation: ConvOpts,
     pub digest: DigestOpts,
+    pub incident: IncOpts,
 }
 
 impl Default for When {
@@ -110,8 +111,32 @@ impl Default for When {
             emergency: false,
             conversation: ConvOpts::default(),
             digest: DigestOpts::default(),
+            incident: IncOpts::default(),
         }
     }
+}
+
+/// Which runs off the dispatch map are worth a message.
+///
+/// A dispatch is not a call: it is what the model made of one or more calls
+/// — a type, an address, the units sent, and often a point on the map. So it
+/// is matched on those, not on words in a transcript.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct IncOpts {
+    /// Call types as the dispatch settings spell them; empty = any.
+    pub call_types: Vec<String>,
+    /// Only runs within `within_km` of this place (a place id), or of the
+    /// nearest place with this feature. Blank = anywhere.
+    pub near_place: String,
+    pub near_feature: String,
+    pub within_km: f64,
+    /// Only runs that ended up on the map — a run with no pin cannot be
+    /// near anything.
+    pub placed_only: bool,
+    /// Wait for the hospital report before sending, so the message can say
+    /// where the patient went.
+    pub linked_only: bool,
 }
 
 /// How a conversation is told apart and when it is over (see
@@ -701,7 +726,7 @@ pub fn sanitize(t: &mut Tripwire) -> Result<(), String> {
     t.recipe = clean_line(&t.recipe, 40);
     let w = &mut t.when;
     w.kind = match w.kind.as_str() {
-        "conversation" | "digest" => w.kind.clone(),
+        "conversation" | "digest" | "incident" => w.kind.clone(),
         _ => "call".into(),
     };
     w.tgs.sort_unstable();
@@ -713,6 +738,14 @@ pub fn sanitize(t: &mut Tripwire) -> Result<(), String> {
     w.units.sort_unstable();
     w.units.dedup();
     w.units.truncate(500);
+    {
+        let o = &mut w.incident;
+        o.call_types = clean_list(&o.call_types, 60);
+        o.call_types.truncate(40);
+        o.near_place = clean_line(&o.near_place, 64);
+        o.near_feature = clean_line(&o.near_feature, 24).to_ascii_lowercase();
+        o.within_km = o.within_km.clamp(0.0, 500.0);
+    }
     let c = &mut w.conversation;
     c.fixed_units.sort_unstable();
     c.fixed_units.dedup();
@@ -826,7 +859,132 @@ pub fn needs_transcript(t: &Tripwire) -> bool {
 /// A call tripwire with nothing narrowing it would fire on every call heard.
 pub fn is_narrowed(t: &Tripwire) -> bool {
     let w = &t.when;
+    if w.kind == "incident" {
+        // A run is already a narrow thing — the model decided it was a
+        // dispatch — so even "every run" is a reasonable tripwire.
+        return true;
+    }
     !w.tgs.is_empty() || !w.units.is_empty() || !w.phrases.is_empty() || w.emergency
+}
+
+// ---------------------------------------------------------------------------
+// runs off the dispatch map
+// ---------------------------------------------------------------------------
+
+/// What an incident tripwire can say in its message, beyond the standard
+/// tokens: `{calltype}`, `{address}`, `{units}`, `{place}`, `{km}`,
+/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`.
+pub fn incident_fields(
+    i: &crate::dispatch::Incident,
+    places: &crate::places::Settings,
+    feature: &str,
+    reports: &[crate::link::LinkedReport],
+) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "calltype": i.call_type,
+        "address": i.address,
+        "units": i.units.join(", "),
+        "summary": i.summary,
+        "place": "",
+        "km": "",
+        "nearest": "",
+        "hospital": "",
+        "report": "",
+    });
+    if let (Some(lat), Some(lon)) = (i.lat, i.lon) {
+        // The nearest place that can do the thing this tripwire cares
+        // about — a cath lab, a stroke team — and how far the run is from
+        // it.
+        if let Some((p, m)) = crate::places::nearest_with(places, feature, (lat, lon)).first() {
+            v["nearest"] = p.name.clone().into();
+            v["km"] = format!("{:.1}", m / 1000.0).into();
+        }
+        if let Some((p, _)) = crate::places::nearest_with(places, "", (lat, lon)).first() {
+            v["place"] = p.name.clone().into();
+        }
+    }
+    if let Some(r) = reports.first() {
+        v["hospital"] = r.place.clone().into();
+        v["report"] = r.summary.clone().into();
+    }
+    v
+}
+
+/// Does this run trip this tripwire?
+pub fn matches_incident(
+    t: &Tripwire,
+    i: &crate::dispatch::Incident,
+    places: &crate::places::Settings,
+    linked: bool,
+) -> bool {
+    let w = &t.when;
+    let o = &w.incident;
+    if !w.tgs.is_empty() && !w.tgs.contains(&i.tg) {
+        return false;
+    }
+    if !o.call_types.is_empty()
+        && !o
+            .call_types
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&i.call_type))
+    {
+        return false;
+    }
+    if o.linked_only && !linked {
+        return false;
+    }
+    let placed = i.lat.is_some() && i.lon.is_some();
+    if (o.placed_only || o.within_km > 0.0) && !placed {
+        return false;
+    }
+    // "Within so many kilometres of somewhere": either a place by name, or
+    // the nearest place that can do a particular thing.
+    if o.within_km > 0.0 {
+        let (lat, lon) = (i.lat.unwrap_or(0.0), i.lon.unwrap_or(0.0));
+        let near = if !o.near_place.is_empty() {
+            places
+                .places
+                .iter()
+                .find(|p| p.id == o.near_place && p.enabled)
+                .and_then(|p| Some(crate::dispatch::haversine_m(lat, lon, p.lat?, p.lon?)))
+        } else {
+            crate::places::nearest_with(places, &o.near_feature, (lat, lon))
+                .first()
+                .map(|(_, m)| *m)
+        };
+        match near {
+            Some(m) if m <= o.within_km * 1000.0 => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// A run, dressed as a call so the rest of the machinery — the quiet
+/// window, the AI check, the message, the history — works unchanged.
+pub fn incident_facts(i: &crate::dispatch::Incident) -> CallFacts {
+    CallFacts {
+        id: None,
+        start: i.created,
+        tg: i.tg,
+        tg_name: i.tg_name.clone(),
+        tg_desc: None,
+        unit: 0,
+        unit_name: i.units.first().cloned(),
+        secs: 0.0,
+        emergency: false,
+        audio: None,
+        // What the model made of the run reads as the transcript, so an AI
+        // check has something to read.
+        transcript: Some(format!(
+            "{} at {}. Units: {}. {}",
+            i.call_type,
+            if i.address.is_empty() { "an address not heard" } else { &i.address },
+            i.units.join(", "),
+            i.summary
+        )),
+        system: String::new(),
+    }
 }
 
 /// Does the call trip this tripwire? Returns the phrases that matched.
@@ -1149,6 +1307,48 @@ fn call_tripwires(app: &AppHandle) -> Vec<Tripwire> {
         .collect()
 }
 
+/// A run appeared on the dispatch map, or grew. Incident tripwires are
+/// matched on what the run *is* — its type, where it is, whether the crew
+/// has reported to a hospital yet — rather than on words in one call.
+///
+/// `linked` says a hospital report has been joined to it, which is what a
+/// tripwire waiting for the outcome is waiting for.
+pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool) {
+    let state = app.state::<AppState>();
+    let list: Vec<Tripwire> = {
+        let st = state.tripwires.lock().unwrap();
+        st.settings
+            .tripwires
+            .iter()
+            .filter(|t| t.enabled && t.when.kind == "incident")
+            .cloned()
+            .collect()
+    };
+    if list.is_empty() {
+        return;
+    }
+    let (places, reports) = {
+        let places = state.places.lock().unwrap().settings.clone();
+        let db = state.db.lock().unwrap().clone();
+        let reports = db
+            .map(|db| {
+                let c = db.lock().unwrap();
+                crate::link::reports_for(&c, i.id, &places)
+            })
+            .unwrap_or_default();
+        (places, reports)
+    };
+    for t in list {
+        if !matches_incident(&t, i, &places, linked || !reports.is_empty()) {
+            continue;
+        }
+        let f = incident_facts(i);
+        let extra = incident_fields(i, &places, &t.when.incident.near_feature, &reports);
+        let (app, t) = (app.clone(), t);
+        std::thread::spawn(move || fire_with(&app, t, f, Vec::new(), Some(extra)));
+    }
+}
+
 /// A call finished (its transcript, if any, is still to come).
 pub fn on_call(app: &AppHandle, f: &CallFacts) {
     for t in call_tripwires(app) {
@@ -1334,6 +1534,18 @@ fn open_thread(st: &TripState, rule: &str, tg: u16, now: i64) -> Option<(String,
 
 /// Run one tripwire for one call: quiet window, check, send, record.
 fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
+    fire_with(app, t, f, keywords, None)
+}
+
+/// `extra` are facts the message can use that did not come from a check —
+/// what a run is, where it is, which hospital took the patient.
+fn fire_with(
+    app: &AppHandle,
+    t: Tripwire,
+    f: CallFacts,
+    keywords: Vec<String>,
+    extra: Option<serde_json::Value>,
+) {
     let state = app.state::<AppState>();
     let now = crate::library::now();
     let key = (t.id.clone(), f.tg);
@@ -1388,6 +1600,20 @@ fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
             }
             (format!("(AI check unavailable: {e})"), None)
         }
+    };
+    // What the run is, underneath whatever the check found: a check that
+    // names the same key wins, because the listener asked for it.
+    let fields = match (extra, fields) {
+        (Some(mut base), Some(found)) => {
+            if let (Some(b), Some(f)) = (base.as_object_mut(), found.as_object()) {
+                for (k, v) in f {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+            Some(base)
+        }
+        (Some(base), None) => Some(base),
+        (None, found) => found,
     };
     let is_reply = reply_to.is_some();
     let message = if is_reply {
@@ -1727,6 +1953,51 @@ pub fn recipes() -> Vec<Recipe> {
         s
     };
     let mut out = vec![
+        recipe(
+            "run-type",
+            "🚑",
+            "A kind of run is dispatched",
+            "Tell me when the dispatch map shows a run of a type I care about — with the address, who was sent, and where it ends up.",
+            Tripwire {
+                when: When {
+                    kind: "incident".into(),
+                    incident: IncOpts {
+                        call_types: vec!["Cardiac Arrest".into(), "Structure Fire".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                send: Send {
+                    message: "{calltype} · {address}\n{units}\n{summary}".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        recipe(
+            "run-outcome",
+            "🏥",
+            "Where an arrest ended up",
+            "Wait for the crew to report to a hospital, then tell me the run and where the patient went — and how far it was from the nearest cath lab.",
+            Tripwire {
+                when: When {
+                    kind: "incident".into(),
+                    incident: IncOpts {
+                        call_types: vec!["Cardiac Arrest".into()],
+                        near_feature: "stemi".into(),
+                        linked_only: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                send: Send {
+                    message: "{calltype} · {address}\n{units}\nWent to {hospital}\n{report}\nNearest cath lab: {nearest} ({km} km)".into(),
+                    quiet_secs: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
         recipe(
             "words",
             "🔤",
@@ -2253,6 +2524,146 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    fn run(call_type: &str, lat: Option<f64>, lon: Option<f64>) -> crate::dispatch::Incident {
+        crate::dispatch::Incident {
+            id: 1,
+            created: 100,
+            updated: 100,
+            tg: 10202,
+            tg_name: "EMS Dispatch".into(),
+            call_type: call_type.into(),
+            emoji: "🫀".into(),
+            address: "1 Example Street".into(),
+            validated: String::new(),
+            lat,
+            lon,
+            geocode: if lat.is_some() { "ok".into() } else { "none".into() },
+            units: vec!["Medic 7".into()],
+            summary: "Chest pain, conscious and breathing".into(),
+            confidence: 90,
+            calls: 1,
+            revision: 0,
+        }
+    }
+
+    fn book() -> crate::places::Settings {
+        crate::places::Settings {
+            places: vec![
+                crate::places::Place {
+                    id: "heart".into(),
+                    name: "Example Heart".into(),
+                    kind: "hospital".into(),
+                    lat: Some(40.02),
+                    lon: Some(-86.0),
+                    features: vec!["stemi".into()],
+                    enabled: true,
+                    ..Default::default()
+                },
+                crate::places::Place {
+                    id: "general".into(),
+                    name: "Example General".into(),
+                    kind: "hospital".into(),
+                    lat: Some(40.001),
+                    lon: Some(-86.0),
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn incident_rule(o: IncOpts) -> Tripwire {
+        Tripwire {
+            id: "i1".into(),
+            name: "Runs".into(),
+            when: When {
+                kind: "incident".into(),
+                incident: o,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_run_is_matched_on_what_it_is_and_where_it_is() {
+        let places = book();
+        let here = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+
+        // Call type, spelled as the dispatch settings spell it.
+        let t = incident_rule(IncOpts {
+            call_types: vec!["cardiac arrest".into()],
+            ..Default::default()
+        });
+        assert!(matches_incident(&t, &here, &places, false));
+        assert!(!matches_incident(&t, &run("Sick Person", Some(40.0), Some(-86.0)), &places, false));
+
+        // Within so far of the nearest place that can do the thing: the
+        // cath lab is 2.2 km away, the general hospital is 110 m.
+        let near_stemi = incident_rule(IncOpts {
+            near_feature: "stemi".into(),
+            within_km: 5.0,
+            ..Default::default()
+        });
+        assert!(matches_incident(&near_stemi, &here, &places, false));
+        let tight = incident_rule(IncOpts {
+            near_feature: "stemi".into(),
+            within_km: 1.0,
+            ..Default::default()
+        });
+        assert!(!matches_incident(&tight, &here, &places, false));
+
+        // A run that never made it onto the map is near nothing.
+        let nowhere = run("Cardiac Arrest", None, None);
+        assert!(!matches_incident(&near_stemi, &nowhere, &places, false));
+        assert!(matches_incident(&t, &nowhere, &places, false), "unless distance was never asked about");
+    }
+
+    #[test]
+    fn waiting_for_the_outcome_means_waiting() {
+        let places = book();
+        let t = incident_rule(IncOpts {
+            linked_only: true,
+            ..Default::default()
+        });
+        let r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        assert!(!matches_incident(&t, &r, &places, false), "no hospital report yet");
+        assert!(matches_incident(&t, &r, &places, true));
+    }
+
+    #[test]
+    fn a_run_message_can_name_the_nearest_place_that_can_help() {
+        let places = book();
+        let r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        let reports = vec![crate::link::LinkedReport {
+            id: 9,
+            at: 500,
+            tg: 10259,
+            tg_name: "MED-03".into(),
+            tg_desc: String::new(),
+            place: "Example General".into(),
+            summary: "Medic 7 inbound, ROSC".into(),
+            how: "Medic 7 was sent to this run".into(),
+        }];
+        let fields = incident_fields(&r, &places, "stemi", &reports);
+        assert_eq!(fields["nearest"], "Example Heart");
+        assert_eq!(fields["km"], "2.2");
+        assert_eq!(fields["place"], "Example General", "the nearest place of any kind");
+        assert_eq!(fields["hospital"], "Example General");
+
+        let msg = render(
+            "{calltype} at {address}\nUnits: {units}\nNearest cath lab: {nearest} ({km} km)\nWent to: {hospital}",
+            "Runs",
+            &incident_facts(&r),
+            &[],
+            "",
+            Some(&fields),
+        );
+        assert!(msg.contains("Cardiac Arrest at 1 Example Street"), "{msg}");
+        assert!(msg.contains("Nearest cath lab: Example Heart (2.2 km)"), "{msg}");
+        assert!(msg.contains("Went to: Example General"), "{msg}");
     }
 
     #[test]
