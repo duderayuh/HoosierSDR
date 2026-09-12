@@ -1799,6 +1799,7 @@ if (TAURI) {
   }
   async function akPersist() {
     akSettings.telegram.chat_id = $("tgChat").value.trim(); akSettings.telegram.topic_id = $("tgTopic").value.trim();
+    akSettings.telegram.announce = $("tgAnnounce").checked; akSettings.telegram.announce_chat = $("tgAnnounceChat").value.trim();
     akSettings.bluesky = { handle: $("bsHandle").value.trim() };
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
     try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
@@ -1819,7 +1820,7 @@ if (TAURI) {
   async function akRefresh() {
     try {
       const v = await invoke("alerts_get"); akSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id; $("tgTopic").value = v.settings.telegram.topic_id || ""; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
+      $("tgChat").value = v.settings.telegram.chat_id; $("tgTopic").value = v.settings.telegram.topic_id || ""; $("tgAnnounce").checked = !!v.settings.telegram.announce; $("tgAnnounceChat").value = v.settings.telegram.announce_chat || ""; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
       $("bsHandle").value = v.settings.bluesky.handle; $("bsPassword").placeholder = v.has_bluesky ? "saved on this Mac" : "xxxx-xxxx-xxxx-xxxx"; $("bsMeta").textContent = v.has_bluesky ? (v.settings.bluesky.handle ? "configured" : "password saved — add a handle") : "no app password";
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;

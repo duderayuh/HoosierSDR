@@ -174,15 +174,28 @@ impl Multipart {
 }
 
 fn agent() -> ureq::Agent {
+    agent_with(60)
+}
+
+fn agent_with(timeout_secs: u64) -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
         .http_status_as_error(false)
         .build()
         .into()
 }
 
 pub fn post(url: &str, ctype: &str, body: Vec<u8>) -> Result<(u16, String), String> {
-    let mut r = agent()
+    post_timeout(url, ctype, body, 60)
+}
+
+pub fn post_timeout(
+    url: &str,
+    ctype: &str,
+    body: Vec<u8>,
+    timeout_secs: u64,
+) -> Result<(u16, String), String> {
+    let mut r = agent_with(timeout_secs)
         .post(url)
         .header("Content-Type", ctype)
         .header("User-Agent", "HoosierSDR")

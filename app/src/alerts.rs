@@ -112,6 +112,13 @@ pub struct Telegram {
     /// Default forum topic (`message_thread_id`) for the chat; blank = none.
     #[serde(default)]
     pub topic_id: String,
+    /// Say in Telegram when the app starts and when it shuts down.
+    #[serde(default)]
+    pub announce: bool,
+    /// Where those messages go (`chat` or `chat:topic`); blank = the
+    /// default chat and topic above.
+    #[serde(default)]
+    pub announce_chat: String,
 }
 
 impl Telegram {
@@ -206,6 +213,8 @@ impl Default for Settings {
             telegram: Telegram {
                 chat_id: String::new(),
                 topic_id: String::new(),
+                announce: false,
+                announce_chat: String::new(),
             },
             ollama: Ollama {
                 url: "http://localhost:11434".into(),
@@ -489,6 +498,7 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
             } else {
                 a.topic_id.trim().to_string()
             },
+            ..tg_settings
         };
         let mut ai_note = String::new();
         if a.ai_gate && !a.ai_prompt.trim().is_empty() {
@@ -703,11 +713,18 @@ pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
     if tg.chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body = text_body(&tg.destination(), text);
-    let (status, out) = crate::upload::post(
+    send_text(&tg.destination(), text, 60)
+}
+
+/// A plain text message to `dest` (`chat` or `chat:topic`), giving up after
+/// `timeout_secs`.
+pub fn send_text(dest: &str, text: &str, timeout_secs: u64) -> Result<String, String> {
+    let body = text_body(dest, text);
+    let (status, out) = crate::upload::post_timeout(
         &telegram_api("sendMessage")?,
         "application/json",
         body.to_string().into_bytes(),
+        timeout_secs,
     )?;
     check(status, &out)
 }
@@ -1127,6 +1144,8 @@ pub fn alerts_set(
             .take(16)
             .collect();
     }
+    let t = &mut settings.telegram;
+    t.announce_chat = t.announce_chat.trim().chars().take(80).collect();
     store(&app, &settings)?;
     state.alerts.lock().unwrap().settings = settings;
     Ok(())
