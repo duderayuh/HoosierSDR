@@ -573,7 +573,7 @@ mod tests {
     use super::*;
 
     const STATUS: &str = r#"{
-      "Self": {"HostName": "meganova’s Mac Studio", "DNSName": "meganova.tail1234.ts.net.",
+      "Self": {"HostName": "studio", "DNSName": "studio.tail1234.ts.net.",
                "TailscaleIPs": ["100.118.155.34", "fd7a:115c:a1e0::3201:9b22"], "UserID": 1560297009701221,
                "OS": "macOS", "Online": true},
       "Peer": {
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn status_parses_self_peers_and_login() {
         let t = parse_status(STATUS).unwrap();
-        assert_eq!(t.me.dns, "meganova.tail1234.ts.net");
+        assert_eq!(t.me.dns, "studio.tail1234.ts.net");
         assert_eq!(t.me.ip.as_deref(), Some("100.118.155.34"));
         assert_eq!(t.login, "someone@example.com");
         // online first, then by name; the IPv4 is picked even when listed second

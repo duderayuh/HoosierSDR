@@ -120,8 +120,8 @@ pub fn catalogs_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 
 /// The loaded talkgroup names, kept apart per RadioReference system.
 ///
-/// Talkgroup numbers are only unique within a system: MESA's TG 10001 and
-/// SAFE-T's TG 10001 are different talkgroups. A lookup that knows the
+/// Talkgroup numbers are only unique within a system: one system's TG 10001 and
+/// another's TG 10001 are different talkgroups. A lookup that knows the
 /// system (a follow run started from a playlist) sees that system's
 /// catalog plus the unscoped files, never another system's; a lookup that
 /// does not (a bare capture, an offline decode, an old library row) sees
@@ -218,7 +218,7 @@ impl Catalogs {
     }
 }
 
-/// `rr_5737` / `user_5737` → 5737.
+/// `rr_1234` / `user_1234` → 1234.
 fn sid_of_stem(stem: &str) -> Option<u32> {
     stem.strip_prefix("rr_")
         .or_else(|| stem.strip_prefix("user_"))
@@ -814,16 +814,16 @@ mod catalog_tests {
     fn same_id_on_two_systems_stays_apart() {
         let mut c = Catalogs::default();
         c.add(
-            "rr_5737",
-            &cat("10001,2711,S1-TECH 1,D,MESA tech,Other,Other,\n10002,2712,S1-TECH 2,D,,,,\n"),
+            "rr_1234",
+            &cat("10001,2711,S1-TECH 1,D,Example tech,Other,Other,\n10002,2712,S1-TECH 2,D,,,,\n"),
         );
-        c.add("rr_8084", &cat("10001,2711,EXCISE-CEN DISP,D,Excise,Law Dispatch,Police,\n10003,2713,01-EMA,D,,,,\n"));
+        c.add("rr_5678", &cat("10001,2711,EXCISE-CEN DISP,D,Excise,Law Dispatch,Police,\n10003,2713,01-EMA,D,,,,\n"));
         // A run that knows its system sees only that system's names.
-        assert_eq!(c.label(Some(5737), 10001), "S1-TECH 1");
-        assert_eq!(c.label(Some(8084), 10001), "EXCISE-CEN DISP");
+        assert_eq!(c.label(Some(1234), 10001), "S1-TECH 1");
+        assert_eq!(c.label(Some(5678), 10001), "EXCISE-CEN DISP");
         // ... and never another system's row for a talkgroup it lacks.
-        assert_eq!(c.label(Some(5737), 10003), "TG 10003");
-        assert!(c.get(Some(5737), 10003).is_none());
+        assert_eq!(c.label(Some(1234), 10003), "TG 10003");
+        assert!(c.get(Some(1234), 10003).is_none());
         // Unknown system: the merged table, later file wins (as before).
         assert_eq!(c.label(None, 10001), "EXCISE-CEN DISP");
         assert_eq!(c.label(None, 10002), "S1-TECH 2");
@@ -840,19 +840,19 @@ mod catalog_tests {
             &cat("10002,2712,Global name,D,,,Discovered,\n10009,2719,Only here,D,,,,\n"),
         );
         c.add(
-            "rr_5737",
+            "rr_1234",
             &cat("10001,2711,S1-TECH 1,D,,,,\n10002,2712,S1-TECH 2,D,,,,\n"),
         );
-        c.add("rr_8084", &cat("10001,2711,EXCISE,D,,,,\n"));
-        c.add("user_5737", &cat("10001,2711,My Tech 1,D,,,Discovered,\n"));
-        assert_eq!(c.label(Some(5737), 10001), "My Tech 1");
-        assert_eq!(c.label(Some(8084), 10001), "EXCISE");
+        c.add("rr_5678", &cat("10001,2711,EXCISE,D,,,,\n"));
+        c.add("user_1234", &cat("10001,2711,My Tech 1,D,,,Discovered,\n"));
+        assert_eq!(c.label(Some(1234), 10001), "My Tech 1");
+        assert_eq!(c.label(Some(5678), 10001), "EXCISE");
         // The system's own row beats an unscoped user row ...
-        assert_eq!(c.label(Some(5737), 10002), "S1-TECH 2");
+        assert_eq!(c.label(Some(1234), 10002), "S1-TECH 2");
         // ... which still names what the system's catalog lacks.
-        assert_eq!(c.label(Some(5737), 10009), "Only here");
-        assert_eq!(c.label(Some(8084), 10009), "Only here");
-        let tgs = c.talkgroups(Some(8084));
+        assert_eq!(c.label(Some(1234), 10009), "Only here");
+        assert_eq!(c.label(Some(5678), 10009), "Only here");
+        let tgs = c.talkgroups(Some(5678));
         let ids: Vec<u16> = {
             let mut v: Vec<u16> = tgs.iter().map(|t| t.id).collect();
             v.sort_unstable();
@@ -863,8 +863,8 @@ mod catalog_tests {
 
     #[test]
     fn stems_name_their_system() {
-        assert_eq!(sid_of_stem("rr_5737"), Some(5737));
-        assert_eq!(sid_of_stem("user_8084"), Some(8084));
+        assert_eq!(sid_of_stem("rr_1234"), Some(1234));
+        assert_eq!(sid_of_stem("user_5678"), Some(5678));
         assert_eq!(sid_of_stem("csv_user"), None);
         assert_eq!(sid_of_stem("csv_mesa"), None);
         assert_eq!(sid_of_stem("rr_x"), None);

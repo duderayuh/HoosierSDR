@@ -2606,7 +2606,7 @@ if (TAURI) {
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }
   }
-  // "Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)" → "MESA"
+  // "Example Emergency Services Agency (EESA) (Formerly XYZ)" → "EESA"
   const shortSystemName = (n) => { const m = /\(([A-Z0-9-]{2,8})\)/.exec(n || ""); return m ? m[1] : (n || "Playlist"); };
   $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } $("rrProg").style.display = ""; $("rrProgBar").style.width = "3%"; $("rrProgText").textContent = "connecting…"; loadSystem(sid); };
   const siteRate = (s) => ((s.span_mhz ? s.span_mhz[1] - s.span_mhz[0] : 0) <= 1.9 ? 2500000 : 10000000);
