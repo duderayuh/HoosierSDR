@@ -240,7 +240,7 @@ pub fn hospital_from_description(desc: &str) -> Option<String> {
     if rest.is_empty() {
         return None;
     }
-    // "(Also on SAFE-T 32M-HRH)" and the like are notes, not the name.
+    // "(Also on the statewide system)" and the like are notes, not the name.
     let rest = rest.split('(').next().unwrap_or(rest).trim();
     let low = rest.to_ascii_lowercase();
     if low.starts_with("spare") || low.contains("unassigned") || low.contains("not used") {
