@@ -1040,6 +1040,11 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .rtrule .rtname:hover, .rtrule .rtname:focus { border-color: var(--line); }
 .rtrulefields { gap: 6px; font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
 .rtusage { margin-top: 8px; font-size: 12.5px; }
+/* The backup passphrase, shown once. Big enough to copy off the screen
+   onto paper without squinting, which is the whole point of it. */
+.bkpass { border: 1px solid color-mix(in srgb, var(--amber, #f5b544) 55%, transparent); background: color-mix(in srgb, var(--amber, #f5b544) 12%, transparent); border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 17px; letter-spacing: 0.04em; user-select: all; word-break: break-all; text-align: center; }
+.bkdest { margin-bottom: 6px; }
+.bkdest .body { padding-top: 8px; padding-bottom: 8px; }
 .rtstat { margin: 2px 0; }
 .rtline { display: grid; grid-template-columns: minmax(6em, 11em) 1fr auto; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
 .rtline .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

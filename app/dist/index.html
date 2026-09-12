@@ -800,6 +800,27 @@
               <div class="rtusage" id="rtUsage"><span class="faint">Measuring…</span></div>
             </div>
           </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Backups · a copy that survives this machine</span><span class="meta" id="bkMeta"></span></div>
+            <div class="body">
+              <div class="rtnotice" id="bkPending" style="display:none"></div>
+              <div class="row2">
+                <label class="field"><span class="lab">What goes in</span>
+                  <select id="bkTier">
+                    <option value="records">The database and settings</option>
+                    <option value="kept">…and the audio that is kept</option>
+                    <option value="everything">…and every recording</option>
+                  </select></label>
+                <label class="field"><span class="lab">Automatically, every <span class="mono faint">hours · blank = only when asked</span></span><input id="bkEvery" type="text" inputmode="numeric" placeholder="only when asked" /></label>
+              </div>
+              <div class="small faint" id="bkSizes">Working out what a backup would weigh…</div>
+              <div class="head" style="padding-left:0;margin-top:8px"><span class="eyebrow">Where it goes</span><span class="spacer"></span><button class="btn ghost sm" id="bkAddFolder">+ Folder or NAS</button><button class="btn ghost sm" id="bkAddS3">+ Cloud storage</button></div>
+              <div id="bkDests" class="list"></div>
+              <div class="empty small" id="bkEmpty">Nowhere yet. A <b>folder</b> is an external disk or a mounted NAS share; <b>cloud storage</b> is Amazon S3, Supabase, Backblaze B2, Cloudflare R2, Wasabi or your own MinIO.</div>
+              <p class="help">Anything that leaves this machine over a network is encrypted before it goes, with a passphrase only you hold. API tokens and passwords are never in a backup — <b>secrets.json</b> is left out and the credential fields in other settings are blanked, so a backup on a shared drive gives nothing away.</p>
+              <div class="inline" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary" id="bkSave">Save</button><button class="btn ghost" id="bkPass">Backup passphrase…</button><span class="help" id="bkOut"></span></div>
+            </div>
+          </div>
         </div>
       </section>
         </div>
@@ -1350,6 +1371,10 @@
   <script src="connections.js"></script>
   <script src="tripwires.js"></script>
   <script src="places.js"></script>
+<<<<<<< HEAD
   <script src="pathways.js"></script>
+=======
+  <script src="backup.js"></script>
+>>>>>>> origin/main
 </body>
 </html>
