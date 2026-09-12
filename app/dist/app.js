@@ -557,11 +557,17 @@ accApply();
 
 /* ---------- listen groups: named sets of talkgroups you can mute or unmute in one click ---------- */
 const groups = store("hs.groups", []);   // [{id, name, tgs:[], listen:true}]
-function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushMuted(); }
-// Muting is about the room, not the library: a muted talkgroup is still
-// followed, recorded, transcribed and matched by tripwires — it just does
-// not come out of the speakers. Refusing a call outright is what lockout is
-// for, and it has its own list.
+function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushMuted(); pushLockout(); }
+// Switching a group off means "I am not interested in these channels", and
+// that is the whole point of the switch: it stops them being followed, so
+// they cost no disk and no transcription. A listener who wants them on
+// record but out of the room ticks `hs.grouprec` and they are only
+// silenced.
+//
+// This was briefly the other way round — off meant "silence the speaker,
+// keep recording" — and a listener with an "All" group switched off came
+// back to every channel on the system being recorded and transcribed.
+const groupRec = () => store("hs.grouprec", false) === true;
 function pushMuted() {
   if (!TAURI) return;
   invoke("set_muted", { tgs: [...mutedByGroups()] }).catch((err) => log(`set_muted: ${err}`));
@@ -576,8 +582,8 @@ function mutedByGroups() {
 }
 function renderGroupChips() {
   const el = $("grpChips"); if (!el) return;
-  el.innerHTML = groups.length ? groups.map((g) => `<span class="chip ${g.listen ? "on" : "muted"}" data-grp="${esc(g.id)}" title="${g.tgs.length} talkgroups — click to ${g.listen ? "mute" : "listen"}">${g.listen ? "🔊" : "🔇"} ${esc(g.name)} <small>${g.tgs.length}</small></span>`).join("") : '<span class="faint">no groups yet — tick talkgroups in Aliases and make one</span>';
-  el.querySelectorAll(".chip[data-grp]").forEach((c) => c.onclick = () => { const g = groups.find((x) => x.id === c.dataset.grp); g.listen = !g.listen; groupsSave(); logEvent(`${g.listen ? "listening to" : "muted"} group “${g.name}” (${g.tgs.length} talkgroups)`); });
+  el.innerHTML = groups.length ? groups.map((g) => `<span class="chip ${g.listen ? "on" : "muted"}" data-grp="${esc(g.id)}" title="${g.tgs.length} talkgroups — click to turn ${g.listen ? (groupRec() ? "off (silenced, still recorded)" : "off (stops following them)") : "on"}">${g.listen ? "🔊" : "🔇"} ${esc(g.name)} <small>${g.tgs.length}</small></span>`).join("") : '<span class="faint">no groups yet — tick talkgroups in Aliases and make one</span>';
+  el.querySelectorAll(".chip[data-grp]").forEach((c) => c.onclick = () => { const g = groups.find((x) => x.id === c.dataset.grp); g.listen = !g.listen; groupsSave(); logEvent(`${g.listen ? "listening to" : groupRec() ? "silenced" : "stopped following"} group “${g.name}” (${g.tgs.length} talkgroups)`); });
   $("grpSummary").textContent = groups.length ? `${groups.filter((g) => g.listen).length} of ${groups.length} on` : "none";
 }
 
@@ -634,7 +640,13 @@ function effectiveLockout(pl) {
   const f = filtFor(pl), now = Date.now();
   for (const [tg, until] of f.avoid) if (until <= now) f.avoid.delete(tg);
   save(pl ? `hs.avoid.${pl}` : "hs.avoid", Object.fromEntries(f.avoid));
-  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...f.avoid.keys()] };
+  // A group that is off is refused outright unless the listener asked for
+  // it to be recorded anyway.
+  const off = groupRec() ? [] : [...mutedByGroups()];
+  return {
+    tgs: [...f.lockout].sort((a, b) => a - b),
+    extra: [...new Set([...f.avoid.keys(), ...off])],
+  };
 }
 // Push one playlist's lockout (or, with no argument, every known one).
 function pushLockout(pl) {
@@ -682,6 +694,18 @@ function toggleLock(tg, pl) {
   renderLockout(); pushLockout(pl);
 }
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
+if ($("grpKeepRec")) {
+  $("grpKeepRec").checked = groupRec();
+  $("grpKeepRec").onchange = (e) => {
+    save("hs.grouprec", e.target.checked);
+    renderGroupChips();
+    pushLockout();
+    pushMuted();
+    logEvent(e.target.checked
+      ? "groups that are off will still be recorded"
+      : "groups that are off are no longer followed");
+  };
+}
 filtFor(""); renderLockout(); renderGroupChips(); pushLockout(""); pushMuted();
 $("histHideNa").checked = !!store("hs.hidena", false); $("histHideNa").onchange = () => { save("hs.hidena", $("histHideNa").checked); applyHistFilter(); };
 
