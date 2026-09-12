@@ -46,6 +46,45 @@ pub struct Worker {
     generation: u64,
     /// Calls asked for explicitly (Transcribe now), served before the pump's.
     pub wanted: std::collections::VecDeque<i64>,
+    /// The call the worker is on, while `busy`.
+    job: Option<Job>,
+    /// Jobs handed to the current worker process; its first also pays for
+    /// loading (or, on first use, downloading) the model.
+    jobs_started: u32,
+    /// A worker has answered a job this run, so the model is on disk and a
+    /// replacement only has to load it.
+    model_ready: bool,
+}
+
+/// One call handed to the worker, and how long it may take.
+struct Job {
+    id: i64,
+    since: std::time::Instant,
+    limit: std::time::Duration,
+}
+
+/// Time allowed for the first job of the run: loading the model, or fetching
+/// it on first use, comes before the transcription itself.
+const FIRST_JOB_SECS: u64 = 600;
+/// A replacement worker's first job: the weights are cached by then, so
+/// loading takes seconds — without this, a restart after a stall followed by
+/// another garbled clip stalled the queue for the full first-use allowance.
+const RELOAD_JOB_SECS: u64 = 120;
+/// Past the worker's own limit, how long before the app stops waiting and
+/// replaces a worker that has gone silent.
+const BACKSTOP_GRACE_SECS: u64 = 30;
+
+/// The worker's limit for one clip. Every engine here runs well under real
+/// time (mlx-whisper ~0.3 s for a 21 s call, faster-whisper on the CPU ~5 s),
+/// so this only ends a job that has stopped making progress — which Whisper
+/// can do on a garbled clip, and which stalled the whole queue behind it.
+fn job_timeout_secs(first: bool, model_ready: bool, clip_secs: f64) -> u64 {
+    let run = 30 + (clip_secs.max(0.0) * 4.0).ceil() as u64;
+    match (first, model_ready) {
+        (false, _) => run,
+        (true, true) => run.max(RELOAD_JOB_SECS),
+        (true, false) => run.max(FIRST_JOB_SECS),
+    }
 }
 
 pub type Shared = Arc<Mutex<Worker>>;
@@ -286,6 +325,8 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
     w.stdin = stdin;
     w.model = format!("{}/{}", s.engine, s.model);
     w.generation += 1;
+    w.jobs_started = 0;
+    w.job = None;
     let my_gen = w.generation;
     drop(w);
 
@@ -375,7 +416,14 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                     };
                     let _ = app2.emit("transcribe_error", format!("call {label}: {err}"));
                 }
-                shared2.lock().unwrap().busy.store(false, Ordering::SeqCst);
+                let mut w = shared2.lock().unwrap();
+                if w.generation == my_gen {
+                    w.job = None;
+                }
+                if id.is_some() {
+                    w.model_ready = true;
+                }
+                w.busy.store(false, Ordering::SeqCst);
             }
             // Worker ended — but only tear down if it is still ours; a
             // replacement may already be running.
@@ -388,21 +436,63 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
     true
 }
 
-fn submit(shared: &Shared, id: i64, path: &str) -> bool {
+fn submit(shared: &Shared, id: i64, path: &str, clip_secs: f64) -> bool {
     let mut w = shared.lock().unwrap();
     if w.busy.load(Ordering::SeqCst) {
         return false;
     }
+    let timeout = job_timeout_secs(w.jobs_started == 0, w.model_ready, clip_secs);
     let Some(stdin) = w.stdin.as_mut() else {
         return false;
     };
-    let line = serde_json::json!({ "id": id, "path": path }).to_string() + "\n";
+    let line = serde_json::json!({ "id": id, "path": path, "timeout": timeout }).to_string() + "\n";
     if stdin.write_all(line.as_bytes()).is_err() {
         stop(&mut w);
         return false;
     }
+    w.jobs_started += 1;
+    w.job = Some(Job {
+        id,
+        since: std::time::Instant::now(),
+        limit: std::time::Duration::from_secs(timeout + BACKSTOP_GRACE_SECS),
+    });
     w.busy.store(true, Ordering::SeqCst);
     true
+}
+
+/// The backstop: a worker that has not answered well past its own limit is
+/// wedged somewhere the alarm cannot reach. Replace it, and mark its call so
+/// the queue moves on instead of feeding it the same clip again.
+fn check_stalled(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let stalled = {
+        let mut w = state.transcriber.lock().unwrap();
+        let over = w
+            .job
+            .as_ref()
+            .filter(|j| w.busy.load(Ordering::SeqCst) && j.since.elapsed() > j.limit)
+            .map(|j| (j.id, j.since.elapsed().as_secs()));
+        if over.is_some() {
+            w.job = None;
+            stop(&mut w);
+        }
+        over
+    };
+    let Some((id, secs)) = stalled else { return };
+    if let Some(db) = state.db.lock().unwrap().clone() {
+        let _ = library::set_transcript(&db.lock().unwrap(), id, "", "transcribe-timeout");
+    }
+    let msg = format!("call {id}: no answer after {secs} s — restarted the transcriber");
+    eprintln!("transcribe: {msg}");
+    let _ = app.emit("transcribe_error", msg);
+}
+
+#[derive(Serialize)]
+pub struct ModelInfo {
+    pub engine: String,
+    pub model: String,
+    pub downloaded: bool,
+    pub path: Option<String>,
 }
 
 /// Download (and load once) a model in the background so the first real
@@ -474,20 +564,22 @@ pub fn transcribe_call(app: AppHandle, state: State<AppState>, id: i64) -> Resul
     Ok(())
 }
 
-/// Background pump: while enabled, feeds untranscribed calls to the worker.
+/// Background pump: feeds the worker the calls asked for explicitly, then,
+/// while auto-transcribe is on, every untranscribed call.
 pub fn spawn_pump(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        check_stalled(&app);
         let state = app.state::<AppState>();
-        let enabled = state.transcriber.lock().unwrap().settings.enabled;
-        if !enabled
-            || state
-                .transcriber
-                .lock()
-                .unwrap()
-                .busy
-                .load(Ordering::SeqCst)
-        {
+        let (enabled, busy, wanted) = {
+            let w = state.transcriber.lock().unwrap();
+            (
+                w.settings.enabled,
+                w.busy.load(Ordering::SeqCst),
+                w.wanted.front().copied(),
+            )
+        };
+        if busy || (!enabled && wanted.is_none()) {
             continue;
         }
         let next = {
@@ -495,8 +587,15 @@ pub fn spawn_pump(app: AppHandle) {
                 continue;
             };
             let c = db.lock().unwrap();
-            let v = library::untranscribed(&c, 1).ok();
-            v.and_then(|v| v.into_iter().next())
+            match wanted {
+                Some(id) => {
+                    state.transcriber.lock().unwrap().wanted.pop_front();
+                    library::get(&c, id).ok().flatten()
+                }
+                None => library::untranscribed(&c, 1)
+                    .ok()
+                    .and_then(|v| v.into_iter().next()),
+            }
         };
         let Some(row) = next else { continue };
         let Some(path) = row.audio else { continue };
@@ -507,10 +606,28 @@ pub fn spawn_pump(app: AppHandle) {
             }
             continue;
         }
-        if ensure_started(&app, &state.transcriber) {
-            submit(&state.transcriber, row.id, &path);
-        } else {
+        if !(ensure_started(&app, &state.transcriber)
+            && submit(&state.transcriber, row.id, &path, row.secs))
+        {
+            // Keep an explicit request for the next attempt.
+            if wanted == Some(row.id) {
+                state.transcriber.lock().unwrap().wanted.push_front(row.id);
+            }
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replacement_worker_does_not_get_the_first_download_allowance() {
+        assert_eq!(job_timeout_secs(true, false, 2.0), FIRST_JOB_SECS);
+        assert_eq!(job_timeout_secs(true, true, 2.0), RELOAD_JOB_SECS);
+        assert_eq!(job_timeout_secs(false, true, 0.9), 34);
+        // A long call keeps its proportional allowance even on a first job.
+        assert_eq!(job_timeout_secs(true, true, 60.0), 270);
+    }
 }

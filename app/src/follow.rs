@@ -355,10 +355,14 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                     p.control_hz / 1e6
                 ),
             });
-            let found = hs_core::scan::scan(
+            let found = hs_core::scan::scan_cancellable(
                 &prime,
                 &hs_core::scan::ScanConfig::new(rate).center(p.center_hz),
+                &cancel,
             );
+            if cancel() {
+                return Ok(());
+            }
             match found.iter().find(|f| f.control_channel) {
                 Some(f) => {
                     let nominal = f.freq_hz.unwrap_or(p.center_hz + f.offset_hz);
@@ -1142,6 +1146,37 @@ impl Reporter<'_> {
             }
         }
         for c in out.completed {
+            if c.encrypted {
+                // Opened as a clear call, then a validated Encryption Sync
+                // showed the transmission encrypted: hs-core dropped its
+                // audio (the LDU1 before the verdict is scrambled voice).
+                // One muted row, unless the encrypted-grant tracker holds the
+                // channel and writes that row itself.
+                let tracked = self
+                    .encrypted_active
+                    .get(&c.freq_hz)
+                    .is_some_and(|a| a.tg == c.talkgroup);
+                if !tracked {
+                    let now = epoch_secs();
+                    let dur = (c.ended_after_secs - c.started_after_secs).max(0.0).round() as u64;
+                    let start = self
+                        .started
+                        .get(&(c.talkgroup, c.freq_hz))
+                        .map(|&(g, _)| g + c.started_after_secs.round() as u64)
+                        .unwrap_or_else(|| now.saturating_sub(dur))
+                        .min(now);
+                    self.enc += 1;
+                    self.emit_encrypted(
+                        c.talkgroup,
+                        c.source_unit,
+                        c.freq_hz,
+                        start,
+                        start + dur,
+                        emit,
+                    );
+                }
+                continue;
+            }
             self.calls += 1;
             let secs = c.pcm.len() as f64 / 8000.0;
             // A grant's clips are reported together when it retires, each
