@@ -1221,19 +1221,56 @@ fn start_follow(
                     }
                 }
             };
-            // Extra radios: a failure to open one is reported, not fatal.
+            // Extra radios go through the same shared pool as the primary:
+            // one already open (another run's primary, or its extra) is
+            // joined at the centre it has; otherwise it is opened here and
+            // left in the pool, so a run started next can read it too. That
+            // is how two radios cover four sites: each run hosts its own
+            // control channel and decodes voice from every open radio. A
+            // failure to open one is reported, not fatal.
             let mut extras = Vec::new();
             for (i, x) in extra.clone().unwrap_or_default().into_iter().enumerate() {
                 let label = x.label.clone().unwrap_or_else(|| format!("radio {}", i + 2));
-                let setting = devices::settings_for(&app, &x.source, x.device.as_deref()).gain_setting(&x.source);
-                match open_device_with_gain(&x.source, x.device.as_deref(), ppm_tune(x.center, x.ppm), x.rate, x.gain, setting) {
-                    Ok((src, h)) => {
-                        let st = app.state::<AppState>();
-                        st.gain_handles.lock().unwrap().insert(format!("{}|{}", x.source, x.device.clone().unwrap_or_default()), h);
-                        extras.push(follow::ExtraRadio { center_hz: x.center, label, src })
+                let key = format!("{}|{}", x.source, x.device.clone().unwrap_or_default());
+                if key == radio_key {
+                    continue;
+                }
+                let st = app.state::<AppState>();
+                let _serial = st.start_lock.lock().unwrap();
+                let mut radios = st.radios.lock().unwrap();
+                let joined = radios
+                    .get(&key)
+                    .filter(|r| r.tee.alive())
+                    .and_then(|r| r.tee.subscribe().map(|s| (r.center_hz, s)));
+                match joined {
+                    Some((center_hz, s)) => {
+                        if (center_hz - x.center).abs() > 1.0 {
+                            emit_run(&app, run_id, &label, follow::FollowEvent::Notice {
+                                text: format!("{label} is already open at {:.4} MHz for another system — reading it there", center_hz / 1e6),
+                            });
+                        }
+                        extras.push(follow::ExtraRadio { center_hz, label, src: Box::new(s) });
                     }
-                    Err(e) => {
-                        emit_run(&app, run_id, &label, follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
+                    None => {
+                        let setting = devices::settings_for(&app, &x.source, x.device.as_deref()).gain_setting(&x.source);
+                        match open_device_with_gain(&x.source, x.device.as_deref(), ppm_tune(x.center, x.ppm), x.rate, x.gain, setting) {
+                            Ok((raw, h)) => {
+                                st.gain_handles.lock().unwrap().insert(key.clone(), h);
+                                let norm = hs_core::stream::Normalized::new(raw);
+                                let norm_rate = hs_source::SdrSource::sample_rate(&norm);
+                                let tee = Arc::new(hs_core::stream::Tee::new(norm, 65536));
+                                match tee.subscribe() {
+                                    Some(s) => {
+                                        radios.insert(key, Radio { tee, center_hz: x.center, norm_rate, name: label.clone() });
+                                        extras.push(follow::ExtraRadio { center_hz: x.center, label, src: Box::new(s) });
+                                    }
+                                    None => emit_run(&app, run_id, &label, follow::FollowEvent::Notice { text: format!("{label} not used: it closed at once") }),
+                                }
+                            }
+                            Err(e) => {
+                                emit_run(&app, run_id, &label, follow::FollowEvent::Notice { text: format!("{label} not used: {e}") });
+                            }
+                        }
                     }
                 }
             }

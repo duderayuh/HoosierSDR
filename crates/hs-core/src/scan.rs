@@ -251,15 +251,30 @@ impl ScanConfig {
 /// not knowable in advance — simulcast sites run CQPSK/LSM, others C4FM — and
 /// the wrong one simply produces no syncs, which is itself the answer.
 pub fn scan(iq: &[f32], cfg: &ScanConfig) -> Vec<Found> {
+    scan_cancellable(iq, cfg, &|| false)
+}
+
+/// As [`scan`], giving up (with what it has so far) as soon as `cancel`
+/// returns true — checked between candidate channels, since decoding one
+/// wideband candidate is the unit of work. A live follower that is told to
+/// stop while it hunts for a control channel returns within one candidate
+/// instead of after the whole band.
+pub fn scan_cancellable(iq: &[f32], cfg: &ScanConfig, cancel: &dyn Fn() -> bool) -> Vec<Found> {
     // Analysing the whole of a long capture at every offset is pure waste;
     // a few seconds already holds tens of frame syncs.
     let want = (cfg.secs * cfg.sample_rate * 2.0) as usize;
     let from = cfg.start_offset(iq.len());
     let iq = &iq[from..(from + want).min(iq.len())];
 
+    if cancel() {
+        return Vec::new();
+    }
     let candidates = cfg.screen(iq, cfg.offsets());
     let mut out: Vec<Found> = Vec::new();
     for offset in candidates {
+        if cancel() {
+            break;
+        }
         let mut best: Option<Found> = None;
         for modulation in [Modulation::Cqpsk, Modulation::C4fm] {
             if let Some(f) = try_offset(iq, cfg, offset, modulation) {

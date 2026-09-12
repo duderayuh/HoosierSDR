@@ -20,7 +20,11 @@ pub fn report_call(c: &Call, cat: Option<&hs_core::catalog::CsvCatalog>, n: usiz
         Some(k) => k.label(c.talkgroup),
         None => format!("TG {}", c.talkgroup),
     };
-    let m = c.modulation.map(mod_name).unwrap_or("?");
+    let m = if c.encrypted {
+        "enc"
+    } else {
+        c.modulation.map(mod_name).unwrap_or("?")
+    };
     let secs = c.pcm.len() as f64 / 8000.0;
     let patch = if c.patched_with.is_empty() {
         String::new()

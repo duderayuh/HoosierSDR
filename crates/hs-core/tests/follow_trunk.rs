@@ -8,7 +8,8 @@
 use hs_core::decoder::Modulation;
 use hs_core::follow::TrunkFollower;
 use hs_dsp::cqpsk::modulate_iq;
-use hs_p25::synth::{build_ldu1, build_tdu, build_tsdu};
+use hs_p25::ess::Ess;
+use hs_p25::synth::{build_ldu1, build_ldu2, build_tdu, build_tsdu};
 use hs_p25::voice::ImbeFrame;
 
 const RATE: f64 = 288_000.0;
@@ -588,4 +589,138 @@ fn a_grant_outside_the_primary_band_decodes_on_an_extra_radio() {
     );
     assert!(c2.syncs_cqpsk > 0, "no sync on the extra band's call");
     assert!(!c2.pcm.is_empty(), "extra band's call produced no audio");
+}
+
+/// An encrypted transmission on the traffic channel: the first LDU1 carries
+/// nothing that says so; every LDU2's Encryption Sync names AES.
+fn encrypted_traffic_dibits(pairs: usize) -> Vec<u8> {
+    let frames = voice_frames();
+    let aes = Ess {
+        mi: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        algid: 0x84,
+        kid: 7,
+    };
+    // A second of idle air, then terminators, so the call is up, CQPSK has
+    // acquired and the framer is locked before the transmission begins: the
+    // first LDU1 is the frame at risk, and it must actually be decoded.
+    let mut d = preamble(4800);
+    for _ in 0..30 {
+        d.extend(build_tdu(0x293));
+    }
+    for _ in 0..pairs {
+        d.extend(build_ldu1(0x293, &frames));
+        d.extend(build_ldu2(0x293, &frames, Some(aes)));
+    }
+    d
+}
+
+/// Group Voice Channel Grant Update (0x02) naming `talkgroup` on channel 10
+/// of IDEN 1 in its A slot. Updates carry no service options, so they cannot
+/// say whether the call is encrypted.
+fn update_args(talkgroup: u16) -> u64 {
+    (((1u64 << 12) | 10) << 48) | ((talkgroup as u64) << 32)
+}
+
+fn run_follower(band: &[f32]) -> (Vec<(u16, u64)>, Vec<(u16, u64)>, Vec<hs_core::follow::Call>) {
+    let mut f = TrunkFollower::new(
+        RATE,
+        CENTER,
+        CONTROL,
+        CONTROL + TUNER_ERROR,
+        Modulation::Cqpsk,
+    );
+    let block = (RATE as usize / 10) * 2;
+    let (mut started, mut encrypted, mut completed) = (Vec::new(), Vec::new(), Vec::new());
+    for chunk in band.chunks(block) {
+        let out = f.process(chunk);
+        started.extend(out.started);
+        encrypted.extend(out.grants_encrypted);
+        completed.extend(out.completed);
+    }
+    completed.extend(f.finish());
+    (started, encrypted, completed)
+}
+
+/// The control channel grants an encrypted call once (service options 'E'
+/// bit), then keeps re-announcing it with Grant Updates, which carry no
+/// service options. The updates must not reopen the call as a clear one:
+/// that decoded the first LDU1 of every encrypted keyup — 180 ms of
+/// scrambled IMBE heard as a high-pitched chirp — before the LDU2's
+/// Encryption Sync could say otherwise.
+#[test]
+fn grant_updates_do_not_reopen_an_encrypted_call() {
+    let mut control = tsdu_stream_n(
+        &[
+            (0x3D, 0, iden_args(PLAN_BASE)),
+            (0x00, 0, (0x40u64 << 56) | grant_args(TALKGROUP)),
+        ],
+        5,
+    );
+    control.extend(tsdu_stream_n(
+        &[
+            (0x3D, 0, iden_args(PLAN_BASE)),
+            (0x02, 0, update_args(TALKGROUP)),
+        ],
+        60,
+    ));
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control, CONTROL + TUNER_ERROR);
+    add_to_band(
+        &mut band,
+        &encrypted_traffic_dibits(6),
+        TRAFFIC + TUNER_ERROR,
+    );
+
+    let (started, encrypted, completed) = run_follower(&band);
+    let leaked: Vec<usize> = completed
+        .iter()
+        .filter(|c| c.talkgroup == TALKGROUP)
+        .map(|c| c.pcm.len())
+        .collect();
+    assert!(
+        !started.iter().any(|(tg, _)| *tg == TALKGROUP),
+        "an update reopened the encrypted call (clips {leaked:?})"
+    );
+    assert!(
+        encrypted.len() > 5,
+        "the updates should be reported as encrypted grants too: {} reported",
+        encrypted.len()
+    );
+}
+
+/// A call granted in the clear whose transmission turns out to be encrypted
+/// (a missed full grant, or a radio answering encrypted on a clear call):
+/// once a validated Encryption Sync says so, the transmission's audio —
+/// including the LDU1 decoded before anyone knew — must not be reported.
+#[test]
+fn a_transmission_found_encrypted_reports_no_audio() {
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(
+        &mut band,
+        &encrypted_traffic_dibits(6),
+        TRAFFIC + TUNER_ERROR,
+    );
+
+    let (started, _, completed) = run_follower(&band);
+    assert!(
+        started.iter().any(|(tg, _)| *tg == TALKGROUP),
+        "the clear grant should still be followed"
+    );
+    let calls: Vec<&hs_core::follow::Call> = completed
+        .iter()
+        .filter(|c| c.talkgroup == TALKGROUP)
+        .collect();
+    assert!(!calls.is_empty(), "the granted call was never reported");
+    for c in &calls {
+        assert!(
+            c.pcm.is_empty(),
+            "encrypted transmission leaked {} samples of audio",
+            c.pcm.len()
+        );
+    }
+    assert!(
+        calls.iter().any(|c| c.encrypted),
+        "the transmission should be reported as encrypted"
+    );
 }

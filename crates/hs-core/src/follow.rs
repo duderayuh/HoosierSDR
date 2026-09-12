@@ -212,6 +212,8 @@ struct SegmentBase {
     err_cq: u64,
     poor_c4: u64,
     poor_cq: u64,
+    enc_c4: u64,
+    enc_cq: u64,
 }
 
 impl SegmentBase {
@@ -224,6 +226,8 @@ impl SegmentBase {
             err_cq: b.voice_frame_errors,
             poor_c4: a.voice_frames_low_quality,
             poor_cq: b.voice_frames_low_quality,
+            enc_c4: a.voice_ldus_encrypted,
+            enc_cq: b.voice_ldus_encrypted,
         }
     }
 }
@@ -268,6 +272,10 @@ pub struct Call {
     /// The radio's over-the-air alias, when the system broadcast one (see
     /// `hs_p25::talker_alias`).
     pub talker_alias: Option<String>,
+    /// A validated Encryption Sync said this transmission is encrypted. Its
+    /// audio is dropped — `pcm` is empty — including the LDU1 that decoded
+    /// before the verdict arrived, which is scrambled IMBE, not speech.
+    pub encrypted: bool,
     /// 8 kHz mono audio.
     pub pcm: Vec<i16>,
 }
@@ -467,6 +475,48 @@ pub struct TrunkFollower {
     affiliations: hs_trunk::AffiliationTable,
     /// Seconds of IQ processed, the clock affiliations are stamped with.
     elapsed_secs: f64,
+    /// Channels last granted encrypted; see [`EncryptedChannels`].
+    encrypted_channels: EncryptedChannels,
+}
+
+/// How long an encrypted grant is remembered without anything re-announcing
+/// it. Updates repeat every second or two while a call is up; a gap this
+/// long means the channel was released.
+const ENC_MEMORY_SECS: f64 = 10.0;
+
+/// Channels the control channel granted encrypted, so the Grant Updates that
+/// keep re-announcing them are not taken for clear calls. An update (0x02,
+/// or Motorola's regroup update) carries no service options and no radio, so
+/// it decodes with `encrypted: false`; followed as a clear call, it played
+/// the first LDU1 of every encrypted keyup — 180 ms of scrambled voice —
+/// before the LDU2's Encryption Sync could mute it.
+#[derive(Default)]
+struct EncryptedChannels(std::collections::HashMap<u64, (u16, f64)>);
+
+impl EncryptedChannels {
+    /// Mark `g` encrypted when it is an update for a channel granted
+    /// encrypted to the same talkgroup. `now` is seconds of IQ processed.
+    fn classify(&mut self, g: &mut hs_trunk::Grant, now: f64) {
+        if g.encrypted {
+            self.0.insert(g.freq_hz, (g.talkgroup, now));
+        } else if g.source_unit != 0 {
+            // Only a full grant names its radio, and a full grant carries
+            // service options: a clear one is the final word.
+            self.0.remove(&g.freq_hz);
+        } else if let Some((tg, seen)) = self.0.get_mut(&g.freq_hz) {
+            if *tg == g.talkgroup {
+                g.encrypted = true;
+                *seen = now;
+            } else {
+                // The channel went to another talkgroup.
+                self.0.remove(&g.freq_hz);
+            }
+        }
+    }
+
+    fn expire(&mut self, now: f64) {
+        self.0.retain(|_, (_, seen)| now - *seen < ENC_MEMORY_SECS);
+    }
 }
 
 impl TrunkFollower {
@@ -549,6 +599,7 @@ impl TrunkFollower {
             priority_ranges: Vec::new(),
             affiliations: hs_trunk::AffiliationTable::new(),
             elapsed_secs: 0.0,
+            encrypted_channels: EncryptedChannels::default(),
         }
     }
 
@@ -1008,8 +1059,18 @@ impl TrunkFollower {
                         s.end.poor_cq,
                     )
                 };
+                // A validated Encryption Sync covers the whole transmission:
+                // the LDU1 decoded before it is scrambled voice, heard as a
+                // chirp. Only the kept decoder's verdict counts — the other
+                // one frames garbage at full rate, and now and then garbage
+                // passes Reed–Solomon and names an algorithm.
+                let encrypted = if pick_c4fm {
+                    s.end.enc_c4 > s.start.enc_c4
+                } else {
+                    s.end.enc_cq > s.start.enc_cq
+                };
                 let has_audio = !s.pcm_c4fm.is_empty() || !s.pcm_cqpsk.is_empty();
-                let (modulation, pcm) = if !has_audio {
+                let (modulation, pcm) = if !has_audio || encrypted {
                     (None, Vec::new())
                 } else if pick_c4fm {
                     (Some(Modulation::C4fm), s.pcm_c4fm)
@@ -1060,6 +1121,7 @@ impl TrunkFollower {
                     patched_with: patched_with.clone(),
                     emergency,
                     talker_alias: talker_alias.clone(),
+                    encrypted,
                     pcm,
                 }
             })
@@ -1076,7 +1138,12 @@ impl TrunkFollower {
         // The control channel decimates itself out of the wideband stream.
         let control_out = self.control.process(iq);
         out.control_syncs = control_out.syncs;
-        out.grants = control_out.grants.clone();
+        self.encrypted_channels.expire(self.elapsed_secs);
+        let mut grants = control_out.grants.clone();
+        for g in grants.iter_mut() {
+            self.encrypted_channels.classify(g, self.elapsed_secs);
+        }
+        out.grants = grants.clone();
         for ev in &control_out.mobility {
             self.affiliations.observe(*ev, self.elapsed_secs);
         }
@@ -1102,7 +1169,7 @@ impl TrunkFollower {
         self.decode_band(None, iq, secs, &mut out);
 
         // Start calls the control channel just granted.
-        for g in &control_out.grants {
+        for g in &grants {
             if g.encrypted {
                 out.grants_encrypted.push((g.talkgroup, g.freq_hz));
                 continue;
@@ -1226,10 +1293,12 @@ impl TrunkFollower {
             };
             call.c4fm.set_uv_quality(self.uv_quality);
             call.cqpsk.set_uv_quality(self.uv_quality);
-            // Encrypted grants never get this far (skipped above), so the
-            // channel's transmissions start out clear: voice flows from the
-            // first LDU, and only an Encryption Sync that validates through
-            // its own error correction can say otherwise.
+            // Encrypted grants, and the updates re-announcing them, never get
+            // this far (skipped above), so the channel's transmissions start
+            // out clear: voice flows from the first LDU, and only an
+            // Encryption Sync that validates through its own error correction
+            // can say otherwise — and if one does, `retire` drops that
+            // transmission's audio, the LDU1 before it included.
             call.c4fm.set_grant_clear(true);
             call.cqpsk.set_grant_clear(true);
             match which {
@@ -1722,6 +1791,42 @@ pub fn pick_modulation(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+
+    #[test]
+    fn an_encrypted_grant_marks_its_updates_until_the_channel_moves_on() {
+        let grant = |tg: u16, unit: u32, encrypted: bool| hs_trunk::Grant {
+            talkgroup: tg,
+            source_unit: unit,
+            freq_hz: 857_762_500,
+            encrypted,
+        };
+        let mut m = EncryptedChannels::default();
+        let mut g = grant(10136, 4918228, true);
+        m.classify(&mut g, 0.0);
+        let mut u = grant(10136, 0, false);
+        m.classify(&mut u, 1.0);
+        assert!(u.encrypted, "an update inherits the grant's encryption");
+        // Another talkgroup's update on the channel: not ours to mark, and
+        // the channel is no longer the encrypted call's.
+        let mut other = grant(10203, 0, false);
+        m.classify(&mut other, 1.5);
+        assert!(!other.encrypted);
+        let mut u = grant(10136, 0, false);
+        m.classify(&mut u, 2.0);
+        assert!(!u.encrypted, "the reassignment released the channel");
+        // A clear full grant is the final word.
+        m.classify(&mut grant(10136, 4918228, true), 3.0);
+        m.classify(&mut grant(10136, 4911347, false), 4.0);
+        let mut u = grant(10136, 0, false);
+        m.classify(&mut u, 5.0);
+        assert!(!u.encrypted, "a clear grant released the channel");
+        // Unrefreshed memory lapses.
+        m.classify(&mut grant(10136, 4918228, true), 6.0);
+        m.expire(6.0 + ENC_MEMORY_SECS);
+        let mut u = grant(10136, 0, false);
+        m.classify(&mut u, 6.0 + ENC_MEMORY_SECS);
+        assert!(!u.encrypted, "memory expires");
+    }
 
     #[test]
     fn probe_windows_step_into_the_file_only_as_far_as_it_goes() {
