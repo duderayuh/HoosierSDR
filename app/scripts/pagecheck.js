@@ -25,6 +25,11 @@ const calls = [];
 const listeners = {};
 w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
+  // Dialogs answer themselves. This has to happen before anything is
+  // driven: a real uiConfirm waits for a click that will never come, and a
+  // page script that opens one mid-run would hang this check with no output
+  // at all.
+  w.uiConfirm = async () => false;
   // Drive every handler the way the backend would, after the page has loaded.
   const fire = (name, payload) => (listeners[name] || []).forEach((cb) => { try { cb({ payload }); } catch (e) { console.log("PAGE ERROR: event " + name + ": " + e.stack); } });
   const follow = (p) => fire("follow", p);
@@ -58,8 +63,7 @@ w.__exercise = async () => {
   try { w.showView("tripwires"); await new Promise((r) => setTimeout(r, 300)); await w.tripwireFromCall(7); await new Promise((r) => setTimeout(r, 900)); } catch (e) { console.log("PAGE ERROR: tripwires: " + e.stack); }
   if (!w.document.getElementById("twSamples").innerHTML.includes("cardiac")) console.log("PAGE ERROR: tripwire preview did not render");
   if (!w.document.getElementById("twPhraseStats").innerHTML.includes("vfib")) console.log("PAGE ERROR: dead-phrase suggestion missing");
-  // Click every button that has a handler, with dialogs auto-cancelled.
-  w.uiConfirm = async () => false;
+  // Click every button that has a handler.
   for (const b of w.document.querySelectorAll("button")) { if (typeof b.onclick === "function") { try { const r = b.onclick({ target: b, preventDefault() {} }); if (r && r.catch) r.catch((e) => console.log("PAGE ERROR: async click " + (b.id || b.textContent.trim()) + ": " + e)); } catch (e) { console.log("PAGE ERROR: click " + (b.id || b.textContent.trim()) + ": " + e.stack); } } }
 };
 w.addEventListener("error", (e) => console.log("PAGE ERROR:", e.message, e.error && e.error.stack));

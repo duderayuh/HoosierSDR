@@ -438,7 +438,7 @@
               <div class="panel tw-step">
                 <div class="head"><span class="tw-num">1</span><span class="eyebrow">When</span><span class="meta" id="twWhenMeta"></span></div>
                 <div class="body tight">
-                  <div class="seg tw-seg" id="twKind"><button data-v="call" aria-pressed="true">A call is heard</button><button data-v="conversation" aria-pressed="false">A conversation ends</button><button data-v="digest" aria-pressed="false">On a timer</button></div>
+                  <div class="seg tw-seg" id="twKind"><button data-v="call" aria-pressed="true">A call is heard</button><button data-v="conversation" aria-pressed="false">A conversation ends</button><button data-v="incident" aria-pressed="false">A run is dispatched</button><button data-v="digest" aria-pressed="false">On a timer</button></div>
                   <div class="field"><span class="lab">On <span class="mono faint" id="twTgHint"></span></span>
                     <div class="inline tw-chanrow"><button class="btn ghost tw-chan" id="twTgs" title="Choose talkgroups">any talkgroup</button><select id="twSystem" title="Which system those talkgroups belong to — the same number on another system is a different channel"></select></div></div>
                   <div id="twCallWhen">
@@ -449,6 +449,16 @@
                       <label class="field"><span class="lab">Only these radios <span class="mono faint">IDs · blank = any</span></span><input id="twUnits" type="text" placeholder="790065" spellcheck="false" /></label>
                       <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="twEmergency" type="checkbox" /> only emergencies</label></label>
                     </div>
+                  </div>
+                  <div id="twIncWhen">
+                    <p class="help">Runs come off the Dispatch map: the model has already read the call and worked out the type, the address and who was sent. Leave everything blank for every run.</p>
+                    <label class="field"><span class="lab">Call types <span class="mono faint">comma separated, as the Dispatch settings spell them · blank = any</span></span><input id="twIncTypes" type="text" spellcheck="false" placeholder="Cardiac Arrest, Structure Fire" /></label>
+                    <div class="row3">
+                      <label class="field"><span class="lab">Near <span class="mono faint">a place, or any that can…</span></span><select id="twIncNear"></select></label>
+                      <label class="field"><span class="lab">Within (km) <span class="mono faint">0 = anywhere</span></span><input id="twIncKm" type="text" inputmode="decimal" /></label>
+                      <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="twIncPlaced" type="checkbox" /> only runs on the map</label></label>
+                    </div>
+                    <label class="check"><input id="twIncLinked" type="checkbox" /> Wait until the crew reports to a hospital, so the message can say where the patient went</label>
                   </div>
                   <div id="twConvWhen">
                     <label class="field"><span class="lab">Fixed radios <span class="mono faint">the hospital's consoles · every other radio is a unit calling in</span></span><span class="inline"><input id="twFixed" type="text" spellcheck="false" placeholder="900001, 900002" /><label class="check" style="margin:0;white-space:nowrap"><input id="twLearn" type="checkbox" checked /> learn from traffic</label></span></label>
