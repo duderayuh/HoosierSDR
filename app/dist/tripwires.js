@@ -20,7 +20,12 @@
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
     incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
-  let list = [], stats = {}, view = null, recipes = null;
+  let list = [], folders = [], stats = {}, view = null, recipes = null;
+  // Which folders are rolled up, per listener rather than per install.
+  let shut = new Set(store("hs.twfolders", []));
+  // What is being dragged, and a guard so a backend event cannot
+  // re-render the list out from under the gesture.
+  let drag = null, dragging = false;
   let sel = null, draft = null, saved = "", words = null;
   let days = 7, preview = null, previewSeq = 0, previewTimer = null, tried = new Map();
   let activity = [];   // [{tg, system, calls}] over the last week, for the system picker
@@ -66,7 +71,7 @@
 
   /* ---------- loading ---------- */
   async function load() {
-    try { view = await invoke("tripwires_get"); list = view.tripwires || []; stats = view.stats || {}; }
+    try { view = await invoke("tripwires_get"); list = view.tripwires || []; folders = view.folders || []; stats = view.stats || {}; }
     catch (e) { log(`tripwires_get: ${e}`); return; }
     renderList();
     if (sel && sel !== "new" && !list.some((t) => t.id === sel)) closeEditor();
@@ -75,32 +80,237 @@
     try { activity = (await invoke("channel_activity", { hours: 24 * 7 })) || []; } catch (_) { activity = []; }
   }
 
-  /* ---------- the list ---------- */
+  /* ---------- the list: a tree of folders, dragged into shape ---------- */
+  // Display order is the stored order: within one parent, folders first,
+  // then tripwires, each in the order the arrays hold them. Dragging
+  // rewrites those arrays, so what is on screen is what is saved.
+  // An id-less folder is nobody's child: without this guard one would be
+  // its own parent at the top level, and counting the tree would not end.
+  const kidFolders = (parent) => folders.filter((f) => f.id && (f.parent || "") === parent);
+  const kidWires = (parent) => list.filter((t) => (t.parent || "") === parent);
+  const folderById = (id) => folders.find((f) => f.id === id);
+
+  // A folder is only really on if every folder above it is too — the same
+  // rule the backend applies, so the list cannot disagree with what runs.
+  function folderOn(id) {
+    let seen = 0;
+    while (id) {
+      const f = folderById(id);
+      if (!f) return true;
+      if (!f.enabled) return false;
+      id = f.parent || "";
+      if (++seen > 8) return false;
+    }
+    return true;
+  }
+  const countIn = (parent) => kidWires(parent).length + kidFolders(parent).reduce((n, f) => n + countIn(f.id), 0);
+  const liveIn = (parent) =>
+    kidWires(parent).filter((t) => t.enabled && folderOn(parent)).length +
+    kidFolders(parent).reduce((n, f) => n + liveIn(f.id), 0);
+
+  function twCard(t, depth) {
+    const st = stats[t.id] || {};
+    const res = [st.sent ? `${st.sent} sent` : "", st.quiet ? `${st.quiet} quiet` : "", st.failed ? `<span class="bad">${st.failed} failed</span>` : ""].filter(Boolean).join(" · ");
+    const icon = t.when.kind === "conversation" ? "🏥" : t.when.kind === "digest" ? "🗞️" : t.when.kind === "incident" ? "🚑" : t.check.kind === "none" ? "⚡" : "🔎";
+    // A tripwire switched on inside a shut-off folder is drawn as off,
+    // because that is what it is — with a word on why.
+    const muted = t.enabled && !folderOn(t.parent || "");
+    return `<div class="twcard ${sel === t.id ? "on" : ""} ${t.enabled && !muted ? "" : "off"}" data-tw="${esc(t.id)}" draggable="true" style="--twdepth:${depth}">
+      <div class="twcard-top"><span class="twgrip" title="Drag to move">⠿</span><span class="twicon">${icon}</span><b class="grow">${esc(t.name)}</b>${muted ? `<span class="twmuted" title="The folder it is in is switched off">folder off</span>` : ""}<label class="tw-switch sm" title="On or off"><input type="checkbox" data-twen="${esc(t.id)}" ${t.enabled ? "checked" : ""}><span></span></label></div>
+      <div class="twcard-sent">${esc(sentence(t))}</div>
+      <div class="twcard-stats">${res || "nothing this week"}${st.last_at ? ` · last ${ago(st.last_at)}` : ""}</div></div>`;
+  }
+
+  function folderRow(f, depth) {
+    const n = countIn(f.id), on = liveIn(f.id);
+    const isShut = shut.has(f.id);
+    const dim = f.enabled && !folderOn(f.parent || "");
+    return `<div class="twfolder ${f.enabled && !dim ? "" : "off"}" data-twf="${esc(f.id)}" draggable="true" style="--twdepth:${depth}">
+        <span class="twgrip" title="Drag to move">⠿</span>
+        <button class="twcaret" data-twfold="${esc(f.id)}" title="${isShut ? "Open" : "Close"}">${isShut ? "▸" : "▾"}</button>
+        <span class="twfname grow" data-twren="${esc(f.id)}" title="Click to rename">${esc(f.name)}</span>
+        <small class="faint">${n ? `${on} of ${n} on` : "empty"}</small>
+        <label class="tw-switch sm" title="Switch off everything in here"><input type="checkbox" data-twfen="${esc(f.id)}" ${f.enabled ? "checked" : ""}><span></span></label>
+        <button class="btn ghost sm" data-twfdel="${esc(f.id)}" title="Remove the folder and keep what is in it">✕</button>
+      </div>` + (isShut ? "" : branch(f.id, depth + 1));
+  }
+
+  function branch(parent, depth) {
+    if (depth > 6) return "";
+    return kidFolders(parent).map((f) => folderRow(f, depth)).join("")
+      + kidWires(parent).map((t) => twCard(t, depth)).join("");
+  }
+
   function renderList() {
+    // Never redraw mid-gesture: the list is server-backed and a tripwires
+    // event would otherwise wipe the node being dragged.
+    if (dragging) return;
     const q = ($("twFilter").value || "").trim().toLowerCase();
-    const shown = list.filter((t) => !q || `${t.name} ${sentence(t)}`.toLowerCase().includes(q));
-    $("twEmpty").style.display = list.length ? "none" : "";
-    $("twMeta").textContent = list.length ? `${list.filter((t) => t.enabled).length} of ${list.length} on` : "";
-    $("twList").innerHTML = shown.map((t) => {
-      const st = stats[t.id] || {};
-      const res = [st.sent ? `${st.sent} sent` : "", st.quiet ? `${st.quiet} quiet` : "", st.failed ? `<span class="bad">${st.failed} failed</span>` : ""].filter(Boolean).join(" · ");
-      const icon = t.when.kind === "conversation" ? "🏥" : t.when.kind === "digest" ? "🗞️" : t.check.kind === "none" ? "⚡" : "🔎";
-      return `<div class="twcard ${sel === t.id ? "on" : ""} ${t.enabled ? "" : "off"}" data-tw="${esc(t.id)}">
-        <div class="twcard-top"><span class="twicon">${icon}</span><b class="grow">${esc(t.name)}</b><label class="tw-switch sm" title="On or off"><input type="checkbox" data-twen="${esc(t.id)}" ${t.enabled ? "checked" : ""}><span></span></label></div>
-        <div class="twcard-sent">${esc(sentence(t))}</div>
-        <div class="twcard-stats">${res || "nothing this week"}${st.last_at ? ` · last ${ago(st.last_at)}` : ""}</div></div>`;
-    }).join("");
-    $("twList").querySelectorAll(".twcard").forEach((c) => c.onclick = (e) => { if (e.target.closest(".tw-switch")) return; pick(c.dataset.tw); });
-    $("twList").querySelectorAll("input[data-twen]").forEach((c) => c.onchange = async () => {
+    $("twEmpty").style.display = list.length || folders.length ? "none" : "";
+    $("twMeta").textContent = list.length ? `${list.filter((t) => t.enabled && folderOn(t.parent || "")).length} of ${list.length} on` : "";
+    // While filtering, the tree gets out of the way: matches are shown flat,
+    // because a hit three folders down is otherwise invisible.
+    $("twList").innerHTML = q
+      ? list.filter((t) => `${t.name} ${sentence(t)}`.toLowerCase().includes(q)).map((t) => twCard(t, 0)).join("")
+      : branch("", 0);
+    wireList(!!q);
+  }
+
+  function wireList(filtering) {
+    const box = $("twList");
+    box.querySelectorAll(".twcard").forEach((c) => c.onclick = (e) => {
+      if (e.target.closest(".tw-switch") || e.target.closest(".twgrip")) return;
+      pick(c.dataset.tw);
+    });
+    box.querySelectorAll("input[data-twen]").forEach((c) => c.onchange = async () => {
       const t = list.find((x) => x.id === c.dataset.twen); if (!t) return;
       t.enabled = c.checked;
       if (await persist(list)) { uiToast(`${t.name} is ${t.enabled ? "on" : "off"}`); if (sel === t.id && draft) { draft.enabled = t.enabled; $("twEnabled").checked = t.enabled; if (saved) { const o = JSON.parse(saved); o.enabled = t.enabled; saved = stable(o); } markDirty(); } }
     });
+    box.querySelectorAll("[data-twfold]").forEach((b) => b.onclick = () => {
+      const id = b.dataset.twfold;
+      if (shut.has(id)) shut.delete(id); else shut.add(id);
+      save("hs.twfolders", [...shut]); renderList();
+    });
+    box.querySelectorAll("input[data-twfen]").forEach((c) => c.onchange = async () => {
+      const f = folderById(c.dataset.twfen); if (!f) return;
+      f.enabled = c.checked;
+      if (await persist(list)) uiToast(`${f.name} and everything in it is ${f.enabled ? "on" : "off"}`);
+    });
+    box.querySelectorAll("[data-twren]").forEach((el) => el.onclick = async () => {
+      const f = folderById(el.dataset.twren); if (!f) return;
+      const name = await uiAsk("Folder name", f.name);
+      if (name === null) return;
+      f.name = String(name).trim() || f.name;
+      await persist(list);
+    });
+    box.querySelectorAll("[data-twfdel]").forEach((b) => b.onclick = async () => {
+      const f = folderById(b.dataset.twfdel); if (!f) return;
+      const n = countIn(f.id);
+      if (!await uiConfirm(n
+        ? `Remove the folder “${f.name}”? The ${n} tripwire(s) and folder(s) in it move up a level — nothing is deleted.`
+        : `Remove the empty folder “${f.name}”?`, "Remove folder")) return;
+      // Contents move to where the folder was, so nothing disappears.
+      const up = f.parent || "";
+      list.forEach((t) => { if ((t.parent || "") === f.id) t.parent = up; });
+      folders.forEach((x) => { if ((x.parent || "") === f.id) x.parent = up; });
+      folders = folders.filter((x) => x.id !== f.id);
+      shut.delete(f.id); save("hs.twfolders", [...shut]);
+      await persist(list);
+    });
+    if (!filtering) wireDrag(box);
   }
+
+  /* ---------- dragging ---------- */
+  // Same gesture as the nav tabs, but this list is server-backed and
+  // re-rendered, so the arrays are reordered and then redrawn rather than
+  // live DOM nodes being shuffled.
+  function wireDrag(box) {
+    const rows = [...box.querySelectorAll(".twcard, .twfolder")];
+    rows.forEach((el) => {
+      const kind = el.classList.contains("twfolder") ? "folder" : "tw";
+      const id = kind === "folder" ? el.dataset.twf : el.dataset.tw;
+      el.addEventListener("dragstart", (e) => {
+        drag = { kind, id }; dragging = true; el.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", id);
+      });
+      el.addEventListener("dragend", () => { el.classList.remove("dragging"); drag = null; dragging = false; renderList(); });
+      el.addEventListener("dragover", (e) => {
+        if (!drag || drag.id === id) return;
+        // A folder may not be dropped into itself or its own descendants.
+        if (drag.kind === "folder" && kind === "folder" && inside(id, drag.id)) return;
+        e.preventDefault(); e.dataTransfer.dropEffect = "move";
+        const r = el.getBoundingClientRect();
+        const third = r.height / 3;
+        // Top third = before it, bottom third = after it, middle of a
+        // folder header = into it.
+        const where = e.clientY < r.top + third ? "before" : e.clientY > r.bottom - third ? "after" : (kind === "folder" ? "in" : "after");
+        el.dataset.drop = where;
+        rows.forEach((o) => { if (o !== el) delete o.dataset.drop; });
+      });
+      el.addEventListener("dragleave", () => delete el.dataset.drop);
+      el.addEventListener("drop", async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const where = el.dataset.drop || "after";
+        rows.forEach((o) => delete o.dataset.drop);
+        const target = { kind, id };
+        drag && (await moveTo(drag, target, where));
+      });
+    });
+    // Dropping on the empty space below the list means the top level.
+    box.addEventListener("dragover", (e) => { if (drag) e.preventDefault(); });
+    box.addEventListener("drop", async (e) => {
+      if (!drag || e.target.closest(".twcard, .twfolder")) return;
+      e.preventDefault();
+      await moveTo(drag, { kind: "root", id: "" }, "in");
+    });
+  }
+
+  // Is `id` inside `maybeAncestor` (or the same folder)?
+  function inside(id, maybeAncestor) {
+    let seen = 0;
+    while (id) {
+      if (id === maybeAncestor) return true;
+      id = (folderById(id) || {}).parent || "";
+      if (++seen > 8) return true;
+    }
+    return false;
+  }
+
+  async function moveTo(what, target, where) {
+    const arr = what.kind === "folder" ? folders : list;
+    const i = arr.findIndex((x) => x.id === what.id);
+    if (i < 0) return;
+    const me = arr[i];
+    let parent, at;
+    if (target.kind === "root") {
+      parent = ""; at = arr.length;
+    } else if (target.kind === "folder" && where === "in") {
+      parent = target.id; at = arr.length;
+      shut.delete(target.id); save("hs.twfolders", [...shut]);
+    } else {
+      // Beside the row it was dropped on, in that row's own parent.
+      const t = (target.kind === "folder" ? folders : list).find((x) => x.id === target.id);
+      if (!t) return;
+      parent = t.parent || "";
+      if (target.kind === what.kind) {
+        at = arr.findIndex((x) => x.id === target.id) + (where === "before" ? 0 : 1);
+      } else {
+        at = arr.length;
+      }
+    }
+    // A folder cannot be moved inside itself, whatever the drop said.
+    if (what.kind === "folder" && inside(parent, what.id)) return;
+    arr.splice(i, 1);
+    if (at > i) at -= 1;
+    me.parent = parent;
+    arr.splice(Math.max(0, Math.min(at, arr.length)), 0, me);
+    dragging = false;
+    await persist(list);
+  }
+
+  $("twFolderAdd").onclick = async () => {
+    const name = await uiAsk("New folder", "");
+    if (name === null) return;
+    // A new folder lands beside whatever is selected, so it appears where
+    // the listener is looking rather than at the bottom.
+    const near = list.find((t) => t.id === sel);
+    folders.push({ id: `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: String(name).trim() || "Folder", enabled: true, parent: near ? (near.parent || "") : "" });
+    await persist(list);
+  };
+
   $("twFilter").oninput = renderList;
 
   async function persist(next) {
-    try { const out = await invoke("tripwires_set", { tripwires: next }); list = out; renderList(); return true; }
+    try {
+      const out = await invoke("tripwires_set", { tripwires: next, folders });
+      list = out;
+      // The backend settles folder ids, names and any impossible nesting,
+      // so the page adopts what was stored rather than what it sent.
+      try { const v = await invoke("tripwires_get"); folders = v.folders || []; } catch (_) {}
+      renderList(); return true;
+    }
     catch (e) { uiToast(`Could not save: ${e}`, "err"); await load(); return false; }
   }
 

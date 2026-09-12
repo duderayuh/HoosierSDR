@@ -61,6 +61,23 @@ function uiConfirm(msg, okLabel) {
     document.body.appendChild(wrap); wrap.querySelector("[data-yes]").focus();
   });
 }
+// Ask for one line of text. Resolves to the string, or null if cancelled —
+// so an empty answer and a cancelled one are told apart.
+function uiAsk(label, value, okLabel) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div"); wrap.className = "modal-wrap";
+    wrap.innerHTML = `<div class="modal"><label class="field"><span class="lab"></span><input class="askin" spellcheck="false" /></label><div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>${esc(okLabel || "OK")}</button></div></div>`;
+    wrap.querySelector(".lab").textContent = String(label || "");
+    const input = wrap.querySelector(".askin");
+    input.value = value == null ? "" : String(value);
+    const done = (v) => { wrap.remove(); resolve(v); };
+    wrap.querySelector("[data-no]").onclick = () => done(null);
+    wrap.querySelector("[data-yes]").onclick = () => done(input.value);
+    wrap.onclick = (e) => { if (e.target === wrap) done(null); };
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); done(input.value); } if (e.key === "Escape") done(null); };
+    document.body.appendChild(wrap); input.focus(); input.select();
+  });
+}
 // A modal with arbitrary content. Returns the wrapper; call close() to dismiss.
 function uiModal(html, opts) {
   const wrap = document.createElement("div"); wrap.className = "modal-wrap";

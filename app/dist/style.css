@@ -1054,6 +1054,23 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .twcard:hover { border-color: var(--ink-dim); }
 .twcard.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
 .twcard.off { opacity: .6; }
+/* The tripwire tree: folders nest, and a row is indented by its depth.
+   Dragging shows where the row would land — above, below, or inside. */
+.twcard, .twfolder { margin-left: calc(var(--twdepth, 0) * 14px); }
+.twgrip { cursor: grab; color: var(--ink-dim); opacity: .55; font-size: 12px; letter-spacing: -1px; user-select: none; }
+.twgrip:hover { opacity: 1; }
+.twcard.dragging, .twfolder.dragging { opacity: .35; }
+.twcard[data-drop="before"], .twfolder[data-drop="before"] { box-shadow: inset 0 2px 0 0 var(--signal); }
+.twcard[data-drop="after"], .twfolder[data-drop="after"] { box-shadow: inset 0 -2px 0 0 var(--signal); }
+.twfolder[data-drop="in"] { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); }
+.twfolder { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.twfolder.off { opacity: .55; }
+.twfolder .twfname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
+.twfolder .twfname:hover { text-decoration: underline dotted; }
+.twcaret { background: none; border: 0; color: var(--ink-dim); cursor: pointer; padding: 0 2px; font-size: 11px; }
+.twmuted { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; }
 .twcard-top { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .twcard-top .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .twicon { font-size: 14px; width: 18px; text-align: center; }
