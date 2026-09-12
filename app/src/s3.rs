@@ -219,14 +219,11 @@ fn send(
     let t = target(b, key)?;
     let hash = sha256_hex(body);
     let date = stamp();
-    let mut headers = vec![
+    let headers = vec![
         ("host".to_string(), t.host.clone()),
         ("x-amz-content-sha256".to_string(), hash.clone()),
         ("x-amz-date".to_string(), date.clone()),
     ];
-    if !body.is_empty() {
-        headers.push(("content-length".into(), body.len().to_string()));
-    }
     let auth = authorization(
         method,
         &t.uri,
@@ -251,16 +248,15 @@ fn send(
     // Built as an `http::Request` rather than through ureq's per-method
     // builders, whose with-body and without-body types cannot share one
     // `match` arm.
-    let mut rb = ureq::http::Request::builder()
+    let rb = ureq::http::Request::builder()
         .method(method)
         .uri(&url)
         .header("x-amz-content-sha256", &hash)
         .header("x-amz-date", &date)
         .header("Authorization", &auth)
         .header("User-Agent", "HoosierSDR");
-    if !body.is_empty() {
-        rb = rb.header("Content-Length", body.len().to_string());
-    }
+    // Content-Length is not signed and ureq sets it from the body; sending
+    // it again is a duplicate header some stores answer with a 400.
     let req = rb.body(body).map_err(|e| e.to_string())?;
     let mut r = agent(timeout_secs).run(req).map_err(|e| e.to_string())?;
     let status = r.status().as_u16();
@@ -635,6 +631,203 @@ mod tests {
         let xml = "<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match</Message></Error>";
         assert!(why(403, xml).starts_with("403 SignatureDoesNotMatch: The request signature"));
         assert_eq!(why(500, ""), "HTTP 500");
+    }
+
+    /// A fake store: reads one request, re-derives the `Authorization`
+    /// header from what actually arrived, and answers 200 only if it
+    /// matches what the client sent. The vector test above proves the
+    /// signing maths; this proves `send` transmits the same host, path,
+    /// query and payload hash that it signed — the mismatch that shows up
+    /// against a real bucket as a bare 403.
+    /// The wire carries percent-encoded path and query; the canonical
+    /// request is built from the decoded forms, so the fake decodes before
+    /// re-signing.
+    fn pct_decode(s: &str) -> String {
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    fn fake_store(secret: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = l.accept().unwrap();
+            let mut r = BufReader::new(sock.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or_default().to_string();
+            let full = parts.next().unwrap_or_default().to_string();
+            let mut headers: Vec<(String, String)> = Vec::new();
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap() == 0 || h.trim().is_empty() {
+                    break;
+                }
+                let (k, v) = h.split_once(':').unwrap();
+                let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
+                if k == "content-length" {
+                    len = v.parse().unwrap_or(0);
+                }
+                headers.push((k, v));
+            }
+            let mut body = vec![0u8; len];
+            if len > 0 {
+                r.read_exact(&mut body).unwrap();
+            }
+            let sent = headers
+                .iter()
+                .find(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            // Only the headers SigV4 covers go back into the signature.
+            let signed: Vec<(String, String)> = headers
+                .iter()
+                .filter(|(k, _)| {
+                    k == "host" || k == "x-amz-date" || k == "x-amz-content-sha256"
+                })
+                .cloned()
+                .collect();
+            let (uri, query) = match full.split_once('?') {
+                Some((u, q)) => (
+                    u.to_string(),
+                    q.split('&')
+                        .filter(|p| !p.is_empty())
+                        .map(|p| match p.split_once('=') {
+                            Some((a, b)) => (pct_decode(a), pct_decode(b)),
+                            None => (pct_decode(p), String::new()),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                None => (full.clone(), Vec::new()),
+            };
+            let date = signed
+                .iter()
+                .find(|(k, _)| k == "x-amz-date")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            let decoded = pct_decode(&uri);
+            let mine = authorization(
+                &method,
+                &decoded,
+                &query,
+                &signed,
+                &sha256_hex(&body),
+                "AKIAEXAMPLE",
+                secret,
+                "us-east-1",
+                "s3",
+                &date,
+            );
+            let good = mine == sent;
+            tx.send(format!(
+                "{method} {full} body={} match={good}\nsent: {sent}\nmine: {mine}",
+                body.len()
+            ))
+            .unwrap();
+            let reply = if good {
+                "HTTP/1.1 200 OK\r\nETag: \"abc\"\r\nContent-Length: 0\r\n\r\n"
+            } else {
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 92\r\n\r\n<Error><Code>SignatureDoesNotMatch</Code><Message>the fake store disagreed</Message></Error>"
+            };
+            sock.write_all(reply.as_bytes()).unwrap();
+            sock.flush().unwrap();
+        });
+        (port, rx)
+    }
+
+    #[test]
+    fn what_is_sent_is_what_was_signed() {
+        let (port, rx) = fake_store("shh-secret");
+        let b = Bucket {
+            // A base path of its own, as Supabase has: the part most
+            // likely to be dropped between signing and sending.
+            endpoint: format!("http://127.0.0.1:{port}/storage/v1/s3"),
+            region: "us-east-1".into(),
+            bucket: "radio".into(),
+            path_style: true,
+            access: "AKIAEXAMPLE".into(),
+            secret: "shh-secret".into(),
+        };
+        let (status, _, body) = send(
+            &b,
+            "PUT",
+            "backups/hoosier-20260912-000000-kept.tar.gz.age",
+            &[],
+            b"pretend archive",
+            10,
+        )
+        .unwrap();
+        let seen = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(status, 200, "{seen}\n{body}");
+        assert!(seen.contains("match=true"), "{seen}");
+        assert!(
+            seen.contains("/storage/v1/s3/radio/backups/hoosier-"),
+            "the endpoint's own path has to reach the wire: {seen}"
+        );
+        assert!(seen.contains("body=15"), "{seen}");
+    }
+
+    #[test]
+    fn a_signed_query_reaches_the_wire_in_the_order_it_was_signed() {
+        let (port, rx) = fake_store("shh-secret");
+        let b = Bucket {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            region: "us-east-1".into(),
+            bucket: "radio".into(),
+            path_style: true,
+            access: "AKIAEXAMPLE".into(),
+            secret: "shh-secret".into(),
+        };
+        // list-type and prefix, given out of order on purpose.
+        let (status, _, _) = send(
+            &b,
+            "GET",
+            "",
+            &[
+                ("prefix".into(), "backups/".into()),
+                ("list-type".into(), "2".into()),
+            ],
+            &[],
+            10,
+        )
+        .unwrap();
+        let seen = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(status, 200, "{seen}");
+        assert!(seen.contains("match=true"), "{seen}");
+        assert!(seen.contains("list-type=2&prefix=backups%2F"), "{seen}");
+    }
+
+    #[test]
+    fn a_wrong_secret_is_reported_as_the_store_described_it() {
+        let (port, _rx) = fake_store("a-different-secret");
+        let b = Bucket {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            region: "us-east-1".into(),
+            bucket: "radio".into(),
+            path_style: true,
+            access: "AKIAEXAMPLE".into(),
+            secret: "shh-secret".into(),
+        };
+        let (status, _, body) = send(&b, "PUT", "k", &[], b"x", 10).unwrap();
+        assert_eq!(status, 403);
+        assert!(why(status, &body).contains("SignatureDoesNotMatch"), "{body}");
     }
 
     #[test]

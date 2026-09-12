@@ -153,6 +153,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "retention_apply" => jv(crate::retention::retention_apply(app.clone(), state).await?),
         "retention_usage" => jv(crate::retention::retention_usage(app.clone()).await?),
         "backup_get" => jv(crate::backup::backup_get(app.clone(), state)),
+        "backup_sizes" => jv(crate::backup::backup_sizes(app.clone(), state)),
         "backup_set" => jv(crate::backup::backup_set(app.clone(), state, arg(args, "settings")?)?),
         "backup_credentials" => jv(crate::backup::backup_credentials(
             arg(args, "dest")?,

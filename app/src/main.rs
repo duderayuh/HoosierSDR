@@ -2470,6 +2470,7 @@ fn main() {
             retention::retention_get,
             retention::retention_set,
             backup::backup_get,
+            backup::backup_sizes,
             backup::backup_set,
             backup::backup_credentials,
             backup::backup_passphrase,

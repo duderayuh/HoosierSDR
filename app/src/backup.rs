@@ -144,7 +144,6 @@ pub struct View {
     /// Destination id → an access key is stored for it.
     pub keys: HashMap<String, bool>,
     pub passphrase_set: bool,
-    pub sizes: Sizes,
     /// A restore waiting for the next start.
     pub pending: Option<Pending>,
 }
@@ -246,6 +245,106 @@ pub struct Plan {
     pub audio_bytes: u64,
     pub db_bytes: u64,
     pub calls: i64,
+}
+
+/// Settings that hold a credential in the clear, and where. `secrets.json`
+/// is left out of an archive entirely; these files are wanted for
+/// everything *else* they hold, so the credential is blanked on the way in.
+/// A plaintext archive sitting on a shared drive is a browsable file.
+const REDACT: &[(&str, &[&str])] = &[
+    (
+        "uploads.json",
+        &["rdio.key", "openmhz.api_key", "broadcastify.api_key"],
+    ),
+    ("stream.json", &["password"]),
+];
+
+/// Key names that are a credential wherever they appear. `key` is not in
+/// the list on purpose: an analyzer's extract field is called `key` too,
+/// and blanking those would quietly break the rules they belong to — the
+/// two real `key` credentials are named in [`REDACT`] instead.
+const CREDENTIAL_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "token",
+    "password",
+    "passwd",
+    "secret",
+    "passphrase",
+    "access_key",
+    "secret_key",
+];
+
+fn blank_at(v: &mut serde_json::Value, path: &str) -> bool {
+    let mut cur = v;
+    let mut parts = path.split('.').peekable();
+    while let Some(p) = parts.next() {
+        let Some(next) = cur.get_mut(p) else {
+            return false;
+        };
+        if parts.peek().is_none() {
+            if next.as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                *next = serde_json::Value::String(String::new());
+                return true;
+            }
+            return false;
+        }
+        cur = next;
+    }
+    false
+}
+
+/// Blank every credential in one settings file: the ones named for it, and
+/// any other field whose name says credential, so a field added later does
+/// not leak by being forgotten here. Returns what was blanked.
+pub fn redact(name: &str, body: &[u8]) -> (Vec<u8>, Vec<String>) {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (body.to_vec(), Vec::new());
+    };
+    let mut blanked = Vec::new();
+    for (file, paths) in REDACT {
+        if *file != name {
+            continue;
+        }
+        for p in *paths {
+            if blank_at(&mut v, p) {
+                blanked.push(format!("{name}: {p}"));
+            }
+        }
+    }
+    sweep(&mut v, name, "", &mut blanked);
+    match serde_json::to_vec_pretty(&v) {
+        Ok(out) => (out, blanked),
+        Err(_) => (body.to_vec(), blanked),
+    }
+}
+
+fn sweep(v: &mut serde_json::Value, file: &str, at: &str, blanked: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                let here = if at.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{at}.{k}")
+                };
+                if CREDENTIAL_KEYS.contains(&k.to_ascii_lowercase().as_str()) {
+                    if val.as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                        *val = serde_json::Value::String(String::new());
+                        blanked.push(format!("{file}: {here}"));
+                    }
+                    continue;
+                }
+                sweep(val, file, &here, blanked);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, val) in items.iter_mut().enumerate() {
+                sweep(val, file, &format!("{at}[{i}]"), blanked);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Every setting file worth keeping — and not `secrets.json`.
@@ -404,6 +503,10 @@ pub struct Manifest {
     pub config_files: usize,
     /// Total size of the members, before compression.
     pub bytes: u64,
+    /// Credential fields blanked on the way in, as `file: path`. Shown at
+    /// restore time so they can be entered again.
+    #[serde(default)]
+    pub redacted: Vec<String>,
     /// Said plainly, because a restore is usually a bad day: the archive
     /// deliberately does not contain the API tokens.
     pub note: String,
@@ -500,14 +603,43 @@ fn add_bytes<W: Write>(
     tar: &mut tar::Builder<W>,
     name: &str,
     body: &[u8],
-) -> Result<(), String> {
+) -> Result<(u64, String), String> {
     let mut h = tar::Header::new_gnu();
     h.set_size(body.len() as u64);
     h.set_mode(0o600);
     h.set_mtime(crate::library::now() as u64);
     h.set_cksum();
     tar.append_data(&mut h, name, body)
-        .map_err(|e| format!("{name}: {e}"))
+        .map_err(|e| format!("{name}: {e}"))?;
+    Ok((body.len() as u64, crate::s3::sha256_hex(body)))
+}
+
+/// The settings files as they will go in: credentials blanked, and read up
+/// front so the manifest — which is the archive's first entry — can already
+/// say what was blanked. They are a few hundred kilobytes between them.
+/// A catalog is CSV and holds no credential, so it streams from disk.
+type Redacted = (Vec<(String, Vec<u8>)>, Vec<String>);
+
+fn redact_config(config: &[(String, PathBuf)]) -> Redacted {
+    let mut bodies = Vec::new();
+    let mut blanked = Vec::new();
+    for (name, from) in config {
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(body) = std::fs::read(from) else {
+            continue;
+        };
+        let short = from
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let (body, found) = redact(&short, &body);
+        blanked.extend(found);
+        bodies.push((name.clone(), body));
+    }
+    (bodies, blanked)
 }
 
 /// A whole, valid copy of the database, taken while the app keeps running.
@@ -546,6 +678,7 @@ pub fn write_archive(
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string();
+    let (bodies, blanked) = redact_config(&plan.config);
     let mut manifest = Manifest {
         format: FORMAT,
         app: env!("CARGO_PKG_VERSION").to_string(),
@@ -557,7 +690,9 @@ pub fn write_archive(
         recordings: plan.audio.len(),
         config_files: plan.config.len(),
         bytes: total,
-        note: "API tokens and passwords (secrets.json) are deliberately not in this archive. \
+        redacted: blanked,
+        note: "API tokens and passwords are deliberately not in this archive — secrets.json is \
+               left out entirely and the credential fields in other settings are blanked. \
                After a restore, enter them again in Settings."
             .into(),
     };
@@ -581,15 +716,25 @@ pub fn write_archive(
     sums.push(("calls.db".into(), n, sum));
     done += n;
 
-    for (name, from) in &plan.config {
+    for (name, body) in &bodies {
         progress(done, total, "settings");
+        match add_bytes(&mut tar, name, body) {
+            Ok((n, sum)) => {
+                sums.push((name.clone(), n, sum));
+                done += n;
+            }
+            Err(e) => eprintln!("backup: {e}"),
+        }
+    }
+    // The catalogs, which are CSV and stream from disk.
+    for (name, from) in plan.config.iter().filter(|(n, _)| !n.ends_with(".json")) {
         match add_file(&mut tar, name, from) {
             Ok((n, sum)) => {
                 sums.push((name.clone(), n, sum));
                 done += n;
             }
-            // A setting file deleted between the plan and the run is not
-            // worth failing a backup over.
+            // A file deleted between the plan and the run is not worth
+            // failing a whole backup over.
             Err(e) => eprintln!("backup: {e}"),
         }
     }
@@ -698,8 +843,16 @@ fn stamp_name(tier: &str, sealed: bool) -> String {
     )
 }
 
+/// A name is only an archive if it is a bare file name. Archive names
+/// arrive from the page — and through the web mirror, from another
+/// machine — and are joined onto a folder path, so a name that can walk
+/// out of that folder is not one.
 fn is_archive(n: &str) -> bool {
-    n.starts_with("hoosier-") && (n.ends_with(".tar.gz") || n.ends_with(".tar.gz.age"))
+    n.starts_with("hoosier-")
+        && (n.ends_with(".tar.gz") || n.ends_with(".tar.gz.age"))
+        && !n.contains('/')
+        && !n.contains('\\')
+        && !n.contains("..")
 }
 
 /// Sort newest first by the stamp in the name, which sorts lexically.
@@ -843,9 +996,24 @@ fn say(app: &AppHandle, dest: &str, phase: &str, detail: String, done: u64, tota
     );
 }
 
+/// One backup at a time: the timer and a hand-pressed Back up now would
+/// otherwise write the same snapshot file from two threads.
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct Guard;
+impl Drop for Guard {
+    fn drop(&mut self) {
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Take a backup to one destination. Blocking; the command wraps it in a
 /// thread.
 pub fn run_to(app: &AppHandle, state: &AppState, dest: &Destination) -> Result<Outcome, String> {
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("a backup is already running".into());
+    }
+    let _guard = Guard;
     let began = std::time::Instant::now();
     let tier = if dest.tier.trim().is_empty() {
         state.backup.lock().unwrap().tier.clone()
@@ -859,6 +1027,14 @@ pub fn run_to(app: &AppHandle, state: &AppState, dest: &Destination) -> Result<O
     };
     let sealed = dest.encrypt || dest.kind == "s3";
     let passphrase = if sealed {
+        // A sealed archive is unreadable without the passphrase, so the
+        // first one does not go out until the listener has said they have
+        // it somewhere other than this machine.
+        if !state.backup.lock().unwrap().passphrase_ack {
+            return Err("write the backup passphrase down first — a sealed backup cannot be \
+                        opened without it. Backups → Show passphrase."
+                .into());
+        }
         Some(crate::secrets::get(PASS_KEY).ok_or(
             "this destination is encrypted but no passphrase is set — set one in Backups",
         )?)
@@ -997,6 +1173,37 @@ pub struct Restored {
     /// Members whose checksum did not match. Empty is the good case.
     pub bad: Vec<String>,
     pub note: String,
+}
+
+/// Point every call's `audio` column at this library's recordings folder,
+/// keeping the file name. Returns how many rows moved.
+pub fn repoint_audio(c: &rusqlite::Connection, lib: &Path) -> Result<usize, String> {
+    let rows: Vec<(i64, String)> = {
+        let mut st = c
+            .prepare("SELECT id, audio FROM calls WHERE audio IS NOT NULL AND audio <> ''")
+            .map_err(|e| e.to_string())?;
+        let it = st
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        it.filter_map(Result::ok).collect()
+    };
+    let mut moved = 0;
+    for (id, old) in rows {
+        let Some(base) = Path::new(&old).file_name() else {
+            continue;
+        };
+        let want = lib.join(base);
+        if want == Path::new(&old) {
+            continue;
+        }
+        c.execute(
+            "UPDATE calls SET audio = ?1 WHERE id = ?2",
+            rusqlite::params![want.to_string_lossy(), id],
+        )
+        .map_err(|e| e.to_string())?;
+        moved += 1;
+    }
+    Ok(moved)
 }
 
 /// Fetch an archive from a destination into the staging folder.
@@ -1150,6 +1357,21 @@ pub fn restore_from(
         }
         sums.insert(format!("@{name}"), got);
     }
+    // A restored database carries the paths of the machine it was backed
+    // up from. Recordings land in this library's own folder, so the rows
+    // are pointed at them; without this every call in a restore onto a new
+    // machine plays nothing.
+    let mut repointed = 0usize;
+    if database {
+        let staged = db_dir.join("calls.db.restored");
+        match rusqlite::Connection::open(&staged) {
+            Ok(c) => match repoint_audio(&c, &lib) {
+                Ok(n) => repointed = n,
+                Err(e) => bad.push(format!("pointing the recordings at {}: {e}", lib.display())),
+            },
+            Err(e) => bad.push(format!("opening the restored database: {e}")),
+        }
+    }
     // Checksums arrive last, so verification happens after the whole walk.
     for (k, got) in sums.iter().filter(|(k, _)| k.starts_with('@')) {
         let name = &k[1..];
@@ -1158,6 +1380,15 @@ pub fn restore_from(
                 bad.push(name.to_string());
             }
         }
+    }
+    // A member that did not survive the trip is not swapped in at the next
+    // start. The staged files go, the marker is never written, and the live
+    // library is exactly as it was.
+    if !bad.is_empty() {
+        for f in &staged {
+            let _ = std::fs::remove_file(f);
+        }
+        staged.clear();
     }
     if !staged.is_empty() {
         let p = Pending {
@@ -1177,12 +1408,21 @@ pub fn restore_from(
         .map_err(|e| e.to_string())?;
     }
     let note = if bad.is_empty() {
-        "Everything checked out. Restart the app to finish: the restored database and settings \
-         are swapped in at the next start, and what is there now is kept beside them. \
-         Telegram and RadioReference credentials are not in a backup — enter them again."
-            .to_string()
+        format!(
+            "Everything checked out{}. Restart the app to finish: the restored database and \
+             settings are swapped in at the next start, and what is there now is kept beside \
+             them. API tokens and passwords are not in a backup — enter them again in Settings.",
+            if repointed > 0 {
+                format!(", and {repointed} recording(s) were pointed at this library")
+            } else {
+                String::new()
+            }
+        )
     } else {
-        format!("{} file(s) did not match their checksum.", bad.len())
+        format!(
+            "{} file(s) did not check out, so nothing was staged and the library is untouched.",
+            bad.len()
+        )
     };
     Ok(Restored {
         manifest,
@@ -1207,8 +1447,16 @@ pub fn apply_pending(app: &AppHandle) {
         let _ = std::fs::remove_file(&marker);
         return;
     };
+    swap_in(&p.files);
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// Put each staged `.restored` file in place of the live one, keeping what
+/// was there. Returns the files that moved.
+fn swap_in(files: &[String]) -> Vec<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    for staged in &p.files {
+    let mut moved = Vec::new();
+    for staged in files {
         let staged = PathBuf::from(staged);
         let Some(live) = staged
             .to_string_lossy()
@@ -1221,21 +1469,38 @@ pub fn apply_pending(app: &AppHandle) {
             continue;
         }
         if live.exists() {
-            let keep = live.with_file_name(format!(
-                "{}.replaced-{stamp}",
-                live.file_name().unwrap_or_default().to_string_lossy()
-            ));
+            let base = live.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let keep = live.with_file_name(format!("{base}.replaced-{stamp}"));
             if let Err(e) = std::fs::rename(&live, &keep) {
                 eprintln!("restore: keeping {} failed: {e}", live.display());
                 continue;
             }
+            // The library runs in WAL mode. A `-wal` left behind by a
+            // process that did not close cleanly would be replayed onto
+            // whatever `calls.db` it finds beside it — which after a swap
+            // is the restored database, not the one those frames came
+            // from. The pair moves with the file it belongs to, so the
+            // old trio stays openable and the new file starts clean (a
+            // `VACUUM INTO` snapshot has no WAL of its own).
+            for tail in ["-wal", "-shm"] {
+                let from = live.with_file_name(format!("{base}{tail}"));
+                if from.exists() {
+                    let to = live.with_file_name(format!("{base}.replaced-{stamp}{tail}"));
+                    if let Err(e) = std::fs::rename(&from, &to) {
+                        eprintln!("restore: moving {} failed: {e}", from.display());
+                    }
+                }
+            }
         }
         match std::fs::rename(&staged, &live) {
-            Ok(()) => eprintln!("restore: {} is in place", live.display()),
+            Ok(()) => {
+                eprintln!("restore: {} is in place", live.display());
+                moved.push(live);
+            }
             Err(e) => eprintln!("restore: {} failed: {e}", live.display()),
         }
     }
-    let _ = std::fs::remove_file(&marker);
+    moved
 }
 
 // ------------------------------------------------------------ schedule
@@ -1347,9 +1612,16 @@ pub fn backup_get(app: AppHandle, state: State<AppState>) -> View {
         settings,
         keys,
         passphrase_set: crate::secrets::get(PASS_KEY).is_some(),
-        sizes: sizes(&app, &state),
         pending,
     }
+}
+
+/// What a backup would weigh. Separate from [`backup_get`] because working
+/// it out stats every recording in the library, and the page should draw
+/// before it waits for that.
+#[tauri::command]
+pub fn backup_sizes(app: AppHandle, state: State<AppState>) -> Sizes {
+    sizes(&app, &state)
 }
 
 #[tauri::command]
@@ -1408,11 +1680,10 @@ pub fn backup_passphrase(
     } else if crate::secrets::get(PASS_KEY).is_none() {
         crate::secrets::set(PASS_KEY, &new_passphrase())?;
     }
-    let mut s = state.backup.lock().unwrap();
-    if !s.passphrase_ack {
-        s.passphrase_ack = true;
-        let _ = store(&app, &s);
-    }
+    // Whether the listener has actually written it down is theirs to say —
+    // it arrives through backup_set when they confirm the modal, not from
+    // the act of looking at it.
+    let _ = (&app, &state);
     if show {
         crate::secrets::get(PASS_KEY).ok_or_else(|| "no passphrase saved".to_string())
     } else {
@@ -1520,15 +1791,13 @@ pub fn backup_restore(
     } else {
         Some(passphrase.trim().to_string())
     };
-    restore_from(
-        &app,
-        &state,
-        &f,
-        pass.as_deref(),
-        database,
-        config,
-        audio,
-    )
+    let out = restore_from(&app, &state, &f, pass.as_deref(), database, config, audio);
+    // A bucket archive was downloaded to get here; it is no longer needed
+    // and can be gigabytes.
+    if d.kind == "s3" {
+        let _ = std::fs::remove_file(&f);
+    }
+    out
 }
 
 /// Throw away a staged restore that has not been applied yet.
@@ -1858,6 +2127,172 @@ mod tests {
             !a.contains('0') && !a.contains('1') && !a.contains('l') && !a.contains('o'),
             "{a}"
         );
+    }
+
+    // secrets.json is left out; these files are wanted for everything else
+    // they hold, so the credential inside them is blanked instead.
+    #[test]
+    fn credentials_in_other_settings_are_blanked_on_the_way_in() {
+        let (body, blanked) = redact(
+            "uploads.json",
+            br#"{"rdio":{"enabled":true,"url":"http://nas:3000","key":"rdio-secret","system":7},
+                 "openmhz":{"enabled":true,"short_name":"example","api_key":"om-secret"},
+                 "broadcastify":{"enabled":false,"api_key":"bc-secret","system_id":42}}"#,
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["rdio"]["key"], "");
+        assert_eq!(v["openmhz"]["api_key"], "");
+        assert_eq!(v["broadcastify"]["api_key"], "");
+        // Everything that is not a credential survives, or a restore brings
+        // back a broken configuration.
+        assert_eq!(v["rdio"]["url"], "http://nas:3000");
+        assert_eq!(v["rdio"]["system"], 7);
+        assert_eq!(v["openmhz"]["short_name"], "example");
+        assert_eq!(v["broadcastify"]["system_id"], 42);
+        assert_eq!(blanked.len(), 3, "{blanked:?}");
+        assert!(!String::from_utf8_lossy(&body).contains("secret"));
+
+        let (body, blanked) = redact("stream.json", br#"{"user":"dj","password":"hunter2"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["password"], "");
+        assert_eq!(v["user"], "dj");
+        assert_eq!(blanked.len(), 1);
+    }
+
+    // The table above is a list someone has to remember to add to. The
+    // sweep is the backstop: a credential field added to any settings file
+    // later is blanked because of what it is called.
+    #[test]
+    fn a_credential_field_nobody_listed_is_still_blanked() {
+        let (body, blanked) = redact(
+            "someday.json",
+            br#"{"nested":{"deeper":[{"token":"t-abc","name":"keep me"}]},"secret":"s"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["nested"]["deeper"][0]["token"], "");
+        assert_eq!(v["nested"]["deeper"][0]["name"], "keep me");
+        assert_eq!(v["secret"], "");
+        assert_eq!(blanked.len(), 2, "{blanked:?}");
+    }
+
+    // An analyzer's extract field is also called `key`. Blanking those
+    // would quietly break every rule that uses one.
+    #[test]
+    fn a_rule_field_named_key_is_not_mistaken_for_a_credential() {
+        let (body, blanked) = redact(
+            "analyzers.json",
+            br#"{"rules":[{"fields":[{"key":"candidate","desc":"yes|no"}],"keywords":["cpr"]}]}"#,
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["rules"][0]["fields"][0]["key"], "candidate");
+        assert_eq!(v["rules"][0]["keywords"][0], "cpr");
+        assert!(blanked.is_empty(), "{blanked:?}");
+    }
+
+    #[test]
+    fn the_archive_carries_no_credential_and_says_which_it_blanked() {
+        let d = tmp("redacted-archive");
+        let c = library(&d);
+        std::fs::write(
+            d.join("uploads.json"),
+            r#"{"openmhz":{"api_key":"om-secret"}}"#,
+        )
+        .unwrap();
+        let snap = d.join("snap.db");
+        snapshot(&c, &snap).unwrap();
+        let plan = Plan {
+            tier: "records".into(),
+            config: vec![("config/uploads.json".into(), d.join("uploads.json"))],
+            calls: 3,
+            db_bytes: std::fs::metadata(&snap).unwrap().len(),
+            ..Default::default()
+        };
+        let out = d.join("hoosier-20260912-000000-records.tar.gz");
+        let m = write_archive(&plan, &snap, &out, None, &mut |_, _, _| {}).unwrap();
+        assert_eq!(m.redacted, vec!["uploads.json: openmhz.api_key"]);
+        // And the key is nowhere in the bytes that were written.
+        let mut a = read_archive(&out, None).unwrap();
+        let mut found = String::new();
+        for e in a.entries().unwrap() {
+            let mut e = e.unwrap();
+            if e.path().unwrap().to_string_lossy() == "config/uploads.json" {
+                e.read_to_string(&mut found).unwrap();
+            }
+        }
+        assert!(found.contains("api_key"), "{found}");
+        assert!(!found.contains("om-secret"), "{found}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // A restored database carries the paths of the machine it came from.
+    #[test]
+    fn a_restored_database_is_pointed_at_this_librarys_recordings() {
+        let d = tmp("repoint");
+        let c = library(&d);
+        c.execute(
+            "UPDATE calls SET audio = '/Volumes/other-machine/library/calls/' || id || '.wav'",
+            [],
+        )
+        .unwrap();
+        let here = d.join("calls");
+        std::fs::create_dir_all(&here).unwrap();
+        let moved = repoint_audio(&c, &here).unwrap();
+        assert_eq!(moved, 3);
+        let paths: Vec<String> = c
+            .prepare("SELECT audio FROM calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for p in &paths {
+            assert!(
+                p.starts_with(here.to_str().unwrap()),
+                "{p} still points at the old machine"
+            );
+            assert!(p.ends_with(".wav"));
+        }
+        // Running it twice moves nothing: the rows already point here.
+        assert_eq!(repoint_audio(&c, &here).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // The library runs in WAL mode. A stale -wal replayed onto a restored
+    // database would write the previous database's frames into it.
+    #[test]
+    fn swapping_a_database_takes_its_wal_with_the_file_it_belongs_to() {
+        let d = tmp("wal");
+        let live = d.join("calls.db");
+        std::fs::write(&live, "old database").unwrap();
+        std::fs::write(d.join("calls.db-wal"), "old frames").unwrap();
+        std::fs::write(d.join("calls.db-shm"), "old shm").unwrap();
+        std::fs::write(d.join("calls.db.restored"), "new database").unwrap();
+        let moved = swap_in(&[d.join("calls.db.restored").to_string_lossy().to_string()]);
+        assert_eq!(moved.len(), 1);
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "new database");
+        // No -wal or -shm is left beside the restored file.
+        assert!(!d.join("calls.db-wal").exists(), "a stale WAL was left behind");
+        assert!(!d.join("calls.db-shm").exists());
+        // The old trio is still there, together, under one stamp.
+        let kept: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.contains(".replaced-"))
+            .collect();
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        let stem = kept
+            .iter()
+            .find(|n| !n.ends_with("-wal") && !n.ends_with("-shm"))
+            .expect("the replaced database itself")
+            .clone();
+        assert_eq!(
+            std::fs::read_to_string(d.join(&stem)).unwrap(),
+            "old database"
+        );
+        assert!(kept.contains(&format!("{stem}-wal")), "{kept:?}");
+        assert!(kept.contains(&format!("{stem}-shm")), "{kept:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
