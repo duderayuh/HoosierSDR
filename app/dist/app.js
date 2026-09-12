@@ -2231,13 +2231,14 @@ if (TAURI) {
     try {
       const p = await invoke("transcribe_probe");
       $("trEnabled").checked = p.settings.enabled; $("trEngine").value = p.settings.engine; $("trModel").value = p.settings.model; $("trLang").value = p.settings.language; $("trDevice").value = p.settings.device;
+      $("trDispatchPrompt").value = p.settings.dispatch_prompt || ""; $("trPrompt").value = p.settings.prompt || "";
       [...$("trEngine").options].forEach((o) => { o.disabled = !p.engines.includes(o.value); o.textContent = o.value + (p.engines.includes(o.value) ? "" : " (not installed)"); });
       $("trMeta").textContent = p.engines.length ? (p.running_model ? `running ${p.running_model}` : `available: ${p.engines.join(", ")}`) : "no whisper found — see below";
       if (p.last_error) $("trMeta").textContent = `error: ${p.last_error}`;
     } catch (e) { log(`transcribe_probe: ${e}`); }
   }
   $("trSave").onclick = async () => {
-    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); setTimeout(trModelsRender, 900); }
+    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value, dispatch_prompt: $("trDispatchPrompt").value.trim(), prompt: $("trPrompt").value.trim() } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); setTimeout(trModelsRender, 900); }
     catch (e) { alert(e); }
   };
   $("trEnabled").onchange = $("trSave").onclick;

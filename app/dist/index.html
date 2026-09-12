@@ -748,7 +748,11 @@
                 <label class="field"><span class="lab">Language</span><input id="trLang" type="text" value="en" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="trSave" style="width:100%">Save</button></label>
               </div>
-              <div class="lab" style="margin-top:6px">Models on this machine <span class="mono faint">download once, then transcription starts instantly · delete the ones you no longer use</span> <span class="mono faint" id="trModelsMeta"></span></div>
+              <div class="lab" style="margin-top:10px">Dispatch vocabulary <span class="mono faint">the words a dispatcher reads out, given to Whisper before it listens · fixes phrases it would otherwise invent a spelling for ("chest pain" → "Testain") · keep it short, the model reads about 200 words of it</span></div>
+              <textarea id="trDispatchPrompt" rows="4" spellcheck="false" style="width:100%"></textarea>
+              <div class="lab" style="margin-top:6px">Vocabulary for every other talkgroup <span class="mono faint">usually blank — tactical and hospital traffic is free-form, and a word list that doesn't fit the audio invites the model to echo it back</span></div>
+              <textarea id="trPrompt" rows="2" spellcheck="false" style="width:100%"></textarea>
+              <div class="lab" style="margin-top:10px">Models on this machine <span class="mono faint">download once, then transcription starts instantly · delete the ones you no longer use</span> <span class="mono faint" id="trModelsMeta"></span></div>
               <div class="tablewrap tgs" style="max-height:230px"><table><thead><tr><th>Model</th><th>faster-whisper</th><th>openai-whisper</th><th>mlx-whisper</th></tr></thead><tbody id="trModels"></tbody></table></div>
               <p class="help" id="trHelp">Runs locally with Python. On an Apple-silicon Mac use <code>pip install mlx-whisper</code>: it runs on the GPU and leaves the CPU to the radio (a CPU-bound transcription starves the decoder and chops the audio). Elsewhere <code>pip install faster-whisper</code> (CPU, capped at a few cores here) or <code>openai-whisper</code> (CPU, all cores). Models download on first use.</p>
             </div>

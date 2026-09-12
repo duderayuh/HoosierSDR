@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """HoosierSDR transcription worker.
 
-Reads JSON lines on stdin: {"id": 12, "path": "/x.wav"}; writes JSON lines
-on stdout: {"id": 12, "text": "...", "model": "faster-whisper/base",
-"secs": 1.23} or {"id": 12, "error": "..."}. One model load per process.
+Reads JSON lines on stdin: {"id": 12, "path": "/x.wav", "prompt": "..."};
+writes JSON lines on stdout: {"id": 12, "text": "...", "model":
+"faster-whisper/base", "secs": 1.23} or {"id": 12, "error": "..."}. One model
+load per process.
+
+`prompt` is optional: a short vocabulary passed to Whisper as `initial_prompt`,
+which biases decoding towards words the model would otherwise have to guess at.
+Radio audio is 8 kHz vocoder output, and a phrase the decoder has no lexical
+anchor for comes back as a plausible-looking proper noun instead ("chest pain"
+→ "Testain", "Tassane", "Caspain"). Naming the dispatcher's vocabulary fixes
+those at the source. Whisper truncates the prompt at 224 tokens.
 
 Engines: faster-whisper (CTranslate2; runs well on modest CPUs),
 openai-whisper (PyTorch), or mlx-whisper (Apple MLX: runs the model on an
@@ -68,9 +76,10 @@ try:
         compute = a.compute if a.compute != "auto" else ("int8" if device == "cpu" else "default")
         threads = max(2, min(8, (os.cpu_count() or 4) // 3))
         model = WhisperModel(a.model, device=device, compute_type=compute, cpu_threads=threads, num_workers=1)
-        def run(path):
+        def run(path, prompt=None):
             segs, info = model.transcribe(path, language=a.language or None, beam_size=5,
-                                          vad_filter=True, condition_on_previous_text=False)
+                                          vad_filter=True, condition_on_previous_text=False,
+                                          initial_prompt=prompt or None)
             return " ".join(s.text.strip() for s in segs).strip()
     elif a.engine == "mlx-whisper":
         import mlx_whisper
@@ -86,9 +95,10 @@ try:
             repo = f"mlx-community/{name}-mlx"
         else:
             repo = f"mlx-community/whisper-{name}-mlx"
-        def run(path):
+        def run(path, prompt=None):
             r = mlx_whisper.transcribe(path, path_or_hf_repo=repo, language=a.language or None,
-                                       condition_on_previous_text=False)
+                                       condition_on_previous_text=False,
+                                       initial_prompt=prompt or None)
             return r.get("text", "").strip()
         if a.download:
             # Fetching happens on first use; do one short transcription so
@@ -102,8 +112,10 @@ try:
         # CPU-only there — and it spreads over every core. Prefer mlx-whisper
         # on Apple silicon, faster-whisper elsewhere.
         model = whisper.load_model(a.model)
-        def run(path):
-            r = model.transcribe(path, language=a.language or None, fp16=False)
+        def run(path, prompt=None):
+            r = model.transcribe(path, language=a.language or None, fp16=False,
+                                 condition_on_previous_text=False,
+                                 initial_prompt=prompt or None)
             return r.get("text", "").strip()
 except Exception as e:
     out({"fatal": f"{a.engine} {a.model}: {e}"}); sys.exit(2)
@@ -140,7 +152,7 @@ for line in sys.stdin:
         if limit > 0:
             signal.alarm(limit)
         try:
-            text = run(req["path"])
+            text = run(req["path"], req.get("prompt") or None)
         finally:
             signal.alarm(0)
         out({"id": req["id"], "text": text, "model": f"{a.engine}/{a.model}", "secs": round(time.time() - t0, 2)})

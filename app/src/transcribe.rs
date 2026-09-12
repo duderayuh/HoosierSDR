@@ -20,6 +20,61 @@ pub struct Settings {
     pub model: String,
     pub language: String,
     pub device: String,
+    /// Vocabulary handed to Whisper for calls on a channel `dispatch` treats as
+    /// a dispatch channel. See [`DISPATCH_PROMPT`].
+    #[serde(default = "default_dispatch_prompt")]
+    pub dispatch_prompt: String,
+    /// Vocabulary for every other talkgroup. Empty by default: tactical and
+    /// hospital traffic is free-form, so there is no short word list that helps
+    /// it, and a prompt that doesn't fit the audio only invites the model to
+    /// echo it back.
+    #[serde(default)]
+    pub prompt: String,
+}
+
+/// Words a dispatcher reads out, given to Whisper as `initial_prompt`.
+///
+/// Dispatch traffic is a closed vocabulary spoken fast over 8 kHz vocoder
+/// audio. With nothing to anchor them, whole phrases come back as invented
+/// proper nouns — "chest pain" was transcribed as Testain, Tassane, Caspain,
+/// Chestain, Tesspain and Chespain across one day of Marion County traffic,
+/// and "Gas Odor in Residence" as "Gas Hour in Residence". Naming the words
+/// the dispatcher actually uses fixes them in the decoder, which no amount of
+/// spelling-correction rules downstream can do: each mishearing is a new
+/// spelling.
+///
+/// Written as prose, not as a bare word list, and that is deliberate: Whisper
+/// copies the prompt's punctuation habits into the transcript. The same
+/// vocabulary as a comma-separated list produced "Engine, 7, Ambulance, 14"
+/// where this produces "Engine 7, Ambulance 14" — and the units are what the
+/// extractor reads. The sample callsigns earn their place the same way.
+///
+/// Keep it short. Whisper allows `initial_prompt` half its context — 223
+/// tokens — and silently drops the overflow, which is the tail of the word
+/// list where the rarer natures live. This measured 185 tokens on Whisper's
+/// own tokenizer; see [`PROMPT_TOKEN_BUDGET`]. Nature codes and unit nouns
+/// only: street names are already rescued against the geocoder's gazetteer in
+/// `addr::sound_alike`, and spending the budget on them costs natures.
+pub const DISPATCH_PROMPT: &str = "Fire and EMS dispatch. The dispatcher tones out units such as \
+Engine 7, Ladder 20, Medic 42, Ambulance 14, Squad 13 and Battalion 6 to an address, then reads \
+the nature of the call and the time. Natures heard here include Chest Pain/Heart, Cardiac Arrest, \
+Sick Person, Difficulty Breathing, Unconscious Person, Injured Person, Assist Person, \
+Abdominal/Back Pain, Mental Emotional, Seizure, Diabetic, Overdose, Allergic Reaction, Stroke/CVA, \
+Vehicle Accident, Pedestrian Struck, Bleeding Non-Traumatic, Building Alarm, Residence Alarm, \
+Investigation, Scene Not Secure, Power Lines Down, Gas Odor in Residence, Gas Main Rupture, \
+Structure Fire, Water Rescue and Hazmat.";
+
+/// How many characters of prompt Whisper will actually read, near enough.
+///
+/// The real limit is 223 tokens (half the 448-token decoder context, less the
+/// start marker). Tokens aren't countable without the model's tokenizer, so
+/// this is the budget in characters: [`DISPATCH_PROMPT`] measured 3.6
+/// characters per token on Whisper's own tokenizer, and 3.5 leaves the
+/// estimate on the safe side of the truncation.
+pub const PROMPT_TOKEN_BUDGET: usize = (223.0 * 3.5) as usize;
+
+fn default_dispatch_prompt() -> String {
+    DISPATCH_PROMPT.into()
 }
 
 impl Default for Settings {
@@ -30,7 +85,28 @@ impl Default for Settings {
             model: "base".into(),
             language: "en".into(),
             device: "auto".into(),
+            dispatch_prompt: default_dispatch_prompt(),
+            prompt: String::new(),
         }
+    }
+}
+
+/// The vocabulary for a call on `tg`: the dispatch word list for a talkgroup
+/// `dispatch` is set to treat as a dispatch channel, otherwise the general one.
+///
+/// Tactical channels are deliberately excluded. They carry unit-to-unit traffic
+/// on an incident already under way — the dispatcher's nature codes are not
+/// what is being said there, and priming for them would push the model towards
+/// words the audio doesn't contain.
+fn prompt_for(tg: u16, tr: &Settings, di: &crate::dispatch::Settings) -> String {
+    let is_dispatch = di
+        .channels
+        .iter()
+        .any(|c| c.tg == tg && c.enabled && c.role == "dispatch");
+    if is_dispatch {
+        tr.dispatch_prompt.clone()
+    } else {
+        tr.prompt.clone()
     }
 }
 
@@ -73,6 +149,23 @@ const RELOAD_JOB_SECS: u64 = 120;
 /// Past the worker's own limit, how long before the app stops waiting and
 /// replaces a worker that has gone silent.
 const BACKSTOP_GRACE_SECS: u64 = 30;
+
+/// Below this, a clip is a keyup, not speech, and is not worth asking about.
+///
+/// Whisper does not answer "nothing was said" — asked about a fifth of a second
+/// of squelch it invents a sentence, and every sub-second transcript in this
+/// library is one: "Thank you.", "For more information visit www.fema.gov",
+/// a line of Korean. Of 309 clips under half a second, 300 came back as junk
+/// and the other nine were longer junk. Priming the decoder with a vocabulary
+/// makes this worse, not better — with a prompt to riff on, a 0.18 s keyup
+/// answers with a paragraph instead of two words.
+///
+/// The floor is deliberately low. Real traffic this short exists ("Fire 84.",
+/// "1329 hours.") and starts appearing around a second; clips between 1 and 3
+/// seconds are still a coin flip, but duration cannot tell a short truth from
+/// a short invention, so that is left to a later pass rather than paid for
+/// here in dropped calls.
+const MIN_TRANSCRIBE_SECS: f64 = 1.0;
 
 /// The worker's limit for one clip. Every engine here runs well under real
 /// time (mlx-whisper ~0.3 s for a 21 s call, faster-whisper on the CPU ~5 s),
@@ -436,7 +529,7 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
     true
 }
 
-fn submit(shared: &Shared, id: i64, path: &str, clip_secs: f64) -> bool {
+fn submit(shared: &Shared, id: i64, path: &str, clip_secs: f64, prompt: &str) -> bool {
     let mut w = shared.lock().unwrap();
     if w.busy.load(Ordering::SeqCst) {
         return false;
@@ -445,7 +538,9 @@ fn submit(shared: &Shared, id: i64, path: &str, clip_secs: f64) -> bool {
     let Some(stdin) = w.stdin.as_mut() else {
         return false;
     };
-    let line = serde_json::json!({ "id": id, "path": path, "timeout": timeout }).to_string() + "\n";
+    let line = serde_json::json!({ "id": id, "path": path, "timeout": timeout, "prompt": prompt })
+        .to_string()
+        + "\n";
     if stdin.write_all(line.as_bytes()).is_err() {
         stop(&mut w);
         return false;
@@ -590,6 +685,14 @@ pub fn spawn_pump(app: AppHandle) {
             }
         };
         let Some(row) = next else { continue };
+        // Too short to be speech — but an explicit "Transcribe now" is the
+        // listener overruling that, so only the automatic pump skips it.
+        if wanted != Some(row.id) && row.secs < MIN_TRANSCRIBE_SECS {
+            if let Some(db) = state.db.lock().unwrap().clone() {
+                let _ = library::set_transcript(&db.lock().unwrap(), row.id, "", "too-short");
+            }
+            continue;
+        }
         let Some(path) = row.audio else { continue };
         if !std::path::Path::new(&path).exists() {
             // Audio gone: mark so we don't loop on it.
@@ -598,8 +701,16 @@ pub fn spawn_pump(app: AppHandle) {
             }
             continue;
         }
+        // Pick the vocabulary before taking the worker's lock: `dispatch` reads
+        // its own settings under its own lock and never reaches for the
+        // transcriber's, so keeping the two un-nested keeps it that way.
+        let prompt = {
+            let tr = state.transcriber.lock().unwrap().settings.clone();
+            let di = state.dispatch.lock().unwrap().settings.clone();
+            prompt_for(row.tg, &tr, &di)
+        };
         if !(ensure_started(&app, &state.transcriber)
-            && submit(&state.transcriber, row.id, &path, row.secs))
+            && submit(&state.transcriber, row.id, &path, row.secs, &prompt))
         {
             // Keep an explicit request for the next attempt.
             if wanted == Some(row.id) {
@@ -621,5 +732,72 @@ mod tests {
         assert_eq!(job_timeout_secs(false, true, 0.9), 34);
         // A long call keeps its proportional allowance even on a first job.
         assert_eq!(job_timeout_secs(true, true, 60.0), 270);
+    }
+
+    fn chan(tg: u16, role: &str, enabled: bool) -> crate::dispatch::Channel {
+        crate::dispatch::Channel {
+            tg,
+            name: String::new(),
+            role: role.into(),
+            fixed_call_type: String::new(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn only_a_live_dispatch_channel_gets_the_dispatch_vocabulary() {
+        let mut tr = Settings::default();
+        tr.prompt = "general".into();
+        let mut di = crate::dispatch::Settings::default();
+        di.channels = vec![
+            chan(10202, "dispatch", true),
+            chan(10203, "tactical", true),
+            chan(10204, "dispatch", false),
+        ];
+
+        assert_eq!(prompt_for(10202, &tr, &di), DISPATCH_PROMPT);
+        // Tactical traffic is unit-to-unit on a call already running: the
+        // dispatcher's nature codes are not what is being said there.
+        assert_eq!(prompt_for(10203, &tr, &di), "general");
+        // A channel switched off is not a dispatch channel.
+        assert_eq!(prompt_for(10204, &tr, &di), "general");
+        // A talkgroup dispatch knows nothing about.
+        assert_eq!(prompt_for(10999, &tr, &di), "general");
+    }
+
+    #[test]
+    fn the_dispatch_vocabulary_fits_whispers_prompt_window() {
+        // Overflow is dropped silently, and what falls off the end is the tail
+        // of the nature list — so this failing is the only warning that a
+        // rarer nature has stopped being recognised. An earlier draft measured
+        // 222 tokens against the real limit of 223: it fit by one token, with
+        // nothing to say so.
+        assert!(
+            DISPATCH_PROMPT.len() <= PROMPT_TOKEN_BUDGET,
+            "dispatch prompt is {} chars, over the {PROMPT_TOKEN_BUDGET}-char budget",
+            DISPATCH_PROMPT.len()
+        );
+    }
+
+    #[test]
+    fn the_short_clip_floor_keeps_the_shortest_real_traffic() {
+        // Real dispatch traffic this brief exists and is worth keeping; the
+        // junk is below it. Guards the constant against being raised to where
+        // it would start eating "Fire 84." (1.4 s) and "1329 hours." (1.8 s).
+        assert!(MIN_TRANSCRIBE_SECS <= 1.4);
+        // And against being lowered back into the bucket that is all noise.
+        assert!(MIN_TRANSCRIBE_SECS > 0.9);
+    }
+
+    #[test]
+    fn settings_saved_before_the_prompts_existed_still_load() {
+        // The transcribe settings UI posts a fresh object rather than the
+        // struct it was given, so a field it doesn't know about arrives
+        // missing, not null — and an existing transcribe.json has neither.
+        let old = r#"{"enabled":true,"engine":"mlx-whisper","model":"turbo",
+                      "language":"en","device":"auto"}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.dispatch_prompt, DISPATCH_PROMPT);
+        assert_eq!(s.prompt, "");
     }
 }
