@@ -2465,6 +2465,7 @@ fn main() {
             pathways::pathways_set,
             pathways::pathways_reset,
             pathways::pathways_preview,
+            pathways::incident_route,
             places::place_features,
             places::place_locate,
             routing::routing_get,

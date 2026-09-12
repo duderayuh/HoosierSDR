@@ -3229,16 +3229,16 @@ setTimeout(() => { if (!store("hs.onboarded", false)) obOpen(); }, 700);
 /* ---------- dispatch bridge: the Tauri backend, or canned data when the page is opened standalone ---------- */
 const dpDemoNow = Math.floor(Date.now() / 1000);
 const dpDemoIncidents = [
-  { id: 1, created: dpDemoNow - 240, updated: dpDemoNow - 60, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Cardiac Arrest", emoji: "🫀", address: "8241 East 41st Street", validated: "8241 East 41st Street, Indianapolis, IN", lat: 39.8318, lon: -86.0223, geocode: "ok", units: ["Ladder 38", "Medic 21"], summary: "Cardiac arrest, CPR in progress on arrival", confidence: 95, calls: 3, revision: 2 },
-  { id: 2, created: dpDemoNow - 600, updated: dpDemoNow - 600, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Structure Fire", emoji: "🔥", address: "2000 South Meridian Street", validated: "2000 S Meridian St, Indianapolis, IN", lat: 39.7452, lon: -86.1579, geocode: "ok", units: ["Engine 23", "Engine 35", "Ladder 5", "Battalion 4"], summary: "Smoke showing from a two-storey residence", confidence: 92, calls: 1, revision: 0 },
-  { id: 3, created: dpDemoNow - 900, updated: dpDemoNow - 900, tg: 10202, tg_name: "County EMS", call_type: "Vehicle Accident", emoji: "🚗", address: "38th and Keystone", validated: "E 38th St & N Keystone Ave, Indianapolis, IN", lat: 39.8264, lon: -86.1178, geocode: "ok", units: ["Medic 63"], summary: "Two-vehicle crash, one patient complaining of neck pain", confidence: 88, calls: 1, revision: 0 },
+  { id: 1, created: dpDemoNow - 240, updated: dpDemoNow - 60, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Cardiac Arrest", emoji: "🫀", address: "8241 East 41st Street", validated: "8241 East 41st Street, Testville, EX", lat: 39.8318, lon: -86.0223, geocode: "ok", units: ["Ladder 38", "Medic 21"], summary: "Cardiac arrest, CPR in progress on arrival", confidence: 95, calls: 3, revision: 2, pathway: "Cardiac arrest", targets: [{ label: "Closest hospital", place_id: "p1", place_name: "Example General", lat: 39.8100, lon: -86.0500, meters: 4800, secs: 480, how: "road" }, { label: "ECMO centre", place_id: "p2", place_name: "Example Heart", lat: 39.7800, lon: -86.1500, meters: 11000, secs: 900, how: "road" }] },
+  { id: 2, created: dpDemoNow - 600, updated: dpDemoNow - 600, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Structure Fire", emoji: "🔥", address: "2000 South Fourth Street", validated: "2000 South Fourth Street, Testville, EX", lat: 39.7452, lon: -86.1579, geocode: "ok", units: ["Engine 23", "Engine 35", "Ladder 5", "Battalion 4"], summary: "Smoke showing from a two-storey residence", confidence: 92, calls: 1, revision: 0 },
+  { id: 3, created: dpDemoNow - 900, updated: dpDemoNow - 900, tg: 10202, tg_name: "County EMS", call_type: "Vehicle Accident", emoji: "🚗", address: "38th and Sixth", validated: "East 38th Street & North Sixth Avenue, Testville, EX", lat: 39.8264, lon: -86.1178, geocode: "ok", units: ["Medic 63"], summary: "Two-vehicle crash, one patient complaining of neck pain", confidence: 88, calls: 1, revision: 0 },
   { id: 4, created: dpDemoNow - 1500, updated: dpDemoNow - 1500, tg: 10202, tg_name: "County EMS", call_type: "Stroke/CVA", emoji: "🧠", address: "9111 Avenue", validated: "", lat: null, lon: null, geocode: "none", units: ["Medic 42", "Engine 42"], summary: "Possible stroke, facial droop", confidence: 61, calls: 1, revision: 0 },
-  { id: 5, created: dpDemoNow - 2400, updated: dpDemoNow - 2000, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Gas Odor", emoji: "⚠️", address: "4232 Cardinal Drive", validated: "4232 Cardinal Dr, Indianapolis, IN", lat: 39.7043, lon: -86.2137, geocode: "ok", units: ["Engine 23", "Engine 46"], summary: "Odor of natural gas inside the residence", confidence: 90, calls: 2, revision: 1 },
-  { id: 6, created: dpDemoNow - 3300, updated: dpDemoNow - 3300, tg: 10202, tg_name: "County EMS", call_type: "Sick Person", emoji: "🤒", address: "1124 North Whitcomb Avenue", validated: "1124 N Whitcomb Ave, Indianapolis, IN", lat: 39.7817, lon: -86.2418, geocode: "ok", units: ["Medic 85"], summary: "Sick person, weakness", confidence: 95, calls: 1, revision: 0 },
+  { id: 5, created: dpDemoNow - 2400, updated: dpDemoNow - 2000, tg: 10147, tg_name: "Fire/EMS Dispatch", call_type: "Gas Odor", emoji: "⚠️", address: "4232 Cardinal Drive", validated: "4232 Cardinal Drive, Testville, EX", lat: 39.7043, lon: -86.2137, geocode: "ok", units: ["Engine 23", "Engine 46"], summary: "Odor of natural gas inside the residence", confidence: 90, calls: 2, revision: 1 },
+  { id: 6, created: dpDemoNow - 3300, updated: dpDemoNow - 3300, tg: 10202, tg_name: "County EMS", call_type: "Sick Person", emoji: "🤒", address: "1124 North Elm Avenue", validated: "1124 North Elm Avenue, Testville, EX", lat: 39.7817, lon: -86.2418, geocode: "ok", units: ["Medic 85"], summary: "Sick person, weakness", confidence: 95, calls: 1, revision: 0, pathway: "Any other medical run", targets: [{ label: "Closest hospital", place_id: "p1", place_name: "Example General", lat: 39.7900, lon: -86.2200, meters: 3100, secs: 0, how: "straight" }] },
 ];
 const dpDemo = async (cmd, args) => {
   switch (cmd) {
-    case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Indianapolis, IN", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "", grid_fallback: true, calibration: { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow } };
+    case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Testville, EX", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "", grid_fallback: true, calibration: { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow } };
     case "incidents_list": return dpDemoIncidents.filter((i) => !args || !args.since || i.updated >= args.since);
     case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, reports: i.id === 1 ? [{ id: 9, at: i.created + 1500, tg: 10259, tg_name: "MED-06", tg_desc: "Example General ER", place: "Example General", summary: "Medic 21 inbound with a 68-year-old in cardiac arrest, ROSC achieved.", how: "Medic 21 was sent to this run" }] : [], calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
     case "dispatch_log": return dpDemoIncidents.map((i) => ({ at: i.updated, tg: i.tg, tg_name: i.tg_name, call: 700 + i.id, outcome: "new", detail: `#${i.id} ${i.call_type} · ${i.address}`, incident: i.id }));
@@ -3247,6 +3247,21 @@ const dpDemo = async (cmd, args) => {
     case "dispatch_test": return "demo mode — no radio";
     case "dispatch_backfill": return 0;
     case "dispatch_regeocode": return [0, 0];
+    // The shape of a drive, for the map. Two bends so a polyline has
+    // something to show, and the straight-line case is exercised too.
+    case "incident_route": {
+      const i = dpDemoIncidents.find((x) => x.id === (args && args.id));
+      if (!i || !(i.targets || []).length) return null;
+      const want = String((args && args.which) || "").toLowerCase();
+      const t = i.targets.find((x) => !want || x.label.toLowerCase() === want) || i.targets[0];
+      const line = t.how === "road"
+        ? [[i.lat, i.lon], [(i.lat + t.lat) / 2, i.lon], [(i.lat + t.lat) / 2, (i.lon + t.lon) / 2], [t.lat, t.lon]]
+        : [[i.lat, i.lon], [t.lat, t.lon]];
+      const say = t.how === "road" && t.secs > 0
+        ? `${t.place_name} — ${(t.meters / 1609.344).toFixed(1)} mi, ${Math.round(t.secs / 60)} min by road`
+        : `${t.place_name} — ${(t.meters / 1609.344).toFixed(1)} mi direct (straight line, no road route)`;
+      return { label: t.label, place_name: t.place_name, to: [t.lat, t.lon], meters: t.meters, secs: t.secs, how: t.how, line, say };
+    }
     case "dispatch_calibrate": return { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow };
     default: return null;
   }
@@ -3258,6 +3273,10 @@ const dpListen = TAURI ? listen : async () => () => {};
 // Everything drawn here came from the model or the geocoder: it is escaped
 // before it meets innerHTML, and the emoji was checked in Rust to be one.
 let dpMap = null, dpTiles = null, dpLayer = null, dpSettings = null, dpSel = null, dpChBuf = [];
+// The drawn route to a run's facility, and which run/facility it is for, so
+// clicking the same marker twice does not redraw and clicking another one
+// clears the first.
+let dpRouteLayer = null, dpRouteFor = null, dpRoutes = new Map();
 let dpWinHours = store("hs.dp.win", 6), dpChanFilter = "", dpQuery = "";
 const dpInc = new Map();       // id → incident
 const dpMarkers = new Map();   // id → L.marker
@@ -3279,8 +3298,10 @@ function dpInitMap() {
     L.control.zoom({ position: "bottomright" }).addTo(dpMap);
     dpTiles = L.tileLayer(dpTileUrl(), { maxZoom: 19, className: "dptiles" }).addTo(dpMap);
     dpLayer = L.layerGroup().addTo(dpMap);
+    dpRouteLayer = L.layerGroup().addTo(dpMap);
     dpMap.on("click", () => dpSelect(null));
-    dpMap.on("popupopen", (e) => { const el = e.popup.getElement(); if (!el) return; el.querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det)); });
+    dpMap.on("popupopen", (e) => { const el = e.popup.getElement(); if (!el) return; el.querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det));
+      el.querySelectorAll("[data-route]").forEach((b) => b.onclick = () => dpDrawRoute(+b.dataset.route, b.dataset.which)); });
     new MutationObserver(() => { $("dpMap").classList.toggle("light", !dpIsDark()); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     $("dpMap").classList.toggle("light", !dpIsDark());
     if (typeof ResizeObserver !== "undefined") {
@@ -3354,7 +3375,29 @@ function dpIcon(i) {
   const html = `<div class="dpmk ${fresh ? "fresh" : ""} ${dpSel === i.id ? "sel" : ""} ${i.geocode === "grid" ? "approx" : ""}"><span class="em">${esc(i.emoji)}</span>${i.calls > 1 ? `<span class="cnt">${i.calls}</span>` : ""}${$("dpShowLabels").checked ? `<span class="lbl">${esc(i.call_type)}</span>` : ""}</div>`;
   return L.divIcon({ html, className: "dpmkwrap", iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -20] });
 }
-const dpPopup = (i) => `<div class="pt">${esc(i.emoji)} ${esc(i.call_type)}</div><div class="pa">${esc(i.address || "no address heard")}</div>${(i.units || []).length ? `<div class="pu">${dpUnits(i)}</div>` : ""}${i.summary ? `<div>${esc(i.summary)}</div>` : ""}<div class="pl"><small class="faint">${esc(i.tg_name)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</small> <button class="btn ghost sm" data-det="${i.id}">Details</button></div>`;
+// What the care pathway worked out for this run: where its patient would
+// go, and how far that is. The distances were worked out when the run came
+// in; the one being drawn is refreshed from the route itself.
+const dpWhere = (i) => {
+  const ts = i.targets || [];
+  if (!ts.length) return "";
+  const drawn = dpRoutes.get(i.id);
+  const rows = ts.map((t) => {
+    const live = drawn && drawn.label === t.label ? drawn : null;
+    const said = live ? live.say : dpSay(t);
+    const on = !!live;
+    return `<div class="dpwrow${on ? " on" : ""}"><button class="btn ghost sm" data-route="${i.id}" data-which="${esc(t.label)}" title="Show the way there">${on ? "◉" : "○"}</button><span class="grow"><b>${esc(t.label)}</b><br>${esc(said)}</span></div>`;
+  }).join("");
+  return `<div class="dpwhere">${i.pathway ? `<div class="small faint">${esc(i.pathway)}</div>` : ""}${rows}</div>`;
+};
+// The same wording the backend uses, for the case where a run was stored
+// before this page reloaded.
+const dpSay = (t) => t.how === "road" && t.secs > 0
+  ? `${esc(t.place_name)} — ${(t.meters / 1609.344).toFixed(1)} mi, ${Math.max(1, Math.round(t.secs / 60))} min by road`
+  : `${esc(t.place_name)} — ${(t.meters / 1609.344).toFixed(1)} mi direct (straight line, no road route)`;
+const dpPopup = (i) => `<div class="pt">${esc(i.emoji)} ${esc(i.call_type)}</div><div class="pa">${esc(i.address || "no address heard")}</div>${(i.units || []).length ? `<div class="pu">${dpUnits(i)}</div>` : ""}${i.summary ? `<div>${esc(i.summary)}</div>` : ""}${dpWhere(i)}<div class="pl"><small class="faint">${esc(i.tg_name)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</small> <button class="btn ghost sm" data-det="${i.id}">Details</button></div>`;
+window.dpPopup = dpPopup;
+window.dpInc = dpInc;
 function dpSyncMarker(i) {
   if (!dpMap) return;
   const show = dpVisible(i) && i.lat != null && i.lon != null && $("dpShowPins").checked;
@@ -3362,7 +3405,7 @@ function dpSyncMarker(i) {
   if (!show) { if (m) { dpLayer.removeLayer(m); dpMarkers.delete(i.id); } return; }
   if (!m) {
     m = L.marker([i.lat, i.lon], { icon: dpIcon(i), riseOnHover: true });
-    m.on("click", () => dpSelect(i.id));
+    m.on("click", () => { dpSelect(i.id); dpDrawRoute(i.id, ""); });
     m.bindPopup(() => dpPopup(dpInc.get(i.id) || i), { maxWidth: 300 });
     dpLayer.addLayer(m); dpMarkers.set(i.id, m);
   } else { m.setLatLng([i.lat, i.lon]); m.setIcon(dpIcon(i)); }
@@ -3389,7 +3432,53 @@ function dpRender() {
   $("dpMapEmpty").style.display = dpMarkers.size ? "none" : "";
   dpRenderTypes();
 }
+// The route from a run to the facility its care pathway asks for. Drawn on
+// click, because that is the moment somebody wants to know how far it is —
+// and the map zooms out to hold both ends, since the useful thing about a
+// route is seeing the whole of it.
+async function dpDrawRoute(id, which) {
+  const i = dpInc.get(id);
+  if (!i || i.lat == null || !(i.targets || []).length) { dpClearRoute(); return null; }
+  const key = `${id}:${which || ""}`;
+  if (dpRouteFor === key) return dpRoutes.get(id) || null;
+  dpRouteFor = key;
+  if (dpRouteLayer) dpRouteLayer.clearLayers();
+  let leg = null;
+  try { leg = await dpInvoke("incident_route", { id, which: which || "" }); }
+  catch (e) { log(`incident_route: ${e}`); }
+  // A click elsewhere while the router was thinking wins.
+  if (dpRouteFor !== key) return null;
+  if (!leg || !(leg.line || []).length) { dpRouteFor = null; return null; }
+  dpRoutes.set(id, leg);
+  // The numbers are in hand even where there is no map to draw them on.
+  if (!dpMap) return leg;
+  const line = leg.line.map(([lat, lon]) => [lat, lon]);
+  // A straight line is drawn dashed and thin: it is not a road, and it must
+  // not be mistaken for one.
+  const road = leg.how === "road";
+  L.polyline(line, {
+    color: "#f5b544", weight: road ? 5 : 2, opacity: road ? .85 : .7,
+    dashArray: road ? null : "6 7", lineJoin: "round", lineCap: "round",
+  }).addTo(dpRouteLayer);
+  if (road) L.polyline(line, { color: "#000", weight: 8, opacity: .25 }).addTo(dpRouteLayer).bringToBack();
+  L.marker(leg.to, {
+    icon: L.divIcon({ className: "dpmkwrap", html: `<div class="dpmk dest" title="${esc(leg.place_name)}">🏥<span class="lbl">${esc(leg.place_name)}</span></div>`, iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -20] }),
+  }).bindPopup(`<div class="pt">🏥 ${esc(leg.place_name)}</div><div class="pa">${esc(leg.label)}</div><div>${esc(leg.say)}</div>`).addTo(dpRouteLayer);
+  // Hold the whole route, with room for the popup above the marker.
+  dpMap.fitBounds(L.latLngBounds(line).extend([i.lat, i.lon]), { paddingTopLeft: [40, 90], paddingBottomRight: [40, 40], maxZoom: 15 });
+  // The popup reads from dpInc, so re-opening it now shows the numbers.
+  const m = dpMarkers.get(id);
+  if (m && m.isPopupOpen()) m.setPopupContent(dpPopup(i));
+  return leg;
+}
+window.dpDrawRoute = dpDrawRoute;
+function dpClearRoute() {
+  dpRouteFor = null;
+  if (dpRouteLayer) dpRouteLayer.clearLayers();
+}
+
 function dpSelect(id, o) {
+  if (id !== dpSel) dpClearRoute();
   dpSel = id;
   $("dpList").querySelectorAll(".dpcard").forEach((c) => c.classList.toggle("on", +c.dataset.id === id));
   for (const [k, m] of dpMarkers) { const i = dpInc.get(k); if (i) m.setIcon(dpIcon(i)); }
