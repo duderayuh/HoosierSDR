@@ -487,14 +487,6 @@ fn check_stalled(app: &AppHandle) {
     let _ = app.emit("transcribe_error", msg);
 }
 
-#[derive(Serialize)]
-pub struct ModelInfo {
-    pub engine: String,
-    pub model: String,
-    pub downloaded: bool,
-    pub path: Option<String>,
-}
-
 /// Download (and load once) a model in the background so the first real
 /// transcription doesn't stall. Emits `transcribe_download` events:
 /// {engine, model, state: "started"|"done"|"error", detail}.
