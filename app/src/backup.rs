@@ -1228,6 +1228,20 @@ pub struct Pending {
     pub tier: String,
 }
 
+/// Files a restore has put in place but not yet committed to. Dropping
+/// this removes them, so every way out of a restore that does not write
+/// the marker — a refused member, a bad checksum, an error partway — ends
+/// with the library exactly as it was.
+struct Staged(Vec<String>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        for f in &self.0 {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+}
+
 /// What a restore brought back.
 #[derive(Serialize, Clone, Debug)]
 pub struct Restored {
@@ -1371,7 +1385,10 @@ pub fn restore_from(
     std::fs::create_dir_all(&lib).map_err(|e| e.to_string())?;
 
     let mut sums: HashMap<String, String> = HashMap::new();
-    let mut staged: Vec<String> = Vec::new();
+    // Anything staged is removed unless the restore reaches the end and
+    // hands the list over to the marker: a half-unpacked restore must not
+    // leave files behind for a later start to swap in.
+    let mut staged = Staged(Vec::new());
     let mut bad: Vec<String> = Vec::new();
     let mut database = false;
     let mut config_files = 0usize;
@@ -1380,6 +1397,14 @@ pub fn restore_from(
     let mut a = read_archive(from, pass.as_deref())?;
     for e in a.entries().map_err(|e| e.to_string())? {
         let mut e = e.map_err(|e| e.to_string())?;
+        // Only regular files are unpacked. This app's own archives hold
+        // nothing else, but tar carries directory entries, symlinks and
+        // hard links too, and a hand-made archive will have them — a
+        // directory entry called `config/catalogs/` used to fail the whole
+        // restore, and a link is something to refuse rather than follow.
+        if !e.header().entry_type().is_file() {
+            continue;
+        }
         let name = e
             .path()
             .map(|p| p.to_string_lossy().to_string())
@@ -1473,7 +1498,7 @@ pub fn restore_from(
         }
         let got = crate::library::hex(&h.finalize());
         if to.to_string_lossy().ends_with(".restored") {
-            staged.push(to.to_string_lossy().to_string());
+            staged.0.push(to.to_string_lossy().to_string());
         }
         sums.insert(format!("@{name}"), got);
     }
@@ -1501,23 +1526,18 @@ pub fn restore_from(
             }
         }
     }
-    // A member that did not survive the trip is not swapped in at the next
-    // start. The staged files go, the marker is never written, and the live
-    // library is exactly as it was.
-    if !bad.is_empty() {
-        for f in &staged {
-            let _ = std::fs::remove_file(f);
-        }
-        staged.clear();
-    }
-    if !staged.is_empty() {
+    // A refused member, or one that did not survive the trip, means no
+    // marker is written — and the staged files are left in the guard,
+    // which removes them as it drops, so the live library is exactly as it
+    // was. Only a clean walk hands the list over.
+    if bad.is_empty() && !staged.0.is_empty() {
         let p = Pending {
             at: crate::library::now(),
             from: from
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            files: staged,
+            files: std::mem::take(&mut staged.0),
             recordings,
             tier: manifest.tier.clone(),
         };
@@ -2416,6 +2436,32 @@ mod tests {
         }
         // Running it twice moves nothing: the rows already point here.
         assert_eq!(repoint_audio(&c, &here).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Every way out of a restore that does not write the marker has to
+    // leave the library as it was. Getting this backwards once left
+    // nineteen staged files behind after a refused restore.
+    #[test]
+    fn a_restore_that_does_not_finish_leaves_nothing_behind() {
+        let d = tmp("guard");
+        let a = d.join("alerts.json.restored");
+        std::fs::write(&a, "staged").unwrap();
+        {
+            let _s = Staged(vec![a.to_string_lossy().to_string()]);
+        }
+        assert!(!a.exists(), "a staged file outlived a restore that failed");
+
+        // A restore that does reach the end hands the list to the marker,
+        // and then the files must stay.
+        let b = d.join("places.json.restored");
+        std::fs::write(&b, "staged").unwrap();
+        {
+            let mut s = Staged(vec![b.to_string_lossy().to_string()]);
+            let handed = std::mem::take(&mut s.0);
+            assert_eq!(handed.len(), 1);
+        }
+        assert!(b.exists(), "a committed restore lost its staged file");
         let _ = std::fs::remove_dir_all(&d);
     }
 
