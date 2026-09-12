@@ -381,6 +381,8 @@ pub fn preview(
             let runs: Vec<crate::dispatch::Incident> = q
                 .query_map([since], |r| {
                     Ok(crate::dispatch::Incident {
+                        pathway: String::new(),
+                        targets: Vec::new(),
                         id: r.get(0)?,
                         created: r.get(1)?,
                         updated: r.get(2)?,

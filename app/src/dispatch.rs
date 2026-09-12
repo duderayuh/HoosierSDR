@@ -378,6 +378,12 @@ pub fn ensure_schema(c: &Connection) {
         );
         "#,
     );
+    // Added later: which care pathway a run matched, and where its patient
+    // would go. `execute` rather than the batch above so an existing table
+    // gains them; the error when they are already there is the expected
+    // case and is ignored.
+    let _ = c.execute("ALTER TABLE incidents ADD COLUMN pathway TEXT", []);
+    let _ = c.execute("ALTER TABLE incidents ADD COLUMN targets TEXT", []);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +412,13 @@ pub struct Incident {
     pub confidence: i64,
     pub calls: i64,
     pub revision: i64,
+    /// The care pathway this run matched, by name; empty if none did.
+    #[serde(default)]
+    pub pathway: String,
+    /// Where this run's patient would go, worked out once and stored, so
+    /// the map, the popup and a Telegram message cannot disagree.
+    #[serde(default)]
+    pub targets: Vec<crate::pathways::Target>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -431,7 +444,77 @@ pub struct IncidentDetail {
     pub reports: Vec<crate::link::LinkedReport>,
 }
 
-const INC_COLS: &str = "id, created, updated, tg, tg_name, call_type, emoji, address, validated, lat, lon, geocode, units, summary, confidence, calls, revision, address_key";
+const INC_COLS: &str = "id, created, updated, tg, tg_name, call_type, emoji, address, validated, lat, lon, geocode, units, summary, confidence, calls, revision, address_key, pathway, targets";
+
+/// Work out which care pathway a run matches and where its patient would
+/// go, store that on the row, and put it on `i` so the map event and the
+/// tripwires that follow all see the same numbers.
+///
+/// Called after the row is written and the database lock is released:
+/// resolving a target can route over the network, and holding the library
+/// lock across that would stall every other reader for as long as the
+/// router takes. Each step takes its own short lock instead.
+pub fn apply_pathways(app: &AppHandle, i: &mut Incident) {
+    let state = app.state::<AppState>();
+    let Some((lat, lon)) = i.lat.zip(i.lon) else {
+        // Nowhere to measure from. Anything worked out earlier is stale.
+        i.pathway.clear();
+        i.targets.clear();
+        return;
+    };
+    let settings = state.pathways.lock().unwrap().clone();
+    if !settings.enabled || settings.pathways.is_empty() {
+        return;
+    }
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return;
+    };
+    // What was actually said on the radio matters: "working arrest" and
+    // "CPR in progress" appear in transcripts and nowhere else.
+    let transcripts: Vec<String> = {
+        let c = db.lock().unwrap();
+        c.prepare(
+            "SELECT c.transcript FROM incident_calls ic JOIN calls c ON c.id = ic.call
+             WHERE ic.incident = ?1 AND c.transcript IS NOT NULL ORDER BY c.start LIMIT 40",
+        )
+        .and_then(|mut st| {
+            st.query_map(params![i.id], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default()
+    };
+    // What the run is, and everything said about it. Exceptions read the
+    // first; phrases read the second.
+    let about = crate::pathways::haystack(&i.call_type, &i.summary, &[]);
+    let text = crate::pathways::haystack(&i.call_type, &i.summary, &transcripts);
+    let run = crate::pathways::Run::new(&i.call_type, &about, &text);
+    let Some(p) = crate::pathways::first_match(&settings, run) else {
+        i.pathway.clear();
+        i.targets.clear();
+        let _ = store_pathways(&db, i);
+        return;
+    };
+    let places = state.places.lock().unwrap().settings.clone();
+    let mut route = |from: (f64, f64), to: (f64, f64)| crate::routing::distance(&state, from, to);
+    let targets = crate::pathways::resolve_all(p, &places, (lat, lon), &mut route);
+    i.pathway = p.name.clone();
+    i.targets = targets;
+    let _ = store_pathways(&db, i);
+}
+
+fn store_pathways(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+    i: &Incident,
+) -> Result<(), String> {
+    let json = serde_json::to_string(&i.targets).unwrap_or_else(|_| "[]".into());
+    let c = db.lock().unwrap();
+    c.execute(
+        "UPDATE incidents SET pathway = ?1, targets = ?2 WHERE id = ?3",
+        params![i.pathway, json, i.id],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
 
 fn inc_row(r: &rusqlite::Row) -> rusqlite::Result<(Incident, String)> {
     let units: String = r.get(12)?;
@@ -454,6 +537,11 @@ fn inc_row(r: &rusqlite::Row) -> rusqlite::Result<(Incident, String)> {
             confidence: r.get(14)?,
             calls: r.get(15)?,
             revision: r.get(16)?,
+            pathway: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
+            targets: r
+                .get::<_, Option<String>>(19)?
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default(),
         },
         r.get(17)?,
     ))
@@ -1604,6 +1692,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             inc_update(&c, &i, &ikey)?;
             inc_attach_call(&c, i.id, f, &role, &x.summary, &extracted)?;
             drop(c);
+            apply_pathways(app, &mut i);
             let _ = app.emit("incident", &i);
             crate::tripwires::on_incident(app, &i, false);
             log_it(app, f, "update", format!("{how} → #{}", i.id), Some(i.id));
@@ -1644,11 +1733,14 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
                 confidence: x.confidence,
                 calls: 1,
                 revision: 0,
+                pathway: String::new(),
+                targets: Vec::new(),
             };
             i.id = inc_insert(&c, &i, &key)?;
             inc_attach_call(&c, i.id, f, &role, &x.summary, &extracted)?;
             prune(&c, settings.retention_days);
             drop(c);
+            apply_pathways(app, &mut i);
             let _ = app.emit("incident", &i);
             crate::tripwires::on_incident(app, &i, false);
             log_it(
