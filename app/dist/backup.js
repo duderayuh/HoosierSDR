@@ -160,9 +160,15 @@
     let text = "";
     try { text = await invoke("backup_passphrase", { set: "", show: true }); }
     catch (e) { uiToast(`${e}`, "err"); return; }
+    // The backend refuses to hand the passphrase over the network, so on a
+    // phone or another machine it comes back empty. It can still be set
+    // from there; it just cannot be read anywhere but at the computer.
+    const shown = text
+      ? `<div class="bkpass mono" id="bkPassText">${esc(text)}</div>`
+      : `<div class="bkpass" id="bkPassText">Open the app on the computer itself to see the passphrase — it is not sent over the network.</div>`;
     const m = uiModal(`<div class="head"><span class="eyebrow">Backup passphrase</span></div><div class="body">
       <p>This is the only way back into an encrypted backup. It is not sent anywhere, and nobody — not this app, not the place you back up to — can recover it for you.</p>
-      <div class="bkpass mono" id="bkPassText">${esc(text)}</div>
+      ${shown}
       <p class="help"><b>Write it down somewhere that is not this computer.</b> A backup is for the day this computer is gone, and the passphrase has to outlive it too.</p>
       <label class="field"><span class="lab">Or use one of your own <span class="mono faint">12 characters or more · replaces the above</span></span><input id="bkPassOwn" spellcheck="false" autocomplete="off" placeholder="leave blank to keep the one above" /></label>
       <p class="help">Changing it does not re-encrypt the backups you already have — keep the old one as long as you want to be able to open them.</p>

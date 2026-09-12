@@ -160,11 +160,15 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "access")?,
             arg(args, "secret")?,
         )?),
+        // `show` is forced off here whatever was asked for: the passphrase
+        // is the only way into every sealed backup, and it does not cross
+        // the network the way no other secret does. It can be set from a
+        // phone; it can only be read on the computer itself.
         "backup_passphrase" => jv(crate::backup::backup_passphrase(
             app.clone(),
             state,
             arg(args, "set")?,
-            arg(args, "show")?,
+            false,
         )?),
         "backup_check" => jv(crate::backup::backup_check(state, arg(args, "dest")?)?),
         "backup_run" => jv(crate::backup::backup_run(app.clone(), state, arg(args, "dest")?)?),

@@ -275,6 +275,67 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "secret_key",
 ];
 
+fn at<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut cur = v;
+    for p in path.split('.') {
+        cur = cur.get(p)?;
+    }
+    Some(cur)
+}
+
+fn set_at(v: &mut serde_json::Value, path: &str, to: serde_json::Value) -> bool {
+    let mut cur = v;
+    let mut parts = path.split('.').peekable();
+    while let Some(p) = parts.next() {
+        let Some(next) = cur.get_mut(p) else {
+            return false;
+        };
+        if parts.peek().is_none() {
+            *next = to;
+            return true;
+        }
+        cur = next;
+    }
+    false
+}
+
+/// A settings file coming back out of an archive has its credentials
+/// blanked. On the machine it was backed up from, the live file still has
+/// them — so they are carried into the restored copy rather than being
+/// quietly lost, which would stop uploads with nothing on screen to say
+/// why. On a new machine there is no live file and the note stands: enter
+/// them again. `redacted` is the manifest's own list.
+pub fn carry_credentials(live: Option<&[u8]>, staged: &[u8], file: &str, redacted: &[String]) -> Vec<u8> {
+    let paths: Vec<&str> = redacted
+        .iter()
+        .filter_map(|r| r.split_once(": "))
+        .filter(|(f, _)| *f == file)
+        .map(|(_, p)| p)
+        .collect();
+    if paths.is_empty() {
+        return staged.to_vec();
+    }
+    let (Some(live), Ok(mut out)) = (
+        live.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()),
+        serde_json::from_slice::<serde_json::Value>(staged),
+    ) else {
+        return staged.to_vec();
+    };
+    let mut carried = false;
+    for p in paths {
+        if let Some(v) = at(&live, p) {
+            if v.as_str().map(|s| !s.is_empty()).unwrap_or(false) && set_at(&mut out, p, v.clone())
+            {
+                carried = true;
+            }
+        }
+    }
+    if !carried {
+        return staged.to_vec();
+    }
+    serde_json::to_vec_pretty(&out).unwrap_or_else(|_| staged.to_vec())
+}
+
 fn blank_at(v: &mut serde_json::Value, path: &str) -> bool {
     let mut cur = v;
     let mut parts = path.split('.').peekable();
@@ -996,7 +1057,12 @@ fn say(app: &AppHandle, dest: &str, phase: &str, detail: String, done: u64, tota
 }
 
 /// One backup at a time: the timer and a hand-pressed Back up now would
-/// otherwise write the same snapshot file from two threads.
+/// otherwise write the same snapshot file from two threads. Losing that
+/// race is not a failed backup, so it is not recorded as one — otherwise
+/// the timer would mark every due destination failed while a hand-pressed
+/// run was still going.
+const BUSY: &str = "a backup is already running";
+
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 struct Guard;
@@ -1010,7 +1076,7 @@ impl Drop for Guard {
 /// thread.
 pub fn run_to(app: &AppHandle, state: &AppState, dest: &Destination) -> Result<Outcome, String> {
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err("a backup is already running".into());
+        return Err(BUSY.into());
     }
     let _guard = Guard;
     let began = std::time::Instant::now();
@@ -1174,6 +1240,28 @@ pub struct Restored {
     pub note: String,
 }
 
+/// Members a restore will not unpack, whatever the archive says.
+///
+/// No archive this app writes contains any of them, so one that does was
+/// edited by somebody — and an unencrypted archive sitting on a shared
+/// drive is an editable file. A planted `secrets.json` would hand over the
+/// web token at the next start; a member already named `.restored` would
+/// be swapped into place without ever having been checked; a path with
+/// `..` in it writes outside the library. Any of these fails the whole
+/// restore rather than being skipped quietly.
+pub fn refused(name: &str) -> Option<&'static str> {
+    if name.contains("..") || name.starts_with('/') || name.starts_with("./") {
+        return Some("a path that points outside the library");
+    }
+    if name.contains(".restored") || name.ends_with(PENDING) {
+        return Some("a name only a restore in progress uses");
+    }
+    if name.strip_prefix("config/") == Some("secrets.json") {
+        return Some("a backup never contains the secret store");
+    }
+    None
+}
+
 /// Where a recording sits relative to the recordings folder. The library
 /// files calls under dated directories (`calls/2026/09/11/…`), so the tail
 /// after the last `calls/` is what has to be kept: flattening it to the
@@ -1298,8 +1386,8 @@ pub fn restore_from(
             .unwrap_or_default();
         // Nothing in an archive may point outside where it is being
         // unpacked, whoever wrote it.
-        if name.contains("..") || name.starts_with('/') {
-            bad.push(name);
+        if let Some(why) = refused(&name) {
+            bad.push(format!("{name} — {why}"));
             continue;
         }
         if name == CHECKSUMS {
@@ -1356,7 +1444,22 @@ pub fn restore_from(
         };
         let Some(to) = to else { continue };
         let mut h = Sha256::new();
-        {
+        // A settings file is small and needs the live credentials folded
+        // back into it, so it is buffered; everything else streams. The
+        // digest is taken over the archive's own bytes either way, or it
+        // would not match the checksum recorded when it was packed.
+        let settings_json = name.starts_with("config/")
+            && name.ends_with(".json")
+            && name.matches('/').count() == 1;
+        if settings_json {
+            let mut body = Vec::new();
+            e.read_to_end(&mut body).map_err(|e| e.to_string())?;
+            h.update(&body);
+            let short = name.trim_start_matches("config/").to_string();
+            let live = std::fs::read(cfg.join(&short)).ok();
+            let body = carry_credentials(live.as_deref(), &body, &short, &manifest.redacted);
+            std::fs::write(&to, &body).map_err(|e| format!("{}: {e}", to.display()))?;
+        } else {
             let mut f = std::fs::File::create(&to).map_err(|e| format!("{}: {e}", to.display()))?;
             let mut buf = vec![0u8; 256 * 1024];
             loop {
@@ -1565,6 +1668,9 @@ pub fn spawn_ticker(app: AppHandle) {
 }
 
 fn remember(app: &AppHandle, state: &AppState, dest: &str, out: Outcome) {
+    if !out.ok && out.error == BUSY {
+        return;
+    }
     let mut s = state.backup.lock().unwrap();
     s.last.insert(dest.to_string(), out);
     let _ = store(app, &s);
@@ -1696,11 +1802,18 @@ pub fn backup_passphrase(
         crate::secrets::set(PASS_KEY, set.trim())?;
     } else if crate::secrets::get(PASS_KEY).is_none() {
         crate::secrets::set(PASS_KEY, &new_passphrase())?;
+        // A freshly generated one nobody has seen yet. The acknowledgement
+        // travels in backup.json, so a restore onto a new machine would
+        // otherwise arrive already saying yes.
+        let mut s = state.backup.lock().unwrap();
+        if s.passphrase_ack {
+            s.passphrase_ack = false;
+            let _ = store(&app, &s);
+        }
     }
     // Whether the listener has actually written it down is theirs to say —
     // it arrives through backup_set when they confirm the modal, not from
     // the act of looking at it.
-    let _ = (&app, &state);
     if show {
         crate::secrets::get(PASS_KEY).ok_or_else(|| "no passphrase saved".to_string())
     } else {
@@ -2194,6 +2307,38 @@ mod tests {
 
     // An analyzer's extract field is also called `key`. Blanking those
     // would quietly break every rule that uses one.
+    // Restoring settings on the machine they came from must not quietly
+    // switch the uploads off: the blanked field is filled back in from the
+    // live file, using the manifest's own list of what it blanked.
+    #[test]
+    fn a_restore_on_the_same_machine_keeps_the_credentials_it_blanked() {
+        let live = br#"{"openmhz":{"short_name":"example","api_key":"live-key"},"min_secs":1}"#;
+        let staged = br#"{"openmhz":{"short_name":"example","api_key":""},"min_secs":1}"#;
+        let redacted = vec!["uploads.json: openmhz.api_key".to_string()];
+        let out = carry_credentials(Some(live), staged, "uploads.json", &redacted);
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["openmhz"]["api_key"], "live-key");
+        assert_eq!(v["min_secs"], 1);
+
+        // On a new machine there is no live file, so nothing is carried and
+        // the field stays blank for the listener to fill in.
+        let out = carry_credentials(None, staged, "uploads.json", &redacted);
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["openmhz"]["api_key"], "");
+
+        // Only what the manifest says was blanked is touched — a restore
+        // does not go rummaging through the live file for anything else.
+        let live = br#"{"openmhz":{"short_name":"CHANGED","api_key":"live-key"}}"#;
+        let out = carry_credentials(Some(live), staged, "uploads.json", &redacted);
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["openmhz"]["short_name"], "example");
+        // And a file the manifest never mentions is passed through as-is.
+        assert_eq!(
+            carry_credentials(Some(live), staged, "stream.json", &redacted),
+            staged.to_vec()
+        );
+    }
+
     #[test]
     fn a_rule_field_named_key_is_not_mistaken_for_a_credential() {
         let (body, blanked) = redact(
@@ -2272,6 +2417,34 @@ mod tests {
         // Running it twice moves nothing: the rows already point here.
         assert_eq!(repoint_audio(&c, &here).unwrap(), 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // An archive is a file, and an unencrypted one on a shared drive is an
+    // editable file. These are the members a restore will not unpack.
+    #[test]
+    fn an_edited_archive_cannot_plant_anything() {
+        // The one that matters: secrets.json holds the web token, and a
+        // planted one would hand over control of the app at next start.
+        assert!(refused("config/secrets.json").is_some());
+        // A member already named .restored would be swapped in unchecked.
+        assert!(refused("config/alerts.json.restored").is_some());
+        assert!(refused("calls.db.restored").is_some());
+        assert!(refused("config/restore-pending.json").is_some());
+        // And nothing may point outside where it is unpacked.
+        assert!(refused("../../../etc/hosts").is_some());
+        assert!(refused("audio/../../../../tmp/x").is_some());
+        assert!(refused("/etc/hosts").is_some());
+        // What a real archive holds is fine.
+        for ok in [
+            "hoosier-backup.json",
+            "hoosier-checksums.json",
+            "calls.db",
+            "config/alerts.json",
+            "config/catalogs/1234.csv",
+            "audio/2026/09/11/a.m4a",
+        ] {
+            assert!(refused(ok).is_none(), "{ok} should be allowed");
+        }
     }
 
     // The library files calls under dated directories. Flattening them to

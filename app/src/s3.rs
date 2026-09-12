@@ -389,9 +389,21 @@ pub fn put_file(
     path: &std::path::Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), String> {
+    put_file_with(b, key, path, PART, progress)
+}
+
+/// The same, with the part size given — so the multipart path can be
+/// driven in a test by a few bytes instead of by a 64 MB file.
+pub fn put_file_with(
+    b: &Bucket,
+    key: &str,
+    path: &std::path::Path,
+    part: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), String> {
     use std::io::Read;
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
-    if size <= PART {
+    if size <= part {
         let body = std::fs::read(path).map_err(|e| e.to_string())?;
         let (s, _, text) = send(b, "PUT", key, &[], &body, 3600)?;
         if !ok(s) {
@@ -412,7 +424,7 @@ pub fn put_file(
     let mut done = 0u64;
     let mut n = 0u32;
     let result = loop {
-        let mut buf = vec![0u8; PART as usize];
+        let mut buf = vec![0u8; part as usize];
         let mut filled = 0usize;
         let mut trouble = None;
         while filled < buf.len() {
@@ -750,6 +762,213 @@ mod tests {
             sock.flush().unwrap();
         });
         (port, rx)
+    }
+
+    /// A fake store that stays up for a whole conversation and plays the
+    /// multipart handshake: create, each part, complete. Every request is
+    /// re-signed from the wire like the single-shot fake, so a part with a
+    /// bad signature fails the test rather than passing quietly.
+    fn fake_multipart(
+        secret: &'static str,
+        fail_part: u32,
+    ) -> (u16, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for sock in l.incoming() {
+                let Ok(mut sock) = sock else { break };
+                let mut r = BufReader::new(sock.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let full = parts.next().unwrap_or_default().to_string();
+                let mut headers: Vec<(String, String)> = Vec::new();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
+                        if k == "content-length" {
+                            len = v.parse().unwrap_or(0);
+                        }
+                        headers.push((k, v));
+                    }
+                }
+                let mut body = vec![0u8; len];
+                if len > 0 {
+                    r.read_exact(&mut body).unwrap();
+                }
+                let sent = headers
+                    .iter()
+                    .find(|(k, _)| k == "authorization")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let signed: Vec<(String, String)> = headers
+                    .iter()
+                    .filter(|(k, _)| {
+                        k == "host" || k == "x-amz-date" || k == "x-amz-content-sha256"
+                    })
+                    .cloned()
+                    .collect();
+                let (uri, query) = match full.split_once('?') {
+                    Some((u, q)) => (
+                        u.to_string(),
+                        q.split('&')
+                            .filter(|p| !p.is_empty())
+                            .map(|p| match p.split_once('=') {
+                                Some((a, b)) => (pct_decode(a), pct_decode(b)),
+                                None => (pct_decode(p), String::new()),
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => (full.clone(), Vec::new()),
+                };
+                let date = signed
+                    .iter()
+                    .find(|(k, _)| k == "x-amz-date")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let mine = authorization(
+                    &method,
+                    &pct_decode(&uri),
+                    &query,
+                    &signed,
+                    &sha256_hex(&body),
+                    "AKIAEXAMPLE",
+                    secret,
+                    "us-east-1",
+                    "s3",
+                    &date,
+                );
+                let good = mine == sent;
+                tx.send((format!("{method} {full} signed={good}"), body.clone()))
+                    .unwrap();
+                let reply: Vec<u8> = if !good {
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_vec()
+                } else if full.contains("uploads") {
+                    let x = "<InitiateMultipartUploadResult><UploadId>up-1</UploadId></InitiateMultipartUploadResult>";
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{x}", x.len()).into_bytes()
+                } else if full.contains("partNumber") {
+                    let this = query
+                        .iter()
+                        .find(|(k, _)| k == "partNumber")
+                        .and_then(|(_, v)| v.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    if fail_part != 0 && this == fail_part {
+                        let x = "<Error><Code>InternalError</Code><Message>the part did not land</Message></Error>";
+                        format!("HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{x}", x.len()).into_bytes()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nETag: \"e-part\"\r\nContent-Length: 0\r\n\r\n".to_vec()
+                    }
+                } else {
+                    let x = "<CompleteMultipartUploadResult><ETag>\"whole\"</ETag></CompleteMultipartUploadResult>";
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{x}", x.len()).into_bytes()
+                };
+                let _ = sock.write_all(&reply);
+                let _ = sock.flush();
+            }
+        });
+        (port, rx)
+    }
+
+    // The path a big archive takes, which no real backup in testing was
+    // large enough to reach: three parts of sixteen bytes instead of one
+    // object of sixty-four megabytes.
+    #[test]
+    fn a_large_archive_goes_up_in_parts_and_arrives_whole() {
+        let (port, rx) = fake_multipart("shh-secret", 0);
+        let b = Bucket {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            region: "us-east-1".into(),
+            bucket: "radio".into(),
+            path_style: true,
+            access: "AKIAEXAMPLE".into(),
+            secret: "shh-secret".into(),
+        };
+        let body: Vec<u8> = (0u8..50).collect();
+        let f = std::env::temp_dir().join(format!("hs-mp-{}.bin", std::process::id()));
+        std::fs::write(&f, &body).unwrap();
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        put_file_with(&b, "backups/big.tar.gz.age", &f, 16, &mut |d, t| {
+            seen.push((d, t))
+        })
+        .unwrap();
+
+        let mut reqs = Vec::new();
+        while let Ok(r) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            reqs.push(r);
+        }
+        // create, four parts (16+16+16+2), complete.
+        assert_eq!(reqs.len(), 6, "{:?}", reqs.iter().map(|(l, _)| l).collect::<Vec<_>>());
+        assert!(reqs.iter().all(|(l, _)| l.contains("signed=true")), "{reqs:?}");
+        assert!(reqs[0].0.starts_with("POST") && reqs[0].0.contains("uploads"), "{}", reqs[0].0);
+        let parts: Vec<&(String, Vec<u8>)> =
+            reqs.iter().filter(|(l, _)| l.contains("partNumber")).collect();
+        assert_eq!(parts.len(), 4);
+        for (i, (l, _)) in parts.iter().enumerate() {
+            assert!(l.contains(&format!("partNumber={}", i + 1)), "{l}");
+            assert!(l.contains("uploadId=up-1"), "{l}");
+        }
+        // What arrived, joined back together, is the file that went up.
+        let arrived: Vec<u8> = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        assert_eq!(arrived, body, "the parts do not reassemble into the file");
+        assert_eq!(parts[3].1.len(), 2, "the last part should be the remainder");
+
+        // The complete call lists every part, in order, with its ETag.
+        let (last_line, last_body) = reqs.last().unwrap();
+        assert!(last_line.contains("uploadId=up-1") && last_line.starts_with("POST"), "{last_line}");
+        let xml = String::from_utf8_lossy(last_body);
+        assert_eq!(xml.matches("<Part>").count(), 4, "{xml}");
+        for i in 1..=4 {
+            assert!(
+                xml.contains(&format!("<PartNumber>{i}</PartNumber><ETag>\"e-part\"</ETag>")),
+                "{xml}"
+            );
+        }
+        assert!(
+            xml.starts_with("<CompleteMultipartUpload>") && xml.ends_with("</CompleteMultipartUpload>"),
+            "{xml}"
+        );
+        // Progress was reported along the way and finished at the total.
+        assert_eq!(seen.last(), Some(&(50, 50)), "{seen:?}");
+        assert!(seen.len() > 1, "{seen:?}");
+        let _ = std::fs::remove_file(&f);
+    }
+
+    // A part that fails mid-flight must not leave the upload billing in
+    // the bucket: the client aborts it on the way out.
+    #[test]
+    fn a_failed_part_aborts_the_upload() {
+        // The create succeeds; the second part comes back a 500.
+        let (port, rx) = fake_multipart("shh-secret", 2);
+        let b = Bucket {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            region: "us-east-1".into(),
+            bucket: "radio".into(),
+            path_style: true,
+            access: "AKIAEXAMPLE".into(),
+            secret: "shh-secret".into(),
+        };
+        let f = std::env::temp_dir().join(format!("hs-mp-fail-{}.bin", std::process::id()));
+        std::fs::write(&f, vec![7u8; 50]).unwrap();
+        assert!(put_file_with(&b, "k", &f, 16, &mut |_, _| {}).is_err());
+        let mut reqs = Vec::new();
+        while let Ok(r) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            reqs.push(r.0);
+        }
+        assert!(
+            reqs.iter().any(|l| l.starts_with("DELETE") && l.contains("uploadId")),
+            "the upload was not aborted: {reqs:?}"
+        );
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
