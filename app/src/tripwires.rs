@@ -873,7 +873,12 @@ pub fn is_narrowed(t: &Tripwire) -> bool {
 
 /// What an incident tripwire can say in its message, beyond the standard
 /// tokens: `{calltype}`, `{address}`, `{units}`, `{place}`, `{km}`,
-/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`.
+/// `{nearest}`, `{summary}`, `{hospital}`, `{report}`, `{where}`.
+///
+/// `{where}` is the care pathway's answer — every hospital the run needs,
+/// with the drive to each — and it is the one worth putting in a message
+/// about a cardiac arrest. `{nearest}`/`{km}` are the older, single-feature
+/// question and stay for the tripwires already written against them.
 pub fn incident_fields(
     i: &crate::dispatch::Incident,
     places: &crate::places::Settings,
@@ -891,6 +896,8 @@ pub fn incident_fields(
         "nearest": "",
         "hospital": "",
         "report": "",
+        "where": crate::pathways::say_all(&i.targets),
+        "pathway": i.pathway,
     });
     if let (Some(lat), Some(lon)) = (i.lat, i.lon) {
         // The nearest place that can do the thing this tripwire cares
@@ -899,6 +906,16 @@ pub fn incident_fields(
         if let Some((p, m)) = crate::places::nearest_with(places, feature, (lat, lon)).first() {
             v["nearest"] = p.name.clone().into();
             v["km"] = format!("{:.1}", m / 1000.0).into();
+            // A drive time only if the pathway already routed to this very
+            // place by road. A straight-line guess would read as a real ETA
+            // here, with nothing in the token to mark it as a guess.
+            if let Some(t) = i
+                .targets
+                .iter()
+                .find(|t| t.place_name == p.name && t.how == "road")
+            {
+                v["mins"] = t.mins().to_string().into();
+            }
         }
         if let Some((p, _)) = crate::places::nearest_with(places, "", (lat, lon)).first() {
             v["place"] = p.name.clone().into();
@@ -2020,7 +2037,7 @@ pub fn recipes() -> Vec<Recipe> {
             "run-type",
             "🚑",
             "A kind of run is dispatched",
-            "Tell me when the dispatch map shows a run of a type I care about — with the address, who was sent, and where it ends up.",
+            "Tell me when the dispatch map shows a run of a type I care about — with the address, who was sent, and the hospitals that kind of run needs.",
             Tripwire {
                 when: When {
                     kind: "incident".into(),
@@ -2031,7 +2048,7 @@ pub fn recipes() -> Vec<Recipe> {
                     ..Default::default()
                 },
                 send: Send {
-                    message: "{calltype} · {address}\n{units}\n{summary}".into(),
+                    message: "{calltype} · {address}\n{units}\n{summary}\n{where}".into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2729,6 +2746,65 @@ mod tests {
         assert!(msg.contains("Cardiac Arrest at 1 Example Street"), "{msg}");
         assert!(msg.contains("Nearest cath lab: Example Heart (2.2 km)"), "{msg}");
         assert!(msg.contains("Went to: Example General"), "{msg}");
+    }
+
+    fn target(label: &str, place: &str, meters: f64, secs: f64, how: &str) -> crate::pathways::Target {
+        crate::pathways::Target {
+            label: label.into(),
+            place_id: place.to_lowercase(),
+            place_name: place.into(),
+            lat: 40.02,
+            lon: -86.0,
+            meters,
+            secs,
+            how: how.into(),
+        }
+    }
+
+    #[test]
+    fn a_run_message_can_say_every_hospital_the_pathway_asked_for() {
+        let places = book();
+        let mut r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        r.pathway = "Cardiac arrest".into();
+        r.targets = vec![
+            target("Closest hospital", "Example General", 3200.0, 420.0, "road"),
+            target("ECMO centre", "Example Heart", 21000.0, 1500.0, "road"),
+        ];
+        let fields = incident_fields(&r, &places, "stemi", &[]);
+        assert_eq!(fields["pathway"], "Cardiac arrest");
+
+        let msg = render(
+            "{calltype} · {address}\n{where}",
+            "Runs",
+            &incident_facts(&r),
+            &[],
+            "",
+            Some(&fields),
+        );
+        // Both legs, each with its own drive — this is the whole point of
+        // the token.
+        assert!(msg.contains("Closest hospital"), "{msg}");
+        assert!(msg.contains("Example General"), "{msg}");
+        assert!(msg.contains("ECMO centre"), "{msg}");
+        assert!(msg.contains("Example Heart"), "{msg}");
+        assert!(msg.contains('7'), "no drive time for the 420 s leg: {msg}");
+    }
+
+    #[test]
+    fn a_straight_line_guess_never_becomes_a_bare_drive_time() {
+        let places = book();
+        let mut r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
+        // The pathway reached the same place {nearest} names, but only as
+        // the crow flies.
+        r.targets = vec![target("Cath lab", "Example Heart", 2200.0, 300.0, "straight")];
+        let fields = incident_fields(&r, &places, "stemi", &[]);
+        assert_eq!(fields["nearest"], "Example Heart");
+        assert_eq!(fields["mins"], "", "a guess was offered as an ETA");
+
+        // Routed by road, the same leg does fill the token.
+        r.targets = vec![target("Cath lab", "Example Heart", 2200.0, 300.0, "road")];
+        let fields = incident_fields(&r, &places, "stemi", &[]);
+        assert_eq!(fields["mins"], "5");
     }
 
     #[test]

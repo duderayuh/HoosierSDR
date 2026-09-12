@@ -146,15 +146,6 @@ pub struct Route {
     pub line: Vec<(f64, f64)>,
 }
 
-impl Route {
-    pub fn miles(&self) -> f64 {
-        self.meters / 1609.344
-    }
-    pub fn mins(&self) -> f64 {
-        self.secs / 60.0
-    }
-}
-
 /// The shape of the drive, when a router can give one. Falls back to the
 /// two ends joined by a straight line, marked as such, so the map always
 /// has something to draw and never implies a road that was not checked.
