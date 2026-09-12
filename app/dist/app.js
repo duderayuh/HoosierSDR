@@ -536,7 +536,15 @@ accApply();
 
 /* ---------- listen groups: named sets of talkgroups you can mute or unmute in one click ---------- */
 const groups = store("hs.groups", []);   // [{id, name, tgs:[], listen:true}]
-function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushLockout(); }
+function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushMuted(); }
+// Muting is about the room, not the library: a muted talkgroup is still
+// followed, recorded, transcribed and matched by tripwires — it just does
+// not come out of the speakers. Refusing a call outright is what lockout is
+// for, and it has its own list.
+function pushMuted() {
+  if (!TAURI) return;
+  invoke("set_muted", { tgs: [...mutedByGroups()] }).catch((err) => log(`set_muted: ${err}`));
+}
 // Listening wins: a talkgroup in any group you are listening to stays
 // audible even if a muted group also contains it; only talkgroups found
 // solely in muted groups are silenced.
@@ -599,12 +607,13 @@ function tone(kind) {
 
 /* ---------- lockout (permanent) + timed avoid, per playlist ---------- */
 // What one playlist's runs should refuse right now: the saved lockout, plus
-// (for now only) timed avoids and talkgroups muted through groups.
+// (for now only) timed avoids. Muted groups are not here: they silence the
+// speaker, they do not refuse the call.
 function effectiveLockout(pl) {
   const f = filtFor(pl), now = Date.now();
   for (const [tg, until] of f.avoid) if (until <= now) f.avoid.delete(tg);
   save(pl ? `hs.avoid.${pl}` : "hs.avoid", Object.fromEntries(f.avoid));
-  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...new Set([...f.avoid.keys(), ...mutedByGroups()])] };
+  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...f.avoid.keys()] };
 }
 // Push one playlist's lockout (or, with no argument, every known one).
 function pushLockout(pl) {
@@ -652,7 +661,7 @@ function toggleLock(tg, pl) {
   renderLockout(); pushLockout(pl);
 }
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
-filtFor(""); renderLockout(); renderGroupChips(); pushLockout("");
+filtFor(""); renderLockout(); renderGroupChips(); pushLockout(""); pushMuted();
 $("histHideNa").checked = !!store("hs.hidena", false); $("histHideNa").onchange = () => { save("hs.hidena", $("histHideNa").checked); applyHistFilter(); };
 
 /* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
@@ -2779,7 +2788,7 @@ if (TAURI) {
     // unscoped set — and the part that carries muted listen groups (`extra`)
     // is deliberately never saved on the Rust side, so a run started now
     // would have nothing muted at all.
-    pushLockout(); pushPriorities();
+    pushLockout(); pushPriorities(); pushMuted();
     // Auto-start: opt-in, and only if the last-used site still exists.
     const pr = store("hs.prefs", {});
     if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
