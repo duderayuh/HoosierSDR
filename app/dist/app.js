@@ -509,11 +509,15 @@ const accOpen = store("hs.acc", { tuning: true, groups: true, control: true, pla
 /* Make every panel collapsible. Panels that already carry an explicit data-acc
    key (the Monitor column) are left as-is; every other panel with a head+body
    gets a key from its eyebrow label, a caret, and defaults to open. On-demand
-   editor panels (inline display:none) are skipped — they appear when summoned. */
+   editor panels (inline display:none) are skipped — they appear when summoned.
+   So are panels marked `nocollapse`: a page whose whole purpose is one long
+   table has nothing to gain from folding it away, and everything to lose —
+   a mis-click leaves an empty box the size of the table, which reads as a
+   freeze rather than as a fold. */
 (function panelify() {
   const seen = {};
   document.querySelectorAll(".panel").forEach((p) => {
-    if (p.classList.contains("acc") || p.style.display === "none") return;
+    if (p.classList.contains("acc") || p.classList.contains("nocollapse") || p.style.display === "none") return;
     const head = Array.from(p.children).find((c) => c.classList.contains("head"));
     if (!head) return;
     const eb = head.querySelector(".eyebrow");
@@ -536,7 +540,15 @@ accApply();
 
 /* ---------- listen groups: named sets of talkgroups you can mute or unmute in one click ---------- */
 const groups = store("hs.groups", []);   // [{id, name, tgs:[], listen:true}]
-function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushLockout(); }
+function groupsSave() { save("hs.groups", groups); renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList(); pushMuted(); }
+// Muting is about the room, not the library: a muted talkgroup is still
+// followed, recorded, transcribed and matched by tripwires — it just does
+// not come out of the speakers. Refusing a call outright is what lockout is
+// for, and it has its own list.
+function pushMuted() {
+  if (!TAURI) return;
+  invoke("set_muted", { tgs: [...mutedByGroups()] }).catch((err) => log(`set_muted: ${err}`));
+}
 // Listening wins: a talkgroup in any group you are listening to stays
 // audible even if a muted group also contains it; only talkgroups found
 // solely in muted groups are silenced.
@@ -599,12 +611,13 @@ function tone(kind) {
 
 /* ---------- lockout (permanent) + timed avoid, per playlist ---------- */
 // What one playlist's runs should refuse right now: the saved lockout, plus
-// (for now only) timed avoids and talkgroups muted through groups.
+// (for now only) timed avoids. Muted groups are not here: they silence the
+// speaker, they do not refuse the call.
 function effectiveLockout(pl) {
   const f = filtFor(pl), now = Date.now();
   for (const [tg, until] of f.avoid) if (until <= now) f.avoid.delete(tg);
   save(pl ? `hs.avoid.${pl}` : "hs.avoid", Object.fromEntries(f.avoid));
-  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...new Set([...f.avoid.keys(), ...mutedByGroups()])] };
+  return { tgs: [...f.lockout].sort((a, b) => a - b), extra: [...f.avoid.keys()] };
 }
 // Push one playlist's lockout (or, with no argument, every known one).
 function pushLockout(pl) {
@@ -652,7 +665,7 @@ function toggleLock(tg, pl) {
   renderLockout(); pushLockout(pl);
 }
 function replay(path) { if (TAURI) invoke("play_wav", { path }).catch((e) => alert(e)); }
-filtFor(""); renderLockout(); renderGroupChips(); pushLockout("");
+filtFor(""); renderLockout(); renderGroupChips(); pushLockout(""); pushMuted();
 $("histHideNa").checked = !!store("hs.hidena", false); $("histHideNa").onchange = () => { save("hs.hidena", $("histHideNa").checked); applyHistFilter(); };
 
 /* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
@@ -2597,7 +2610,7 @@ if (TAURI) {
     } catch (e) { $("findMeta").textContent = ""; alert(e); }
     finally { $("rrDownload").disabled = false; }
   }
-  // "Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)" → "MESA"
+  // "Example Emergency Services Agency (EESA) (Formerly XYZ)" → "EESA"
   const shortSystemName = (n) => { const m = /\(([A-Z0-9-]{2,8})\)/.exec(n || ""); return m ? m[1] : (n || "Playlist"); };
   $("rrDownload").onclick = () => { const sid = sidVal(); if (sid == null) { alert("Enter a system ID."); return; } $("rrProg").style.display = ""; $("rrProgBar").style.width = "3%"; $("rrProgText").textContent = "connecting…"; loadSystem(sid); };
   const siteRate = (s) => ((s.span_mhz ? s.span_mhz[1] - s.span_mhz[0] : 0) <= 1.9 ? 2500000 : 10000000);
@@ -2774,6 +2787,12 @@ if (TAURI) {
     renderSavedSites(sites);
     migrateLocalFilters();
     renderLockout();
+    // Now that the playlists are known, send their filters again. The first
+    // push happened before this list arrived, so it only reached the
+    // unscoped set — and the part that carries muted listen groups (`extra`)
+    // is deliberately never saved on the Rust side, so a run started now
+    // would have nothing muted at all.
+    pushLockout(); pushPriorities(); pushMuted();
     // Auto-start: opt-in, and only if the last-used site still exists.
     const pr = store("hs.prefs", {});
     if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {

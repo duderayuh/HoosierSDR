@@ -94,7 +94,7 @@ struct AppState {
     /// runs without one); sites sharing a playlist share the entry.
     filters: playlists::FilterTable,
     /// Transcript corrections: (tg, wrong, right); `tg` None = applies to every
-    /// talkgroup (global rule — say "Rirey" on any channel → "Riley").
+    /// talkgroup (global rule — say "cardigan" on any channel → "cardiac").
     corrections: Arc<Mutex<Vec<(Option<u16>, String, String)>>>,
     /// Radio-ID aliases, and the wildcard rules behind them.
     units: units::Units,
@@ -107,6 +107,10 @@ struct AppState {
     record_policy: Arc<Mutex<Policy>>,
     stream_policy: Arc<Mutex<Policy>>,
     upload_policy: Arc<Mutex<Policy>>,
+    /// Talkgroups silenced in the speakers. They are still followed,
+    /// recorded, transcribed and matched — muting is about the room, not
+    /// about the library.
+    muted: Arc<Mutex<std::collections::HashSet<u16>>>,
     /// Keyword / emergency / activity alerts (Telegram, tones).
     alerts: alerts::Shared,
     /// Conversation rules and the conversations in progress.
@@ -291,8 +295,18 @@ fn set_policies(state: State<AppState>, record: Policy, stream: Policy, upload: 
     *state.upload_policy.lock().unwrap() = upload;
 }
 
+/// Silence these talkgroups in the speakers.
+///
+/// Muting is not lockout: a muted call is still followed, still recorded,
+/// still transcribed, and still trips tripwires. Lockout is the other
+/// feature — it refuses the call outright.
+#[tauri::command]
+fn set_muted(state: State<AppState>, tgs: Vec<u16>) {
+    *state.muted.lock().unwrap() = tgs.into_iter().collect();
+}
+
 /// Apply per-talkgroup transcript corrections: each `(wrong, right)` pair is a
-/// case-insensitive, whole-word substitution (so "rirey"/"RIREY" → "Riley" but
+/// case-insensitive, whole-word substitution (so "cardigan"/"CARDIGAN" → "cardiac" but
 /// "shirey" is left alone). Applied before a transcript is stored or acted on.
 pub(crate) fn apply_corrections(rules: &[(String, String)], text: &str) -> String {
     let mut out = text.to_string();
@@ -1161,6 +1175,7 @@ fn start_follow(
     let learn_aliases = state.learn_aliases.clone();
     let record_policy = state.record_policy.clone();
     let stream_policy = state.stream_policy.clone();
+    let muted = state.muted.clone();
     let upload_policy = state.upload_policy.clone();
     let name_template = state.names.lock().unwrap().template.clone();
     let db = state.db.clone();
@@ -1477,7 +1492,8 @@ fn start_follow(
                             st.feed(pcm);
                         }
                         if let Some(pl) = player.as_ref() {
-                            if !archive_mode.load(Ordering::SeqCst) {
+                            let silent = muted.lock().unwrap().contains(tg);
+                            if !archive_mode.load(Ordering::SeqCst) && !silent {
                                 pl.play(pcm.clone(), *priority);
                             }
                         }
@@ -2395,6 +2411,7 @@ fn main() {
             names_preview,
             set_learn_aliases,
             set_policies,
+            set_muted,
             set_max_calls,
             set_queue_limit,
             set_channelizer,
@@ -2552,23 +2569,39 @@ mod corrections_tests {
     use super::apply_corrections;
 
     #[test]
+    fn muting_silences_without_hiding() {
+        // Muting is a speaker decision, so it is a plain set of talkgroups
+        // consulted at the moment a call would be played — never mixed into
+        // the lockout, which is what stops a call being followed at all.
+        let muted: std::collections::HashSet<u16> = [10202, 10203].into_iter().collect();
+        assert!(muted.contains(&10202), "a muted channel stays out of the room");
+        assert!(!muted.contains(&10204), "everything else still plays");
+        // And a policy, which decides recording, is untouched by it.
+        let record: crate::Policy = None;
+        assert!(
+            crate::policy_allows(&record, 10202),
+            "a muted call is still recorded, transcribed and matched"
+        );
+    }
+
+    #[test]
     fn corrections_are_word_boundary_and_case_insensitive() {
-        let rules = vec![("Rirey".to_string(), "Riley".to_string())];
+        let rules = vec![("cardigan".to_string(), "cardiac".to_string())];
         assert_eq!(
-            apply_corrections(&rules, "Unit 5 to Rirey station"),
-            "Unit 5 to Riley station"
+            apply_corrections(&rules, "Unit 5 reports a cardigan event"),
+            "Unit 5 reports a cardiac event"
         );
         assert_eq!(
-            apply_corrections(&rules, "rirey and RIREY"),
-            "Riley and Riley"
+            apply_corrections(&rules, "cardigan and CARDIGAN"),
+            "cardiac and cardiac"
         );
         assert_eq!(
-            apply_corrections(&rules, "Rireyfield untouched"),
-            "Rireyfield untouched"
+            apply_corrections(&rules, "cardigans untouched"),
+            "cardigans untouched"
         );
         assert_eq!(
-            apply_corrections(&rules, "shirey untouched"),
-            "shirey untouched"
+            apply_corrections(&rules, "brocardigan untouched"),
+            "brocardigan untouched"
         );
         // No rules → unchanged.
         assert_eq!(apply_corrections(&[], "hello"), "hello");

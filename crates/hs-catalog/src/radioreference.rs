@@ -508,7 +508,7 @@ impl<T: SoapTransport> RrClient<T> {
         progress: &mut dyn FnMut(&str, usize, usize),
     ) -> Result<Vec<Talkgroup>, RrError> {
         // Whole list first. RadioReference's server has answered HTTP 500
-        // with an empty body for some large systems (e.g. sid 5737); the
+        // with an empty body for some large systems; the
         // same data comes back fine one category at a time, so fall back to
         // that before giving up.
         let sid = sys_id.to_string();
@@ -1112,7 +1112,7 @@ mod tests {
             seen: Default::default(),
         };
         let c = RrClient::with_transport(Credentials::new("k", "u", "p"), t);
-        let tgs = c.talkgroups(5737).unwrap();
+        let tgs = c.talkgroups(1234).unwrap();
         assert_eq!(tgs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![101, 201]);
         assert_eq!(tgs[0].category.as_deref(), Some("Law"));
         assert_eq!(tgs[1].category.as_deref(), Some("Fire"));

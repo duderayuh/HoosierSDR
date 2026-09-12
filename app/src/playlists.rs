@@ -55,7 +55,7 @@ pub struct Playlist {
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Site {
     pub id: String,
-    /// The listener's label ("MESA System 1"); the top bar and run chips.
+    /// The listener's label ("County System 1"); the top bar and run chips.
     pub name: String,
     pub sid: u32,
     pub system_name: String,
@@ -182,7 +182,7 @@ pub fn split_legacy(old: &[Playlist]) -> (Vec<Playlist>, Vec<Site>) {
     (playlists, sites)
 }
 
-/// "Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)" → "MESA".
+/// "Example Emergency Services Agency (EESA) (Formerly XYZ)" → "EESA".
 pub fn system_short_name(name: &str) -> String {
     let mut rest = name;
     while let Some(i) = rest.find('(') {
@@ -594,7 +594,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             sid,
-            system_name: "Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)".into(),
+            system_name: "Example Emergency Services Agency (EESA) (Formerly XYZ)".into(),
             tgs,
             site_id,
             site_name: format!("Site {site_id}"),
@@ -609,25 +609,25 @@ mod tests {
     fn legacy_entries_split_into_sites_sharing_one_playlist() {
         let old = vec![
             legacy(
-                "5737-1",
-                "MESA System 1",
-                5737,
+                "1234-1",
+                "County System 1",
+                1234,
                 13059,
                 857.6625,
                 vec![3, 1, 2],
             ),
             legacy(
-                "5737-2",
-                "MESA System 2",
-                5737,
+                "1234-2",
+                "County System 2",
+                1234,
                 13102,
                 852.1125,
                 vec![1, 2, 3],
             ),
-            legacy("5737-3", "MESA Fire only", 5737, 24437, 859.8125, vec![2]),
+            legacy("1234-3", "County Fire only", 1234, 24437, 859.8125, vec![2]),
             {
-                let mut p = legacy("8084-1", "SAFE-T", 8084, 28177, 859.7375, vec![1, 2, 3]);
-                p.system_name = "Indiana Project Hoosier SAFE-T".into();
+                let mut p = legacy("5678-1", "Statewide", 5678, 28177, 859.7375, vec![1, 2, 3]);
+                p.system_name = "Statewide Interoperability Network".into();
                 p
             },
         ];
@@ -640,20 +640,20 @@ mod tests {
             .iter()
             .find(|p| Some(&p.id) == sites[0].playlist.as_ref())
             .unwrap();
-        assert_eq!(shared.name, "MESA");
+        assert_eq!(shared.name, "EESA");
         assert_eq!(shared.tgs, vec![1, 2, 3]);
         // A different selection on the same system keeps its own name.
         let fire = pl
             .iter()
             .find(|p| Some(&p.id) == sites[2].playlist.as_ref())
             .unwrap();
-        assert_eq!(fire.name, "MESA Fire only");
+        assert_eq!(fire.name, "County Fire only");
         // Another system never shares, even with the same talkgroup numbers.
         assert_ne!(sites[3].playlist, sites[0].playlist);
         // Sites keep their ids (saved preferences point at them) and tuning.
-        assert_eq!(sites[0].id, "5737-1");
+        assert_eq!(sites[0].id, "1234-1");
         assert_eq!(sites[0].control_mhz, 857.6625);
-        assert_eq!(sites[0].name, "MESA System 1");
+        assert_eq!(sites[0].name, "County System 1");
     }
 
     #[test]
@@ -671,12 +671,12 @@ mod tests {
     #[test]
     fn short_names() {
         assert_eq!(
-            system_short_name("Metropolitan Emergency Services Agency (MESA) (Formerly IDPS)"),
-            "MESA"
+            system_short_name("Example Emergency Services Agency (EESA) (Formerly XYZ)"),
+            "EESA"
         );
         assert_eq!(
-            system_short_name("Indiana Project Hoosier SAFE-T"),
-            "Indiana Project Hoosier SAFE-T"
+            system_short_name("Statewide Interoperability Network"),
+            "Statewide Interoperability Network"
         );
         assert_eq!(system_short_name("Statewide (P25)"), "P25");
         assert_eq!(system_short_name(""), "Playlist");

@@ -102,7 +102,7 @@
             <div class="head"><span class="eyebrow">Listen groups</span><span class="meta" id="grpSummary">none</span><span class="caret">▾</span></div>
             <div class="body tight">
               <div id="grpChips" class="chips"></div>
-              <p class="help">Click a group to mute or unmute its talkgroups. Listening wins: a talkgroup in any listening group stays audible even if a muted group also contains it; only talkgroups found solely in muted groups go quiet. Groups are made in the Aliases tab.</p>
+              <p class="help">Click a group to mute or unmute its talkgroups. Muted channels are still recorded, transcribed and watched by tripwires — they just stay out of the speakers. (To stop following a talkgroup altogether, lock it out.) Listening wins: a talkgroup in any listening group stays audible even if a muted group also contains it; only talkgroups found solely in muted groups go quiet. Groups are made in the Aliases tab.</p>
             </div>
           </div>
           <div class="panel acc" data-acc="control">
@@ -735,12 +735,12 @@
           <div class="panel">
             <div class="head"><span class="eyebrow">Transcript corrections</span></div>
             <div class="body">
-              <p class="help">Misheard → correct phrase replacements, <span class="mono">"Rirey" → "Riley"</span>. Leave the TG field blank to apply a rule to <b>every talkgroup</b>, or set one to scope it.</p>
+              <p class="help">Misheard → correct phrase replacements, <span class="mono">"cardigan arrest" → "cardiac arrest"</span>. Leave the TG field blank to apply a rule to <b>every talkgroup</b>, or set one to scope it.</p>
               <div id="tcList"></div>
               <div class="row3" style="margin-top:6px">
                 <label class="field"><span class="lab">TG <span class="mono faint">blank = every TG</span></span><input id="tcTg" type="text" inputmode="numeric" placeholder="10203" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Misheard</span><input id="tcFrom" type="text" placeholder="Rirey" spellcheck="false" /></label>
-                <label class="field"><span class="lab">Should be</span><input id="tcTo" type="text" placeholder="Riley" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Misheard</span><input id="tcFrom" type="text" placeholder="cardigan arrest" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Should be</span><input id="tcTo" type="text" placeholder="cardiac arrest" spellcheck="false" /></label>
               </div>
               <button class="btn ghost sm" id="tcAdd" style="margin-top:4px">Add correction</button>
             </div>
@@ -1046,7 +1046,7 @@
                 <table><thead><tr><th></th><th>TG</th><th>Alpha tag</th><th>Description</th><th>Category</th><th></th></tr></thead><tbody id="tgBody"></tbody></table>
               </div>
               <div class="row2" style="margin-top:12px">
-                <label class="field"><span class="lab">Playlist name <span class="mono faint">the talkgroups ticked above, shared by every site of this system that follows it</span></span><input id="plName" type="text" placeholder="MESA" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Playlist name <span class="mono faint">the talkgroups ticked above, shared by every site of this system that follows it</span></span><input id="plName" type="text" placeholder="County trunked" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn primary" id="plSave" style="width:100%">Save playlist</button></label>
               </div>
             </div>
@@ -1075,7 +1075,7 @@
         <div class="stack settings-page" id="set-aliases" style="display:none">
       <section class="two-col">
         <div class="stack">
-          <div class="panel">
+          <div class="panel nocollapse">
             <div class="head"><span class="eyebrow">Talkgroup aliases</span>
               <input id="alFilter" type="text" placeholder="filter: name, description, category, TG…" spellcheck="false" />
               <select id="alSource" title="Alias source (system / CSV)" style="width:auto;max-width:220px;padding:4px 26px 4px 8px;font-size:11.5px"><option value="">all sources</option></select>
