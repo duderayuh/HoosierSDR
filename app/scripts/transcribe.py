@@ -11,7 +11,7 @@ Apple-silicon GPU with next to no CPU — the engine to use on a Mac that is
 also decoding a radio site in real time). Chosen with --engine; --model
 names the size.
 """
-import argparse, json, sys, time
+import argparse, json, os, signal, sys, threading, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--engine", default="faster-whisper", choices=["faster-whisper", "openai-whisper", "mlx-whisper"])
@@ -25,6 +25,22 @@ a = ap.parse_args()
 
 def out(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+
+# The app is the only reader of these answers. When it goes away (quit, a
+# crash, a dev rebuild's SIGKILL) stdin's end is only noticed between jobs,
+# and a transcription stuck inside the engine would keep the GPU busy with
+# no one waiting for it — so notice the parent going, and go too.
+_parent = os.getppid()
+
+
+def _orphan_watch():
+    while True:
+        time.sleep(2)
+        if os.getppid() != _parent:
+            os._exit(0)
+
+
+threading.Thread(target=_orphan_watch, daemon=True).start()
 
 if a.probe:
     engines = []
@@ -95,15 +111,41 @@ except Exception as e:
 if a.download:
     out({"downloaded": True, "model": f"{a.engine}/{a.model}"}); sys.exit(0)
 
+class JobTimeout(BaseException):
+    """Raised by the alarm. A BaseException, so no `except Exception` inside
+    an engine can swallow it."""
+
+
+def _alarm(signum, frame):
+    raise JobTimeout()
+
+
+signal.signal(signal.SIGALRM, _alarm)
+
 out({"ready": True, "model": f"{a.engine}/{a.model}"})
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
+    req, limit = None, 0
     try:
         req = json.loads(line)
+        # The app's time limit for this job. Whisper's decode loop can stop
+        # advancing on a garbled clip: a window whose last timestamp token is
+        # 0.00 adds nothing to `seek`, and it decodes the same window again,
+        # for ever (a 0.9 s clip held the worker for minutes, and every call
+        # queued behind it went untranscribed).
+        limit = int(req.get("timeout") or 0)
         t0 = time.time()
-        text = run(req["path"])
+        if limit > 0:
+            signal.alarm(limit)
+        try:
+            text = run(req["path"])
+        finally:
+            signal.alarm(0)
         out({"id": req["id"], "text": text, "model": f"{a.engine}/{a.model}", "secs": round(time.time() - t0, 2)})
+    except JobTimeout:
+        out({"id": req.get("id") if isinstance(req, dict) else None,
+             "error": f"gave up after {limit} s: the model stopped advancing through the audio"})
     except Exception as e:
         out({"id": req.get("id") if isinstance(req, dict) else None, "error": str(e)})

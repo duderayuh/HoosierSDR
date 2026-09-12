@@ -189,6 +189,10 @@ pub struct Diagnostics {
     /// and ones that did not (and so said nothing about encryption).
     pub ess_valid: u64,
     pub ess_invalid: u64,
+    /// LDUs muted because the transmission was known to be encrypted. A
+    /// clip whose range of this counter moved was an encrypted transmission,
+    /// whatever audio was decoded before the verdict arrived.
+    pub voice_ldus_encrypted: u64,
     pub health: SymbolHealth,
 }
 
@@ -292,8 +296,12 @@ impl Diagnostics {
             self.voice_frames_low_quality
         ));
         s.push_str(&format!(
-            "  \"voice_frames_inferred\": {},\n  \"voice_frames_concealed\": {},\n  \"ess_valid\": {},\n  \"ess_invalid\": {},\n",
-            self.voice_frames_inferred, self.voice_frames_concealed, self.ess_valid, self.ess_invalid
+            "  \"voice_frames_inferred\": {},\n  \"voice_frames_concealed\": {},\n  \"ess_valid\": {},\n  \"ess_invalid\": {},\n  \"voice_ldus_encrypted\": {},\n",
+            self.voice_frames_inferred,
+            self.voice_frames_concealed,
+            self.ess_valid,
+            self.ess_invalid,
+            self.voice_ldus_encrypted
         ));
         s.push_str(&format!("  \"sync_count\": {},\n", self.syncs.len()));
         s.push_str(&format!("  \"tsbks\": {},\n", self.tsbks));
