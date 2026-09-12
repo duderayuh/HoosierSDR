@@ -509,11 +509,15 @@ const accOpen = store("hs.acc", { tuning: true, groups: true, control: true, pla
 /* Make every panel collapsible. Panels that already carry an explicit data-acc
    key (the Monitor column) are left as-is; every other panel with a head+body
    gets a key from its eyebrow label, a caret, and defaults to open. On-demand
-   editor panels (inline display:none) are skipped — they appear when summoned. */
+   editor panels (inline display:none) are skipped — they appear when summoned.
+   So are panels marked `nocollapse`: a page whose whole purpose is one long
+   table has nothing to gain from folding it away, and everything to lose —
+   a mis-click leaves an empty box the size of the table, which reads as a
+   freeze rather than as a fold. */
 (function panelify() {
   const seen = {};
   document.querySelectorAll(".panel").forEach((p) => {
-    if (p.classList.contains("acc") || p.style.display === "none") return;
+    if (p.classList.contains("acc") || p.classList.contains("nocollapse") || p.style.display === "none") return;
     const head = Array.from(p.children).find((c) => c.classList.contains("head"));
     if (!head) return;
     const eb = head.querySelector(".eyebrow");
