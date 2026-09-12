@@ -1338,14 +1338,28 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
             .unwrap_or_default();
         (places, reports)
     };
+    // Which rules have already had their say about this run. A run grows
+    // as more calls land on it, and each growth would otherwise be news.
+    let told: std::collections::HashSet<String> = {
+        let db = state.db.lock().unwrap().clone();
+        db.map(|db| {
+            let c = db.lock().unwrap();
+            crate::events::rules_for_incident(&c, i.id)
+        })
+        .unwrap_or_default()
+    };
     for t in list {
+        if told.contains(&t.id) {
+            continue;
+        }
         if !matches_incident(&t, i, &places, linked || !reports.is_empty()) {
             continue;
         }
         let f = incident_facts(i);
         let extra = incident_fields(i, &places, &t.when.incident.near_feature, &reports);
         let (app, t) = (app.clone(), t);
-        std::thread::spawn(move || fire_with(&app, t, f, Vec::new(), Some(extra)));
+        let id = i.id;
+        std::thread::spawn(move || fire_with(&app, t, f, Vec::new(), Some(extra), Some(id)));
     }
 }
 
@@ -1534,7 +1548,7 @@ fn open_thread(st: &TripState, rule: &str, tg: u16, now: i64) -> Option<(String,
 
 /// Run one tripwire for one call: quiet window, check, send, record.
 fn fire(app: &AppHandle, t: Tripwire, f: CallFacts, keywords: Vec<String>) {
-    fire_with(app, t, f, keywords, None)
+    fire_with(app, t, f, keywords, None, None)
 }
 
 /// `extra` are facts the message can use that did not come from a check —
@@ -1545,7 +1559,20 @@ fn fire_with(
     f: CallFacts,
     keywords: Vec<String>,
     extra: Option<serde_json::Value>,
+    incident: Option<i64>,
 ) {
+    // Every history row this attempt writes is about the same run.
+    let rec = |app: &AppHandle,
+               t: &Tripwire,
+               f: &CallFacts,
+               status: &str,
+               detail: String,
+               message: String,
+               keywords: &[String],
+               fields: Option<&serde_json::Value>,
+               sent: (String, Vec<i64>)| {
+        record_for(app, t, f, status, detail, message, keywords, fields, sent, incident)
+    };
     let state = app.state::<AppState>();
     let now = crate::library::now();
     let key = (t.id.clone(), f.tg);
@@ -1570,7 +1597,7 @@ fn fire_with(
     let (note, fields) = match run_check(&state, &t, &f) {
         Verdict::Pass { note, fields } => (note, fields),
         Verdict::Quiet { why, fields } => {
-            record(
+            rec(
                 app,
                 &t,
                 &f,
@@ -1585,7 +1612,7 @@ fn fire_with(
         }
         Verdict::Unavailable(e) => {
             if t.check.if_unavailable == "hold" {
-                record(
+                rec(
                     app,
                     &t,
                     &f,
@@ -1634,7 +1661,7 @@ fn fire_with(
     );
     if !t.send.telegram {
         state.tripwires.lock().unwrap().last_sent.insert(key, now);
-        record(
+        rec(
             app,
             &t,
             &f,
@@ -1654,7 +1681,7 @@ fn fire_with(
     let dest = match dest {
         Ok(d) => d,
         Err(e) => {
-            record(
+            rec(
                 app,
                 &t,
                 &f,
@@ -1717,7 +1744,7 @@ fn fire_with(
             } else {
                 detail
             };
-            record(
+            rec(
                 app,
                 &t,
                 &f,
@@ -1729,7 +1756,7 @@ fn fire_with(
                 (dest, ids),
             );
         }
-        Err(e) => record(
+        Err(e) => rec(
             app,
             &t,
             &f,
@@ -1893,7 +1920,25 @@ fn record(
     message: String,
     keywords: &[String],
     fields: Option<&serde_json::Value>,
+    sent: (String, Vec<i64>),
+) {
+    record_for(app, t, f, status, detail, message, keywords, fields, sent, None)
+}
+
+/// As `record`, but naming the run it was about, so a run is never told
+/// about twice and the timeline can show what was sent.
+#[allow(clippy::too_many_arguments)]
+fn record_for(
+    app: &AppHandle,
+    t: &Tripwire,
+    f: &CallFacts,
+    status: &str,
+    detail: String,
+    message: String,
+    keywords: &[String],
+    fields: Option<&serde_json::Value>,
     (chat, message_ids): (String, Vec<i64>),
+    incident_id: Option<i64>,
 ) {
     crate::events::record(
         app,
@@ -1910,6 +1955,7 @@ fn record(
             message_ids,
             data: serde_json::json!({ "keywords": keywords, "fields": fields }).to_string(),
             calls: f.id.into_iter().collect(),
+            incident_id,
             ..Default::default()
         },
     );

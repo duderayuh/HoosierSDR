@@ -151,6 +151,22 @@ pub fn record(app: &AppHandle, e: NewEvent) -> Option<i64> {
     }
 }
 
+/// The tripwires that have already had their say about a run — sent, stayed
+/// quiet, failed or held. A run is told about once: it grows as more calls
+/// land on it, and a rule that spoke for the dispatch should not speak again
+/// for the update.
+pub fn rules_for_incident(c: &Connection, incident: i64) -> std::collections::HashSet<String> {
+    let Ok(mut q) = c.prepare(
+        "SELECT DISTINCT rule_id FROM tripwire_events
+          WHERE incident_id = ?1 AND source = 'tripwire'",
+    ) else {
+        return Default::default();
+    };
+    q.query_map([incident], |r| r.get::<_, String>(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
 /// For each of `ids`, the rules that fired about it — one entry per rule,
 /// its newest outcome, sends before quiet verdicts. One query for the lot.
 pub fn fired_for(c: &Connection, ids: &[i64]) -> HashMap<i64, Vec<Fired>> {
@@ -433,6 +449,30 @@ mod tests {
         .unwrap();
         assert_eq!(by_call.len(), 1);
         assert_eq!(by_call[0].status, "failed");
+    }
+
+    #[test]
+    fn a_run_is_told_about_once_per_rule() {
+        let c = db();
+        let ev = |rule: &str, incident: Option<i64>, status: &str| NewEvent {
+            source: "tripwire",
+            rule_id: rule.into(),
+            rule_name: rule.into(),
+            status: status.into(),
+            incident_id: incident,
+            ..Default::default()
+        };
+        insert(&c, &ev("r1", Some(7), "sent"), 100).unwrap();
+        insert(&c, &ev("r2", Some(7), "quiet"), 101).unwrap();
+        insert(&c, &ev("r3", Some(8), "sent"), 102).unwrap();
+        insert(&c, &ev("r4", None, "sent"), 103).unwrap();
+
+        let told = rules_for_incident(&c, 7);
+        assert!(told.contains("r1"), "a rule that sent has had its say");
+        assert!(told.contains("r2"), "so has one that looked and stayed quiet");
+        assert!(!told.contains("r3"), "another run is another story");
+        assert!(!told.contains("r4"));
+        assert!(rules_for_incident(&c, 99).is_empty());
     }
 
     #[test]
