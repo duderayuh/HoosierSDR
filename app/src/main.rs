@@ -38,6 +38,7 @@ mod player;
 mod playlists;
 mod remotes;
 mod retention;
+mod routing;
 mod tripwires;
 mod backtest;
 mod fuzzy;
@@ -120,6 +121,7 @@ struct AppState {
     /// Dispatch channels → geocoded, grouped incidents on the live map.
     dispatch: dispatch::Shared,
     places: places::Shared,
+    routing: routing::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -2306,6 +2308,7 @@ fn main() {
             tripwires::init(app.handle());
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
             *state.places.lock().unwrap() = places::load(app.handle());
+            *state.routing.lock().unwrap() = routing::load(app.handle());
             *state.retention.lock().unwrap() = retention::load(app.handle());
             retention::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
@@ -2439,6 +2442,13 @@ fn main() {
             places::places_suggest,
             places::place_features,
             places::place_locate,
+            routing::routing_get,
+            routing::routing_set,
+            routing::routing_status,
+            routing::mapdata_prepare,
+            routing::mapdata_start,
+            routing::mapdata_stop,
+            routing::mapdata_region,
             dispatch::incidents_list,
             dispatch::incident_get,
             dispatch::incident_delete,

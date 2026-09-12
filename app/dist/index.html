@@ -340,6 +340,21 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Map data &amp; distances</span><span class="meta" id="rtMeta"></span></div>
+            <div class="body tight">
+              <p class="help">Distances are straight lines until a router is running. OSRM runs here, in a container, on a map of one state — nothing about your calls leaves the machine. It needs Docker running and about 10 GB free.</p>
+              <label class="check"><input id="rtEnabled" type="checkbox" /> Use the local router for distances and drive times</label>
+              <div class="row3">
+                <label class="field"><span class="lab">Region <span class="mono faint">a Geofabrik extract, e.g. us/indiana</span></span><span class="inline"><input id="rtRegion" type="text" spellcheck="false" placeholder="us/indiana" /><button class="btn ghost sm" id="rtSuggest" title="Work it out from your home location">From home</button></span></label>
+                <label class="field"><span class="lab">Router URL</span><input id="rtUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:5000" /></label>
+                <label class="field"><span class="lab">Platform <span class="mono faint">blank unless the image has no build for your chip</span></span><input id="rtPlatform" type="text" spellcheck="false" placeholder="linux/amd64" /></label>
+              </div>
+              <label class="field"><span class="lab">Container image</span><input id="rtImage" type="text" spellcheck="false" /></label>
+              <div class="inline"><button class="btn primary sm" id="rtSave">Save</button><button class="btn ghost sm" id="rtPrepare" title="Download the map and build the routing graph — minutes, and a few hundred megabytes">Prepare the map</button><button class="btn ghost sm" id="rtStart">Start router</button><button class="btn ghost sm" id="rtStop">Stop</button><button class="btn ghost sm" id="rtCheck">Check</button></div>
+              <div class="mono small" id="rtStatus"></div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Home &amp; geocoding</span><span class="meta" id="dpGeoMeta"></span></div>
             <div class="body tight">
               <div class="row3">

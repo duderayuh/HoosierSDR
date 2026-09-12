@@ -18,7 +18,7 @@
     call: ["{name}", "{tgname}", "{tgdesc}", "{unitname}", "{time}", "{transcript}", "{keywords}", "{ai}"],
     conversation: ["{rule}", "{summary}", "{tgname}", "{tgdesc}", "{unitnames}", "{calls}", "{duration}", "{started}", "{transcript}", "{revision}"],
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
-    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{place}", "{nearest}", "{km}", "{hospital}", "{report}", "{time}", "{ai}"],
+    incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
   let list = [], stats = {}, view = null, recipes = null;
   let sel = null, draft = null, saved = "", words = null;

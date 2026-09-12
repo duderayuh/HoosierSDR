@@ -887,6 +887,7 @@ pub fn incident_fields(
         "summary": i.summary,
         "place": "",
         "km": "",
+        "mins": "",
         "nearest": "",
         "hospital": "",
         "report": "",
@@ -1356,7 +1357,23 @@ pub fn on_incident(app: &AppHandle, i: &crate::dispatch::Incident, linked: bool)
             continue;
         }
         let f = incident_facts(i);
-        let extra = incident_fields(i, &places, &t.when.incident.near_feature, &reports);
+        let mut extra = incident_fields(i, &places, &t.when.incident.near_feature, &reports);
+        // By road if a router is running; the straight line otherwise, and
+        // the message never pretends otherwise.
+        if let (Some(lat), Some(lon)) = (i.lat, i.lon) {
+            if let Some((p, _)) =
+                crate::places::nearest_with(&places, &t.when.incident.near_feature, (lat, lon))
+                    .first()
+            {
+                if let (Some(plat), Some(plon)) = (p.lat, p.lon) {
+                    let d = crate::routing::distance(&state, (lat, lon), (plat, plon));
+                    extra["km"] = format!("{:.1}", d.km()).into();
+                    if d.secs > 0.0 {
+                        extra["mins"] = format!("{:.0}", d.mins()).into();
+                    }
+                }
+            }
+        }
         let (app, t) = (app.clone(), t);
         let id = i.id;
         std::thread::spawn(move || fire_with(&app, t, f, Vec::new(), Some(extra), Some(id)));
