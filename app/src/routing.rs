@@ -614,6 +614,75 @@ mod tests {
         assert!(parse_line(&serde_json::Value::Null).is_empty());
     }
 
+    /// The same two functions against a real OSRM, rather than a fixture I
+    /// wrote to match my own reading of the docs. Ignored: it needs a
+    /// router. Any extract will do — Monaco is 700 KB and builds in
+    /// seconds:
+    ///
+    ///   docker run --rm -t -v $D:/data ghcr.io/project-osrm/osrm-backend \
+    ///     osrm-extract -p /opt/car.lua /data/monaco.osm.pbf      # then
+    ///     osrm-partition /data/monaco.osrm, osrm-customize likewise
+    ///   docker run -d -p 5099:5000 -v $D:/data <image> \
+    ///     osrm-routed --algorithm mld /data/monaco.osrm
+    ///   HS_OSRM=http://127.0.0.1:5099 HS_OSRM_AT=43.7311,7.4198 \
+    ///   HS_OSRM_TO=43.7396,7.4290 cargo test -- --ignored a_live_router
+    #[test]
+    #[ignore]
+    fn a_live_router_answers_in_the_order_this_app_reads() {
+        let url = std::env::var("HS_OSRM").expect("HS_OSRM is not set");
+        let pair = |v: String| {
+            let (a, b) = v.split_once(',').expect("want lat,lon");
+            (a.trim().parse::<f64>().unwrap(), b.trim().parse().unwrap())
+        };
+        let from = pair(std::env::var("HS_OSRM_AT").expect("HS_OSRM_AT"));
+        let to = pair(std::env::var("HS_OSRM_TO").expect("HS_OSRM_TO"));
+
+        // The cheap question: a distance, with no shape.
+        let d = route(&url, from, to).expect("the router did not answer");
+        assert_eq!(d.how, "road");
+        assert!(d.meters > 0.0 && d.secs > 0.0, "{d:?}");
+        // A route is never shorter than the straight line between its ends.
+        let crow = straight(from, to);
+        assert!(
+            d.meters >= crow.meters * 0.99,
+            "a {:.0} m route between points {:.0} m apart",
+            d.meters,
+            crow.meters
+        );
+
+        // The expensive one: the shape, which is where the coordinate order
+        // matters. Both ends must land on the ends that were asked for —
+        // if the swap in parse_line were missing, latitude and longitude
+        // would be exchanged and this would be somewhere off Somalia.
+        let r = route_line(&url, from, to).expect("no shape");
+        assert_eq!(r.how, "road");
+        assert!(r.line.len() >= 2, "a shape of {} points", r.line.len());
+        let near = |a: (f64, f64), b: (f64, f64)| {
+            crate::dispatch::haversine_m(a.0, a.1, b.0, b.1) < 60.0
+        };
+        assert!(near(*r.line.first().unwrap(), from), "starts at {:?}, asked for {from:?}", r.line.first());
+        assert!(near(*r.line.last().unwrap(), to), "ends at {:?}, asked for {to:?}", r.line.last());
+        // And the whole line stays in the same corner of the world.
+        for p in &r.line {
+            assert!(
+                near_enough(*p, from, 60_000.0),
+                "the route wanders to {p:?}"
+            );
+        }
+        eprintln!(
+            "live router: {:.0} m, {:.0} s, {} points (crow {:.0} m)",
+            r.meters,
+            r.secs,
+            r.line.len(),
+            crow.meters
+        );
+    }
+
+    #[cfg(test)]
+    fn near_enough(a: (f64, f64), b: (f64, f64), m: f64) -> bool {
+        crate::dispatch::haversine_m(a.0, a.1, b.0, b.1) < m
+    }
+
     #[test]
     fn a_straight_line_is_always_available() {
         let d = straight((39.7684, -86.1581), (39.8684, -86.1581));
