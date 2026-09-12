@@ -355,10 +355,14 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                     p.control_hz / 1e6
                 ),
             });
-            let found = hs_core::scan::scan(
+            let found = hs_core::scan::scan_cancellable(
                 &prime,
                 &hs_core::scan::ScanConfig::new(rate).center(p.center_hz),
+                &cancel,
             );
+            if cancel() {
+                return Ok(());
+            }
             match found.iter().find(|f| f.control_channel) {
                 Some(f) => {
                     let nominal = f.freq_hz.unwrap_or(p.center_hz + f.offset_hz);
