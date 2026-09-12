@@ -72,6 +72,19 @@ w.__exercise = async () => {
   // The per-playlist filters still have to be sent once the playlists are
   // known — timed avoids ride along there.
   if (!lockouts.some((l) => l.playlist === "p1")) console.log("PAGE ERROR: no lockout was pushed for the saved playlist");
+  // The talkgroup table is the Aliases page; folding it away leaves an empty
+  // box the size of the table, which reads as a freeze.
+  {
+    const al = w.document.getElementById("alBody");
+    const panel = al && al.closest(".panel");
+    if (!panel) console.log("PAGE ERROR: the talkgroup table lost its panel");
+    else {
+      if (panel.classList.contains("acc")) console.log("PAGE ERROR: the talkgroup table can be collapsed");
+      if (panel.querySelector(".head .caret")) console.log("PAGE ERROR: the talkgroup table offers a collapse caret");
+      const head = panel.querySelector(".head");
+      if (head && typeof head.onclick === "function") console.log("PAGE ERROR: clicking the talkgroup header still folds it");
+    }
+  }
   // Click every button that has a handler.
   for (const b of w.document.querySelectorAll("button")) { if (typeof b.onclick === "function") { try { const r = b.onclick({ target: b, preventDefault() {} }); if (r && r.catch) r.catch((e) => console.log("PAGE ERROR: async click " + (b.id || b.textContent.trim()) + ": " + e)); } catch (e) { console.log("PAGE ERROR: click " + (b.id || b.textContent.trim()) + ": " + e.stack); } } }
 };
