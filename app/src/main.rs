@@ -108,6 +108,10 @@ struct AppState {
     record_policy: Arc<Mutex<Policy>>,
     stream_policy: Arc<Mutex<Policy>>,
     upload_policy: Arc<Mutex<Policy>>,
+    /// Talkgroups silenced in the speakers. They are still followed,
+    /// recorded, transcribed and matched — muting is about the room, not
+    /// about the library.
+    muted: Arc<Mutex<std::collections::HashSet<u16>>>,
     /// Keyword / emergency / activity alerts (Telegram, tones).
     alerts: alerts::Shared,
     /// Conversation rules and the conversations in progress.
@@ -290,6 +294,16 @@ fn set_policies(state: State<AppState>, record: Policy, stream: Policy, upload: 
     *state.record_policy.lock().unwrap() = record;
     *state.stream_policy.lock().unwrap() = stream;
     *state.upload_policy.lock().unwrap() = upload;
+}
+
+/// Silence these talkgroups in the speakers.
+///
+/// Muting is not lockout: a muted call is still followed, still recorded,
+/// still transcribed, and still trips tripwires. Lockout is the other
+/// feature — it refuses the call outright.
+#[tauri::command]
+fn set_muted(state: State<AppState>, tgs: Vec<u16>) {
+    *state.muted.lock().unwrap() = tgs.into_iter().collect();
 }
 
 /// Apply per-talkgroup transcript corrections: each `(wrong, right)` pair is a
@@ -1162,6 +1176,7 @@ fn start_follow(
     let learn_aliases = state.learn_aliases.clone();
     let record_policy = state.record_policy.clone();
     let stream_policy = state.stream_policy.clone();
+    let muted = state.muted.clone();
     let upload_policy = state.upload_policy.clone();
     let name_template = state.names.lock().unwrap().template.clone();
     let db = state.db.clone();
@@ -1478,7 +1493,8 @@ fn start_follow(
                             st.feed(pcm);
                         }
                         if let Some(pl) = player.as_ref() {
-                            if !archive_mode.load(Ordering::SeqCst) {
+                            let silent = muted.lock().unwrap().contains(tg);
+                            if !archive_mode.load(Ordering::SeqCst) && !silent {
                                 pl.play(pcm.clone(), *priority);
                             }
                         }
@@ -2400,6 +2416,7 @@ fn main() {
             names_preview,
             set_learn_aliases,
             set_policies,
+            set_muted,
             set_max_calls,
             set_queue_limit,
             set_channelizer,
@@ -2563,6 +2580,22 @@ fn main() {
 #[cfg(test)]
 mod corrections_tests {
     use super::apply_corrections;
+
+    #[test]
+    fn muting_silences_without_hiding() {
+        // Muting is a speaker decision, so it is a plain set of talkgroups
+        // consulted at the moment a call would be played — never mixed into
+        // the lockout, which is what stops a call being followed at all.
+        let muted: std::collections::HashSet<u16> = [10202, 10203].into_iter().collect();
+        assert!(muted.contains(&10202), "a muted channel stays out of the room");
+        assert!(!muted.contains(&10204), "everything else still plays");
+        // And a policy, which decides recording, is untouched by it.
+        let record: crate::Policy = None;
+        assert!(
+            crate::policy_allows(&record, 10202),
+            "a muted call is still recorded, transcribed and matched"
+        );
+    }
 
     #[test]
     fn corrections_are_word_boundary_and_case_insensitive() {

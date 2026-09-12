@@ -362,6 +362,10 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::set_policies(state, record, stream, upload);
             Ok(Value::Null)
         }
+        "set_muted" => {
+            crate::set_muted(state, arg(args, "tgs")?);
+            Ok(Value::Null)
+        }
         "set_learn_aliases" => {
             crate::set_learn_aliases(arg(args, "on")?, state);
             Ok(Value::Null)
