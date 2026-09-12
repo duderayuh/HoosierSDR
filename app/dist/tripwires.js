@@ -120,7 +120,9 @@
       t.id = ""; t.enabled = true;
       if (S() && S().ollama && t.check.kind === "ask") t.check.if_unavailable = S().ollama.fail_open ? "send" : "hold";
       edit("new", t, null);
-      if (!t.when.tgs.length) setTimeout(() => $("twTgs").click(), 150);
+      // Runs already come from the channels the Dispatch tab watches, so
+      // there is nothing to pick.
+      if (!t.when.tgs.length && t.when.kind !== "incident") setTimeout(() => $("twTgs").click(), 150);
     });
   }
   $("twNew").onclick = showGallery;
@@ -270,6 +272,7 @@
     $("twCallWhen").style.display = kind === "call" ? "" : "none";
     $("twConvWhen").style.display = kind === "conversation" ? "" : "none";
     $("twIncWhen").style.display = kind === "incident" ? "" : "none";
+    $("twTgRow").style.display = kind === "incident" ? "none" : "";
     $("twDigestWhen").style.display = kind === "digest" ? "" : "none";
     const asksModel = kind === "call" || kind === "incident";
     $("twCheck").style.display = asksModel ? "" : "none";
@@ -290,6 +293,7 @@
     $("twFollowRow").style.display = kind === "call" ? "" : "none";
     $("twFollowFor").style.display = $("twFollow").value === "off" ? "none" : "";
     $("twToneWrap").style.display = kind === "call" ? "" : "none";
+    $("twAudioWrap").style.display = kind === "incident" ? "none" : "";
     $("twEarlier").style.display = kind === "call" && $("twAudio").checked ? "" : "none";
     $("twChatWrap").style.display = $("twDest").value === "custom" ? "" : "none";
     const toks = [...TOKENS[kind] || TOKENS.call, ...(asksModel && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
@@ -427,8 +431,11 @@
     else if (t.when.kind === "conversation") head = `About <b>${p.messages}</b> conversations in ${span} — ${p.scanned.toLocaleString()} transmissions on these talkgroups.`;
     else {
       const perDay = p.messages / p.days;
-      head = p.matches ? `In ${span} it would have fired on <b>${p.matches}</b> call${p.matches === 1 ? "" : "s"} → <b>${p.messages}</b> message${p.messages === 1 ? "" : "s"}${t.check.kind !== "none" ? " before the AI check" : ""} <span class="faint">(≈ ${perDay < 1 ? perDay.toFixed(1) : Math.round(perDay)} a day)</span>.`
-        : `Nothing in ${span} would have tripped it <span class="faint">— looked at ${p.scanned.toLocaleString()} call${p.scanned === 1 ? "" : "s"}, ${p.transcribed.toLocaleString()} with transcripts</span>.`;
+      const thing = t.when.kind === "incident" ? "run" : "call";
+      head = p.matches ? `In ${span} it would have fired on <b>${p.matches}</b> ${thing}${p.matches === 1 ? "" : "s"} → <b>${p.messages}</b> message${p.messages === 1 ? "" : "s"}${t.check.kind !== "none" ? " before the AI check" : ""} <span class="faint">(≈ ${perDay < 1 ? perDay.toFixed(1) : Math.round(perDay)} a day)</span>.`
+        : t.when.kind === "incident"
+          ? `Nothing in ${span} would have tripped it <span class="faint">— looked at ${p.scanned.toLocaleString()} run${p.scanned === 1 ? "" : "s"} on the dispatch map</span>.`
+          : `Nothing in ${span} would have tripped it <span class="faint">— looked at ${p.scanned.toLocaleString()} call${p.scanned === 1 ? "" : "s"}, ${p.transcribed.toLocaleString()} with transcripts</span>.`;
       if (p.excepted) head += ` <span class="faint">“But not” kept ${p.excepted} out.</span>`;
     }
     $("twHeadline").innerHTML = head;
@@ -446,7 +453,10 @@
       if (i >= 0) cur[i] = b.dataset.to; else cur.push(b.dataset.to);
       $("twPhrases").value = cur.join("\n"); changed();
     });
-    $("twSamplesLab").textContent = t.when.kind === "call" ? (p.samples.length ? `Calls it would have caught${p.matches > p.samples.length ? ` · newest ${p.samples.length}` : ""}` : "") : "Recent traffic it would summarise";
+    $("twSamplesLab").textContent =
+      t.when.kind === "incident" ? (p.samples.length ? `Runs it would have caught${p.matches > p.samples.length ? ` · newest ${p.samples.length}` : ""}` : "")
+      : t.when.kind === "call" ? (p.samples.length ? `Calls it would have caught${p.matches > p.samples.length ? ` · newest ${p.samples.length}` : ""}` : "")
+      : "Recent traffic it would summarise";
     const hl = (text, kws) => { let h = esc(text); for (const k of kws || []) { const re = new RegExp(`(${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/[\s-]+/g, "[\\s\\W]+")})`, "ig"); h = h.replace(re, "<mark>$1</mark>"); } return h; };
     $("twSamples").innerHTML = p.samples.map((s) => {
       const tr = tried.get(s.id);
