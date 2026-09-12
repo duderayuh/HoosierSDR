@@ -60,9 +60,6 @@ pub struct Alert {
     /// = the default topic, or the chat itself when it has no topics.
     #[serde(default)]
     pub topic_id: String,
-    /// Also post to Bluesky.
-    #[serde(default)]
-    pub bluesky: bool,
     pub tone: bool,
     pub attach_audio: bool,
     /// Also attach this many earlier calls on the same talkgroup…
@@ -94,7 +91,6 @@ impl Default for Alert {
             telegram: true,
             chat_id: String::new(),
             topic_id: String::new(),
-            bluesky: false,
             tone: true,
             attach_audio: true,
             combine_prev: 0,
@@ -174,13 +170,6 @@ fn multipart_for(dest: &str) -> crate::upload::Multipart {
     m
 }
 
-/// Bluesky account to post alerts to. The handle is public; the app password
-/// is a secret held in the local secret store, not in these settings.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Bluesky {
-    pub handle: String,
-}
-
 /// The alerts' Telegram chat and Ollama settings, for the conversation
 /// summaries to share.
 pub fn shared_settings(state: &AppState) -> (Telegram, Ollama) {
@@ -202,8 +191,14 @@ pub struct Settings {
     pub alerts: Vec<Alert>,
     pub telegram: Telegram,
     pub ollama: Ollama,
+    /// Named places to send (a chat, or one topic in a forum chat), set up
+    /// on the Connections page and picked by name in every rule.
     #[serde(default)]
-    pub bluesky: Bluesky,
+    pub destinations: Vec<crate::connections::Destination>,
+    /// Chats (and forum topics) the bot has been seen in, remembered so the
+    /// pickers can name them after Telegram's one-day update window.
+    #[serde(default)]
+    pub known_chats: Vec<crate::connections::KnownChat>,
 }
 
 impl Default for Settings {
@@ -222,7 +217,8 @@ impl Default for Settings {
                 timeout_secs: 60,
                 fail_open: true,
             },
-            bluesky: Bluesky::default(),
+            destinations: Vec::new(),
+            known_chats: Vec::new(),
         }
     }
 }
@@ -236,6 +232,10 @@ pub struct LogEntry {
     pub tg_name: String,
     pub message: String,
     pub ok: bool,
+    /// `sent` | `failed` | `quiet` (the AI check said no — working as
+    /// intended, not an error) | `held` (the AI check could not be reached
+    /// and the alert fails closed).
+    pub status: String,
     pub detail: String,
 }
 
@@ -267,6 +267,50 @@ pub struct CallFacts {
     pub emergency: bool,
     pub audio: Option<String>,
     pub transcript: Option<String>,
+    /// The system the call was heard on (its RadioReference name), so a
+    /// rule can tell TG 10202 on one system from TG 10202 on another.
+    #[allow(dead_code)] // read by the Tripwires rule engine
+    pub system: String,
+}
+
+/// The RadioReference description of `tg` on the named system.
+pub fn tg_desc_for(app: &AppHandle, system: &str, tg: u16) -> Option<String> {
+    let state = app.state::<AppState>();
+    let sid = crate::playlists::sids_by_system_name(app)
+        .get(system)
+        .copied();
+    let desc = state
+        .catalog
+        .lock()
+        .unwrap()
+        .get(sid, tg)
+        .and_then(|t| t.description.clone());
+    desc.filter(|d| !d.trim().is_empty())
+}
+
+/// What a rule is judged against, from a stored call. `transcript` wins
+/// over the row's own (it is the corrected text that just landed); without
+/// one the listener's edit, then the machine text, is used.
+pub fn facts_from_row(
+    app: &AppHandle,
+    r: crate::library::CallRow,
+    transcript: Option<String>,
+) -> CallFacts {
+    let transcript = transcript.or(r.transcript_edited).or(r.transcript);
+    CallFacts {
+        id: Some(r.id),
+        start: r.start,
+        tg_desc: tg_desc_for(app, &r.system, r.tg),
+        tg: r.tg,
+        tg_name: r.tg_name,
+        unit: r.unit,
+        unit_name: r.unit_name,
+        secs: r.secs,
+        emergency: r.emergency,
+        audio: r.audio,
+        transcript,
+        system: r.system,
+    }
 }
 
 fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -279,6 +323,10 @@ fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 pub fn load(app: &AppHandle) -> AlertState {
+    // Bluesky posting is gone; its app password has no business lingering.
+    if crate::secrets::get("bluesky-password").is_some() {
+        let _ = crate::secrets::remove("bluesky-password");
+    }
     AlertState {
         settings: path(app)
             .ok()
@@ -362,7 +410,11 @@ pub fn matches(a: &Alert, f: &CallFacts) -> Option<Vec<String>> {
 }
 
 pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai: &str) -> String {
-    let time = chrono_like(crate::library::now());
+    let time = crate::library::local_hms(if f.start > 0 {
+        f.start
+    } else {
+        crate::library::now()
+    });
     template
         .replace("{alert}", &a.name)
         .replace("{tg}", &f.tg.to_string())
@@ -380,13 +432,6 @@ pub fn render(template: &str, a: &Alert, f: &CallFacts, keywords: &[String], ai:
         .replace("{ai}", ai)
         .trim()
         .to_string()
-}
-
-fn chrono_like(epoch: i64) -> String {
-    // Local-ish HH:MM:SS without a date crate: use the system's TZ offset via
-    // `date` is overkill; show UTC and say so.
-    let s = epoch.rem_euclid(86_400);
-    format!("{:02}:{:02}:{:02} UTC", s / 3600, (s % 3600) / 60, s % 60)
 }
 
 // ---------------------------------------------------------------------------
@@ -437,28 +482,7 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
         crate::library::get(&c, id).ok().flatten()
     };
     let Some(r) = row else { return };
-    let sid = crate::playlists::sids_by_system_name(app)
-        .get(&r.system)
-        .copied();
-    let tg_desc = state
-        .catalog
-        .lock()
-        .unwrap()
-        .get(sid, r.tg)
-        .and_then(|t| t.description.clone());
-    let f = CallFacts {
-        id: Some(r.id),
-        start: r.start,
-        tg: r.tg,
-        tg_name: r.tg_name,
-        tg_desc,
-        unit: r.unit,
-        unit_name: r.unit_name,
-        secs: r.secs,
-        emergency: r.emergency,
-        audio: r.audio,
-        transcript: Some(text.to_string()),
-    };
+    let f = facts_from_row(app, r, Some(text.to_string()));
     for a in alerts {
         if let Some(kw) = matches(&a, &f) {
             fire(app.clone(), a, f.clone(), kw);
@@ -505,13 +529,16 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
             match ask_ollama(&ollama, &a.ai_prompt, &f, a.ai_think) {
                 Ok((true, summary)) => ai_note = summary,
                 Ok((false, summary)) => {
+                    // The check doing its job: logged, but not an error.
                     log_entry(
                         &app,
                         &a,
                         &f,
-                        false,
-                        format!("AI gate said no: {summary}"),
+                        "quiet",
+                        format!("AI check said no: {summary}"),
                         String::new(),
+                        &keywords,
+                        (String::new(), Vec::new()),
                     );
                     return;
                 }
@@ -521,63 +548,69 @@ fn fire(app: AppHandle, a: Alert, f: CallFacts, keywords: Vec<String>) {
                             &app,
                             &a,
                             &f,
-                            false,
-                            format!("AI gate unavailable, alert held: {e}"),
+                            "held",
+                            format!("AI check unavailable, alert held: {e}"),
                             String::new(),
+                            &keywords,
+                            (String::new(), Vec::new()),
                         );
                         return;
                     }
-                    ai_note = format!("(AI gate unavailable: {e})");
+                    ai_note = format!("(AI check unavailable: {e})");
                 }
             }
         }
         let message = render(&a.message, &a, &f, &keywords, &ai_note);
         let _ = app.emit(
             "alert",
-            serde_json::json!({ "name": a.name, "tg": f.tg, "message": message, "tone": a.tone }),
+            serde_json::json!({ "name": a.name, "tg": f.tg, "message": message, "tone": a.tone, "call": f.id }),
         );
         let mut ok = true;
         let mut detail = String::new();
+        let mut sent_ids: Vec<i64> = Vec::new();
         if a.telegram {
             match send_telegram(&tg_settings, &a, &f, &message, &state) {
-                Ok(d) => detail = d,
+                Ok((d, ids)) => {
+                    detail = d;
+                    sent_ids = ids;
+                }
                 Err(e) => {
                     ok = false;
                     detail = e;
                 }
             }
         }
-        if a.bluesky {
-            let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
-            let res = bluesky_password()
-                .ok_or_else(|| "no Bluesky app password".to_string())
-                .and_then(|pw| post_to_bluesky(&handle, &pw, &message));
-            match res {
-                Ok(d) => {
-                    detail = if detail.is_empty() {
-                        d
-                    } else {
-                        format!("{detail}; {d}")
-                    }
-                }
-                Err(e) => {
-                    ok = false;
-                    detail = if detail.is_empty() {
-                        e
-                    } else {
-                        format!("{detail}; {e}")
-                    };
-                }
-            }
-        }
         if ok {
             state.alerts.lock().unwrap().last_fired.insert(key, now);
         }
-        log_entry(&app, &a, &f, ok, detail, message);
+        let chat = if a.telegram { tg_settings.destination() } else { String::new() };
+        log_entry(
+            &app,
+            &a,
+            &f,
+            if ok { "sent" } else { "failed" },
+            detail,
+            message,
+            &keywords,
+            (chat, sent_ids),
+        );
     });
 }
 
-fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, ok: bool, detail: String, message: String) {
+/// Record one outcome — in the in-app log and the tripwire history. Only a
+/// failed send or a held alert is an error the listener is told about; a
+/// quiet AI verdict is the check working.
+#[allow(clippy::too_many_arguments)]
+fn log_entry(
+    app: &AppHandle,
+    a: &Alert,
+    f: &CallFacts,
+    status: &str,
+    detail: String,
+    message: String,
+    keywords: &[String],
+    (chat, message_ids): (String, Vec<i64>),
+) {
     let state = app.state::<AppState>();
     let mut st = state.alerts.lock().unwrap();
     st.log.push_front(LogEntry {
@@ -585,12 +618,32 @@ fn log_entry(app: &AppHandle, a: &Alert, f: &CallFacts, ok: bool, detail: String
         alert: a.name.clone(),
         tg: f.tg,
         tg_name: f.tg_name.clone(),
-        message,
-        ok,
+        message: message.clone(),
+        ok: status == "sent",
+        status: status.to_string(),
         detail: detail.clone(),
     });
     st.log.truncate(200);
-    if !ok {
+    drop(st);
+    crate::events::record(
+        app,
+        crate::events::NewEvent {
+            source: "alert",
+            rule_id: a.id.clone(),
+            rule_name: a.name.clone(),
+            tg: f.tg,
+            tg_name: f.tg_name.clone(),
+            status: status.to_string(),
+            detail: detail.clone(),
+            message,
+            chat,
+            message_ids,
+            data: serde_json::json!({ "keywords": keywords }).to_string(),
+            calls: f.id.into_iter().collect(),
+            ..Default::default()
+        },
+    );
+    if status == "failed" || status == "held" {
         let _ = app.emit("alert_error", format!("{}: {detail}", a.name));
     }
 }
@@ -707,13 +760,6 @@ fn check(status: u16, text: &str) -> Result<String, String> {
             v["description"].as_str().unwrap_or(text.trim())
         ))
     }
-}
-
-pub fn send_message(tg: &Telegram, text: &str) -> Result<String, String> {
-    if tg.chat_id.trim().is_empty() {
-        return Err("no Telegram chat id".into());
-    }
-    send_text(&tg.destination(), text, 60)
 }
 
 /// A plain text message to `dest` (`chat` or `chat:topic`), giving up after
@@ -971,132 +1017,39 @@ fn read_audio(path: &str) -> Result<Vec<i16>, String> {
     }
 }
 
+/// Send the alert — with its audio when asked — and return what happened
+/// and the Telegram message ids (a follow-up replies to them).
 fn send_telegram(
     tg: &Telegram,
     a: &Alert,
     f: &CallFacts,
     message: &str,
     state: &AppState,
-) -> Result<String, String> {
+) -> Result<(String, Vec<i64>), String> {
+    if tg.chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let dest = tg.destination();
     let clip = if a.attach_audio {
         clip_for(a, f, state)?
     } else {
         None
     };
     match clip {
-        None => send_message(tg, message),
+        None => send_text_id(&dest, message).map(|id| ("sent".to_string(), vec![id])),
         Some((path, is_mp3)) => {
-            let data = std::fs::read(&path).map_err(|e| e.to_string())?;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "call.mp3".into());
-            let caption: String = message.chars().take(1000).collect();
-            let (method, field, mime) = if is_mp3 {
-                ("sendAudio", "audio", "audio/mpeg")
-            } else {
-                ("sendDocument", "document", "audio/wav")
-            };
-            let mut m = multipart_for(&tg.destination())
-                .text("caption", &caption)
-                .file(field, &name, mime, &data);
-            if is_mp3 {
-                m = m.text("title", &a.name).text("performer", &f.tg_name);
-            }
-            let (ctype, body) = m.finish();
-            let (status, out) = crate::upload::post(&telegram_api(method)?, &ctype, body)?;
+            // A message too long for a caption goes first as text, and the
+            // audio follows with its first line.
+            let res = send_audio_id(&dest, &path, is_mp3, message, &a.name, &f.tg_name);
             let _ = std::fs::remove_file(&path);
-            // A long message does not fit a caption; send the rest as text.
-            if message.chars().count() > 1000 {
-                let _ = send_message(tg, message);
-            }
-            check(status, &out).map(|_| format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }))
+            res.map(|ids| {
+                (
+                    format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }),
+                    ids,
+                )
+            })
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Bluesky (AT Protocol)
-// ---------------------------------------------------------------------------
-
-/// The Bluesky app password, from the local secret store.
-fn bluesky_password() -> Option<String> {
-    crate::secrets::get("bluesky-password")
-}
-
-/// Post `text` to the configured Bluesky account — handle from the alerts
-/// settings, app password from the secret store. Shared with analyzers.
-pub(crate) fn bluesky_post(state: &AppState, text: &str) -> Result<String, String> {
-    let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
-    let pw = bluesky_password().ok_or_else(|| "no Bluesky app password".to_string())?;
-    post_to_bluesky(&handle, &pw, text)
-}
-
-/// Post text to Bluesky. Returns the created post's at-URI on success.
-fn post_to_bluesky(handle: &str, password: &str, text: &str) -> Result<String, String> {
-    if handle.trim().is_empty() {
-        return Err("no Bluesky handle".into());
-    }
-    if password.is_empty() {
-        return Err("no Bluesky app password".into());
-    }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .http_status_as_error(false)
-        .build()
-        .into();
-
-    // 1. createSession → accessJwt + did.
-    let login =
-        serde_json::json!({ "identifier": handle.trim(), "password": password }).to_string();
-    let mut r = agent
-        .post("https://bsky.social/xrpc/com.atproto.server.createSession")
-        .header("Content-Type", "application/json")
-        .send(login.as_bytes())
-        .map_err(|e| format!("Bluesky login: {e}"))?;
-    let status = r.status().as_u16();
-    let body = r.body_mut().read_to_string().unwrap_or_default();
-    if status != 200 {
-        return Err(format!(
-            "Bluesky login HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
-        ));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("Bluesky login reply: {e}"))?;
-    let token = v["accessJwt"]
-        .as_str()
-        .ok_or("Bluesky login: no accessJwt")?
-        .to_string();
-    let did = v["did"]
-        .as_str()
-        .ok_or("Bluesky login: no did")?
-        .to_string();
-
-    // 2. createRecord — a plain text post (truncated to Bluesky's limit).
-    let text = text.chars().take(280).collect::<String>();
-    let created = crate::library::utc(crate::library::now()).replace(' ', "T") + "Z";
-    let post = serde_json::json!({
-        "repo": did,
-        "collection": "app.bsky.feed.post",
-        "record": { "$type": "app.bsky.feed.post", "text": text, "createdAt": created }
-    });
-    let mut r2 = agent
-        .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
-        .header("Content-Type", "application/json")
-        .header("Authorization", &format!("Bearer {token}"))
-        .send(post.to_string().as_bytes())
-        .map_err(|e| format!("Bluesky post: {e}"))?;
-    let status2 = r2.status().as_u16();
-    let body2 = r2.body_mut().read_to_string().unwrap_or_default();
-    if status2 != 200 {
-        return Err(format!(
-            "Bluesky post HTTP {status2}: {}",
-            body2.chars().take(200).collect::<String>()
-        ));
-    }
-    let v2: serde_json::Value = serde_json::from_str(&body2).unwrap_or_default();
-    Ok(v2["uri"].as_str().unwrap_or("posted").to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,7 +1060,6 @@ fn post_to_bluesky(handle: &str, password: &str, text: &str) -> Result<String, S
 pub struct View {
     pub settings: Settings,
     pub has_token: bool,
-    pub has_bluesky: bool,
     pub ffmpeg: bool,
 }
 
@@ -1116,7 +1068,6 @@ pub fn alerts_get(state: State<AppState>) -> View {
     View {
         settings: state.alerts.lock().unwrap().settings.clone(),
         has_token: token().is_some(),
-        has_bluesky: bluesky_password().is_some(),
         ffmpeg: crate::encode::ffmpeg_available().is_some(),
     }
 }
@@ -1146,9 +1097,28 @@ pub fn alerts_set(
     }
     let t = &mut settings.telegram;
     t.announce_chat = t.announce_chat.trim().chars().take(80).collect();
+    crate::connections::sanitize_destinations(&mut settings.destinations)?;
+    let mut st = state.alerts.lock().unwrap();
+    // Discovered chats are the backend's to keep: a page that loaded before
+    // the last discovery must not wind them back.
+    let mut known = st.settings.known_chats.clone();
+    crate::connections::merge_chats(&mut known, std::mem::take(&mut settings.known_chats));
+    settings.known_chats = known;
     store(&app, &settings)?;
-    state.alerts.lock().unwrap().settings = settings;
+    st.settings = settings;
     Ok(())
+}
+
+/// Fold freshly discovered chats into the saved list and persist it.
+pub fn update_known_chats(
+    app: &AppHandle,
+    fresh: Vec<crate::connections::KnownChat>,
+) -> Result<Vec<crate::connections::KnownChat>, String> {
+    let state = app.state::<AppState>();
+    let mut st = state.alerts.lock().unwrap();
+    crate::connections::merge_chats(&mut st.settings.known_chats, fresh);
+    store(app, &st.settings)?;
+    Ok(st.settings.known_chats.clone())
 }
 
 #[tauri::command]
@@ -1158,31 +1128,6 @@ pub fn telegram_save(token: String) -> Result<(), String> {
     } else {
         crate::secrets::set(TOKEN_USER, token.trim())
     }
-}
-
-/// Save the Bluesky app password. Empty removes it. The handle is stored in
-/// the alerts settings (via `alerts_set`), not here.
-#[tauri::command]
-pub fn bluesky_save(password: String) -> Result<(), String> {
-    if password.trim().is_empty() {
-        crate::secrets::remove("bluesky-password")
-    } else {
-        crate::secrets::set("bluesky-password", password.trim())
-    }
-}
-
-/// Post a fixed test message with the saved handle + password.
-#[tauri::command]
-pub async fn bluesky_test(state: State<'_, AppState>) -> Result<String, String> {
-    let handle = state.alerts.lock().unwrap().settings.bluesky.handle.clone();
-    let pw = bluesky_password()
-        .ok_or("no Bluesky app password")?
-        .to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        post_to_bluesky(&handle, &pw, "✅ HoosierSDR can reach Bluesky.")
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1213,34 +1158,19 @@ pub async fn alerts_test(app: AppHandle, id: String) -> Result<String, String> {
             crate::library::latest_call(&c, &a.trigger.tgs)?
         };
         let f = match row {
-            Some(r) => CallFacts {
-                id: Some(r.id),
-                start: r.start,
-                tg: r.tg,
-                tg_name: r.tg_name,
-                tg_desc: None,
-                unit: r.unit,
-                unit_name: r.unit_name,
-                secs: r.secs,
-                emergency: r.emergency,
-                audio: r.audio,
-                transcript: r
-                    .transcript_edited
-                    .or(r.transcript)
-                    .or(Some("(no transcript yet)".into())),
-            },
+            Some(r) => {
+                let mut f = facts_from_row(&app, r, None);
+                if f.transcript.is_none() {
+                    f.transcript = Some("(no transcript yet)".into());
+                }
+                f
+            }
             None => CallFacts {
-                id: None,
                 start: crate::library::now(),
                 tg: a.trigger.tgs.first().copied().unwrap_or(0),
                 tg_name: "Test talkgroup".into(),
-                tg_desc: None,
-                unit: 0,
-                unit_name: None,
-                secs: 0.0,
-                emergency: false,
-                audio: None,
                 transcript: Some("test message — no calls in the library yet".into()),
+                ..Default::default()
             },
         };
         let keywords = f
@@ -1357,6 +1287,7 @@ mod tests {
             emergency: false,
             audio: None,
             transcript: Some(text.into()),
+            system: String::new(),
         }
     }
 

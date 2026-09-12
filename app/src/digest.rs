@@ -209,17 +209,38 @@ fn run_digest(app: AppHandle, r: DigestRule) -> Result<String, String> {
         .replace("{time}", &fmt_time(now))
         .replace("{transcript}", &rollup.trim());
 
-    let detail = match crate::alerts::send_text_id(&chat, message.trim()) {
-        Ok(_) => "sent".to_string(),
+    let (detail, ids) = match crate::alerts::send_text_id(&chat, message.trim()) {
+        Ok(id) => ("sent".to_string(), vec![id]),
         Err(e) => {
             log_it(&app, &r, n, false, e.clone(), summary.clone());
+            record(&app, &r, "failed", &e, &message, &chat, Vec::new());
             let _ = app.emit("digests", ());
             return Err(e);
         }
     };
-    log_it(&app, &r, n, true, detail, summary.clone());
+    log_it(&app, &r, n, true, detail.clone(), summary.clone());
+    record(&app, &r, "sent", &detail, &message, &chat, ids);
     let _ = app.emit("digests", ());
     Ok(summary)
+}
+
+/// The tripwire history row for one digest (a roll-up is about a window,
+/// not particular calls, so it carries no call links).
+fn record(app: &AppHandle, r: &DigestRule, status: &str, detail: &str, message: &str, chat: &str, ids: Vec<i64>) {
+    crate::events::record(
+        app,
+        crate::events::NewEvent {
+            source: "digest",
+            rule_id: r.id.clone(),
+            rule_name: r.name.clone(),
+            status: status.into(),
+            detail: detail.into(),
+            message: message.into(),
+            chat: chat.into(),
+            message_ids: ids,
+            ..Default::default()
+        },
+    );
 }
 
 /// The window's transmissions stitched into a rollup, grouped by talkgroup,
@@ -253,8 +274,7 @@ fn fmt_window(secs: u32) -> String {
 }
 
 fn fmt_time(epoch: i64) -> String {
-    let s = epoch.rem_euclid(86_400);
-    format!("{:02}:{:02} UTC", s / 3600, (s % 3600) / 60)
+    crate::library::local_hm(epoch)
 }
 
 fn log_it(

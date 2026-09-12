@@ -17,19 +17,24 @@ use hs_core::decoder::{ChannelDecoder, EqMode, Modulation};
 
 mod alerts;
 mod analyzers;
+mod channels;
+mod connections;
 mod conversations;
 mod devices;
 mod digest;
 mod dispatch;
 mod dual;
 mod encode;
+mod events;
 mod follow;
 mod hook;
 mod library;
+mod models;
 mod names;
 mod player;
 mod playlists;
 mod remotes;
+mod retention;
 mod rr;
 mod secrets;
 mod status;
@@ -133,6 +138,8 @@ struct AppState {
     /// names), so a remote desktop page joining mid-run can show the same
     /// controls as the local one. Cleared when the run ends.
     last_start: Mutex<Option<serde_json::Value>>,
+    /// What the call library keeps, and for how long.
+    retention: Mutex<retention::Settings>,
 }
 
 /// One live trunk-following run: a site (usually a playlist) being followed.
@@ -606,7 +613,15 @@ fn library_search(
     state: State<AppState>,
     query: library::Query,
 ) -> Result<Vec<library::CallRow>, String> {
-    let mut rows = with_db(&state, |c| library::search(c, &query))?;
+    let mut rows = with_db(&state, |c| {
+        let mut rows = library::search(c, &query)?;
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        let mut fired = events::fired_for(c, &ids);
+        for r in rows.iter_mut() {
+            r.fired = fired.remove(&r.id).unwrap_or_default();
+        }
+        Ok(rows)
+    })?;
     let sids = playlists::sids_by_system_name(&app);
     for r in rows.iter_mut() {
         r.tg_desc = upload::tg_meta(&state.catalog, sids.get(&r.system).copied(), r.tg).desc;
@@ -620,7 +635,13 @@ fn library_get(
     state: State<AppState>,
     id: i64,
 ) -> Result<Option<library::CallRow>, String> {
-    let mut row = with_db(&state, |c| library::get(c, id))?;
+    let mut row = with_db(&state, |c| {
+        let mut row = library::get(c, id)?;
+        if let Some(r) = row.as_mut() {
+            r.fired = events::fired_for(c, &[r.id]).remove(&r.id).unwrap_or_default();
+        }
+        Ok(row)
+    })?;
     if let Some(r) = row.as_mut() {
         let sid = playlists::sids_by_system_name(&app).get(&r.system).copied();
         r.tg_desc = upload::tg_meta(&state.catalog, sid, r.tg).desc;
@@ -1390,6 +1411,7 @@ fn start_follow(
                             emergency: *emergency,
                             audio: wav.clone(),
                             transcript: None,
+                            system: params.system_name.clone(),
                         },
                     );
                     alerts::on_call(
@@ -1406,6 +1428,7 @@ fn start_follow(
                             emergency: *emergency,
                             audio: wav.clone(),
                             transcript: None,
+                            system: params.system_name.clone(),
                         },
                     );
                     if let Some(h) = app.state::<AppState>().hook.lock().unwrap().as_ref() {
@@ -2269,6 +2292,8 @@ fn main() {
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
+            *state.retention.lock().unwrap() = retention::load(app.handle());
+            retention::spawn_ticker(app.handle().clone());
             let hk = hook::load_settings(app.handle());
             if hk.enabled {
                 *state.hook.lock().unwrap() = Some(hook::start(app.handle().clone(), hk));
@@ -2281,6 +2306,7 @@ fn main() {
                         upload::ensure_schema(&c);
                         dispatch::ensure_schema(&c);
                         conversations::ensure_schema(&c);
+                        events::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2348,10 +2374,11 @@ fn main() {
             alerts::alerts_test,
             alerts::alerts_log,
             alerts::telegram_save,
-            alerts::bluesky_save,
-            alerts::bluesky_test,
             alerts::ollama_models,
             alerts::ollama_capabilities,
+            connections::telegram_verify,
+            connections::telegram_discover,
+            connections::telegram_test_destination,
             conversations::conversations_get,
             conversations::conversations_set,
             conversations::conversations_state,
@@ -2386,6 +2413,17 @@ fn main() {
             dispatch::incident_get,
             dispatch::incident_delete,
             dispatch::incident_locate,
+            events::events_list,
+            events::events_stats,
+            channels::channel_activity,
+            channels::channel_sets_get,
+            channels::channel_sets_set,
+            retention::retention_get,
+            retention::retention_set,
+            retention::retention_migrate,
+            retention::retention_preview,
+            retention::retention_apply,
+            retention::retention_usage,
             hook::hook_get,
             hook::hook_configure,
             hook::hook_test,
@@ -2424,7 +2462,8 @@ fn main() {
             transcribe::transcribe_probe,
             transcribe::transcribe_configure,
             transcribe::transcribe_call,
-            transcribe::transcribe_models,
+            models::transcribe_models,
+            models::transcribe_delete,
             transcribe::transcribe_download,
             play_wav,
             ui_log,

@@ -496,54 +496,6 @@ pub struct ModelInfo {
     pub path: Option<String>,
 }
 
-/// Which model files are already on this machine, per engine.
-#[tauri::command]
-pub fn transcribe_models() -> Vec<ModelInfo> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut out = Vec::new();
-    for m in [
-        "tiny",
-        "base",
-        "small",
-        "medium",
-        "large-v3",
-        "distil-large-v3",
-        "turbo",
-    ] {
-        // faster-whisper: Hugging Face hub cache, Systran/faster-whisper-<m>
-        // (distil models live under Systran/faster-distil-whisper-*).
-        let repo = if let Some(rest) = m.strip_prefix("distil-") {
-            format!("models--Systran--faster-distil-whisper-{rest}")
-        } else if m == "turbo" {
-            "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo".to_string()
-        } else {
-            format!("models--Systran--faster-whisper-{m}")
-        };
-        let p = std::path::Path::new(&home)
-            .join(".cache/huggingface/hub")
-            .join(&repo);
-        let done = p.join("snapshots").exists();
-        out.push(ModelInfo {
-            engine: "faster-whisper".into(),
-            model: m.into(),
-            downloaded: done,
-            path: done.then(|| p.to_string_lossy().into_owned()),
-        });
-        // openai-whisper: ~/.cache/whisper/<m>.pt
-        let p = std::path::Path::new(&home)
-            .join(".cache/whisper")
-            .join(format!("{m}.pt"));
-        let done = p.exists();
-        out.push(ModelInfo {
-            engine: "openai-whisper".into(),
-            model: m.into(),
-            downloaded: done,
-            path: done.then(|| p.to_string_lossy().into_owned()),
-        });
-    }
-    out
-}
-
 /// Download (and load once) a model in the background so the first real
 /// transcription doesn't stall. Emits `transcribe_download` events:
 /// {engine, model, state: "started"|"done"|"error", detail}.

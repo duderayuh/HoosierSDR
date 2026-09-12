@@ -504,6 +504,12 @@ td.act button.on { color: var(--enc); border-color: var(--enc); }
 .badge { display: inline-block; font-family: var(--mono); font-size: 10.5px; padding: 2px 7px; border-radius: 999px; }
 .badge.clear { color: var(--clear); background: color-mix(in srgb, var(--clear) 15%, transparent); }
 .badge.enc { color: var(--enc); background: color-mix(in srgb, var(--enc) 15%, transparent); }
+/* tripwire badges on calls: sent, failed, or looked-and-stayed-quiet */
+.twbox { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.badge.tw { color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.badge.tw.failed, .badge.tw.held { color: var(--enc); background: color-mix(in srgb, var(--enc) 15%, transparent); }
+.badge.tw.quiet, .badge.tw.skipped { color: var(--ink-faint); background: transparent; border: 1px dashed color-mix(in srgb, var(--ink-faint) 45%, transparent); }
+.twlist { display: grid; gap: 4px; margin: 2px 0 8px; }
 .empty { padding: 30px 16px; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
 .empty .big { display: block; font-family: var(--display); font-size: 15px; color: var(--ink-dim); margin-bottom: 3px; }
 .empty.small { padding: 14px 8px; }
@@ -971,3 +977,60 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .lockbar .chip.lab { background: transparent; border-style: dashed; cursor: default; opacity: .8; }
 .list .row input.plname { font: inherit; font-weight: 600; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; color: inherit; min-width: 12ch; }
 .list .row input.plname:hover, .list .row input.plname:focus { border-color: var(--line, #8884); outline: none; }
+
+/* ---------- Connections: bot, discovered chats, destinations ---------- */
+.cxsteps { margin: 0 0 10px; padding-left: 1.3em; color: var(--ink-dim); font-size: 12.5px; line-height: 1.55; }
+.cxsteps li { margin: 2px 0; }
+.cxbot { margin-top: 8px; font-size: 13px; }
+.cxbot .help { margin-top: 4px; }
+.cxchat { border-bottom: 1px solid var(--line); padding: 2px 0; }
+.cxchat:last-child { border-bottom: 0; }
+.cxrow.sub { padding-left: 14px; }
+.cxrow .badge { margin-left: 4px; }
+.cxdest .cxname { width: auto; min-width: 12em; max-width: 100%; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 2px 4px; margin-left: -5px; }
+.cxdest .cxname:hover, .cxdest .cxname:focus { border-color: var(--line); background: var(--panel2, transparent); }
+.destother { display: inline-flex; gap: 8px; margin-top: 4px; }
+.destother input { min-width: 12em; }
+
+/* ---------- talkgroup picker ---------- */
+.pk { display: flex; flex-direction: column; gap: 8px; min-height: 60vh; }
+.pkhead { display: flex; align-items: center; gap: 8px; }
+.pk input[data-q] { width: 100%; }
+.pksel { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12px; min-height: 22px; }
+.pksel .chip { cursor: pointer; }
+.pklist { overflow: auto; max-height: 52vh; border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; }
+.pksec { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: 10px 4px 4px; }
+.pkgroup { border-bottom: 1px solid var(--line); }
+.pkgroup:last-child { border-bottom: 0; }
+.pkgh { display: flex; align-items: center; gap: 8px; padding: 6px 4px; cursor: pointer; }
+.pkgh.flat { cursor: default; }
+.pkgh .car { width: 1em; color: var(--ink-faint); }
+.pkgh .faint { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pkgb { padding: 0 0 6px 18px; }
+.pkrow { display: grid; grid-template-columns: auto minmax(7em, max-content) 1fr auto auto; gap: 10px; align-items: center; padding: 3px 4px; border-radius: 6px; cursor: pointer; font-size: 12.5px; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0; }
+.pkrow:hover { background: color-mix(in srgb, var(--signal) 7%, transparent); }
+.pkrow.on { background: color-mix(in srgb, var(--signal) 12%, transparent); }
+.pkrow input { width: auto; margin: 0; }
+.pkrow .d { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pkrow .n { color: var(--ink-faint); font-size: 11px; }
+.pkrow .a { color: var(--signal); font-size: 11px; white-space: nowrap; }
+.pkheard { color: var(--signal); }
+.pknames { font-size: 11.5px; color: var(--ink-faint); margin: -4px 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) { .pkrow { grid-template-columns: auto 1fr auto; } .pkrow .d, .pkrow .n { display: none; } }
+.cxfoundh { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: 10px 0 2px; }
+.cxfound { align-items: center; }
+
+/* ---------- retention + disk use ---------- */
+.rtnotice { border: 1px solid color-mix(in srgb, var(--amber, #f5b544) 55%, transparent); background: color-mix(in srgb, var(--amber, #f5b544) 10%, transparent); color: var(--ink); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 8px; }
+.rtrows { display: grid; gap: 6px; margin: 4px 0; }
+.rtnum { width: 4.5em !important; display: inline-block; padding: 2px 6px !important; text-align: right; }
+.rtrule .rtname { width: auto; min-width: 10em; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 2px 4px; }
+.rtrule .rtname:hover, .rtrule .rtname:focus { border-color: var(--line); }
+.rtrulefields { gap: 6px; font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
+.rtusage { margin-top: 8px; font-size: 12.5px; }
+.rtstat { margin: 2px 0; }
+.rtline { display: grid; grid-template-columns: minmax(6em, 11em) 1fr auto; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
+.rtline .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rtline .v { color: var(--ink-faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.rtbar { display: block; height: 7px; border-radius: 4px; background: color-mix(in srgb, var(--ink-faint) 15%, transparent); overflow: hidden; }
+.rtbar span { display: block; height: 100%; background: var(--signal); border-radius: 4px; }

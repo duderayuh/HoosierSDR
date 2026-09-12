@@ -97,7 +97,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 // Pages that load something when shown. Playlists, Aliases, Alerts,
 // Analyzers, Devices and Discovery were top-level tabs once; their code
 // still refreshes only while on screen, via settingsPageVisible().
-const PAGE_HOOKS = { discovery: "discoveryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
+const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", library: "libraryOnShow", alerts: "alertsOnShow", analyzers: "analyzersOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
 let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
@@ -117,7 +117,7 @@ setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
   const page = location.hash.slice(1);
-  if (["discovery", "playlists", "aliases", "alerts", "analyzers", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
+  if (["discovery", "playlists", "aliases", "connections", "alerts", "analyzers", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
   if (["library", "conversations", "dispatch"].includes(page)) showView(page);
 }, 0);
 
@@ -1061,6 +1061,22 @@ function alertFired(p) {
   logEvent(`ALERT ${p.name}: ${p.message.split("\n")[0]}`, "alarm");
   uiToast(`🚨 ${p.name} — ${p.message.split("\n").slice(0, 2).join(" · ")}`);
   if (p.tone) tone("emergency");
+  markFired(p.call, { rule_name: p.name, status: "sent", source: "alert", at: Math.floor(Date.now() / 1000) });
+}
+/* ---------- tripwire badges: which rules fired about a call ---------- */
+// `fired` rows come from the tripwire history (Rust `events::Fired`). Sent is
+// the signal colour, failed red, quiet (looked, stayed quiet) faint.
+function firedBadges(list) {
+  return (list || []).map((f) => `<span class="badge tw ${esc(f.status)}" title="${esc(`${f.rule_name} · ${f.status === "quiet" ? "looked, stayed quiet" : f.status}${f.at ? " · " + new Date(f.at * 1000).toLocaleTimeString("en-US", { hour12: false }) : ""}`)}">⚡ ${esc(f.rule_name)}</span>`).join("");
+}
+// A live call just fired a rule: badge its row in the Monitor history.
+function markFired(id, f) {
+  if (id == null) return;
+  const h = history.find((x) => x.id === id); if (!h) return;
+  const cell = h.el.querySelector("td.tg"); if (!cell) return;
+  let box = cell.querySelector(".twbox"); if (!box) { box = document.createElement("span"); box.className = "twbox"; cell.appendChild(box); }
+  box.insertAdjacentHTML("beforeend", firedBadges([f]));
+  if (typeof window.libMarkFired === "function") window.libMarkFired(id, f);
 }
 
 /* ---------- constellation (control channel symbols) ---------- */
@@ -1766,13 +1782,13 @@ if (TAURI) {
   /* ---------- alerts: editor, Telegram, Ollama, log ---------- */
   listen("alert", (e) => alertFired(e.payload));
   listen("alert_error", (e) => { logEvent(`alert failed: ${e.payload}`, "warn"); uiToast(`Alert failed: ${e.payload}`, "err"); });
-  let akSettings = null, akSel = null;
+  let akSettings = null, akSel = null, akView = null;
   const akKindLabel = { keywords: "keywords", emergency: "emergency", talkgroup: "any call", unit: "radio" };
   function akRenderList() {
     const list = akSettings ? akSettings.alerts : [];
     $("akEmpty").style.display = list.length ? "none" : "";
     $("akMeta").textContent = list.length ? `${list.filter((a) => a.enabled).length} of ${list.length} enabled` : "";
-    $("akList").innerHTML = list.map((a) => `<div class="row ${akSel === a.id ? "on" : ""}" data-ak="${esc(a.id)}"><span class="grow"><b>${esc(a.name)}</b> ${a.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>${akKindLabel[a.trigger.kind] || a.trigger.kind}${a.trigger.keywords.length ? ": " + esc(a.trigger.keywords.slice(0, 4).join(", ")) + (a.trigger.keywords.length > 4 ? "…" : "") : ""} · TG ${a.trigger.tgs.length ? a.trigger.tgs.join(",") : "any"}${a.telegram ? " · Telegram" : ""}${a.bluesky ? " · Bluesky" : ""}${a.ai_gate ? " · AI" : ""}</small></span><label class="check" style="margin:0" title="enabled"><input type="checkbox" data-aken="${esc(a.id)}" ${a.enabled ? "checked" : ""}></label></div>`).join("");
+    $("akList").innerHTML = list.map((a) => `<div class="row ${akSel === a.id ? "on" : ""}" data-ak="${esc(a.id)}"><span class="grow"><b>${esc(a.name)}</b> ${a.enabled ? "" : '<span class="badge enc">off</span>'}<br><small>${akKindLabel[a.trigger.kind] || a.trigger.kind}${a.trigger.keywords.length ? ": " + esc(a.trigger.keywords.slice(0, 4).join(", ")) + (a.trigger.keywords.length > 4 ? "…" : "") : ""} · TG ${a.trigger.tgs.length ? a.trigger.tgs.join(",") : "any"}${a.telegram ? " · Telegram" : ""}${a.ai_gate ? " · AI" : ""}</small></span><label class="check" style="margin:0" title="enabled"><input type="checkbox" data-aken="${esc(a.id)}" ${a.enabled ? "checked" : ""}></label></div>`).join("");
     $("akList").querySelectorAll(".row[data-ak]").forEach((r) => r.onclick = (e) => { if (e.target.closest("input")) return; akEdit(r.dataset.ak); });
     $("akList").querySelectorAll("input[data-aken]").forEach((c) => c.onchange = async () => { const a = akSettings.alerts.find((x) => x.id === c.dataset.aken); a.enabled = c.checked; await akPersist(); });
   }
@@ -1780,9 +1796,9 @@ if (TAURI) {
     const a = akSettings.alerts.find((x) => x.id === id); if (!a) return;
     akSel = id; akRenderList(); $("akEditor").style.display = "";
     $("akName").value = a.name; $("akKind").value = a.trigger.kind; $("akEnabled").checked = a.enabled;
-    $("akTgs").value = a.trigger.tgs.join(", "); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
+    $("akTgs").value = a.trigger.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("akTgs"); $("akKeywords").value = a.trigger.keywords.join("\n"); $("akUnits").value = a.trigger.units.join(", ");
     $("akMessage").value = a.message; $("akCooldown").value = a.cooldown_secs; $("akPrev").value = a.combine_prev; $("akWindow").value = a.combine_window_secs;
-    $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akTopic").value = a.topic_id || ""; $("akBluesky").checked = a.bluesky; $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
+    $("akTelegram").checked = a.telegram; $("akChat").value = a.chat_id || ""; $("akTopic").value = a.topic_id || ""; if (window.destBind) destBind("akDest", "akChat", "akTopic"); $("akAudio").checked = a.attach_audio; $("akTone").checked = a.tone; $("akAi").checked = a.ai_gate; $("akAiPrompt").value = a.ai_prompt; $("akAiThink").checked = !!a.ai_think; olThinkUi();
     $("akEdMeta").textContent = a.trigger.kind === "keywords" ? "fires when the transcript arrives" : "fires when the call completes";
     akKindUi();
   }
@@ -1794,13 +1810,13 @@ if (TAURI) {
     a.name = $("akName").value.trim(); a.enabled = $("akEnabled").checked;
     a.trigger = { kind: $("akKind").value, tgs: nums($("akTgs").value), units: nums($("akUnits").value), keywords: $("akKeywords").value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) };
     a.message = $("akMessage").value; a.cooldown_secs = parseInt($("akCooldown").value, 10) || 0; a.combine_prev = parseInt($("akPrev").value, 10) || 0; a.combine_window_secs = parseInt($("akWindow").value, 10) || 120;
-    a.telegram = $("akTelegram").checked; a.chat_id = $("akChat").value.trim(); a.topic_id = $("akTopic").value.trim(); a.bluesky = $("akBluesky").checked; a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
+    a.telegram = $("akTelegram").checked; a.chat_id = $("akChat").value.trim(); a.topic_id = $("akTopic").value.trim(); a.attach_audio = $("akAudio").checked; a.tone = $("akTone").checked; a.ai_gate = $("akAi").checked; a.ai_prompt = $("akAiPrompt").value; a.ai_think = $("akAiThink").checked;
     return a;
   }
+  // The Telegram defaults, destinations and discovered chats live in the
+  // same settings object; the Connections page (connections.js) edits them
+  // through alertsSettings() / alertsPersist() so there is one copy.
   async function akPersist() {
-    akSettings.telegram.chat_id = $("tgChat").value.trim(); akSettings.telegram.topic_id = $("tgTopic").value.trim();
-    akSettings.telegram.announce = $("tgAnnounce").checked; akSettings.telegram.announce_chat = $("tgAnnounceChat").value.trim();
-    akSettings.bluesky = { handle: $("bsHandle").value.trim() };
     akSettings.ollama = { url: $("olUrl").value.trim() || "http://localhost:11434", model: $("olModel").value, timeout_secs: parseInt($("olTimeout").value, 10) || 60, fail_open: $("olFailOpen").checked };
     try { await invoke("alerts_set", { settings: akSettings }); const v = await invoke("alerts_get"); akSettings = v.settings; akRenderList(); return true; } catch (e) { log(`alerts_set failed: ${e}`); uiToast(`Could not save alerts: ${e}`, "err"); return false; }
   }
@@ -1812,16 +1828,14 @@ if (TAURI) {
   $("akSave").onclick = async () => { const a = akRead(); if (!a) return; if (await akPersist()) { uiToast("Alert saved"); akEdit(akSel); if (a.trigger.kind === "keywords" && !$("trEnabled").checked) uiToast("Keyword alerts need transcription — enable it in Settings → Transcription", "err"); } };
   $("akDelete").onclick = async () => { if (!(await uiConfirm("Delete this alert?", "Delete"))) return; akSettings.alerts = akSettings.alerts.filter((x) => x.id !== akSel); akSel = null; $("akEditor").style.display = "none"; await akPersist(); };
   $("akTest").onclick = async () => { if (!akRead()) return; if (!(await akPersist())) return; try { uiToast(await invoke("alerts_test", { id: akSel })); setTimeout(akLogRefresh, 4000); setTimeout(akLogRefresh, 15000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
-  $("akPickTg").onclick = () => { const box = $("akTgPick"); if (box.style.display === "none") { const cur = new Set(nums($("akTgs").value)); box.innerHTML = alRows.length ? alRows.slice(0, 1500).map((r) => `<span class="chip ${cur.has(r.id) ? "on" : ""}" data-tg="${r.id}" title="${esc(r.description)}">${r.id} ${esc(r.alias)}</span>`).join("") : '<span class="faint">load a catalog first</span>'; box.querySelectorAll(".chip").forEach((c) => c.onclick = () => { const set = new Set(nums($("akTgs").value)); set.has(+c.dataset.tg) ? set.delete(+c.dataset.tg) : set.add(+c.dataset.tg); $("akTgs").value = [...set].sort((a, b) => a - b).join(", "); c.classList.toggle("on"); }); box.style.display = ""; } else box.style.display = "none"; };
   async function akLogRefresh() {
-    try { const rows = await invoke("alerts_log"); $("akLogMeta").textContent = rows.length ? `${rows.length} recent` : "nothing fired yet"; $("akLog").innerHTML = rows.map((r) => `<tr><td class="mono">${new Date(r.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(r.alert)}</td><td>${esc(r.tg_name)} <span class="faint mono">${r.tg}</span></td><td><span class="badge ${r.ok ? "clear" : "enc"}">${r.ok ? "sent" : "failed"}</span> <small>${esc(r.detail)}</small></td></tr>`).join(""); } catch (e) { log(`alerts_log: ${e}`); }
+    try { const rows = await invoke("alerts_log"); $("akLogMeta").textContent = rows.length ? `${rows.length} recent` : "nothing fired yet"; $("akLog").innerHTML = rows.map((r) => `<tr><td class="mono">${new Date(r.at * 1000).toLocaleTimeString("en-US", { hour12: false })}</td><td>${esc(r.alert)}</td><td>${esc(r.tg_name)} <span class="faint mono">${r.tg}</span></td><td>${r.status === "quiet" ? '<span class="badge">quiet</span>' : r.status === "held" ? '<span class="badge enc">held</span>' : `<span class="badge ${r.ok ? "clear" : "enc"}">${r.ok ? "sent" : "failed"}</span>`} <small>${esc(r.detail)}</small></td></tr>`).join(""); } catch (e) { log(`alerts_log: ${e}`); }
   }
   $("akLogRefresh").onclick = akLogRefresh;
   async function akRefresh() {
     try {
-      const v = await invoke("alerts_get"); akSettings = v.settings;
-      $("tgChat").value = v.settings.telegram.chat_id; $("tgTopic").value = v.settings.telegram.topic_id || ""; $("tgAnnounce").checked = !!v.settings.telegram.announce; $("tgAnnounceChat").value = v.settings.telegram.announce_chat || ""; $("tgToken").placeholder = v.has_token ? "saved on this Mac" : "123456:ABC-DEF…"; $("tgMeta2").textContent = v.has_token ? (v.settings.telegram.chat_id ? "configured" : "token saved — add a chat id") : "no token";
-      $("bsHandle").value = v.settings.bluesky.handle; $("bsPassword").placeholder = v.has_bluesky ? "saved on this Mac" : "xxxx-xxxx-xxxx-xxxx"; $("bsMeta").textContent = v.has_bluesky ? (v.settings.bluesky.handle ? "configured" : "password saved — add a handle") : "no app password";
+      const v = await invoke("alerts_get"); akSettings = v.settings; akView = v;
+      if (typeof window.connectionsRender === "function") window.connectionsRender();
       $("olUrl").value = v.settings.ollama.url; $("olTimeout").value = v.settings.ollama.timeout_secs; $("olFailOpen").checked = v.settings.ollama.fail_open;
       if (v.settings.ollama.model) $("olModel").innerHTML = `<option value="${esc(v.settings.ollama.model)}">${esc(v.settings.ollama.model)}</option>`;
       akRenderList(); akLogRefresh(); olRefresh(true);
@@ -1857,16 +1871,10 @@ if (TAURI) {
   $("olRefresh").onclick = () => olRefresh(false);
   ["olModel", "olTimeout", "olFailOpen", "olUrl"].forEach((id) => $(id).onchange = akPersist);
   $("olModel").addEventListener("change", () => olThinkUi());
-  $("tgSave").onclick = async () => { try { if ($("tgToken").value.trim()) { await invoke("telegram_save", { token: $("tgToken").value.trim() }); $("tgToken").value = ""; } if (await akPersist()) { uiToast("Telegram settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
-  $("bsSave").onclick = async () => { try { if ($("bsPassword").value.trim()) { await invoke("bluesky_save", { password: $("bsPassword").value.trim() }); $("bsPassword").value = ""; } if (await akPersist()) { uiToast("Bluesky settings saved"); akRefresh(); } } catch (e) { uiToast(`${e}`, "err"); } };
-  $("bsTest").onclick = async () => { try { await $("bsSave").onclick(); uiToast(await invoke("bluesky_test")); } catch (e) { uiToast(`Bluesky test failed: ${e}`, "err"); } };
-  $("tgTest").onclick = async () => {
-    await $("tgSave").onclick();
-    const id = `t${Date.now()}`;
-    akSettings.alerts.push({ id, name: "Telegram test", enabled: true, trigger: { kind: "talkgroup", keywords: [], tgs: [], units: [] }, message: "✅ HoosierSDR can reach this chat. Last call: {tgname} (TG {tg}) · {time}", cooldown_secs: 0, telegram: true, tone: false, attach_audio: true, combine_prev: 0, combine_window_secs: 0, ai_gate: false, ai_prompt: "" });
-    try { await invoke("alerts_set", { settings: akSettings }); uiToast(await invoke("alerts_test", { id })); } catch (e) { uiToast(`${e}`, "err"); }
-    akSettings.alerts = akSettings.alerts.filter((a) => a.id !== id); await invoke("alerts_set", { settings: akSettings }).catch(() => {}); setTimeout(akLogRefresh, 5000);
-  };
+  window.alertsSettings = () => akSettings;
+  window.alertsView = () => akView;
+  window.alertsPersist = akPersist;
+  window.alertsReload = akRefresh;
   window.alertsOnShow = () => { if (!akSettings) akRefresh(); else akLogRefresh(); cvRefresh(); cvStateRefresh(); };
   akRefresh();
 
@@ -1885,9 +1893,9 @@ if (TAURI) {
   function cvEdit(id) {
     const r = cvView.settings.rules.find((x) => x.id === id); if (!r) return;
     cvSel = id; cvRenderList(); $("cvEditor").style.display = "";
-    $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
+    $("cvName").value = r.name; $("cvTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("cvTgs"); $("cvEnabled").checked = r.enabled; $("cvFixed").value = r.fixed_units.join(", "); $("cvLearn").checked = r.learn_fixed;
     $("cvGap").value = r.end_gap_secs; $("cvReply").value = r.reply_gap_secs ?? 45; $("cvLate").value = r.late_window_secs; $("cvMax").value = r.max_secs; $("cvPrompt").value = r.summary_prompt; $("cvMessage").value = r.message;
-    $("cvChat").value = r.chat_id; $("cvMin").value = r.min_calls; $("cvAudio").checked = r.attach_audio; $("cvNoTr").checked = r.send_without_transcript;
+    $("cvChat").value = r.chat_id; if (window.destBind) destBind("cvDest", "cvChat"); $("cvMin").value = r.min_calls; $("cvAudio").checked = r.attach_audio; $("cvNoTr").checked = r.send_without_transcript;
     const proposed = Object.entries(cvView.proposed_fixed || {}).filter(([k]) => k.startsWith(id + ":")).flatMap(([k, units]) => units.map((u) => ({ tg: k.split(":")[1], u })));
     $("cvProposed").innerHTML = proposed.length ? "learned fixed IDs: " + proposed.map((p) => `<button class="btn ghost sm" data-cvadopt="${p.u}" title="TG ${p.tg}">${p.u} ✔ adopt</button>`).join(" ") : "";
     $("cvProposed").querySelectorAll("[data-cvadopt]").forEach((b) => b.onclick = () => { const set = new Set(nums($("cvFixed").value)); set.add(+b.dataset.cvadopt); $("cvFixed").value = [...set].join(", "); });
@@ -1920,7 +1928,7 @@ if (TAURI) {
   listen("conversations", () => { if (settingsPageVisible("alerts")) cvStateRefresh(); });
   setInterval(() => { if (settingsPageVisible("alerts")) cvStateRefresh(); }, 10000);
   $("cvNew").onclick = () => { const id = `c${Date.now()}`; cvView.settings.rules.push({ ...CV_DEFAULT, id, name: "Hospitals" }); cvRenderList(); cvEdit(id); };
-  $("cvSave").onclick = async () => { if (!cvRead()) return; if (await cvPersist()) { uiToast("Conversation rule saved"); cvEdit(cvSel); if (!$("trEnabled").checked) uiToast("Summaries need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model above for the summaries", "err"); } };
+  $("cvSave").onclick = async () => { if (!cvRead()) return; if (await cvPersist()) { uiToast("Conversation rule saved"); cvEdit(cvSel); if (!$("trEnabled").checked) uiToast("Summaries need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections for the summaries", "err"); } };
   $("cvDelete").onclick = async () => { if (!(await uiConfirm("Delete this conversation rule?", "Delete"))) return; cvView.settings.rules = cvView.settings.rules.filter((x) => x.id !== cvSel); cvSel = null; $("cvEditor").style.display = "none"; await cvPersist(); };
   $("cvTest").onclick = async () => { if (!cvRead()) return; if (!(await cvPersist())) return; try { uiToast(await invoke("conversation_test", { id: cvSel })); setTimeout(cvStateRefresh, 5000); setTimeout(cvStateRefresh, 30000); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
   cvRefresh();
@@ -1940,9 +1948,9 @@ if (TAURI) {
   function dgEdit(id) {
     const r = dgView.rules.find((x) => x.id === id); if (!r) return;
     dgSel = id; dgRenderList(); $("dgEditor").style.display = "";
-    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); $("dgEnabled").checked = r.enabled;
+    $("dgName").value = r.name; $("dgTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("dgTgs"); $("dgEnabled").checked = r.enabled;
     $("dgInterval").value = Math.round(r.interval_secs / 60); $("dgWindow").value = Math.round(r.window_secs / 60);
-    $("dgPrompt").value = r.prompt; $("dgMessage").value = r.message; $("dgChat").value = r.chat_id;
+    $("dgPrompt").value = r.prompt; $("dgMessage").value = r.message; $("dgChat").value = r.chat_id; if (window.destBind) destBind("dgDest", "dgChat");
     $("dgEdMeta").textContent = `${r.tgs.length} talkgroups`;
   }
   function dgRead() {
@@ -1970,7 +1978,7 @@ if (TAURI) {
   listen("digests", () => { if (settingsPageVisible("alerts")) dgLogRefresh(); });
   setInterval(() => { if (settingsPageVisible("alerts")) dgLogRefresh(); }, 15000);
   $("dgNew").onclick = () => { if (!dgView) return; const id = `d${Date.now()}`; dgView.rules.push({ ...DG_DEFAULT, id, name: "Digest" }); dgRenderList(); dgEdit(id); };
-  $("dgSave").onclick = async () => { if (!dgRead()) return; if (await dgPersist()) { uiToast("Digest saved"); dgEdit(dgSel); if (!$("trEnabled").checked) uiToast("Digests need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model above for the summaries", "err"); } };
+  $("dgSave").onclick = async () => { if (!dgRead()) return; if (await dgPersist()) { uiToast("Digest saved"); dgEdit(dgSel); if (!$("trEnabled").checked) uiToast("Digests need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections for the summaries", "err"); } };
   $("dgDelete").onclick = async () => { if (!(await uiConfirm("Delete this digest?", "Delete"))) return; dgView.rules = dgView.rules.filter((x) => x.id !== dgSel); dgSel = null; $("dgEditor").style.display = "none"; await dgPersist(); };
   $("dgTest").onclick = async () => { if (!dgRead()) return; if (!(await dgPersist())) return; try { uiToast(await invoke("digest_test", { id: dgSel })); setTimeout(dgLogRefresh, 3000); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
   dgRefresh(); dgLogRefresh();
@@ -2003,11 +2011,11 @@ if (TAURI) {
   function azEdit(id) {
     const r = azView.rules.find((x) => x.id === id); if (!r) return;
     azSel = id; azRenderList(); $("azEditor").style.display = "";
-    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); $("azEnabled").checked = r.enabled;
+    $("azName").value = r.name; $("azTgs").value = r.tgs.join(", "); if (window.pickerRefresh) pickerRefresh("azTgs"); $("azEnabled").checked = r.enabled;
     $("azKeywords").value = r.keywords.join("\n"); $("azInstructions").value = r.instructions;
-    $("azEngine").value = r.engine || "ollama"; $("azThink").checked = !!r.think; if (typeof olThinkUi === "function") olThinkUi(); $("azTelegram").checked = r.telegram !== false; $("azBluesky").checked = !!r.bluesky;
+    $("azEngine").value = r.engine || "ollama"; $("azThink").checked = !!r.think; if (typeof olThinkUi === "function") olThinkUi(); $("azTelegram").checked = r.telegram !== false;
     $("azMatch").value = r.conditions.length ? r.match_mode : "";
-    $("azMessage").value = r.message; $("azChat").value = r.chat_id; $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
+    $("azMessage").value = r.message; $("azChat").value = r.chat_id; if (window.destBind) destBind("azDest", "azChat"); $("azCooldown").value = r.cooldown_secs; $("azAudio").checked = r.attach_audio;
     azFieldsBuf = r.fields.map((f) => ({ ...f })); azCondsBuf = r.conditions.map((c) => ({ ...c }));
     azRenderFields(); azRenderConds();
     $("azEdMeta").textContent = `${r.fields.length} fields · ${r.conditions.length} conditions`;
@@ -2017,7 +2025,7 @@ if (TAURI) {
     azSyncBuffers();
     r.name = $("azName").value.trim(); r.tgs = nums($("azTgs").value); r.enabled = $("azEnabled").checked;
     r.keywords = azKw($("azKeywords").value); r.instructions = $("azInstructions").value;
-    r.engine = $("azEngine").value; r.think = $("azThink").checked; r.telegram = $("azTelegram").checked; r.bluesky = $("azBluesky").checked;
+    r.engine = $("azEngine").value; r.think = $("azThink").checked; r.telegram = $("azTelegram").checked;
     r.fields = azFieldsBuf.filter((f) => f.key);
     const mm = $("azMatch").value;
     r.conditions = mm ? azCondsBuf.filter((c) => c.field) : [];
@@ -2043,8 +2051,8 @@ if (TAURI) {
   }
   $("azFieldAdd").onclick = () => { azSyncBuffers(); azFieldsBuf.push({ key: "", kind: "string", desc: "" }); azRenderFields(); };
   $("azCondAdd").onclick = () => { if (!$("azMatch").value) $("azMatch").value = "all"; azSyncBuffers(); azCondsBuf.push({ field: "", op: "==", value: "" }); azRenderConds(); };
-  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", think: false, tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, bluesky: false, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
-  $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
+  $("azNew").onclick = () => { if (!azView) return; const id = `z${Date.now()}`; azView.rules.push({ id, name: "New analyzer", enabled: true, engine: "ollama", think: false, tgs: [], keywords: [], instructions: "", fields: [], match_mode: "all", conditions: [], message: "🔎 {name}\n{tgname} (TG {tg}) · {time}\n{transcript}", chat_id: "", telegram: true, attach_audio: false, cooldown_secs: 120 }); azRenderList(); azEdit(id); };
+  $("azSave").onclick = async () => { if (!azRead()) return; if (await azPersist()) { uiToast("Analyzer saved"); azEdit(azSel); if (!$("trEnabled").checked) uiToast("Analyzers need transcription — enable it in Settings → Transcription", "err"); if (!$("olModel").value) uiToast("Pick a local model in Settings → Connections", "err"); } };
   $("azDelete").onclick = async () => { if (!(await uiConfirm("Delete this analyzer?", "Delete"))) return; azView.rules = azView.rules.filter((x) => x.id !== azSel); azSel = null; $("azEditor").style.display = "none"; await azPersist(); };
   $("azTest").onclick = async () => { if (!azRead()) return; if (!(await azPersist())) return; uiToast("Running the analyzer on a recent call…"); try { const out = await invoke("analyzer_test", { id: azSel }); await uiConfirm(out, "OK"); setTimeout(azLogRefresh, 500); } catch (e) { uiToast(`Test failed: ${e}`, "err"); } };
   $("azLogRefresh").onclick = azLogRefresh;
@@ -2072,7 +2080,7 @@ if (TAURI) {
       <p class="msg" style="margin:8px 0 2px"><b>${esc(t.name || "Untitled template")}</b>${t.author ? ` <small class="faint">by ${esc(t.author)}</small>` : ""}</p>
       ${t.description ? `<p class="help" style="white-space:pre-wrap">${esc(t.description)}</p>` : ""}
       <div class="list" style="margin:10px 0;max-height:36vh">${list}</div>
-      <p class="help">These arrive <b>disabled</b>, with no Telegram chat and Bluesky off. Read each prompt before enabling it — a prompt decides what gets extracted and sent.</p>
+      <p class="help">These arrive <b>disabled</b>, with no Telegram chat. Read each prompt before enabling it — a prompt decides what gets extracted and sent.</p>
       <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Add ${t.rules.length} analyzer${t.rules.length === 1 ? "" : "s"}</button></div>`, { wide: true });
     rv.querySelector("[data-no]").onclick = rv.close;
     rv.querySelector("[data-yes]").onclick = async () => {
@@ -2085,7 +2093,7 @@ if (TAURI) {
   $("azImport").onclick = () => {
     if (!azView) return;
     const m = uiModal(`<div class="eyebrow">Import analyzer template</div>
-      <p class="help">A template is a <span class="mono">.json</span> file exported from another HoosierSDR. It is checked in the app before anything is added: sizes and field names are limited, hidden characters are stripped, and every imported analyzer is quarantined (disabled, no chat, no Bluesky).</p>
+      <p class="help">A template is a <span class="mono">.json</span> file exported from another HoosierSDR. It is checked in the app before anything is added: sizes and field names are limited, hidden characters are stripped, and every imported analyzer is quarantined (disabled, no chat).</p>
       <div class="inline" style="margin:10px 0"><button class="btn ghost" data-pick>Choose file…</button><span class="help" data-fname></span></div>
       <label class="field"><span class="lab">or paste the template JSON</span><textarea data-paste style="min-height:120px" spellcheck="false"></textarea></label>
       <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Review…</button></div>`, { wide: true });
@@ -2108,7 +2116,7 @@ if (TAURI) {
       <label class="field"><span class="lab">Description <span class="mono faint">optional · what it watches for and which model it was tuned on</span></span><textarea data-xdesc style="min-height:56px"></textarea></label>
       <div class="lab">Analyzers to include</div><div class="list" style="max-height:30vh;margin-bottom:8px">${rows}</div>
       <label class="field"><span class="lab">Save to</span><input data-xpath type="text" spellcheck="false"></label>
-      <p class="help">Your Telegram chat id, the enabled flag and Bluesky are left out of the file. Prompts and messages are included as written.</p>
+      <p class="help">Your Telegram chat id and the enabled flag are left out of the file. Prompts and messages are included as written.</p>
       <div class="xport" style="justify-content:flex-end;margin:12px 0 0"><button class="btn ghost" data-no>Cancel</button><button class="btn ghost" data-copy>Copy JSON</button><button class="btn primary" data-save>Save file</button></div>`, { wide: true });
     const nameIn = m.querySelector("[data-xname]"), pathIn = m.querySelector("[data-xpath]");
     const syncPath = () => { if (!pathIn.dataset.touched) pathIn.value = `~/Downloads/${azSlug(nameIn.value)}.hoosier-analyzers.json`; };
@@ -2332,7 +2340,7 @@ if (TAURI) {
     // every header sat one column left of its data.
     return `<tr data-id="${r.id}" class="${libSel === r.id ? "sel" : ""}"><td><input type="checkbox" data-sel="${r.id}" ${cart.has(r.id) ? "checked" : ""}></td>` +
       `<td class="time">${esc(fmtT(r.start))}</td>` +
-      `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}</td>` +
+      `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}${(r.fired || []).length ? `<span class="twbox">${firedBadges(r.fired)}</span>` : ""}</td>` +
       `<td class="desc">${esc(r.tg_desc || "")}</td>` +
       `<td class="src">${r.unit_name ? `${esc(r.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : (r.unit ? `UID ${r.unit}` : "—")}</td><td class="len">${r.secs.toFixed(1)} s</td>` +
       `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
@@ -2394,6 +2402,7 @@ if (TAURI) {
       $("detBody").innerHTML = `<div class="det">
         <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        ${(r.fired || []).length ? `<div class="k">Tripwires</div><div class="twlist">${r.fired.map((f) => `<div>${firedBadges([f])} <span class="faint">${esc(f.status === "quiet" ? "looked, stayed quiet" : f.status)} · ${esc(fmtT(f.at))}</span></div>`).join("")}</div>` : ""}
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>
         <div class="machine">${esc(r.transcript || "—")}</div>
@@ -2413,6 +2422,12 @@ if (TAURI) {
     } catch (e) { alert(e); }
   }
   window.libRefreshRow = (id) => libSearchRefreshRow(id);
+  // A rule fired about a call on screen: badge it without a reload.
+  window.libMarkFired = (id, f) => {
+    const r = libRows.find((x) => x.id === id); if (!r) return;
+    r.fired = [f, ...(r.fired || []).filter((x) => x.rule_name !== f.rule_name)];
+    const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.outerHTML = libRowHtml(r); wireLibRows(); }
+  };
   async function libSearchRefreshRow(id) {
     const r = await invoke("library_get", { id }); const i = libRows.findIndex((x) => x.id === id);
     if (r && i >= 0) { libRows[i] = r; const tr = $("libBody").querySelector(`tr[data-id="${id}"]`); if (tr) { tr.outerHTML = libRowHtml(r); wireLibRows(); } }
@@ -2462,30 +2477,16 @@ if (TAURI) {
     } catch (e) { log(`transcribe_probe: ${e}`); }
   }
   $("trSave").onclick = async () => {
-    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); }
+    try { await invoke("transcribe_configure", { settings: { enabled: $("trEnabled").checked, engine: $("trEngine").value, model: $("trModel").value, language: $("trLang").value.trim() || "en", device: $("trDevice").value } }); $("trMeta").textContent = "saved"; setTimeout(trRefresh, 800); setTimeout(trModelsRender, 900); }
     catch (e) { alert(e); }
   };
   $("trEnabled").onchange = $("trSave").onclick;
   async function libStatsRefresh() {
-    try { const [n, secs, tr, dir] = await invoke("library_stats"); $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
+    try { const st = await invoke("library_stats"); const [n, secs, tr, dir] = Array.isArray(st) ? st : [st.count, st.seconds, st.transcribed, st.dir]; $("libStats").textContent = `${n} calls · ${(secs / 60).toFixed(0)} min · ${tr} transcribed`; $("libDir").textContent = dir; } catch (e) { log(`library_stats: ${e}`); }
   }
-  const RET_KEY = "hs.retention";
-  const retentionDays = () => { const d = parseInt(store(RET_KEY, ""), 10); return Number.isFinite(d) && d >= 0 ? d : null; };
-  $("pruneDays").value = store(RET_KEY, "");
-  $("pruneDays").onchange = () => { save(RET_KEY, $("pruneDays").value); uiToast("Retention saved — calls older than this are auto-pruned (starred kept)."); };
-  async function autoPrune() {
-    const d = retentionDays(); if (d == null) return;
-    try { const n = await invoke("library_prune", { days: d }); if (n > 0) { log(`auto-prune: ${n} call${n === 1 ? "" : "s"} older than ${d} days deleted`); libStatsRefresh(); } } catch (e) { log(`auto-prune: ${e}`); }
-  }
-  $("pruneNow").onclick = async () => {
-    const d = parseInt($("pruneDays").value, 10); if (!Number.isFinite(d)) { alert("Enter a number of days."); return; }
-    save(RET_KEY, $("pruneDays").value);
-    if (!(await uiConfirm(`Delete unstarred calls older than ${d} days?`, "Delete"))) return;
-    try { const n = await invoke("library_prune", { days: d }); alert(`${n} calls deleted`); libStatsRefresh(); } catch (e) { alert(e); }
-  };
-  autoPrune();
-  setInterval(autoPrune, 12 * 3600 * 1000);
-  trRefresh(); libStatsRefresh();
+  // Retention (what the library keeps) lives in retention.js and the
+  // backend's hourly timer; the page no longer prunes by itself.
+  trRefresh(); libStatsRefresh(); window.libStatsRefresh = libStatsRefresh;
 
   /* ---------- transcript corrections (global + per-talkgroup) ---------- */
   let tcRules = [];
@@ -2686,15 +2687,26 @@ if (TAURI) {
   /* ---------- whisper models: what's downloaded, download ahead of time ---------- */
   const MODEL_SIZES = { tiny: "75 MB", base: "145 MB", small: "480 MB", medium: "1.5 GB", "large-v3": "3 GB", "distil-large-v3": "1.5 GB", turbo: "1.6 GB" };
   const downloading = new Set();
+  const gb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`;
   async function trModelsRender() {
     try {
       const rows = await invoke("transcribe_models"); const names = [...new Set(rows.map((r) => r.model))];
+      const total = rows.filter((r) => r.downloaded).reduce((a, r) => a + (r.bytes || 0), 0);
+      const meta = $("trModelsMeta"); if (meta) meta.textContent = total ? `${gb(total)} on disk` : "";
       $("trModels").innerHTML = names.map((m) => {
         const cell = (eng) => { const r = rows.find((x) => x.model === m && x.engine === eng); const key = `${eng}/${m}`;
-          return r && r.downloaded ? `<span class="badge clear">✔ downloaded</span>` : downloading.has(key) ? `<span class="meta">downloading…</span>` : `<button class="btn ghost sm" data-dl="${key}">Download</button>`; };
-        return `<tr><td class="mono">${m} <small class="faint">${MODEL_SIZES[m] || ""}</small></td><td>${cell("faster-whisper")}</td><td>${cell("openai-whisper")}</td></tr>`;
+          if (!r) return "";
+          if (r.downloaded) return `<span class="badge clear" title="${esc(r.path || "")}">✔ ${gb(r.bytes || 0)}</span>${r.in_use ? ' <span class="badge">in use</span>' : ` <button class="btn ghost sm" data-rmmodel="${key}" title="Delete this model from disk">Delete</button>`}`;
+          return downloading.has(key) ? `<span class="meta">downloading…</span>` : `<button class="btn ghost sm" data-dl="${key}">Download</button>`; };
+        return `<tr><td class="mono">${m} <small class="faint">${MODEL_SIZES[m] || ""}</small></td><td>${cell("faster-whisper")}</td><td>${cell("openai-whisper")}</td><td>${cell("mlx-whisper")}</td></tr>`;
       }).join("");
       $("trModels").querySelectorAll("[data-dl]").forEach((b) => b.onclick = () => { const [engine, model] = b.dataset.dl.split("/"); downloading.add(b.dataset.dl); trModelsRender(); invoke("transcribe_download", { engine, model }).catch((e) => { downloading.delete(b.dataset.dl); alert(e); trModelsRender(); }); });
+      $("trModels").querySelectorAll("[data-rmmodel]").forEach((b) => b.onclick = async () => {
+        const [engine, model] = b.dataset.rmmodel.split("/"); const r = rows.find((x) => x.engine === engine && x.model === model);
+        if (!(await uiConfirm(`Delete ${engine} ${model} (${gb((r && r.bytes) || 0)}) from this Mac? It downloads again if you choose it later.`, "Delete"))) return;
+        try { const freed = await invoke("transcribe_delete", { engine, model }); uiToast(`Deleted ${engine} ${model} — ${gb(freed)} freed`); } catch (e) { uiToast(`${e}`, "err"); }
+        trModelsRender();
+      });
     } catch (e) { log(`transcribe_models: ${e}`); }
   }
   listen("transcribe_download", (e) => {
@@ -3702,8 +3714,17 @@ async function dpSave() {
   try { await dpInvoke("dispatch_set", { settings: s }); } catch (e) { uiToast(`Could not save: ${e}`, "err"); return false; }
   await dpSettingsLoad(); dpSetupFill(); return true;
 }
-$("dpSave").onclick = async () => { if (await dpSave()) { uiToast("Dispatch settings saved"); if (!$("trEnabled").checked) uiToast("The dispatch map needs transcription — enable it in Settings → Transcription", "err"); if (dpSettings.engine === "ollama" && !$("olModel").value) uiToast("Pick an Ollama model in Alerts → AI gate", "err"); } };
+$("dpSave").onclick = async () => { if (await dpSave()) { uiToast("Dispatch settings saved"); if (!$("trEnabled").checked) uiToast("The dispatch map needs transcription — enable it in Settings → Transcription", "err"); if (dpSettings.engine === "ollama" && !$("olModel").value) uiToast("Pick a local model in Settings → Connections", "err"); } };
 $("dpHomeFromMap").onclick = () => { if (!dpMap) { uiToast("Open the map first"); return; } const c = dpMap.getCenter(); $("dpHomeLat").value = c.lat.toFixed(5); $("dpHomeLon").value = c.lng.toFixed(5); };
+$("dpChPick").onclick = async () => {
+  if (typeof pickChannels !== "function") return;
+  dpChSync();
+  const got = await pickChannels({ title: "Dispatch and tactical channels", selected: dpChBuf.map((c) => c.tg).filter(Boolean) });
+  if (!got) return;
+  const keep = dpChBuf.filter((c) => got.includes(c.tg));
+  for (const tg of got) if (!keep.some((c) => c.tg === tg)) keep.push({ tg, name: channelSummary([tg], 1), role: "dispatch", fixed_call_type: "", enabled: true });
+  dpChBuf = keep; dpChRender();
+};
 $("dpChAdd").onclick = () => { dpChSync(); dpChBuf.push({ tg: 0, name: "", role: "dispatch", fixed_call_type: "", enabled: true }); dpChRender(); const last = $("dpChannels").querySelector(".row:last-child [data-ctg]"); if (last) last.focus(); };
 $("dpTest").onclick = async () => { if (!(await dpSave())) return; uiToast("Running the extractor on the latest dispatch call…"); try { await uiConfirm(await dpInvoke("dispatch_test", { tg: null }), "OK"); dpLogRefresh(); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
 $("dpRegeocode").onclick = async () => {

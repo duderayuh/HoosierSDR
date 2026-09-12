@@ -144,6 +144,23 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "limit")?,
         )?),
         "incident_get" => jv(crate::dispatch::incident_get(state, arg(args, "id")?)?),
+        "events_list" => jv(crate::events::events_list(
+            state,
+            arg::<Option<crate::events::EventQuery>>(args, "query")?.unwrap_or_default(),
+        )?),
+        "channel_activity" => jv(crate::channels::channel_activity(state, arg(args, "hours")?)?),
+        "retention_get" => jv(crate::retention::retention_get(state)),
+        "retention_set" => jv(crate::retention::retention_set(app.clone(), state, arg(args, "settings")?)?),
+        "retention_migrate" => jv(crate::retention::retention_migrate(app.clone(), state, arg(args, "days")?)?),
+        "retention_preview" => jv(crate::retention::retention_preview(app.clone(), arg(args, "settings")?).await?),
+        "retention_apply" => jv(crate::retention::retention_apply(app.clone(), state).await?),
+        "retention_usage" => jv(crate::retention::retention_usage(app.clone()).await?),
+        "channel_sets_get" => jv(crate::channels::channel_sets_get(app.clone())),
+        "channel_sets_set" => jv(crate::channels::channel_sets_set(app.clone(), arg(args, "settings")?)?),
+        "events_stats" => jv(crate::events::events_stats(
+            state,
+            arg::<Option<i64>>(args, "since")?.unwrap_or(0),
+        )?),
         "units_list" => jv(crate::units::units_list(state)),
         "rr_settings" => jv(crate::rr::rr_settings(app.clone(), state)),
 
@@ -318,7 +335,8 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::transcribe::transcribe_configure(app.clone(), state, settings)?;
             Ok(Value::Null)
         }
-        "transcribe_models" => jv(crate::transcribe::transcribe_models()),
+        "transcribe_models" => jv(crate::models::transcribe_models(app.clone())),
+        "transcribe_delete" => jv(crate::models::transcribe_delete(app.clone(), arg(args, "engine")?, arg(args, "model")?)?),
 
         // ---- settings: hook / stream / uploads ----
         "hook_get" => jv(crate::hook::hook_get(app.clone(), state)),
@@ -390,8 +408,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         // ---- the rest of the desktop's commands, so the remote desktop page
         // can do everything the local one can ----
         "telegram_save" => jv(crate::alerts::telegram_save(arg(args, "token")?)?),
-        "bluesky_save" => jv(crate::alerts::bluesky_save(arg(args, "password")?)?),
-        "bluesky_test" => jv(crate::alerts::bluesky_test(state).await?),
+        "telegram_verify" => jv(crate::connections::telegram_verify().await?),
+        "telegram_discover" => jv(crate::connections::telegram_discover(app.clone()).await?),
+        "telegram_test_destination" => jv(crate::connections::telegram_test_destination(arg(args, "destination")?).await?),
         "alerts_test" => jv(crate::alerts::alerts_test(app.clone(), arg(args, "id")?).await?),
         "ollama_models" => jv(crate::alerts::ollama_models(arg(args, "url")?).await?),
         "analyzer_cloud_get" => jv(crate::analyzers::analyzer_cloud_get(state)),
