@@ -100,10 +100,28 @@ w.__exercise = async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (shown("twMapWrap")) console.log("PAGE ERROR: a call tripwire is offered a map it cannot draw");
   } catch (e) { console.log("PAGE ERROR: map toggle: " + e.stack); }
-  // A launch has to tell the backend which talkgroups are silenced, and
-  // muting must not reach the lockout — a muted channel is still recorded.
-  if (!mutes.some((m) => (m.tgs || []).includes(1001))) console.log("PAGE ERROR: the muted group never reached the speaker mute");
-  if (lockouts.some((l) => (l.extra || []).includes(1001))) console.log("PAGE ERROR: muting a group locked the talkgroup out instead of silencing it");
+  // A launch has to tell the backend which talkgroups are silenced, and a
+  // group that is switched off must also stop being followed — otherwise
+  // every channel in it is recorded and transcribed for nothing, which is
+  // exactly what happened to a listener with an "All" group switched off.
+  if (!mutes.some((m) => (m.tgs || []).includes(1001))) console.log("PAGE ERROR: the group that is off never reached the speaker mute");
+  if (!lockouts.some((l) => (l.extra || []).includes(1001))) console.log("PAGE ERROR: a group that is off is still being followed — it will be recorded and transcribed");
+  // Ticking the box keeps them on record and only silences them, which is
+  // the other thing a listener may want.
+  {
+    const box = w.document.getElementById("grpKeepRec");
+    if (!box) console.log("PAGE ERROR: no way to keep recording the groups that are off");
+    else {
+      const before = lockouts.length;
+      box.checked = true; box.onchange({ target: box });
+      const after = lockouts.slice(before);
+      if (!after.length) console.log("PAGE ERROR: changing the setting pushed no new lockout");
+      else if (after.some((l) => (l.extra || []).includes(1001))) console.log("PAGE ERROR: the box is ticked but the channel is still refused");
+      box.checked = false; box.onchange({ target: box });
+      const last = lockouts[lockouts.length - 1];
+      if (!(last.extra || []).includes(1001)) console.log("PAGE ERROR: unticking the box did not stop following the channel again");
+    }
+  }
   // The per-playlist filters still have to be sent once the playlists are
   // known — timed avoids ride along there.
   if (!lockouts.some((l) => l.playlist === "p1")) console.log("PAGE ERROR: no lockout was pushed for the saved playlist");
