@@ -173,3 +173,67 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire);
   else wire();
 })();
+
+/* ---------- map data & distances (OSRM in a container, locally) ---------- */
+(() => {
+  const $ = (id) => document.getElementById(id);
+  if (!$("rtSave")) return;
+  const inv = (cmd, args) => (window.__TAURI__ ? window.__TAURI__.core.invoke(cmd, args) : window.dpInvoke(cmd, args));
+  const bytes = (n) => (n > 1 << 30 ? (n / (1 << 30)).toFixed(1) + " GB" : Math.round(n / (1 << 20)) + " MB");
+  let settings = null;
+
+  async function load() {
+    try {
+      settings = await inv("routing_get");
+      $("rtEnabled").checked = !!settings.enabled;
+      $("rtRegion").value = settings.region || "";
+      $("rtUrl").value = settings.url || "";
+      $("rtImage").value = settings.image || "";
+      $("rtPlatform").value = settings.platform || "";
+      $("rtMeta").textContent = settings.enabled ? "on" : "straight lines";
+    } catch (e) { /* only in the app */ }
+  }
+  const read = () => ({
+    enabled: $("rtEnabled").checked, url: $("rtUrl").value.trim(), region: $("rtRegion").value.trim(),
+    image: $("rtImage").value.trim(), platform: $("rtPlatform").value.trim(),
+  });
+  $("rtSave").onclick = async () => {
+    try { settings = await inv("routing_set", { settings: read() }); await load(); uiToast("Saved"); }
+    catch (e) { uiToast(`${e}`, "err"); }
+  };
+  // The extract to fetch is the state the listener lives in; the geocoder
+  // already knows where that is.
+  $("rtSuggest").onclick = async () => {
+    try {
+      $("rtRegion").value = await inv("mapdata_region");
+      uiToast(`Region set to ${$("rtRegion").value} — check it looks right, then prepare the map`);
+    } catch (e) { uiToast(`${e}`, "err"); }
+  };
+  const say = (t) => { $("rtStatus").textContent = t; };
+  $("rtPrepare").onclick = async () => {
+    if (!(await uiConfirm("Download the map for this region and build the routing graph? It takes a few hundred megabytes and several minutes, and Docker has to be running.", "Prepare"))) return;
+    try { await inv("mapdata_prepare", { region: $("rtRegion").value.trim() }); say("starting…"); }
+    catch (e) { uiToast(`${e}`, "err"); }
+  };
+  $("rtStart").onclick = async () => { try { await inv("mapdata_start"); say("router started"); check(); } catch (e) { uiToast(`${e}`, "err"); } };
+  $("rtStop").onclick = async () => { try { await inv("mapdata_stop"); say("router stopped"); check(); } catch (e) { uiToast(`${e}`, "err"); } };
+  async function check() {
+    try {
+      const s = await inv("routing_status");
+      say([
+        s.docker ? "Docker: running" : `Docker: ${s.docker_error || "not running"}`,
+        `container: ${s.container ? "up" : "not running"}`,
+        `routes: ${s.answering ? "answering" : "no answer"}`,
+        s.have_graph ? `map ready (${bytes(s.size_bytes)})` : s.size_bytes ? `map data ${bytes(s.size_bytes)}, not built` : "no map prepared",
+      ].join(" · "));
+    } catch (e) { say(`${e}`); }
+  }
+  $("rtCheck").onclick = check;
+  if (window.__TAURI__) window.__TAURI__.event.listen("mapdata", (e) => {
+    const p = e.payload || {};
+    if (p.step === "download" && p.total) say(`downloading ${bytes(p.got)} of ${bytes(p.total)}…`);
+    else say(`${p.step}: ${p.detail || ""}`);
+    if (p.done) check();
+  });
+  load();
+})();
