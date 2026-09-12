@@ -12,8 +12,8 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
-/// Explicit aliases. Radio IDs are only unique within a system (MESA's
-/// 790041 and SAFE-T's 790041 are different radios), so the table is kept
+/// Explicit aliases. Radio IDs are only unique within a system (one
+/// system's 790041 and another's are different radios), so the table is kept
 /// per RadioReference system (`units_<sid>.json`) with one unscoped table
 /// (`units.json`, the pre-multi-system file) that applies everywhere a
 /// system has no row of its own.
@@ -411,25 +411,25 @@ mod tests {
     fn aliases_are_kept_per_system() {
         let mut t = UnitTable::default();
         t.global.insert(790041, "EMS Control".to_string());
-        t.scope_mut(Some(5737))
+        t.scope_mut(Some(1234))
             .insert(790041, "Indy EMS Control".to_string());
-        t.scope_mut(Some(8084))
+        t.scope_mut(Some(5678))
             .insert(790099, "State Trooper 99".to_string());
         // The system's own row wins; the unscoped row covers the rest.
         assert_eq!(
-            t.get(Some(5737), 790041).map(String::as_str),
+            t.get(Some(1234), 790041).map(String::as_str),
             Some("Indy EMS Control")
         );
         assert_eq!(
-            t.get(Some(8084), 790041).map(String::as_str),
+            t.get(Some(5678), 790041).map(String::as_str),
             Some("EMS Control")
         );
         assert_eq!(t.get(None, 790041).map(String::as_str), Some("EMS Control"));
         // Another system's alias never leaks.
-        assert_eq!(t.get(Some(5737), 790099), None);
+        assert_eq!(t.get(Some(1234), 790099), None);
         assert_eq!(t.get(None, 790099), None);
-        assert!(t.has(Some(8084), 790099));
-        assert!(!t.has(Some(5737), 790099));
+        assert!(t.has(Some(5678), 790099));
+        assert!(!t.has(Some(1234), 790099));
         assert!(t.has(None, 790041));
         assert_eq!(t.len(), 3);
     }

@@ -93,7 +93,7 @@ struct AppState {
     /// runs without one); sites sharing a playlist share the entry.
     filters: playlists::FilterTable,
     /// Transcript corrections: (tg, wrong, right); `tg` None = applies to every
-    /// talkgroup (global rule — say "Rirey" on any channel → "Riley").
+    /// talkgroup (global rule — say "cardigan" on any channel → "cardiac").
     corrections: Arc<Mutex<Vec<(Option<u16>, String, String)>>>,
     /// Radio-ID aliases, and the wildcard rules behind them.
     units: units::Units,
@@ -289,7 +289,7 @@ fn set_policies(state: State<AppState>, record: Policy, stream: Policy, upload: 
 }
 
 /// Apply per-talkgroup transcript corrections: each `(wrong, right)` pair is a
-/// case-insensitive, whole-word substitution (so "rirey"/"RIREY" → "Riley" but
+/// case-insensitive, whole-word substitution (so "cardigan"/"CARDIGAN" → "cardiac" but
 /// "shirey" is left alone). Applied before a transcript is stored or acted on.
 pub(crate) fn apply_corrections(rules: &[(String, String)], text: &str) -> String {
     let mut out = text.to_string();
@@ -2545,22 +2545,22 @@ mod corrections_tests {
 
     #[test]
     fn corrections_are_word_boundary_and_case_insensitive() {
-        let rules = vec![("Rirey".to_string(), "Riley".to_string())];
+        let rules = vec![("cardigan".to_string(), "cardiac".to_string())];
         assert_eq!(
-            apply_corrections(&rules, "Unit 5 to Rirey station"),
-            "Unit 5 to Riley station"
+            apply_corrections(&rules, "Unit 5 reports a cardigan event"),
+            "Unit 5 reports a cardiac event"
         );
         assert_eq!(
-            apply_corrections(&rules, "rirey and RIREY"),
-            "Riley and Riley"
+            apply_corrections(&rules, "cardigan and CARDIGAN"),
+            "cardiac and cardiac"
         );
         assert_eq!(
-            apply_corrections(&rules, "Rireyfield untouched"),
-            "Rireyfield untouched"
+            apply_corrections(&rules, "cardigans untouched"),
+            "cardigans untouched"
         );
         assert_eq!(
-            apply_corrections(&rules, "shirey untouched"),
-            "shirey untouched"
+            apply_corrections(&rules, "brocardigan untouched"),
+            "brocardigan untouched"
         );
         // No rules → unchanged.
         assert_eq!(apply_corrections(&[], "hello"), "hello");

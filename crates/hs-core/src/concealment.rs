@@ -262,7 +262,8 @@ mod tests {
     }
 
     /// Regression test for a real click/pop found in an archived live call
-    /// (talkgroup 49F-DISPATCH on a simulcast site — see git history): a
+    /// (a county fire dispatch talkgroup on a simulcast site — see git
+    /// history): a
     /// stretch of marginal-quality frames whose *raw decode* still carried
     /// real energy (not literal silence) got attenuated by concealment on
     /// their way out, and — when the AGC ran on that already-faded output —

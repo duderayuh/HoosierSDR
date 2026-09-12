@@ -1835,14 +1835,14 @@ mod tests {
             transcript: Some(text.into()),
         };
         c.pieces = vec![
-            piece(4917150, "Medic 42 to Methodist"),
+            piece(4917150, "Medic 42 to Example General"),
             piece(31705, "Go ahead Medic 42"),
             piece(4917150, "14 year old, ETA 5"),
         ];
         let t = stitched_transcript(&c);
         assert_eq!(
             t,
-            "RADIO A: Medic 42 to Methodist\nRADIO B: Go ahead Medic 42\nRADIO A: 14 year old, ETA 5\n"
+            "RADIO A: Medic 42 to Example General\nRADIO B: Go ahead Medic 42\nRADIO A: 14 year old, ETA 5\n"
         );
         assert!(!t.contains("4917150") && !t.contains("31705"));
     }
@@ -1855,7 +1855,7 @@ mod tests {
             rule_id: "r".into(),
             rule_name: "Hospitals".into(),
             tg: 10202,
-            tg_name: "Methodist ER".into(),
+            tg_name: "Example General ER".into(),
             tg_desc: None,
             mobile_unit: Some(790065),
             participants: vec![790065],
@@ -1908,7 +1908,7 @@ mod tests {
         assert_eq!(t, "RADIO \"Medic 3\": Medic 3 inbound, 64 year old male chest pain\nHOSPITAL: Copy, ETA?\nRADIO \"Medic 3\": [no transcript]\n");
         let m = render(&r, &c, "Chest pain, ETA unknown.");
         assert!(
-            m.starts_with("🏥 Hospitals · Methodist ER\nChest pain, ETA unknown."),
+            m.starts_with("🏥 Hospitals · Example General ER\nChest pain, ETA unknown."),
             "{m}"
         );
         // Wall-clock local time, whatever zone the test machine is in.

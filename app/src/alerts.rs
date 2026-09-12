@@ -244,7 +244,7 @@ pub struct CallFacts {
     pub tg: u16,
     pub tg_name: String,
     /// RadioReference "Description" — longer human label next to the alias,
-    /// e.g. "IU Methodist" where the alpha tag is "49M-03". Surfaced as the
+    /// e.g. "Example General ER" where the alpha tag is "MED-03". Surfaced as the
     /// `{tgdesc}` token in alert templates.
     pub tg_desc: Option<String>,
     pub unit: u32,

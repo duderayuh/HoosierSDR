@@ -1,19 +1,19 @@
 /* ================= talkgroup picker ================= */
 // One picker for every place a rule names talkgroups. It searches alpha tag,
 // description and number; lists what was actually heard lately first, with
-// counts; groups the catalog by alpha-tag prefix ("49M", "IMPD MET") since
+// counts; groups the catalog by alpha-tag prefix ("MED", "CITY PD") since
 // RadioReference exports often carry no Tag/Category; and saves named sets
 // ("Hospitals") in the backend for reuse. By default it shows only the
 // systems the listener follows, so TG 10202 on some other system does not
 // sit beside the one they hear.
 //
 //   pickChannels({ title, selected: [tg…] }) → Promise<[tg…] | null>
-//   channelSummary([tg…]) → "49M-M03, 49M-M02 +3 more"
+//   channelSummary([tg…]) → "MED-03, MED-02 +3 more"
 (() => {
   let rows = null, rowsAt = 0, act = new Map(), actAt = 0, sets = [], followed = new Set();
   const now = () => Math.floor(Date.now() / 1000);
   // The family a talkgroup belongs to: the alpha tag up to its first "-",
-  // else its first word ("49M-M03" → "49M", "IMPD MET-CO6" → "IMPD MET").
+  // else its first word ("MED-03" → "MED", "CITY PD-N1" → "CITY PD").
   const prefixOf = (alias) => { const a = String(alias || "").trim(); if (!a) return "?"; const d = a.indexOf("-"); if (d > 0) return a.slice(0, d).trim(); const s = a.indexOf(" "); return s > 0 ? a.slice(0, s) : a; };
   window.tgPrefixOf = prefixOf;
   const ago = (t) => { const s = Math.max(0, now() - t); return s < 90 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };

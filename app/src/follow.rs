@@ -93,7 +93,7 @@ pub enum FollowEvent {
         tg: u16,
         name: String,
         /// Human-readable description (RadioReference "Description"), e.g.
-        /// "IU Methodist" alongside the alpha tag "49M-03".
+        /// "Example General ER" alongside the alpha tag "MED-03".
         desc: Option<String>,
         freq_mhz: f64,
         priority: u8,
@@ -778,7 +778,7 @@ impl Reporter<'_> {
         }
     }
 
-    /// The catalog's long description for a talkgroup ("IU Methodist") — the
+    /// The catalog's long description for a talkgroup ("Example General ER") — the
     /// human-readable alias shown alongside the alpha tag. `None` when the
     /// talkgroup is unknown or has no description.
     fn description_of(&self, tg: u16) -> Option<String> {
