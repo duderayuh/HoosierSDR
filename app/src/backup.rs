@@ -432,14 +432,13 @@ fn plan_for(app: &AppHandle, state: &AppState, tier: &str) -> Result<Plan, Strin
         let Ok(md) = std::fs::metadata(&path) else {
             continue;
         };
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() {
+        // Kept relative to the recordings folder, dated directories and
+        // all, so a restore puts each file back where the library expects
+        // it rather than in one flat heap.
+        let rel = relative_audio(p);
+        let Some(name) = rel.to_str().filter(|s| !s.is_empty()) else {
             continue;
-        }
+        };
         audio_bytes += md.len();
         audio.push((format!("audio/{name}"), path));
     }
@@ -1175,8 +1174,25 @@ pub struct Restored {
     pub note: String,
 }
 
+/// Where a recording sits relative to the recordings folder. The library
+/// files calls under dated directories (`calls/2026/09/11/…`), so the tail
+/// after the last `calls/` is what has to be kept: flattening it to the
+/// bare file name loses the shape of the library, and points restored rows
+/// at files that are not there.
+pub fn relative_audio(old: &str) -> PathBuf {
+    let p = Path::new(old);
+    let tail = old
+        .rfind("/calls/")
+        .map(|i| &old[i + "/calls/".len()..])
+        .filter(|t| !t.is_empty() && !t.contains("..") && !t.starts_with('/'));
+    match tail {
+        Some(t) => PathBuf::from(t),
+        None => PathBuf::from(p.file_name().unwrap_or_default()),
+    }
+}
+
 /// Point every call's `audio` column at this library's recordings folder,
-/// keeping the file name. Returns how many rows moved.
+/// keeping where the recording sits inside it. Returns how many rows moved.
 pub fn repoint_audio(c: &rusqlite::Connection, lib: &Path) -> Result<usize, String> {
     let rows: Vec<(i64, String)> = {
         let mut st = c
@@ -1189,10 +1205,7 @@ pub fn repoint_audio(c: &rusqlite::Connection, lib: &Path) -> Result<usize, Stri
     };
     let mut moved = 0;
     for (id, old) in rows {
-        let Some(base) = Path::new(&old).file_name() else {
-            continue;
-        };
-        let want = lib.join(base);
+        let want = lib.join(relative_audio(&old));
         if want == Path::new(&old) {
             continue;
         }
@@ -1331,6 +1344,10 @@ pub fn restore_from(
             let p = lib.join(rest);
             if p.exists() {
                 continue;
+            }
+            // Dated directories, which a fresh library does not have yet.
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
             recordings += 1;
             Some(p)
@@ -2254,6 +2271,104 @@ mod tests {
         }
         // Running it twice moves nothing: the rows already point here.
         assert_eq!(repoint_audio(&c, &here).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // The library files calls under dated directories. Flattening them to
+    // bare file names put restored recordings in one heap and pointed the
+    // rows at files that were not there — and orphaned the ones already on
+    // disk, which is how this was found: on a real library, 579 recordings
+    // lost their rows.
+    #[test]
+    fn a_recording_keeps_its_place_in_the_library() {
+        let lib = Path::new("/Users/x/Library/App Support/com.hoosiersdr.app/library/calls");
+        assert_eq!(
+            relative_audio(
+                "/Users/x/Library/App Support/com.hoosiersdr.app/library/calls/2026/09/11/a.m4a"
+            ),
+            PathBuf::from("2026/09/11/a.m4a")
+        );
+        // A row already pointing at this library is left alone.
+        let same = lib.join("2026/09/11/a.m4a");
+        assert_eq!(lib.join(relative_audio(same.to_str().unwrap())), same);
+        // A path from another machine keeps the same shape under this one.
+        assert_eq!(
+            lib.join(relative_audio(
+                "/Volumes/other/com.hoosiersdr.test/library/calls/2026/09/11/a.m4a"
+            )),
+            same
+        );
+        // Nothing clever for a bare name, and nothing that escapes.
+        assert_eq!(relative_audio("/tmp/flat.wav"), PathBuf::from("flat.wav"));
+        assert_eq!(
+            relative_audio("/x/library/calls/../../etc/passwd"),
+            PathBuf::from("passwd")
+        );
+    }
+
+    #[test]
+    fn dated_directories_survive_the_round_trip() {
+        let d = tmp("dated");
+        let c = library(&d);
+        let lib = d.join("calls");
+        std::fs::create_dir_all(lib.join("2026/09/11")).unwrap();
+        for i in 1..=3 {
+            std::fs::write(lib.join(format!("2026/09/11/c{i}.wav")), format!("audio {i}")).unwrap();
+        }
+        c.execute(
+            "UPDATE calls SET audio = ?1 || '/2026/09/11/c' || id || '.wav'",
+            rusqlite::params![lib.to_string_lossy()],
+        )
+        .unwrap();
+        let snap = d.join("snap.db");
+        snapshot(&c, &snap).unwrap();
+        let plan = Plan {
+            tier: "everything".into(),
+            audio: (1..=3)
+                .map(|i| {
+                    (
+                        format!("audio/2026/09/11/c{i}.wav"),
+                        lib.join(format!("2026/09/11/c{i}.wav")),
+                    )
+                })
+                .collect(),
+            audio_bytes: 21,
+            db_bytes: std::fs::metadata(&snap).unwrap().len(),
+            calls: 3,
+            ..Default::default()
+        };
+        let out = d.join("hoosier-20260912-000000-everything.tar.gz");
+        write_archive(&plan, &snap, &out, None, &mut |_, _, _| {}).unwrap();
+
+        // Unpack into a fresh library the way a restore does, and check
+        // each row's path resolves to a file that is actually there.
+        let into = d.join("fresh").join("calls");
+        std::fs::create_dir_all(&into).unwrap();
+        let mut a = read_archive(&out, None).unwrap();
+        for e in a.entries().unwrap() {
+            let mut e = e.unwrap();
+            let name = e.path().unwrap().to_string_lossy().to_string();
+            let to = if let Some(rest) = name.strip_prefix("audio/") {
+                into.join(rest)
+            } else {
+                into.join(name.replace('/', "_"))
+            };
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::io::copy(&mut e, &mut std::fs::File::create(&to).unwrap()).unwrap();
+        }
+        assert!(into.join("2026/09/11/c2.wav").exists(), "the dates were flattened");
+        let restored = rusqlite::Connection::open(into.join("calls.db")).unwrap();
+        assert_eq!(repoint_audio(&restored, &into).unwrap(), 3);
+        let paths: Vec<String> = restored
+            .prepare("SELECT audio FROM calls")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for p in &paths {
+            assert!(Path::new(p).exists(), "{p} does not exist after a restore");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
