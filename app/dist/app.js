@@ -3219,15 +3219,16 @@ const dpDemoIncidents = [
 ];
 const dpDemo = async (cmd, args) => {
   switch (cmd) {
-    case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Indianapolis, IN", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "" };
+    case "dispatch_get": return { channels: [{ tg: 10147, name: "Fire/EMS Dispatch", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10202, name: "County EMS", role: "dispatch", fixed_call_type: "", enabled: true }, { tg: 10150, name: "Fire Tac 1", role: "tactical", fixed_call_type: "", enabled: true }], call_types: [["Cardiac Arrest", "🫀"], ["Chest Pain", "❤️‍🩹"], ["Difficulty Breathing", "😮‍💨"], ["Stroke/CVA", "🧠"], ["Unconscious", "😵"], ["Sick Person", "🤒"], ["Injured Person", "🤕"], ["Overdose", "💊"], ["Mental-Emotional", "😰"], ["Vehicle Accident", "🚗"], ["Structure Fire", "🔥"], ["Fire Alarm", "🚨"], ["Gas Odor", "⚠️"], ["Residence Alarm", "🔔"], ["Water Rescue", "🌊"], ["Hazmat", "☣️"], ["Assault", "👊"], ["Unknown", "📍"]].map(([name, emoji]) => ({ name, emoji })), home_lat: 39.7684, home_lon: -86.1581, region_hint: "Indianapolis, IN", search_radius_km: 40, geocoder_url: "https://nominatim.openstreetmap.org", geocoder_email: "", engine: "ollama", group_window_secs: 2700, group_radius_m: 150, retention_days: 14, extra_instructions: "", grid_fallback: true, calibration: { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow } };
     case "incidents_list": return dpDemoIncidents.filter((i) => !args || !args.since || i.updated >= args.since);
-    case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
+    case "incident_get": { const i = dpDemoIncidents.find((x) => x.id === (args && args.id)); return i ? { incident: i, reports: i.id === 1 ? [{ id: 9, at: i.created + 1500, tg: 10259, tg_name: "MED-06", tg_desc: "Example General ER", place: "Example General", summary: "Medic 21 inbound with a 68-year-old in cardiac arrest, ROSC achieved.", how: "Medic 21 was sent to this run" }] : [], calls: [{ call: 700 + i.id, at: i.created, tg: i.tg, role: "dispatch", summary: i.summary, extracted: "", tg_name: i.tg_name, unit_name: null, secs: 6.4, audio: null, transcript: `${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. ${i.units[0] || "Medic 1"}, ${i.address}, ${i.call_type.toLowerCase()}. 11:20 hours.` }] } : null; }
     case "dispatch_log": return dpDemoIncidents.map((i) => ({ at: i.updated, tg: i.tg, tg_name: i.tg_name, call: 700 + i.id, outcome: "new", detail: `#${i.id} ${i.call_type} · ${i.address}`, incident: i.id }));
     case "dispatch_set": case "incident_delete": return null;
     case "incident_locate": { const i = dpDemoIncidents.find((x) => x.id === args.id); if (i && args.lat != null) { i.lat = args.lat; i.lon = args.lon; i.geocode = "manual"; } return i; }
     case "dispatch_test": return "demo mode — no radio";
     case "dispatch_backfill": return 0;
     case "dispatch_regeocode": return [0, 0];
+    case "dispatch_calibrate": return { lat0: 39.77, lon0: -86.16, lat_per: 1.5e-5, lon_per: 1.7e-5, samples: 42, median_m: 480, at: dpDemoNow };
     default: return null;
   }
 };
@@ -3282,14 +3283,56 @@ function dpCard(i) {
   const fresh = i.updated > dpNow() - 300, stale = i.updated < dpNow() - 3 * 3600;
   return `<div class="dpcard ${dpSel === i.id ? "on" : ""} ${fresh ? "fresh" : ""} ${stale ? "stale" : ""}" data-id="${i.id}">
     <div class="top"><span class="chan" title="${esc(i.tg_name)}">${esc(i.tg_name || "TG " + i.tg)}</span>${i.calls > 1 ? `<span class="linked">Linked · ${i.calls - 1} update${i.calls === 2 ? "" : "s"}</span>` : ""}<span class="conf ${i.confidence < 50 ? "low" : ""}" title="model confidence">${i.confidence}%</span><span class="ago" data-t="${i.updated}">${dpAgo(i.updated)}</span><button class="btn ghost sm" data-det="${i.id}" title="Details">⤢</button></div>
-    <div class="title"><span class="em">${esc(i.emoji)}</span><b>${esc(i.call_type)}</b>${i.address ? `<span class="addr">· ${esc(i.address)}</span>` : `<span class="noaddr">· no address heard</span>`}${i.address && i.lat == null ? `<span class="nogeo" title="address not found on the map — open details to fix it">⚠ unmapped</span>` : ""}</div>
+    <div class="title"><span class="em">${esc(i.emoji)}</span><b>${esc(i.call_type)}</b>${i.address ? `<span class="addr">· ${esc(i.address)}</span>` : `<span class="noaddr">· no address heard</span>`}${dpPlacedBadge(i)}</div>
     ${(i.units || []).length ? `<div class="units">${dpUnits(i)}</div>` : ""}
     ${i.summary ? `<div class="summ" title="${esc(i.summary)}">${esc(i.summary)}</div>` : ""}
   </div>`;
 }
+// How the pin got where it is. "grid" means the dispatcher's grid
+// reference placed it — a few hundred metres, not a doorstep.
+// When a mis-heard street was put right, keep what was actually said in
+// view — the listener is the one who can tell whether the swap was fair.
+// The run as a story: dispatched, worked, and — when a crew was heard
+// reading a report to a hospital — where the patient went. The hospital
+// half is joined by the crew's callsign, so the reason is shown with it.
+function dpStory(i, calls, reports, t) {
+  if (!(reports || []).length) return "";
+  const first = calls && calls.length ? calls[0].at : i.created;
+  const step = (at, what, who, body, how) => `
+    <div class="dpstep">
+      <span class="mono when">${t(at)}</span>
+      <span class="mins">${at > first ? "+" + Math.round((at - first) / 60) + " min" : ""}</span>
+      <div class="what"><b>${esc(what)}</b>${who ? ` <span class="faint">${esc(who)}</span>` : ""}
+        ${body ? `<div class="body">${esc(body)}</div>` : ""}
+        ${how ? `<div class="how">joined because ${esc(how)}</div>` : ""}</div>
+    </div>`;
+  const rows = [step(i.created, `${i.emoji} ${i.call_type}`, (i.units || []).join(", "), i.address, "")];
+  for (const r of reports) {
+    rows.push(step(r.at, `🏥 ${r.place || r.tg_desc || r.tg_name}`, "", r.summary, r.how));
+  }
+  return `<div class="k" style="margin-top:10px">What happened</div><div class="dpstory">${rows.join("")}</div>`;
+}
+function dpHeardAs(i, calls) {
+  if (i.geocode !== "corrected") return "";
+  for (const c of calls || []) {
+    let heard = "";
+    try { heard = (JSON.parse(c.extracted || "{}").address || "").trim(); } catch (_) {}
+    if (heard && heard.toLowerCase() !== String(i.address).toLowerCase()) {
+      return `<div class="faint sm">heard as “${esc(heard)}”</div>`;
+    }
+  }
+  return "";
+}
+function dpPlacedBadge(i) {
+  if (!i.address) return "";
+  if (i.lat == null) return `<span class="nogeo" title="address not found on the map — open details to fix it">⚠ unmapped</span>`;
+  if (i.geocode === "grid") return `<span class="approx" title="placed from the grid reference the dispatcher read out, not from the address">≈ approximate</span>`;
+  if (i.geocode === "corrected") return `<span class="fixedup" title="the street name was mis-heard; this is the one that sounds like it and sits where the grid reference says">✎ name corrected</span>`;
+  return "";
+}
 function dpIcon(i) {
   const fresh = i.updated > dpNow() - 300;
-  const html = `<div class="dpmk ${fresh ? "fresh" : ""} ${dpSel === i.id ? "sel" : ""}"><span class="em">${esc(i.emoji)}</span>${i.calls > 1 ? `<span class="cnt">${i.calls}</span>` : ""}${$("dpShowLabels").checked ? `<span class="lbl">${esc(i.call_type)}</span>` : ""}</div>`;
+  const html = `<div class="dpmk ${fresh ? "fresh" : ""} ${dpSel === i.id ? "sel" : ""} ${i.geocode === "grid" ? "approx" : ""}"><span class="em">${esc(i.emoji)}</span>${i.calls > 1 ? `<span class="cnt">${i.calls}</span>` : ""}${$("dpShowLabels").checked ? `<span class="lbl">${esc(i.call_type)}</span>` : ""}</div>`;
   return L.divIcon({ html, className: "dpmkwrap", iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -20] });
 }
 const dpPopup = (i) => `<div class="pt">${esc(i.emoji)} ${esc(i.call_type)}</div><div class="pa">${esc(i.address || "no address heard")}</div>${(i.units || []).length ? `<div class="pu">${dpUnits(i)}</div>` : ""}${i.summary ? `<div>${esc(i.summary)}</div>` : ""}<div class="pl"><small class="faint">${esc(i.tg_name)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</small> <button class="btn ghost sm" data-det="${i.id}">Details</button></div>`;
@@ -3390,12 +3433,13 @@ async function dpDetails(id) {
       <div><div class="k">First heard · last update</div><div class="v">${t(i.created)} · ${dpAgo(i.updated)} · ${i.calls} transmission${i.calls === 1 ? "" : "s"}</div></div>
       <div><div class="k">Units</div><div class="v units" style="display:flex;flex-wrap:wrap;gap:4px">${dpUnits(i) || "—"}</div></div>
       <div><div class="k">Channel</div><div class="v">${esc(i.tg_name)} <span class="mono faint">TG ${i.tg}</span></div></div>
-      <div><div class="k">Address · as heard</div><div class="v">${esc(i.address) || "<span class='faint'>none</span>"}</div></div>
-      <div><div class="k">Validated</div><div class="v">${i.validated ? "✓ " + esc(i.validated) : i.geocode === "manual" ? "placed by hand" : i.geocode === "none" ? "<span class='warn'>not found near home — fix the address below</span>" : i.geocode === "error" ? "<span class='warn'>geocoder error — try again</span>" : "<span class='faint'>—</span>"}</div></div>
+      <div><div class="k">Address · as heard</div><div class="v">${esc(i.address) || "<span class='faint'>none</span>"}${dpHeardAs(i, d.calls)}</div></div>
+      <div><div class="k">Validated</div><div class="v">${i.geocode === "grid" ? "<span class='warn'>≈ " + esc(i.validated) + " — approximate, from the grid reference</span>" : i.geocode === "corrected" ? "✎ " + esc(i.validated) + " <span class='faint'>(street name corrected)</span>" : i.validated ? "✓ " + esc(i.validated) : i.geocode === "manual" ? "placed by hand" : i.geocode === "none" ? "<span class='warn'>not found near home — fix the address below</span>" : i.geocode === "error" ? "<span class='warn'>geocoder error — try again</span>" : "<span class='faint'>—</span>"}</div></div>
       <div><div class="k">Coordinates</div><div class="v mono">${i.lat != null ? `${(+i.lat).toFixed(6)}, ${(+i.lon).toFixed(6)}` : "—"}</div></div>
       <div><div class="k">Summary</div><div class="v">${esc(i.summary) || "—"}</div></div>
     </div>
     <div class="fix"><input data-fixaddr type="text" value="${esc(i.address)}" placeholder="Corrected street address or intersection" spellcheck="false"><button class="btn ghost sm" data-fixgo>Re-geocode</button><button class="btn ghost sm" data-fixmap title="Place the pin at the current map centre">Use map centre</button></div>
+    ${dpStory(i, d.calls, d.reports, t)}
     <div class="k" style="margin-top:10px">Transmissions</div>
     <div class="calls">${calls || '<div class="faint">none</div>'}</div>
   </div>`, { wide: true });
@@ -3430,6 +3474,8 @@ function dpSetupFill() {
   $("dpTypesText").value = s.call_types.map((t) => `${t.emoji} ${t.name}`).join("\n"); $("dpExtra").value = s.extra_instructions;
   let dl = $("dpTypeList"); if (!dl) { dl = document.createElement("datalist"); dl.id = "dpTypeList"; document.body.appendChild(dl); } dl.innerHTML = s.call_types.map((t) => `<option value="${esc(t.name)}">`).join("");
   $("dpGeoMeta").textContent = s.geocoder_url.includes("nominatim.openstreetmap.org") ? "public Nominatim · 1 req/s" : "custom server";
+  $("dpGridFallback").checked = s.grid_fallback !== false;
+  dpCalShow(s.calibration);
 }
 function dpSetupRead() {
   dpChSync();
@@ -3437,6 +3483,7 @@ function dpSetupRead() {
   return { ...dpSettings, channels: dpChBuf.filter((c) => c.tg > 0), call_types: types,
     home_lat: parseFloat($("dpHomeLat").value), home_lon: parseFloat($("dpHomeLon").value), region_hint: $("dpRegion").value.trim(), search_radius_km: parseFloat($("dpRadiusKm").value) || 40,
     geocoder_url: $("dpGeoUrl").value.trim(), geocoder_email: $("dpGeoEmail").value.trim(), engine: $("dpEngine").value,
+    grid_fallback: $("dpGridFallback").checked, calibration: (dpSettings && dpSettings.calibration) || {},
     group_window_secs: (parseInt($("dpWindowMin").value, 10) || 45) * 60, group_radius_m: parseInt($("dpRadiusM").value, 10) || 150, retention_days: parseInt($("dpRetention").value, 10) || 14,
     extra_instructions: $("dpExtra").value };
 }
@@ -3460,6 +3507,18 @@ $("dpChPick").onclick = async () => {
 };
 $("dpChAdd").onclick = () => { dpChSync(); dpChBuf.push({ tg: 0, name: "", role: "dispatch", fixed_call_type: "", enabled: true }); dpChRender(); const last = $("dpChannels").querySelector(".row:last-child [data-ctg]"); if (last) last.focus(); };
 $("dpTest").onclick = async () => { if (!(await dpSave())) return; uiToast("Running the extractor on the latest dispatch call…"); try { await uiConfirm(await dpInvoke("dispatch_test", { tg: null }), "OK"); dpLogRefresh(); } catch (e) { uiToast(`Run failed: ${e}`, "err"); } };
+// What the grid fit is worth, in the listener's own terms.
+function dpCalShow(c) {
+  const el = $("dpCalMeta"); if (!el) return;
+  if (!c || !c.samples) { el.textContent = "not fitted yet — it learns from calls that do place"; return; }
+  el.textContent = `fitted from ${c.samples} placed call${c.samples === 1 ? "" : "s"} · typically ${Math.round(c.median_m)} m out`;
+}
+$("dpCalibrate").onclick = async () => {
+  const b = $("dpCalibrate"); b.disabled = true;
+  try { const c = await dpInvoke("dispatch_calibrate"); if (dpSettings) dpSettings.calibration = c; dpCalShow(c); uiToast("Grid re-fitted"); }
+  catch (e) { uiToast(`${e}`, "err"); }
+  finally { b.disabled = false; }
+};
 $("dpRegeocode").onclick = async () => {
   const b = $("dpRegeocode"), st = $("dpRegeocodeState");
   b.disabled = true; st.textContent = "retrying — about a second per address…";

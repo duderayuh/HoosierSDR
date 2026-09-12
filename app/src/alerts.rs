@@ -373,6 +373,40 @@ fn normalize(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Ask the model whether to send. Returns (fire, summary).
+/// Ask the local model one question and hand back what it said.
+///
+/// The screening and extraction paths both wrap their own prompt around the
+/// listener's words; this is for the places that have written the whole
+/// prompt already — the incident tie-break, for one.
+pub fn ollama_json(o: &Ollama, prompt: &str) -> Result<String, String> {
+    if o.model.trim().is_empty() {
+        return Err("no Ollama model chosen".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(
+            o.timeout_secs.max(5) as u64
+        )))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let body = serde_json::json!({
+        "model": o.model, "prompt": prompt, "stream": false, "format": "json",
+        "think": false, "options": { "temperature": 0 }
+    });
+    let mut r = agent
+        .post(&format!("{}/api/generate", o.url.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send(body.to_string().as_bytes())
+        .map_err(|e| format!("ollama: {e}"))?;
+    let status = r.status().as_u16();
+    let text = r.body_mut().read_to_string().unwrap_or_default();
+    if status != 200 {
+        return Err(format!("ollama HTTP {status}: {}", text.trim()));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(v["response"].as_str().unwrap_or_default().to_string())
+}
+
 pub fn ask_ollama(
     o: &Ollama,
     prompt: &str,
@@ -468,7 +502,22 @@ pub fn parse_verdict(answer: &str) -> Option<(bool, String)> {
 // Telegram
 // ---------------------------------------------------------------------------
 
+/// Set `HS_NO_SEND=1` and nothing leaves the machine: every Telegram send
+/// fails where it is made, while the rest of the app — matching, checks,
+/// history, the log — runs exactly as it would.
+///
+/// This exists because a test build is a copy of a real one. It reads the
+/// same config, hears the same radio and, if a token ever finds its way into
+/// its profile, messages the same people. One environment variable is a
+/// smaller thing to get right than remembering to empty a config directory.
+pub fn sending_blocked() -> bool {
+    std::env::var("HS_NO_SEND").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 pub(crate) fn telegram_api(method: &str) -> Result<String, String> {
+    if method.starts_with("send") && sending_blocked() {
+        return Err("HS_NO_SEND is set — nothing is sent from this build".into());
+    }
     let t = token().ok_or("no Telegram bot token saved")?;
     Ok(format!("https://api.telegram.org/bot{t}/{method}"))
 }
@@ -910,6 +959,27 @@ pub async fn ollama_capabilities(url: String, model: String) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_send_stops_every_send_and_nothing_else() {
+        // Reading is still allowed: a blocked build can still tell you which
+        // chats the bot can see.
+        unsafe { std::env::set_var("HS_NO_SEND", "1") };
+        assert!(sending_blocked());
+        assert!(telegram_api("sendMessage").is_err());
+        assert!(telegram_api("sendAudio").is_err());
+        let read = telegram_api("getUpdates");
+        assert!(
+            read.is_ok() || read.as_ref().is_err_and(|e| e.contains("no Telegram bot token")),
+            "reads are not blocked: {read:?}"
+        );
+        unsafe { std::env::set_var("HS_NO_SEND", "0") };
+        assert!(!sending_blocked());
+        unsafe { std::env::remove_var("HS_NO_SEND") };
+        assert!(!sending_blocked());
+    }
+
+    
 
     #[test]
     fn keywords_match_whole_phrases_case_insensitively() {

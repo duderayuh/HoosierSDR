@@ -95,6 +95,14 @@ pub struct Settings {
     pub group_window_secs: u32,
     #[serde(default = "default_group_radius")]
     pub group_radius_m: u32,
+    /// Place a call the geocoder could not, from the grid reference the
+    /// dispatcher reads out. Off means an address that will not geocode
+    /// simply has no pin.
+    #[serde(default = "yes")]
+    pub grid_fallback: bool,
+    /// What the grid means here, learned from calls that did geocode.
+    #[serde(default)]
+    pub calibration: crate::addr::Calibration,
     #[serde(default = "default_retention")]
     pub retention_days: u32,
     /// Extra guidance appended to the extraction prompt (local street-naming
@@ -133,6 +141,10 @@ fn default_group_window() -> u32 {
 fn default_group_radius() -> u32 {
     150
 }
+fn yes() -> bool {
+    true
+}
+
 fn default_retention() -> u32 {
     14
 }
@@ -179,6 +191,8 @@ impl Default for Settings {
             engine: default_engine(),
             group_window_secs: default_group_window(),
             group_radius_m: default_group_radius(),
+            grid_fallback: yes(),
+            calibration: crate::addr::Calibration::default(),
             retention_days: default_retention(),
             extra_instructions: String::new(),
         }
@@ -413,6 +427,8 @@ pub struct IncidentCall {
 pub struct IncidentDetail {
     pub incident: Incident,
     pub calls: Vec<IncidentCall>,
+    /// Hospital reports joined to this run.
+    pub reports: Vec<crate::link::LinkedReport>,
 }
 
 const INC_COLS: &str = "id, created, updated, tg, tg_name, call_type, emoji, address, validated, lat, lon, geocode, units, summary, confidence, calls, revision, address_key";
@@ -443,7 +459,7 @@ fn inc_row(r: &rusqlite::Row) -> rusqlite::Result<(Incident, String)> {
     ))
 }
 
-fn inc_get(c: &Connection, id: i64) -> Result<Option<Incident>, String> {
+pub(crate) fn inc_get(c: &Connection, id: i64) -> Result<Option<Incident>, String> {
     c.query_row(
         &format!("SELECT {INC_COLS} FROM incidents WHERE id = ?1"),
         params![id],
@@ -690,7 +706,7 @@ fn unit_key(u: &str) -> String {
         .collect()
 }
 
-fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let r = 6_371_000.0;
     let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
     let dp = (lat2 - lat1).to_radians();
@@ -1393,6 +1409,73 @@ pub fn on_transcript(app: &AppHandle, id: i64, text: &str) {
 }
 
 /// Extract, geocode, group, store, announce. Returns what happened, for the
+/// What the grid reference and the sound of the street name rescued.
+pub struct Rescued {
+    pub lat: f64,
+    pub lon: f64,
+    pub validated: String,
+    /// `corrected` — a mis-heard street name put right and geocoded;
+    /// `grid` — no better than the grid reference, so approximate.
+    pub status: &'static str,
+    /// The address as it should have been heard.
+    pub address: Option<String>,
+}
+
+/// How far a corrected address may land from the grid reference before we
+/// stop believing the correction.
+const CORRECTION_M: f64 = 1_500.0;
+
+/// Place an address the geocoder refused, using the grid reference the
+/// dispatcher read out.
+///
+/// Two rungs. If the street name sounds like one this listener's geocoder
+/// has confirmed before, put the name right and geocode that — an exact
+/// address, as long as it lands near where the grid says. Otherwise fall
+/// back to the grid point itself, which is a few hundred metres out and
+/// honest about it.
+fn rescue(db: &Db, settings: &Settings, address: &str, grid: &str) -> Option<Rescued> {
+    let cal = &settings.calibration;
+    let home = (settings.home_lat, settings.home_lon);
+    let point = crate::addr::parse_grid(grid)
+        .and_then(|g| cal.place_near(g, home, settings.search_radius_km));
+
+    if let Some(heard) = crate::addr::street_of(address) {
+        let streets = {
+            let c = db.lock().unwrap();
+            crate::addr::gazetteer(&c)
+        };
+        for cand in crate::addr::sound_alike(&streets, &heard, point)
+            .into_iter()
+            .take(3)
+        {
+            let fixed = crate::addr::with_street(address, &heard, &cand.name);
+            if let Ok(Some((lat, lon, display))) = geocode(db, settings, &fixed) {
+                let near_grid = point
+                    .map(|(a, b)| haversine_m(a, b, lat, lon) <= CORRECTION_M)
+                    .unwrap_or(true);
+                if near_grid {
+                    return Some(Rescued {
+                        lat,
+                        lon,
+                        validated: display,
+                        status: "corrected",
+                        address: Some(fixed),
+                    });
+                }
+            }
+        }
+    }
+
+    let (lat, lon) = point?;
+    Some(Rescued {
+        lat,
+        lon,
+        validated: format!("near {} (grid reference)", grid.trim()),
+        status: "grid",
+        address: None,
+    })
+}
+
 /// log and for the test command.
 pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Incident>), String> {
     let state = app.state::<AppState>();
@@ -1420,13 +1503,12 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             return Err(e);
         }
     };
-    let x = tidy(&settings, &ch, &obj);
+    let mut x = tidy(&settings, &ch, &obj);
     let extracted = serde_json::to_string(&x).unwrap_or_default();
     if !x.is_dispatch && x.address.is_empty() && x.units.is_empty() {
         log_it(app, f, "skip", "not a dispatch".into(), None);
         return Ok(("not a dispatch".into(), None));
     }
-    let key = address_key(&x.address);
     // Geocode outside the database lock: it can take a second.
     // Geocode (cached, throttled); the connection lock is not held across
     // the network call.
@@ -1435,12 +1517,29 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
     } else {
         geocode(&db, &settings, &x.address)
     };
-    let (lat, lon, validated, status) = match &geo {
+    let (mut lat, mut lon, mut validated, mut status) = match &geo {
         Ok(Some((a, b, d))) => (Some(*a), Some(*b), d.clone(), "ok"),
         Ok(None) if x.address.is_empty() => (None, None, String::new(), ""),
         Ok(None) => (None, None, String::new(), "none"),
         Err(_) => (None, None, String::new(), "error"),
     };
+    // The address did not resolve. The dispatcher read out a grid reference
+    // after it; see what that can do.
+    if lat.is_none() && !x.address.is_empty() && settings.grid_fallback {
+        if let Some(r) = rescue(&db, &settings, &x.address, &x.grid) {
+            lat = Some(r.lat);
+            lon = Some(r.lon);
+            validated = r.validated;
+            status = r.status;
+            // The address as it should have been heard, so the card, the
+            // grouping key and any later search all agree.
+            if let Some(fixed) = r.address {
+                x.address = fixed;
+            }
+        }
+    }
+    let (lat, lon, validated) = (lat, lon, validated);
+    let key = address_key(&x.address);
 
     let now = crate::library::now();
     let c = db.lock().unwrap();
@@ -1506,6 +1605,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             inc_attach_call(&c, i.id, f, &role, &x.summary, &extracted)?;
             drop(c);
             let _ = app.emit("incident", &i);
+            crate::tripwires::on_incident(app, &i, false);
             log_it(app, f, "update", format!("{how} → #{}", i.id), Some(i.id));
             Ok((format!("updated incident #{} ({how})", i.id), Some(i)))
         }
@@ -1550,6 +1650,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             prune(&c, settings.retention_days);
             drop(c);
             let _ = app.emit("incident", &i);
+            crate::tripwires::on_incident(app, &i, false);
             log_it(
                 app,
                 f,
@@ -1754,7 +1855,15 @@ pub fn incident_get(state: State<AppState>, id: i64) -> Result<Option<IncidentDe
             transcript: row.and_then(|r| r.transcript_edited.or(r.transcript)),
         });
     }
-    Ok(Some(IncidentDetail { incident, calls }))
+    // The hospital reports this run turned into, if a crew was heard
+    // reading one.
+    let places = state.places.lock().unwrap().settings.clone();
+    let reports = crate::link::reports_for(&c, id, &places);
+    Ok(Some(IncidentDetail {
+        incident,
+        calls,
+        reports,
+    }))
 }
 
 #[tauri::command]
@@ -1855,7 +1964,9 @@ fn locate_blocking(
 fn inc_unmapped(c: &Connection, limit: u32) -> Result<Vec<Incident>, String> {
     let mut st = c
         .prepare(&format!(
-            "SELECT {INC_COLS} FROM incidents WHERE geocode IN ('none', 'error') AND address <> '' ORDER BY created DESC LIMIT ?1"
+            // 'grid' is in here too: an approximate pin is a candidate for
+            // an exact one, so a later retry can upgrade it.
+            "SELECT {INC_COLS} FROM incidents WHERE geocode IN ('none', 'error', 'grid') AND address <> '' ORDER BY created DESC LIMIT ?1"
         ))
         .map_err(|e| e.to_string())?;
     let rows = st
@@ -1882,13 +1993,51 @@ pub async fn dispatch_regeocode(
         .map_err(|e| e.to_string())?
 }
 
+/// Re-fit the grid from everything the geocoder has confirmed so far and
+/// remember it. Cheap, and the fit only improves as the library grows.
+pub fn refresh_calibration(app: &AppHandle, db: &Db) -> Option<crate::addr::Calibration> {
+    let cal = {
+        let c = db.lock().unwrap();
+        crate::addr::calibrate(&c)?
+    };
+    let state = app.state::<AppState>();
+    let settings = {
+        let mut st = state.dispatch.lock().unwrap();
+        st.settings.calibration = cal.clone();
+        st.settings.clone()
+    };
+    let _ = store(app, &settings);
+    Some(cal)
+}
+
+/// The grid reference a call carried, for an incident already stored.
+fn grid_of(c: &Connection, incident: i64) -> String {
+    c.query_row(
+        "SELECT json_extract(extracted, '$.grid') FROM incident_calls
+          WHERE incident = ?1 AND json_extract(extracted, '$.grid') <> '' LIMIT 1",
+        [incident],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
 fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(u32, u32), String> {
+    // Fit the grid first: the rescue below leans on it.
+    let mut settings = settings.clone();
+    if let Some(cal) = refresh_calibration(app, db) {
+        settings.calibration = cal;
+    }
+    let settings = &settings;
     let todo = {
         let c = db.lock().unwrap();
         inc_unmapped(&c, 500)?
     };
-    let (mut tried, mut placed) = (0u32, 0u32);
+    let (mut tried, mut placed, mut upgraded) = (0u32, 0u32, 0u32);
     for mut i in todo {
+        // An approximate pin is only worth retrying for an exact answer.
+        let was_grid = i.geocode == "grid";
         // A hundred-block grid reference is not a place; Indiana county
         // roads are named like one ("N 100 E"), so never offer it.
         if is_grid_ref(&i.address) {
@@ -1908,13 +2057,53 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                     inc_update(&c, &i, &key)?;
                 }
                 let _ = app.emit("incident", &i);
-                placed += 1;
+                if was_grid {
+                    upgraded += 1;
+                } else {
+                    placed += 1;
+                }
+            }
+            Ok(None) | Err(_) if settings.grid_fallback && !was_grid => {
+                let grid = {
+                    let c = db.lock().unwrap();
+                    grid_of(&c, i.id)
+                };
+                if let Some(r) = rescue(db, settings, &i.address, &grid) {
+                    i.lat = Some(r.lat);
+                    i.lon = Some(r.lon);
+                    i.validated = r.validated;
+                    i.geocode = r.status.into();
+                    i.revision += 1;
+                    if let Some(fixed) = r.address {
+                        i.address = fixed;
+                    }
+                    let key = address_key(&i.address);
+                    {
+                        let c = db.lock().unwrap();
+                        inc_update(&c, &i, &key)?;
+                    }
+                    let _ = app.emit("incident", &i);
+                    placed += 1;
+                }
             }
             Ok(None) => {}
             Err(e) => eprintln!("[dispatch] retry geocode #{}: {e}", i.id),
         }
     }
-    Ok((tried, placed))
+    Ok((tried, placed + upgraded))
+}
+
+/// Re-fit the grid on demand, for the Setup panel's button.
+#[tauri::command]
+pub fn dispatch_calibrate(
+    app: AppHandle,
+    state: State<AppState>,
+) -> Result<crate::addr::Calibration, String> {
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return Err("library not open".into());
+    };
+    refresh_calibration(&app, &db)
+        .ok_or_else(|| "not enough placed calls with a grid reference yet".into())
 }
 
 /// Geocode a free-text query (the Fix-address dialog's preview).

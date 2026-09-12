@@ -1204,6 +1204,27 @@ fn store_outcome(app: &AppHandle, r: &Rule, c: &Conversation, o: &Outcome) {
     if let Err(e) = crate::events::insert(&db, &ev, crate::library::now()) {
         eprintln!("conversation event: {e}");
     }
+    // A hospital report belongs to a run somebody was dispatched to; see if
+    // the crew who read it can be found in the dispatch history. Off the
+    // send path (it may ask the local model) and never for a test run.
+    let id: Option<i64> = db
+        .query_row(
+            "SELECT id FROM conversations WHERE rule_id = ?1 AND tg = ?2 AND first_at = ?3",
+            params![r.id, c.tg, c.first_at],
+            |row| row.get(0),
+        )
+        .ok();
+    drop(db);
+    if source == "live" {
+        if let Some(id) = id {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Some((incident, how)) = crate::link::try_link(&app, id) {
+                    println!("[link] conversation {id} → incident {incident} ({how})");
+                }
+            });
+        }
+    }
 }
 
 /// The row for one outcome: insert on first send, update on a revision.

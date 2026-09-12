@@ -310,12 +310,61 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Places</span><span class="meta" id="plMeta"></span><button class="btn ghost sm" id="plSuggest" title="Read the talkgroup catalog for hospitals it already names">Add from my catalog</button><button class="btn ghost sm" id="plAdd">+ Place</button></div>
+            <div class="body tight">
+              <p class="help">Hospitals, stations and landmarks, with the channels that belong to them. A place on the map lets a tripwire say how far away something is, and which hospital nearest the call can take it.</p>
+              <div id="plList" class="pllist"></div>
+              <div class="empty small" id="plEmpty">No places yet. If your catalog names the hospital channels, “Add from my catalog” fills this in.</div>
+              <div id="plEdit" class="pledit" style="display:none">
+                <div class="row3">
+                  <label class="field"><span class="lab">Name</span><input id="plName" type="text" spellcheck="false" /></label>
+                  <label class="field"><span class="lab">Kind</span><select id="plKind"><option value="hospital">Hospital</option><option value="station">Station</option><option value="landmark">Landmark</option><option value="other">Other</option></select></label>
+                  <label class="field"><span class="lab">&nbsp;</span><label class="check"><input id="plEnabled" type="checkbox" checked /> In use</label></label>
+                </div>
+                <div class="row2">
+                  <label class="field"><span class="lab">Address <span class="mono faint">or leave blank and search by name</span></span><input id="plAddress" type="text" spellcheck="false" /></label>
+                  <label class="field"><span class="lab">On the map <span class="mono faint" id="plWhere"></span></span><button class="btn ghost sm" id="plLocate" style="justify-self:start">Find on the map</button></label>
+                </div>
+                <label class="field"><span class="lab">What it can do <span class="mono faint">nothing is assumed — tick what you know</span></span></label>
+                <div id="plFeatures" class="plfeats"></div>
+                <div class="row2">
+                  <label class="field"><span class="lab">Anything else it can do <span class="mono faint">comma separated</span></span><input id="plOwnFeatures" type="text" spellcheck="false" placeholder="hyperbaric, replant" /></label>
+                  <label class="field"><span class="lab">Channels <span class="mono faint">traffic here is about this place</span></span><span class="inline"><input id="plTgs" type="text" spellcheck="false" placeholder="10257" /><button class="btn ghost sm" id="plPickTgs">Pick…</button></span></label>
+                </div>
+                <div class="row2">
+                  <label class="field"><span class="lab">System <span class="mono faint">two systems can use the same numbers; blank means any</span></span><input id="plSystem" type="text" spellcheck="false" /></label>
+                </div>
+                <label class="field"><span class="lab">Notes</span><input id="plNotes" type="text" spellcheck="false" /></label>
+                <div class="inline"><button class="btn primary sm" id="plSave">Save</button><span class="spacer"></span><button class="btn ghost sm danger" id="plDelete">Delete</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Map data &amp; distances</span><span class="meta" id="rtMeta"></span></div>
+            <div class="body tight">
+              <p class="help">Distances are straight lines until a router is running. OSRM runs here, in a container, on a map of one state — nothing about your calls leaves the machine. It needs Docker running and about 10 GB free.</p>
+              <label class="check"><input id="rtEnabled" type="checkbox" /> Use the local router for distances and drive times</label>
+              <div class="row3">
+                <label class="field"><span class="lab">Region <span class="mono faint">a Geofabrik extract, e.g. us/indiana</span></span><span class="inline"><input id="rtRegion" type="text" spellcheck="false" placeholder="us/indiana" /><button class="btn ghost sm" id="rtSuggest" title="Work it out from your home location">From home</button></span></label>
+                <label class="field"><span class="lab">Router URL</span><input id="rtUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:5000" /></label>
+                <label class="field"><span class="lab">Platform <span class="mono faint">blank unless the image has no build for your chip</span></span><input id="rtPlatform" type="text" spellcheck="false" placeholder="linux/amd64" /></label>
+              </div>
+              <label class="field"><span class="lab">Container image</span><input id="rtImage" type="text" spellcheck="false" /></label>
+              <div class="inline"><button class="btn primary sm" id="rtSave">Save</button><button class="btn ghost sm" id="rtPrepare" title="Download the map and build the routing graph — minutes, and a few hundred megabytes">Prepare the map</button><button class="btn ghost sm" id="rtStart">Start router</button><button class="btn ghost sm" id="rtStop">Stop</button><button class="btn ghost sm" id="rtCheck">Check</button></div>
+              <div class="mono small" id="rtStatus"></div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Home &amp; geocoding</span><span class="meta" id="dpGeoMeta"></span></div>
             <div class="body tight">
               <div class="row3">
                 <label class="field"><span class="lab">Home latitude</span><input id="dpHomeLat" type="text" inputmode="decimal" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Home longitude</span><input id="dpHomeLon" type="text" inputmode="decimal" spellcheck="false" /></label>
                 <label class="field"><span class="lab">&nbsp;</span><button class="btn ghost sm" id="dpHomeFromMap" style="justify-self:start">Use map centre</button></label>
+              </div>
+              <div class="row2" style="align-items:start">
+                <label class="check"><input id="dpGridFallback" type="checkbox" checked /> Place calls the geocoder can't find from the grid reference the dispatcher reads out</label>
+                <div class="inline"><button class="btn ghost sm" id="dpCalibrate" title="Work out what the grid means from calls that did place">Re-fit the grid</button><span class="meta" id="dpCalMeta"></span></div>
               </div>
               <div class="row2">
                 <label class="field"><span class="lab">Region hint <span class="mono faint">added to every address</span></span><input id="dpRegion" type="text" placeholder="Indianapolis, IN" spellcheck="false" /></label>
@@ -404,8 +453,8 @@
               <div class="panel tw-step">
                 <div class="head"><span class="tw-num">1</span><span class="eyebrow">When</span><span class="meta" id="twWhenMeta"></span></div>
                 <div class="body tight">
-                  <div class="seg tw-seg" id="twKind"><button data-v="call" aria-pressed="true">A call is heard</button><button data-v="conversation" aria-pressed="false">A conversation ends</button><button data-v="digest" aria-pressed="false">On a timer</button></div>
-                  <div class="field"><span class="lab">On <span class="mono faint" id="twTgHint"></span></span>
+                  <div class="seg tw-seg" id="twKind"><button data-v="call" aria-pressed="true">A call is heard</button><button data-v="conversation" aria-pressed="false">A conversation ends</button><button data-v="incident" aria-pressed="false">A run is dispatched</button><button data-v="digest" aria-pressed="false">On a timer</button></div>
+                  <div class="field" id="twTgRow"><span class="lab">On <span class="mono faint" id="twTgHint"></span></span>
                     <div class="inline tw-chanrow"><button class="btn ghost tw-chan" id="twTgs" title="Choose talkgroups">any talkgroup</button><select id="twSystem" title="Which system those talkgroups belong to — the same number on another system is a different channel"></select></div></div>
                   <div id="twCallWhen">
                     <label class="field"><span class="lab">Listen for <span class="mono faint">one phrase per line · any of them · whole words, any case</span></span><textarea id="twPhrases" rows="3" spellcheck="false" placeholder="cardiac arrest&#10;working fire"></textarea></label>
@@ -415,6 +464,16 @@
                       <label class="field"><span class="lab">Only these radios <span class="mono faint">IDs · blank = any</span></span><input id="twUnits" type="text" placeholder="790065" spellcheck="false" /></label>
                       <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="twEmergency" type="checkbox" /> only emergencies</label></label>
                     </div>
+                  </div>
+                  <div id="twIncWhen">
+                    <p class="help">Runs come off the Dispatch map: the model has already read the call and worked out the type, the address and who was sent. Leave everything blank for every run.</p>
+                    <label class="field"><span class="lab">Call types <span class="mono faint">comma separated, as the Dispatch settings spell them · blank = any</span></span><input id="twIncTypes" type="text" spellcheck="false" placeholder="Cardiac Arrest, Structure Fire" /></label>
+                    <div class="row3">
+                      <label class="field"><span class="lab">Near <span class="mono faint">a place, or any that can…</span></span><select id="twIncNear"></select></label>
+                      <label class="field"><span class="lab">Within (km) <span class="mono faint">0 = anywhere</span></span><input id="twIncKm" type="text" inputmode="decimal" /></label>
+                      <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="twIncPlaced" type="checkbox" /> only runs on the map</label></label>
+                    </div>
+                    <label class="check"><input id="twIncLinked" type="checkbox" /> Wait until the crew reports to a hospital, so the message can say where the patient went</label>
                   </div>
                   <div id="twConvWhen">
                     <label class="field"><span class="lab">Fixed radios <span class="mono faint">the hospital's consoles · every other radio is a unit calling in</span></span><span class="inline"><input id="twFixed" type="text" spellcheck="false" placeholder="900001, 900002" /><label class="check" style="margin:0;white-space:nowrap"><input id="twLearn" type="checkbox" checked /> learn from traffic</label></span></label>
@@ -468,7 +527,7 @@
                   <div class="tw-tokens" id="twTokens"></div>
                   <div class="tw-msgprev" id="twMsgPrev"></div>
                   <div class="inline tw-opts">
-                    <label class="check" style="margin:0"><input id="twAudio" type="checkbox" /> with the audio</label>
+                    <label class="check" style="margin:0" id="twAudioWrap"><input id="twAudio" type="checkbox" /> with the audio</label>
                     <select id="twEarlier" title="Also attach earlier calls on the same talkgroup"></select>
                     <label class="check" style="margin:0" id="twToneWrap"><input id="twTone" type="checkbox" /> tone in the app</label>
                     <label class="check" style="margin:0"><input id="twTelegram" type="checkbox" checked /> Telegram</label>
@@ -1278,5 +1337,6 @@
   <script src="retention.js"></script>
   <script src="connections.js"></script>
   <script src="tripwires.js"></script>
+  <script src="places.js"></script>
 </body>
 </html>
