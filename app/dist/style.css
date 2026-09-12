@@ -1150,6 +1150,30 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dpmk.approx { opacity: .78; border-style: dashed; }
 
 /* The place book, in the Dispatch setup pane. */
+/* Care pathways. The number on each row is the whole point: first match
+   wins, so position is meaning — which is why they are dragged. */
+.pwlist { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
+.pwcard { border: 1px solid var(--line); border-radius: 9px; padding: 6px 9px; background: var(--panel); cursor: pointer; }
+.pwcard.on { border-color: var(--signal); }
+.pwcard.off { opacity: .55; }
+.pwcard.dragging { opacity: .35; }
+.pwcard[data-drop="before"] { box-shadow: inset 0 2px 0 0 var(--signal); }
+.pwcard[data-drop="after"] { box-shadow: inset 0 -2px 0 0 var(--signal); }
+.pwgrip { cursor: grab; color: var(--ink-dim); opacity: .55; font-size: 12px; letter-spacing: -1px; user-select: none; }
+.pwgrip:hover { opacity: 1; }
+.pwtop { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.pwtop .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pwno { font-size: 10px; color: var(--ink-dim); border: 1px solid var(--line); border-radius: 999px; min-width: 17px; text-align: center; padding: 0 3px; }
+.pwsaid { font-size: 11.5px; color: var(--ink-dim); margin: 3px 0 0 25px; line-height: 1.4; }
+.pwedit { margin: 8px 0 2px; padding-top: 8px; border-top: 1px solid var(--line); cursor: default; }
+.pwneeds { display: flex; flex-direction: column; gap: 5px; }
+.pwneed { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.pwneed > input { width: 13em; }
+.pwfeats { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+.pwfeats .check { margin: 0; }
+.pwpreview { margin-top: 8px; font-size: 12px; }
+.pwrow { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; font-size: 12px; }
+.pwrow .grow { flex: 1; min-width: 0; }
 .pllist { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
 .plrow { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 .plrow:hover { background: var(--row-hover, rgba(127,127,127,.08)); }
