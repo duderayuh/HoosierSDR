@@ -2273,9 +2273,13 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.split('-').count(), 6);
         assert_eq!(a.chars().filter(|c| *c != '-').count(), 24);
+        // The characters that can be misread off paper. Only the offending
+        // ones are named if this fails — a passphrase, even a thrown-away
+        // one from a test, does not belong in a log.
+        let ambiguous: Vec<char> = a.chars().filter(|c| "01lo".contains(*c)).collect();
         assert!(
-            !a.contains('0') && !a.contains('1') && !a.contains('l') && !a.contains('o'),
-            "{a}"
+            ambiguous.is_empty(),
+            "a generated passphrase used characters that can be misread: {ambiguous:?}"
         );
     }
 

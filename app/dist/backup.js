@@ -16,13 +16,13 @@
   // code path underneath.
   const PRESETS = {
     aws: { name: "Amazon S3", endpoint: "https://s3.us-east-2.amazonaws.com", region: "us-east-2", path_style: false,
-      help: "Endpoint is <span class='mono'>https://s3.&lt;region&gt;.amazonaws.com</span>. The key needs s3:PutObject, GetObject, ListBucket and DeleteObject on this bucket." },
+      help: "Endpoint is https://s3.<region>.amazonaws.com. The key needs s3:PutObject, GetObject, ListBucket and DeleteObject on this bucket." },
     supabase: { name: "Supabase Storage", endpoint: "https://YOUR-PROJECT.supabase.co/storage/v1/s3", region: "us-east-1", path_style: true,
       help: "Project Settings → Storage → S3 access keys. The endpoint and region are shown there; the bucket is the one you made in Storage." },
     b2: { name: "Backblaze B2", endpoint: "https://s3.us-west-004.backblazeb2.com", region: "us-west-004", path_style: false,
       help: "Use an application key scoped to the one bucket. The endpoint and region are on the bucket's page." },
     r2: { name: "Cloudflare R2", endpoint: "https://YOUR-ACCOUNT.r2.cloudflarestorage.com", region: "auto", path_style: true,
-      help: "R2 → Manage API tokens. The region is <span class='mono'>auto</span>." },
+      help: "R2 → Manage API tokens. The region is auto." },
     wasabi: { name: "Wasabi", endpoint: "https://s3.us-east-1.wasabisys.com", region: "us-east-1", path_style: false, help: "" },
     minio: { name: "MinIO or another S3 server", endpoint: "http://192.168.1.10:9000", region: "us-east-1", path_style: true,
       help: "Your own server on the network. Path style is required." },
@@ -96,7 +96,6 @@
       </div></div>`;
     }).join("");
     const box = $("bkDests");
-    const bindText = (attr, set) => box.querySelectorAll(`[data-${attr}]`).forEach((x) => x.onchange = () => set(dests[+x.dataset[attr.replace(/-/g, "")] ?? 0], x));
     box.querySelectorAll("[data-bkname]").forEach((x) => x.onchange = () => { dests[+x.dataset.bkname].name = x.value.trim(); });
     box.querySelectorAll("[data-bkkeep]").forEach((x) => x.onchange = () => { dests[+x.dataset.bkkeep].keep = intOr0(x.value); });
     box.querySelectorAll("[data-bkendpoint]").forEach((x) => x.onchange = () => { dests[+x.dataset.bkendpoint].endpoint = x.value.trim(); });
@@ -263,7 +262,7 @@
       encrypt: true, keep: 7, enabled: true, tier: "",
     });
     renderDests();
-    if (p && p.help) uiToast(String(p.help).replace(/<[^>]+>/g, ""));
+    if (p && p.help) uiToast(p.help);
   }
 
   async function save() {
@@ -290,7 +289,7 @@
   $("bkAddFolder").onclick = () => addDest("folder", null);
   $("bkAddS3").onclick = () => {
     const m = uiModal(`<div class="head"><span class="eyebrow">Where to</span></div><div class="body">
-      <div class="list">${Object.entries(PRESETS).map(([k, p]) => `<div class="row"><span class="grow"><b>${esc(p.name)}</b>${p.help ? `<br><span class="small faint">${p.help}</span>` : ""}</span><button class="btn ghost sm" data-bkpreset="${k}">Use this</button></div>`).join("")}</div>
+      <div class="list">${Object.entries(PRESETS).map(([k, p]) => `<div class="row"><span class="grow"><b>${esc(p.name)}</b>${p.help ? `<br><span class="small faint">${esc(p.help)}</span>` : ""}</span><button class="btn ghost sm" data-bkpreset="${k}">Use this</button></div>`).join("")}</div>
       <p class="help">All of these speak the same protocol, so anything S3-compatible works even if it is not listed.</p></div>`, { wide: true });
     m.querySelectorAll("[data-bkpreset]").forEach((x) => x.onclick = () => { m.close(); addDest("s3", x.dataset.bkpreset); });
   };
