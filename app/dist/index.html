@@ -340,6 +340,18 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Care pathways · if this, then the closest one of these</span><span class="meta" id="pwMeta"></span><button class="btn ghost sm" id="pwAdd">+ Pathway</button></div>
+            <div class="body tight">
+              <p class="help">One list of “if this, then that”. The <b>first</b> pathway a run matches is the one used, so the specific ones go above the general ones — drag to reorder. A pathway asks for facilities by what they can do, not by name, so it keeps working as the places change.</p>
+              <label class="check"><input id="pwEnabled" type="checkbox" checked /> Work out the nearest facilities for each run</label>
+              <div class="rtnotice" id="pwWarn" style="display:none"></div>
+              <div id="pwList" class="pwlist" title="Drag to reorder — the first match wins"></div>
+              <div class="empty small" id="pwEmpty">No pathways. <b>Start over</b> puts back the standard set — cardiac arrest, stroke, chest pain, trauma, childbirth — which you can then edit.</div>
+              <div class="inline" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" id="pwSave">Save</button><button class="btn ghost sm" id="pwPreview">Check against my runs</button><button class="btn ghost sm" id="pwReset">Start over</button><span class="help" id="pwOut"></span></div>
+              <div id="pwPreviewOut" class="pwpreview" style="display:none"></div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Map data &amp; distances</span><span class="meta" id="rtMeta"></span></div>
             <div class="body tight">
               <p class="help">Distances are straight lines until a router is running. OSRM runs here, in a container, on a map of one state — nothing about your calls leaves the machine. It needs Docker running and about 10 GB free.</p>
@@ -1359,6 +1371,10 @@
   <script src="connections.js"></script>
   <script src="tripwires.js"></script>
   <script src="places.js"></script>
+<<<<<<< HEAD
+  <script src="pathways.js"></script>
+=======
   <script src="backup.js"></script>
+>>>>>>> origin/main
 </body>
 </html>

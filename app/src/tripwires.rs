@@ -2952,6 +2952,8 @@ mod tests {
 
     fn run(call_type: &str, lat: Option<f64>, lon: Option<f64>) -> crate::dispatch::Incident {
         crate::dispatch::Incident {
+            pathway: String::new(),
+            targets: Vec::new(),
             id: 1,
             created: 100,
             updated: 100,
