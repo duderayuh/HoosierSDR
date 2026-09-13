@@ -291,16 +291,26 @@ fn ollama_extract(
         .http_status_as_error(false)
         .build()
         .into();
-    let call = |send_think: bool| -> Result<(u16, String), String> {
+    // How to ask, in the order worth trying. A thinking model asked for
+    // grammar-constrained JSON can spend everything on the thought and answer
+    // with an empty string: qwen3 does it every time, returning 44 characters
+    // of thinking and a response of length zero. Neither half of that pair is
+    // wrong on its own — dropping the grammar leaves the thinking intact and
+    // the model still answers in JSON because the prompt asked it to, and
+    // dropping the thinking works too. So try the configured shape first, and
+    // climb down only when it comes back unusable.
+    let attempts = attempts_for(r.think);
+
+    let call = |a: &Attempt| -> Result<(u16, String), String> {
         let mut body = serde_json::json!({
-            "model": o.model, "prompt": full, "stream": false, "format": "json",
+            "model": o.model, "prompt": full, "stream": false,
             "options": { "temperature": 0 }
         });
-        if send_think {
-            // `think: true` when the rule asks for reasoning (the thought
-            // comes back in `thinking`, the JSON in `response`), else false
-            // so a thinking model does not spend its output on the thought.
-            body["think"] = serde_json::Value::Bool(r.think);
+        if a.json_format {
+            body["format"] = serde_json::Value::String("json".into());
+        }
+        if let Some(t) = a.think {
+            body["think"] = serde_json::Value::Bool(t);
         }
         let mut resp = agent
             .post(&format!("{}/api/generate", o.url.trim_end_matches('/')))
@@ -311,25 +321,73 @@ fn ollama_extract(
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         Ok((status, text))
     };
-    let (mut status, mut text) = call(true)?;
-    if status != 200 && text.to_ascii_lowercase().contains("think") {
-        (status, text) = call(false)?;
+
+    let mut last_answer = String::new();
+    let mut last_err: Option<String> = None;
+    for a in &attempts {
+        let (mut status, mut text) = call(a)?;
+        // An older server that does not know `think` at all rejects the whole
+        // request; ask again without it rather than giving up on the model.
+        if status != 200 && text.to_ascii_lowercase().contains("think") {
+            let bare = Attempt { think: None, json_format: a.json_format };
+            (status, text) = call(&bare)?;
+        }
+        if status != 200 {
+            last_err = Some(format!(
+                "ollama HTTP {status}: {}",
+                text.chars().take(200).collect::<String>()
+            ));
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
+        let answer = v["response"].as_str().unwrap_or("");
+        if let Some(obj) = parse_object(answer) {
+            return Ok(obj);
+        }
+        // Some builds put the whole answer in `thinking` and leave `response`
+        // empty; if the object is in there, take it rather than asking again.
+        if let Some(obj) = v["thinking"].as_str().and_then(parse_object) {
+            return Ok(obj);
+        }
+        if !answer.trim().is_empty() {
+            last_answer = answer.to_string();
+        }
     }
-    if status != 200 {
-        return Err(format!(
-            "ollama HTTP {status}: {}",
-            text.chars().take(200).collect::<String>()
-        ));
+    if let Some(e) = last_err {
+        return Err(e);
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("ollama reply: {e}"))?;
-    let answer = v["response"].as_str().unwrap_or("");
-    parse_object(answer).ok_or_else(|| {
-        format!(
-            "model did not answer in JSON: {}",
-            answer.chars().take(200).collect::<String>()
-        )
-    })
+    Err(format!(
+        "model did not answer in JSON{}",
+        if last_answer.is_empty() {
+            " — it returned nothing at all. A thinking model asked for JSON \
+             can do this; try turning reasoning off for this tripwire."
+                .to_string()
+        } else {
+            format!(": {}", last_answer.chars().take(200).collect::<String>())
+        }
+    ))
+}
+
+/// One way of asking the model, for the fallback ladder in `ollama_extract`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Attempt {
+    /// `None` leaves the field off the request entirely.
+    think: Option<bool>,
+    json_format: bool,
+}
+
+/// The shapes to try for a rule, hardest constraint first.
+fn attempts_for(think: bool) -> Vec<Attempt> {
+    if think {
+        vec![
+            Attempt { think: Some(true), json_format: true },
+            Attempt { think: Some(true), json_format: false },
+            Attempt { think: Some(false), json_format: true },
+        ]
+    } else {
+        vec![Attempt { think: Some(false), json_format: true }]
+    }
 }
 
 /// The provider's chat/messages endpoint and which request shape it speaks.
@@ -1115,5 +1173,53 @@ mod tests {
         for mut r in builtin_templates() {
             sanitize_rule(&mut r).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod thinking_model_tests {
+    use super::*;
+
+    #[test]
+    fn a_thinking_rule_has_somewhere_to_climb_down_to() {
+        // qwen3 asked to think *and* to answer in grammar-constrained JSON
+        // returns its thought and an empty response, every time. Measured on
+        // 2026-09-13: 44 characters of thinking, response length zero, three
+        // runs out of three. Either constraint alone is fine, so the ladder
+        // gives up one at a time rather than failing the tripwire.
+        let a = attempts_for(true);
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0], Attempt { think: Some(true), json_format: true },
+                   "first ask for exactly what the rule wants");
+        assert_eq!(a[1], Attempt { think: Some(true), json_format: false },
+                   "then keep the reasoning and drop the grammar");
+        assert_eq!(a[2], Attempt { think: Some(false), json_format: true },
+                   "only then give up the reasoning");
+    }
+
+    #[test]
+    fn a_rule_that_does_not_want_reasoning_asks_once() {
+        // Nothing to climb down from, and a second call would double the wait
+        // on every genuinely unanswerable transcript.
+        let a = attempts_for(false);
+        assert_eq!(a, vec![Attempt { think: Some(false), json_format: true }]);
+    }
+
+    #[test]
+    fn json_is_found_inside_whatever_the_model_wrapped_it_in() {
+        // Dropping the grammar means the answer can arrive with prose around
+        // it, which is the cost of the second rung.
+        let v = parse_object("Here is the result:\n{\"candidate\": \"yes\", \"criteriaMet\": 4}\nHope that helps.")
+            .expect("an object");
+        assert_eq!(v["candidate"], "yes");
+        assert_eq!(v["criteriaMet"], 4);
+    }
+
+    #[test]
+    fn an_empty_answer_is_not_mistaken_for_an_object() {
+        assert!(parse_object("").is_none());
+        assert!(parse_object("   ").is_none());
+        assert!(parse_object("no json here").is_none());
+        assert!(parse_object("[1,2,3]").is_none(), "an array is not the object asked for");
     }
 }
