@@ -200,6 +200,9 @@ pub struct ConvState {
     /// configured" — so it is remembered, shown, and, most importantly,
     /// blocks writing over the file that could not be parsed.
     pub load_error: Option<String>,
+    /// A backfill is running; a second one would summarise the same stretch
+    /// twice and spend the model's time doing it.
+    pub busy: bool,
 }
 
 pub type Shared = Mutex<ConvState>;
@@ -2278,5 +2281,301 @@ mod visibility_tests {
         assert_eq!(statuses.len(), 1);
         assert!(!statuses[0].enabled);
         assert!(statuses[0].off_reason.contains("Old"));
+    }
+}
+
+// ---------------------------------------------------------------- backfill
+
+/// Build conversations out of calls already in the library and summarise
+/// them, for a stretch of time the live engine did not cover.
+///
+/// **Nothing is sent.** A backfill of a day's hospital traffic is dozens of
+/// hand-off notes, and replaying those into a live Telegram chat hours after
+/// the patients arrived would be noise at best. The summaries are written to
+/// the library and appear in the Conversations tab; a single one worth
+/// passing on can be sent from there with Resend.
+///
+/// Groups already stored are skipped, so running it twice is safe and running
+/// it over a period the live engine handled adds nothing.
+#[tauri::command]
+pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (rules, settings) = {
+            let mut st = state.conversations.lock().unwrap();
+            if st.busy {
+                return Err("a backfill is already running".into());
+            }
+            let rules: Vec<Rule> = st.settings.rules.iter().filter(|r| r.enabled).cloned().collect();
+            if rules.is_empty() {
+                return Err("no conversation rule is switched on".into());
+            }
+            st.busy = true;
+            (rules, st.settings.clone())
+        };
+        let done = (|| -> Result<Vec<Conversation>, String> {
+            let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
+            let c = db.lock().unwrap();
+            let since = crate::library::now() - hours.clamp(1, 24 * 60) as i64 * 3600;
+            let mut out: Vec<Conversation> = Vec::new();
+            for r in &rules {
+                for tg in &r.tgs {
+                    let rows = crate::library::search(
+                        &c,
+                        &crate::library::Query {
+                            tg: Some(*tg),
+                            from: Some(since),
+                            limit: Some(5_000),
+                            ..Default::default()
+                        },
+                    )?;
+                    // `search` hands back newest first; a conversation reads
+                    // forwards.
+                    let mut rows = rows;
+                    rows.sort_by_key(|x| x.start);
+                    let mut group: Vec<Piece> = Vec::new();
+                    let flush = |group: &mut Vec<Piece>, out: &mut Vec<Conversation>| {
+                        if group.is_empty() {
+                            return;
+                        }
+                        let pieces = std::mem::take(group);
+                        if let Some(conv) = assemble(r, *tg, pieces) {
+                            out.push(conv);
+                        }
+                    };
+                    for row in rows {
+                        let at = row.start;
+                        if let Some(last) = group.last() {
+                            if at - last.at > r.end_gap_secs as i64 {
+                                flush(&mut group, &mut out);
+                            }
+                        }
+                        group.push(Piece {
+                            id: Some(row.id),
+                            unit: row.unit,
+                            unit_name: row.unit_name.clone(),
+                            fixed: row.unit == 0 || is_fixed(&settings, r, row.tg, row.unit),
+                            at,
+                            secs: row.secs,
+                            audio: row.audio.clone(),
+                            transcript: row.transcript_edited.or(row.transcript),
+                        });
+                    }
+                    flush(&mut group, &mut out);
+                }
+            }
+            // Leave alone anything the live engine already wrote.
+            out.retain(|conv| !already_stored(&c, &conv.rule_id, conv.tg, conv.first_at));
+            Ok(out)
+        })();
+        let todo = match done {
+            Ok(v) => v,
+            Err(e) => {
+                state.conversations.lock().unwrap().busy = false;
+                return Err(e);
+            }
+        };
+        let n = todo.len();
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            for (k, conv) in todo.into_iter().enumerate() {
+                let Some(r) = app2
+                    .state::<AppState>()
+                    .conversations
+                    .lock()
+                    .unwrap()
+                    .settings
+                    .rules
+                    .iter()
+                    .find(|x| x.id == conv.rule_id)
+                    .cloned()
+                else {
+                    continue;
+                };
+                summarise_only(&app2, &conv, &r);
+                let _ = app2.emit(
+                    "conversations_progress",
+                    serde_json::json!({ "done": k + 1, "total": n }),
+                );
+            }
+            app2.state::<AppState>().conversations.lock().unwrap().busy = false;
+            let _ = app2.emit(
+                "conversations_progress",
+                serde_json::json!({ "done": n, "total": n, "finished": true }),
+            );
+            let _ = app2.emit("conversations", ());
+        });
+        Ok(n)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One group of transmissions as a conversation, or `None` if it is not one:
+/// the same two rejections the live ticker makes, so a backfill and a live
+/// run disagree about nothing.
+fn assemble(r: &Rule, tg: u16, pieces: Vec<Piece>) -> Option<Conversation> {
+    if pieces.len() < r.min_calls.max(1) as usize {
+        return None;
+    }
+    if !pieces.iter().any(|p| !p.fixed) {
+        return None;
+    }
+    let mut participants: Vec<u32> = Vec::new();
+    for p in pieces.iter().filter(|p| !p.fixed) {
+        if !participants.contains(&p.unit) {
+            participants.push(p.unit);
+        }
+    }
+    Some(Conversation {
+        key: 0,
+        rule_id: r.id.clone(),
+        rule_name: r.name.clone(),
+        tg,
+        tg_name: format!("TG {tg}"),
+        tg_desc: None,
+        mobile_unit: pieces.iter().find(|p| !p.fixed).map(|p| p.unit),
+        participants,
+        first_at: pieces.first().map(|p| p.at).unwrap_or(0),
+        last_at: pieces.last().map(|p| p.at).unwrap_or(0),
+        pieces,
+        sent_ids: Vec::new(),
+        sent_chat: String::new(),
+        sent_at: None,
+        dirty: false,
+        revision: 0,
+        busy: false,
+        attempts: 0,
+        retry_after: 0,
+        last_summary: None,
+        last_error: None,
+    })
+}
+
+fn already_stored(c: &Connection, rule_id: &str, tg: u16, first_at: i64) -> bool {
+    c.query_row(
+        "SELECT 1 FROM conversations WHERE rule_id = ?1 AND tg = ?2 AND first_at = ?3",
+        params![rule_id, tg, first_at],
+        |_| Ok(()),
+    )
+    .optional()
+    .unwrap_or(None)
+    .is_some()
+}
+
+/// Summarise and store, without sending. The summary half of
+/// `summarise_and_send_with`, kept deliberately separate so that no backfill
+/// can ever reach Telegram by accident.
+fn summarise_only(app: &AppHandle, c: &Conversation, r: &Rule) {
+    let state = app.state::<AppState>();
+    let (_tg, ollama) = crate::alerts::shared_settings(&state);
+    let has_text = c
+        .pieces
+        .iter()
+        .any(|p| p.transcript.as_deref().is_some_and(|t| !t.trim().is_empty()));
+    if !has_text && !r.send_without_transcript {
+        return;
+    }
+    let transcript = stitched_transcript(c);
+    let prompt = format!(
+        "{}\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
+        r.summary_prompt.trim(),
+        c.tg_name,
+        c.tg,
+        transcript
+    );
+    let (headline, summary) = match crate::alerts::ollama_complete(&ollama, &prompt) {
+        Ok(s) => split_headline(&s),
+        Err(e) => (String::new(), format!("(summary unavailable: {e})")),
+    };
+    let message = render(r, c, &headline, &summary);
+    store_outcome(
+        app,
+        r,
+        c,
+        &Outcome {
+            status: "backfilled",
+            detail: "summarised from the library; not sent",
+            headline: &headline,
+            summary: &summary,
+            message: &message,
+            prompt: &prompt,
+            chat: "",
+            revision: 0,
+            message_ids: &[],
+        },
+    );
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::*;
+
+    fn rule() -> Rule {
+        Rule {
+            id: "r1".into(),
+            name: "All Hospitals".into(),
+            enabled: true,
+            tgs: vec![10256],
+            end_gap_secs: 90,
+            min_calls: 1,
+            ..Rule::default()
+        }
+    }
+
+    fn piece(unit: u32, fixed: bool, at: i64) -> Piece {
+        Piece {
+            id: Some(at),
+            unit,
+            unit_name: None,
+            fixed,
+            at,
+            secs: 5.0,
+            audio: None,
+            transcript: Some("text".into()),
+        }
+    }
+
+    #[test]
+    fn a_group_with_no_unit_is_not_a_conversation() {
+        // The same rejection the live ticker makes: a hospital console talking
+        // to nobody is not a hand-off. A backfill that disagreed with the live
+        // engine would write rows the engine would never have written.
+        assert!(assemble(&rule(), 10256, vec![piece(900001, true, 100)]).is_none());
+    }
+
+    #[test]
+    fn a_group_below_min_calls_is_not_a_conversation() {
+        let mut r = rule();
+        r.min_calls = 3;
+        let pieces = vec![piece(900001, true, 100), piece(4917150, false, 120)];
+        assert!(assemble(&r, 10256, pieces).is_none());
+    }
+
+    #[test]
+    fn a_real_exchange_assembles_with_its_units_and_span() {
+        let pieces = vec![
+            piece(900001, true, 100),
+            piece(4917150, false, 130),
+            piece(4917150, false, 160),
+            piece(4917151, false, 200),
+        ];
+        let c = assemble(&rule(), 10256, pieces).expect("a conversation");
+        assert_eq!(c.first_at, 100);
+        assert_eq!(c.last_at, 200);
+        assert_eq!(c.mobile_unit, Some(4917150));
+        assert_eq!(c.participants, vec![4917150, 4917151], "mobiles, first seen first");
+        assert_eq!(c.pieces.len(), 4, "the console's side is kept in the transcript");
+        assert!(!c.busy && c.sent_at.is_none());
+    }
+
+    #[test]
+    fn a_backfilled_conversation_is_keyed_the_same_as_a_live_one() {
+        // Re-running a backfill, or backfilling over a stretch the live engine
+        // already covered, must not double up: both are keyed on
+        // (rule_id, tg, first_at), which is also the table's unique index.
+        let pieces = vec![piece(900001, true, 100), piece(4917150, false, 130)];
+        let c = assemble(&rule(), 10256, pieces).expect("a conversation");
+        assert_eq!(conv_id(c.tg, c.first_at), "CONV-10256-100");
     }
 }

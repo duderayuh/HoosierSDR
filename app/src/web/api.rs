@@ -117,6 +117,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         "devices_get" => jv(crate::devices::devices_get(app.clone())),
         "alerts_get" => jv(crate::alerts::alerts_get(state)),
         "conversations_state" => jv(crate::conversations::conversations_state(state)),
+        "conversations_backfill" => jv(crate::conversations::conversations_backfill(app.clone(), arg(args, "hours")?).await?),
         "conversations_list" => jv(crate::conversations::conversations_list(
             state,
             arg(args, "q")?,

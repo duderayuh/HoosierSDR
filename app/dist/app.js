@@ -3085,6 +3085,30 @@ $("cvTgFilter").onchange = () => { convShowPage("list"); convLoad(false); };
 if (listen) listen("conversations", () => { if ($("view-conversations").style.display !== "none" && $("cvListPage").style.display !== "none") convLoad(false); });
 window.conversationsOnShow = () => convLoad(false);
 
+// Summarise conversations out of calls already in the library, for a stretch
+// the live engine missed. Nothing is sent: a day of hospital traffic is dozens
+// of hand-off notes, and replaying those into Telegram hours later would be
+// noise. They land in this list; Resend passes one on if it is worth it.
+if (typeof $ === "function" && $("cvBackfill")) $("cvBackfill").onclick = async () => {
+  const hours = parseInt(prompt("Summarise conversations from the last how many hours?\n\nThey are written to this list only — nothing is sent to Telegram.", "24"), 10);
+  if (!Number.isFinite(hours) || hours < 1) return;
+  const btn = $("cvBackfill");
+  btn.disabled = true; btn.textContent = "Backfilling…";
+  try {
+    const n = await invoke("conversations_backfill", { hours });
+    if (!n) { uiToast("Nothing to backfill — every conversation in that stretch is already stored."); }
+    else uiToast(`Summarising ${n} conversation${n === 1 ? "" : "s"}… they appear as each finishes.`);
+  } catch (e) { uiToast(`${e}`, "err"); }
+  finally { btn.disabled = false; btn.textContent = "Backfill…"; }
+};
+if (typeof listen === "function") {
+  listen("conversations_progress", (e) => {
+    const p = e.payload || {}; const btn = $("cvBackfill"); if (!btn) return;
+    if (p.finished) { btn.textContent = "Backfill…"; btn.disabled = false; convLoad(false); }
+    else { btn.textContent = `Backfilling ${p.done}/${p.total}…`; }
+  });
+}
+
 /* ---------- inline transcript editing (right-click a transcript) ---------- */
 // Right-click the transcript of a stored call — in the Monitor history or
 // the Library list — to edit it where it is. Enter saves (Shift+Enter for a

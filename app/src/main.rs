@@ -2446,6 +2446,7 @@ fn main() {
             conversations::conversations_state,
             conversations::conversation_test,
             conversations::conversation_resend,
+            conversations::conversations_backfill,
             conversations::conversations_list,
             conversations::conversation_get,
             conversations::conversation_delete,
