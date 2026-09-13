@@ -98,13 +98,14 @@ function wireSeg(el, onPick) {
 function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === v))); }
 
 /* ---------- views ---------- */
-const VIEWS = ["monitor", "library", "tripwires", "conversations", "dispatch", "settings"];
+const VIEWS = ["monitor", "library", "tripwires", "conversations", "dispatch", "dashboard", "settings"];
 function showView(v) {
   VIEWS.forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
   if (v === "library" && typeof libOnShow === "function") libOnShow();
   if (v === "conversations" && typeof conversationsOnShow === "function") conversationsOnShow();
   if (v === "tripwires" && typeof window.tripwiresOnShow === "function") window.tripwiresOnShow();
+  if (v === "dashboard" && typeof window.dashboardsOnShow === "function") window.dashboardsOnShow();
   // Coming back to Settings refreshes whichever page was left open.
   if (v === "settings") setPage(curPage);
   setSeg($("navSeg"), v);
@@ -138,7 +139,7 @@ setTimeout(() => {
   if (["discovery", "playlists", "aliases", "connections", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
   // The old Alerts and Analyzers pages are Tripwires now.
   if (["alerts", "analyzers", "tripwires"].includes(page)) { showView("tripwires"); return; }
-  if (["library", "conversations", "dispatch"].includes(page)) showView(page);
+  if (["library", "conversations", "dispatch", "dashboard"].includes(page)) showView(page);
 }, 0);
 
 /* ---------- tuning state ---------- */

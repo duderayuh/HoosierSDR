@@ -35,6 +35,7 @@ mod link;
 mod mapshot;
 mod models;
 mod names;
+mod dashboards;
 mod pathways;
 mod places;
 mod player;
@@ -162,6 +163,7 @@ struct AppState {
     retention: Mutex<retention::Settings>,
     /// What a dispatch run needs, and where the nearest one is.
     pathways: Mutex<pathways::Settings>,
+    dashboards: Mutex<dashboards::Settings>,
     /// Where copies of the library go, and how often.
     backup: backup::Shared,
 }
@@ -2336,6 +2338,7 @@ fn main() {
             *state.dispatch.lock().unwrap() = dispatch::load(app.handle());
             *state.places.lock().unwrap() = places::load(app.handle());
             *state.pathways.lock().unwrap() = pathways::load(app.handle());
+            *state.dashboards.lock().unwrap() = dashboards::load(app.handle());
             *state.routing.lock().unwrap() = routing::load(app.handle());
             *state.retention.lock().unwrap() = retention::load(app.handle());
             retention::spawn_ticker(app.handle().clone());
@@ -2471,6 +2474,8 @@ fn main() {
             places::places_get,
             places::places_set,
             places::places_suggest,
+            dashboards::dashboards_get,
+            dashboards::dashboards_set,
             pathways::pathways_get,
             pathways::pathways_set,
             pathways::pathways_reset,

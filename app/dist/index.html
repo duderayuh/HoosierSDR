@@ -20,6 +20,7 @@
       <button data-v="tripwires" aria-pressed="false">Tripwires</button>
       <button data-v="conversations" aria-pressed="false">Conversations</button>
       <button data-v="dispatch" aria-pressed="false">Dispatch</button>
+      <button data-v="dashboard" aria-pressed="false">Dashboards</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
     </div>
     <span class="spacer"></span>
@@ -666,6 +667,47 @@
               <div class="tablewrap tgs" style="max-height:calc(44vh / var(--z))"><table><tbody id="cvStBody"></tbody></table></div>
               <div class="empty small" id="cvStEmpty">Nothing yet.</div>
             </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ===================== DASHBOARDS ===================== -->
+    <div class="view" id="view-dashboard" style="display:none">
+      <!-- The board itself. Chrome is kept thin: this is meant to be left up
+           on a wall, and on /desktop/?token=… it is the whole screen. -->
+      <section id="dbBoard" class="stack">
+        <div class="dbbar">
+          <div class="seg" id="dbPick" role="tablist"></div>
+          <span class="spacer"></span>
+          <span class="mono faint" id="dbClock"></span>
+          <span class="mono faint" id="dbLive">●&nbsp;live</span>
+          <button class="btn ghost sm" id="dbSetupBtn">⚙ Edit</button>
+        </div>
+        <div class="dbpanes" id="dbPanes"></div>
+        <div class="empty" id="dbEmpty" style="display:none">
+          <div class="big">No dashboards yet</div>
+          <div>A dashboard is a row of panes — dispatch runs on one side, a hospital's
+               hand-off reports on the other. Press <b>Edit</b> to make one.</div>
+        </div>
+        <div class="dbfoot legal" id="dbFooter" style="display:none"></div>
+      </section>
+
+      <!-- Editor. Same shape as Dispatch → Setup: a sub-page of this view. -->
+      <section id="dbSetup" class="stack" style="display:none">
+        <div class="dbbar">
+          <button class="btn ghost sm" id="dbBack">← Board</button>
+          <span class="spacer"></span>
+          <span class="mono faint" id="dbMeta"></span>
+          <button class="btn sm" id="dbAdd">+ Dashboard</button>
+          <button class="btn primary sm" id="dbSave">Save</button>
+        </div>
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Dashboards</span><span class="spacer"></span>
+            <span class="meta mono faint">panes are drawn left to right</span></div>
+          <div class="body">
+            <div id="dbEditList"></div>
+            <div class="empty small" id="dbEditEmpty">None yet — press <b>+ Dashboard</b>.</div>
           </div>
         </div>
       </section>
@@ -1386,10 +1428,8 @@
   <script src="connections.js"></script>
   <script src="tripwires.js"></script>
   <script src="places.js"></script>
-<<<<<<< HEAD
   <script src="pathways.js"></script>
-=======
   <script src="backup.js"></script>
->>>>>>> origin/main
+  <script src="dashboards.js"></script>
 </body>
 </html>
