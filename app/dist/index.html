@@ -158,6 +158,25 @@
             <div class="head"><span class="eyebrow">Events</span><span class="meta"></span><button class="btn ghost sm" id="evClear">Clear</button><span class="caret">▾</span></div>
             <div class="body tight"><div id="events" class="events mono"></div></div>
           </div>
+
+          <!-- How much of what the site grants is actually being heard. A call
+               list only ever shows what arrived, so losses are invisible in it. -->
+          <div class="panel acc" data-acc="rxhealth">
+            <div class="head"><span class="eyebrow">Receive health</span><span class="meta mono" id="rxMeta"></span>
+              <select id="rxHours" class="sm" title="Window">
+                <option value="6">6 h</option><option value="12" selected>12 h</option>
+                <option value="24">24 h</option><option value="72">3 d</option>
+              </select><span class="caret">▾</span></div>
+            <div class="body tight">
+              <div id="rxHeadline" class="rxhead"></div>
+              <div id="rxBars" class="rxbars" title="Each bar is an hour. The filled part is the share of grants that produced no audio."></div>
+              <div class="lab" style="margin-top:8px">Worst talkgroups</div>
+              <div class="tablewrap tgs" style="max-height:170px"><table>
+                <thead><tr><th>Talkgroup</th><th>Heard</th><th>Lost</th><th></th></tr></thead>
+                <tbody id="rxTgs"></tbody></table></div>
+              <p class="help" id="rxHelp"></p>
+            </div>
+          </div>
         </aside>
 
         <!-- right: spectrum + history -->

@@ -3759,3 +3759,63 @@ window.dispatchOnShow = async () => {
   dpLoad();
 };
 
+
+/* ---------- receive health ----------
+ * A grant the site issued but whose voice channel did not decode is still
+ * recorded — with no audio and no length. A call list cannot show those,
+ * because it only shows what arrived, so a site losing a third of its
+ * traffic looks exactly like a quiet one. This counts them.
+ */
+(() => {
+  if (typeof invoke !== "function") return;
+  // The rate and its band come from the backend, which is where the
+  // thresholds live and where they are tested.
+  const words = {
+    good: "almost everything granted is being heard",
+    fair: "a little is going missing",
+    poor: "a noticeable share is not decoding",
+    bad: "a large share is not decoding",
+  };
+
+  async function load() {
+    if ($("view-monitor").style.display === "none") return;
+    const hours = +$("rxHours").value || 12;
+    let h;
+    try { h = await invoke("rx_health", { hours }); }
+    catch (e) { $("rxMeta").textContent = ""; $("rxHeadline").textContent = `${e}`; return; }
+
+    const p = h.pct || 0;
+    const v = h.verdict || "good";
+    $("rxMeta").textContent = h.calls ? `${p.toFixed(1)}% lost` : "no traffic";
+    $("rxMeta").className = "meta mono rx-" + v;
+    $("rxHeadline").innerHTML = h.calls
+      ? `<b class="rx-${v}">${h.silent} of ${h.calls}</b> grants produced no audio in the last ${hours} h — ${esc(words[v])}.`
+      : `Nothing heard in the last ${hours} h.`;
+
+    // One bar per hour, filled by the share lost.
+    const top = Math.max(1, ...h.hours.map((x) => x.calls));
+    $("rxBars").innerHTML = h.hours.map((x) => {
+      const lost = x.pct || 0;
+      const when = new Date(x.at * 1000).toLocaleTimeString([], { hour: "2-digit" });
+      return `<span class="rxbar rx-${x.verdict || "good"}" style="height:${Math.max(6, (x.calls / top) * 46)}px"
+        title="${when} · ${x.calls} grants, ${x.silent} silent (${lost.toFixed(0)}%)${x.poor ? `, ${x.poor} with damaged audio` : ""}">
+        <i style="height:${lost}%"></i></span>`;
+    }).join("");
+
+    $("rxTgs").innerHTML = h.talkgroups.map((t) => {
+      const lost = t.pct || 0;
+      return `<tr><td>${esc(t.name || "TG " + t.tg)} <span class="faint mono">${t.tg}</span></td>
+        <td class="mono">${t.calls - t.silent}</td><td class="mono">${t.silent}</td>
+        <td class="mono rx-${t.verdict || "good"}">${lost.toFixed(0)}%</td></tr>`;
+    }).join("") || `<tr><td colspan="4" class="faint">Nothing lost — every grant decoded.</td></tr>`;
+
+    $("rxHelp").textContent = h.encrypted
+      ? `${h.encrypted} encrypted call${h.encrypted === 1 ? "" : "s"} left out: those carry no audio by design and are not a fault.`
+      : "A grant with no audio usually means the voice channel could not be decoded — on a simulcast site that is a gain or siting problem, not a talkgroup one.";
+  }
+
+  $("rxHours").onchange = load;
+  setInterval(load, 60000);
+  window.rxHealthLoad = load;
+  load();
+})();

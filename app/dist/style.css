@@ -1290,3 +1290,13 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 /* The Save reminder: a board lives in memory until Save, and two were lost
    to that being invisible. */
 .dbunsaved { color: var(--amber); font-weight: 600; }
+
+/* Receive health: grants that produced no audio. */
+.rxhead { font-size: 12.5px; line-height: 1.5; margin-bottom: 8px; }
+.rxbars { display: flex; align-items: flex-end; gap: 2px; min-height: 48px; }
+.rxbar { flex: 1; min-width: 3px; background: color-mix(in srgb, var(--ink-faint) 35%, transparent); border-radius: 2px 2px 0 0; display: flex; align-items: flex-end; overflow: hidden; }
+.rxbar > i { display: block; width: 100%; background: currentColor; }
+.rx-good { color: var(--clear); }
+.rx-fair { color: var(--signal); }
+.rx-poor { color: var(--amber); }
+.rx-bad  { color: var(--enc); }

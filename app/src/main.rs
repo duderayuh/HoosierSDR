@@ -37,6 +37,7 @@ mod models;
 mod names;
 mod dashboards;
 mod pathways;
+mod rxhealth;
 mod places;
 mod player;
 mod playlists;
@@ -2477,6 +2478,7 @@ fn main() {
             places::places_suggest,
             dashboards::dashboards_get,
             dashboards::dashboards_set,
+            rxhealth::rx_health,
             pathways::pathways_get,
             pathways::pathways_set,
             pathways::pathways_reset,
