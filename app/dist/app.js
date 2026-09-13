@@ -2953,6 +2953,36 @@ async function convLoad(more) {
     convRenderList();
   } catch (e) { log(`conversations_list: ${e}`); }
   convLoadStats();
+  convCheckRules();
+}
+
+// Say why nothing is arriving. A conversation rule is compiled from a
+// tripwire and goes quiet if the tripwire is off, if a folder above it is
+// off, or if Telegram sending is off — and a silent rule looks exactly like
+// a quiet night. One rule switched off this way cost a day of hospital
+// reports before anyone could tell which it was.
+async function convCheckRules() {
+  if (!TAURI) return;
+  const box = $("cvOffNotice");
+  try {
+    const st = (await invoke("conversations_state")) || {};
+    if (st.load_error) {
+      box.innerHTML = `<b>Conversation settings could not be read, so no rules are running.</b><br>` +
+        `<span class="mono faint">${esc(st.load_error)}</span><br>` +
+        `The file has been left alone rather than overwritten.`;
+      box.style.display = ""; return;
+    }
+    const rules = st.rules || [];
+    const live = rules.filter((r) => r.enabled);
+    if (rules.length && !live.length) {
+      box.innerHTML = `<b>No conversation rule is running, so nothing will arrive here.</b><br>` +
+        rules.map((r) => `“${esc(r.name)}” — ${esc(r.off_reason || "switched off")}`).join("<br>") +
+        `<br>Turn it back on under <b>Tripwires</b>.`;
+      box.style.display = "";
+    } else {
+      box.style.display = "none";
+    }
+  } catch (e) { log(`conversations_state: ${e}`); box.style.display = "none"; }
 }
 async function convLoadStats() {
   if (!TAURI) return;

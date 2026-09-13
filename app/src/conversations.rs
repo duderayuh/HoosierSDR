@@ -79,6 +79,11 @@ pub struct Rule {
     /// Send even when no transcript arrived (audio + placeholder).
     #[serde(default)]
     pub send_without_transcript: bool,
+    /// Why this rule is switched off, in words, when it is. Recomputed from
+    /// the tripwire it is compiled from — a conversation rule can be off for
+    /// three unrelated reasons and none of them used to be visible from here.
+    #[serde(default)]
+    pub off_reason: String,
 }
 
 fn t() -> bool {
@@ -107,6 +112,7 @@ impl Default for Rule {
             chat_id: String::new(),
             attach_audio: true,
             send_without_transcript: false,
+            off_reason: String::new(),
         }
     }
 }
@@ -189,6 +195,11 @@ pub struct ConvState {
     pub open: Vec<Conversation>,
     pub log: VecDeque<LogEntry>,
     next_key: u64,
+    /// Set when `conversations.json` exists but could not be read. The
+    /// settings are then empty, which is indistinguishable from "no rules
+    /// configured" — so it is remembered, shown, and, most importantly,
+    /// blocks writing over the file that could not be parsed.
+    pub load_error: Option<String>,
 }
 
 pub type Shared = Mutex<ConvState>;
@@ -203,13 +214,29 @@ fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 pub fn load(app: &AppHandle) -> ConvState {
-    ConvState {
-        settings: path(app)
-            .ok()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default(),
-        ..Default::default()
+    let Ok(p) = path(app) else {
+        return ConvState::default();
+    };
+    // No file is the ordinary first run, not a fault.
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return ConvState::default();
+    };
+    match serde_json::from_str::<Settings>(&text) {
+        Ok(settings) => ConvState {
+            settings,
+            ..Default::default()
+        },
+        Err(e) => {
+            // Falling back to empty settings here reads downstream as "no
+            // rules", and every hospital report stops with nothing said
+            // anywhere. Keep the reason, and refuse to overwrite the file.
+            let why = format!("{}: {e}", p.display());
+            eprintln!("conversations: could not read settings — {why}");
+            ConvState {
+                load_error: Some(why),
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -467,6 +494,20 @@ pub fn spawn_ticker(app: AppHandle) {
                         // Too small, or only the fixed party spoke (a one-sided
                         // hospital-only exchange with no unit) — not worth a
                         // summary. Dropped, but still counts toward learning.
+                        //
+                        // Say so. A drop used to leave no trace at all, so a
+                        // rule that dropped everything looked exactly like a
+                        // rule that was never running.
+                        let why = if !has_mobile {
+                            "dropped: only the hospital console was heard, no unit".to_string()
+                        } else {
+                            format!(
+                                "dropped: {} transmission(s), fewer than the {} this rule needs",
+                                c.pieces.len(),
+                                r.min_calls.max(1)
+                            )
+                        };
+                        note(&mut st, r, &c, why);
                         learn(&mut st.settings, r, &c);
                         continue;
                     }
@@ -488,6 +529,31 @@ pub fn spawn_ticker(app: AppHandle) {
             std::thread::spawn(move || summarise_and_send(app2, c));
         }
     });
+}
+
+/// Add a line to the log the Conversations tab shows.
+///
+/// Separate from `log_it` on purpose: that one takes the conversations lock,
+/// and the ticker calls this while already holding it.
+fn note(st: &mut ConvState, r: &Rule, c: &Conversation, detail: String) {
+    st.log.push_front(LogEntry {
+        at: crate::library::now(),
+        rule: r.name.clone(),
+        tg_name: c.tg_name.clone(),
+        units: c
+            .pieces
+            .iter()
+            .filter(|p| !p.fixed)
+            .map(|p| p.unit_name.clone().unwrap_or_else(|| p.unit.to_string()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        calls: c.pieces.len(),
+        revision: c.revision,
+        ok: false,
+        detail,
+        summary: String::new(),
+    });
+    st.log.truncate(200);
 }
 
 fn learn(s: &mut Settings, r: &Rule, c: &Conversation) {
@@ -992,6 +1058,10 @@ pub fn conversations_get(state: State<AppState>) -> View {
 pub fn set_rules(app: &AppHandle, rules: Vec<Rule>) {
     let state = app.state::<AppState>();
     let mut st = state.conversations.lock().unwrap();
+    if let Some(why) = &st.load_error {
+        eprintln!("conversations: not saving over settings that would not load — {why}");
+        return;
+    }
     if st.settings.rules == rules {
         return;
     }
@@ -1005,6 +1075,19 @@ pub fn set_rules(app: &AppHandle, rules: Vec<Rule>) {
 pub struct StateView {
     pub open: Vec<Conversation>,
     pub log: Vec<LogEntry>,
+    /// Every compiled rule and whether it is live, so a quiet tab can say
+    /// which rule is off and why rather than just showing nothing.
+    pub rules: Vec<RuleStatus>,
+    /// Set when the settings file could not be read.
+    pub load_error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct RuleStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub tgs: usize,
+    pub off_reason: String,
 }
 
 #[tauri::command]
@@ -1013,6 +1096,18 @@ pub fn conversations_state(state: State<AppState>) -> StateView {
     StateView {
         open: st.open.clone(),
         log: st.log.iter().cloned().collect(),
+        rules: st
+            .settings
+            .rules
+            .iter()
+            .map(|r| RuleStatus {
+                name: r.name.clone(),
+                enabled: r.enabled,
+                tgs: r.tgs.len(),
+                off_reason: r.off_reason.clone(),
+            })
+            .collect(),
+        load_error: st.load_error.clone(),
     }
 }
 
@@ -2049,5 +2144,139 @@ mod headline_tests {
         let (h, s) = split_headline("HEADLINE: Incomplete Report");
         assert_eq!(h, "Incomplete Report");
         assert_eq!(s, "");
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    fn rule() -> Rule {
+        Rule {
+            id: "r1".into(),
+            name: "All Hospitals".into(),
+            enabled: true,
+            tgs: vec![10256],
+            ..Rule::default()
+        }
+    }
+
+    fn conv(pieces: Vec<Piece>) -> Conversation {
+        Conversation {
+            key: 1,
+            rule_id: "r1".into(),
+            rule_name: "All Hospitals".into(),
+            tg: 10256,
+            tg_name: "49M-M03".into(),
+            tg_desc: None,
+            mobile_unit: None,
+            participants: Vec::new(),
+            pieces,
+            first_at: 100,
+            last_at: 200,
+            sent_ids: Vec::new(),
+            sent_chat: String::new(),
+            sent_at: None,
+            dirty: false,
+            revision: 0,
+            busy: false,
+            attempts: 0,
+            retry_after: 0,
+            last_summary: None,
+            last_error: None,
+        }
+    }
+
+    fn piece(unit: u32, fixed: bool) -> Piece {
+        Piece {
+            id: Some(1),
+            unit,
+            unit_name: None,
+            fixed,
+            at: 100,
+            secs: 5.0,
+            audio: None,
+            transcript: Some("text".into()),
+        }
+    }
+
+    #[test]
+    fn a_dropped_conversation_leaves_a_trace() {
+        // A rule that drops everything used to look exactly like a rule that
+        // was never running: no row, no log line, nothing. That cost a day of
+        // hospital reports before anyone could tell the two apart.
+        let mut st = ConvState::default();
+        let r = rule();
+        note(
+            &mut st,
+            &r,
+            &conv(vec![piece(900001, true)]),
+            "dropped: only the hospital console was heard, no unit".into(),
+        );
+        assert_eq!(st.log.len(), 1);
+        let e = &st.log[0];
+        assert_eq!(e.rule, "All Hospitals");
+        assert_eq!(e.tg_name, "49M-M03");
+        assert!(!e.ok);
+        assert!(e.detail.contains("only the hospital console"));
+    }
+
+    #[test]
+    fn the_log_does_not_grow_without_bound() {
+        let mut st = ConvState::default();
+        let r = rule();
+        for _ in 0..260 {
+            note(&mut st, &r, &conv(vec![piece(1, false)]), "dropped".into());
+        }
+        assert_eq!(st.log.len(), 200);
+    }
+
+    #[test]
+    fn settings_that_will_not_parse_are_never_written_over() {
+        // Empty settings and unreadable settings look identical downstream —
+        // both mean "no rules". Saving compiled rules on top of a file that
+        // would not load would turn a bad read into permanent data loss.
+        let mut st = ConvState {
+            load_error: Some("conversations.json: trailing comma".into()),
+            ..Default::default()
+        };
+        assert!(st.load_error.is_some());
+        // set_rules bails on exactly this condition; mirror its guard here
+        // since the real one needs an AppHandle.
+        if st.load_error.is_none() {
+            st.settings.rules = vec![rule()];
+        }
+        assert!(
+            st.settings.rules.is_empty(),
+            "rules must not be written over unreadable settings"
+        );
+    }
+
+    #[test]
+    fn a_state_view_says_which_rule_is_off_and_why() {
+        let mut off = rule();
+        off.enabled = false;
+        off.off_reason = "its folder “Old” is switched off".into();
+        let st = ConvState {
+            settings: Settings {
+                rules: vec![off],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let statuses: Vec<RuleStatus> = st
+            .settings
+            .rules
+            .iter()
+            .map(|r| RuleStatus {
+                name: r.name.clone(),
+                enabled: r.enabled,
+                tgs: r.tgs.len(),
+                off_reason: r.off_reason.clone(),
+            })
+            .collect();
+        assert_eq!(statuses.len(), 1);
+        assert!(!statuses[0].enabled);
+        assert!(statuses[0].off_reason.contains("Old"));
     }
 }

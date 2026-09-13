@@ -1614,10 +1614,30 @@ pub fn compile_rules(
         match t.when.kind.as_str() {
             "conversation" => {
                 let o = &t.when.conversation;
+                // Three separate switches turn a conversation rule off, and
+                // one of them — Telegram sending — is not obviously about
+                // conversations at all. Turning off the messages stops the
+                // hospital reports being written too, and until this reason
+                // was recorded the only symptom was a tab that quietly
+                // stopped filling up.
+                let folder_on = folders_on(folders, &t.parent);
+                let off_reason = if !t.enabled {
+                    "the tripwire is switched off".to_string()
+                } else if !folder_on {
+                    match folders.iter().find(|f| f.id == t.parent) {
+                        Some(f) => format!("its folder “{}” is switched off", f.name),
+                        None => "a folder above it is switched off".to_string(),
+                    }
+                } else if !t.send.telegram {
+                    "Telegram sending is off for it — which also stops the reports being written"
+                        .to_string()
+                } else {
+                    String::new()
+                };
                 convs.push(crate::conversations::Rule {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    enabled: t.enabled && folders_on(folders, &t.parent) && t.send.telegram,
+                    enabled: t.enabled && folder_on && t.send.telegram,
                     tgs: t.when.tgs.clone(),
                     fixed_units: o.fixed_units.clone(),
                     learn_fixed: o.learn_fixed,
@@ -1631,6 +1651,7 @@ pub fn compile_rules(
                     chat_id: chat,
                     attach_audio: t.send.audio,
                     send_without_transcript: o.send_without_transcript,
+                    off_reason,
                 });
             }
             "digest" => {
@@ -4010,5 +4031,71 @@ mod real_config {
             dg.rules.len(),
             list.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod conversation_off_reason_tests {
+    use super::*;
+
+    fn conv_tripwire() -> Tripwire {
+        let mut t = Tripwire::default();
+        t.id = "tw1".into();
+        t.name = "All Hospitals".into();
+        t.when.kind = "conversation".into();
+        t.when.tgs = vec![10256];
+        t.send.telegram = true;
+        t
+    }
+
+    fn compile_one(t: Tripwire, folders: &[Folder]) -> crate::conversations::Rule {
+        let al = crate::alerts::Settings::default();
+        compile_rules(&[t], folders, &al).0.pop().expect("one rule")
+    }
+
+    #[test]
+    fn a_live_conversation_tripwire_gives_no_reason() {
+        let r = compile_one(conv_tripwire(), &[]);
+        assert!(r.enabled);
+        assert_eq!(r.off_reason, "");
+    }
+
+    #[test]
+    fn a_switched_off_tripwire_says_so() {
+        let mut t = conv_tripwire();
+        t.enabled = false;
+        let r = compile_one(t, &[]);
+        assert!(!r.enabled);
+        assert!(r.off_reason.contains("switched off"), "{}", r.off_reason);
+    }
+
+    #[test]
+    fn a_tripwire_in_a_switched_off_folder_names_the_folder() {
+        // This is what actually happened: "All Hospitals" was moved into a
+        // folder called "Old", the folder was off, and every hospital report
+        // stopped with nothing said anywhere.
+        let mut t = conv_tripwire();
+        t.parent = "f1".into();
+        let folders = vec![Folder {
+            id: "f1".into(),
+            name: "Old".into(),
+            enabled: false,
+            parent: String::new(),
+        }];
+        let r = compile_one(t, &folders);
+        assert!(!r.enabled);
+        assert!(r.off_reason.contains("Old"), "{}", r.off_reason);
+    }
+
+    #[test]
+    fn turning_off_telegram_says_it_also_stops_the_reports() {
+        // The least obvious of the three: the switch is about messaging, but
+        // it also stops the summaries being written and the tab filling up.
+        let mut t = conv_tripwire();
+        t.send.telegram = false;
+        let r = compile_one(t, &[]);
+        assert!(!r.enabled);
+        assert!(r.off_reason.contains("Telegram"), "{}", r.off_reason);
+        assert!(r.off_reason.contains("reports"), "{}", r.off_reason);
     }
 }
