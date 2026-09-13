@@ -434,7 +434,7 @@
       dirty = false;
       renderEditor();
       if (typeof uiToast === "function") uiToast("Dashboards saved");
-    } catch (e) { alert(e); }
+    } catch (e) { uiToast(`${e}`, "err"); }
   };
 
   // Live. Everything a board shows arrives as an event it is already told

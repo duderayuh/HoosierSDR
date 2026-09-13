@@ -3090,8 +3090,15 @@ window.conversationsOnShow = () => convLoad(false);
 // of hand-off notes, and replaying those into Telegram hours later would be
 // noise. They land in this list; Resend passes one on if it is worth it.
 if (typeof $ === "function" && $("cvBackfill")) $("cvBackfill").onclick = async () => {
-  const hours = parseInt(prompt("Summarise conversations from the last how many hours?\n\nThey are written to this list only — nothing is sent to Telegram.", "24"), 10);
-  if (!Number.isFinite(hours) || hours < 1) return;
+  // uiAsk, not prompt(). The webview implements alert() and confirm() — this
+  // file uses alert dozens of times — but not prompt(), which returns null
+  // the instant it is called. A button asking that way looks dead: the click
+  // lands, the answer is null, and it quietly does nothing. That is what
+  // `uiAsk` is here for.
+  const answer = await uiAsk("Summarise conversations from the last how many hours? Nothing is sent to Telegram.", "24", "Backfill");
+  if (answer === null) return;
+  const hours = parseInt(answer, 10);
+  if (!Number.isFinite(hours) || hours < 1) { uiToast("Give a number of hours, e.g. 24", "err"); return; }
   const btn = $("cvBackfill");
   btn.disabled = true; btn.textContent = "Backfilling…";
   try {
