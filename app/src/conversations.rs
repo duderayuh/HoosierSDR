@@ -2364,8 +2364,21 @@ pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize,
                     flush(&mut group, &mut out);
                 }
             }
-            // Leave alone anything the live engine already wrote.
-            out.retain(|conv| !already_stored(&c, &conv.rule_id, conv.tg, conv.first_at));
+            // Leave alone anything the live engine already wrote. Matching on
+            // the group's start would not do it: a live conversation is
+            // stamped with the moment the call was *handled*, which trails the
+            // call's own start by anything from a few seconds to a minute, so
+            // the same exchange gets two different keys. The transmissions are
+            // the identity — a group sharing any call with a stored
+            // conversation is that conversation.
+            let covered = covered_calls(&c, since)?;
+            out.retain(|conv| {
+                !conv
+                    .pieces
+                    .iter()
+                    .filter_map(|p| p.id)
+                    .any(|id| covered.contains(&id))
+            });
             Ok(out)
         })();
         let todo = match done {
@@ -2452,15 +2465,28 @@ fn assemble(r: &Rule, tg: u16, pieces: Vec<Piece>) -> Option<Conversation> {
     })
 }
 
-fn already_stored(c: &Connection, rule_id: &str, tg: u16, first_at: i64) -> bool {
-    c.query_row(
-        "SELECT 1 FROM conversations WHERE rule_id = ?1 AND tg = ?2 AND first_at = ?3",
-        params![rule_id, tg, first_at],
-        |_| Ok(()),
-    )
-    .optional()
-    .unwrap_or(None)
-    .is_some()
+/// Every call id already belonging to a stored conversation that ends at or
+/// after `since`. A little slack on the lower bound so a conversation that
+/// began just before the window still shields its calls.
+fn covered_calls(c: &Connection, since: i64) -> Result<std::collections::HashSet<i64>, String> {
+    let mut q = c
+        .prepare("SELECT pieces FROM conversations WHERE last_at >= ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = q
+        .query_map([since - 6 * 3600], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::HashSet::new();
+    for text in rows.flatten() {
+        for p in serde_json::from_str::<Vec<Piece>>(&text)
+            .unwrap_or_default()
+            .into_iter()
+        {
+            if let Some(id) = p.id {
+                out.insert(id);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Summarise and store, without sending. The summary half of
@@ -2570,12 +2596,25 @@ mod backfill_tests {
     }
 
     #[test]
-    fn a_backfilled_conversation_is_keyed_the_same_as_a_live_one() {
-        // Re-running a backfill, or backfilling over a stretch the live engine
-        // already covered, must not double up: both are keyed on
-        // (rule_id, tg, first_at), which is also the table's unique index.
+    fn a_group_is_matched_to_a_stored_conversation_by_its_calls() {
+        // The live engine stamps a conversation with the moment it handled the
+        // first call, which trails that call's own start by seconds to a
+        // minute (measured: 3–64 s across one library). Matching on the start
+        // would therefore miss every live row and backfill a duplicate of it.
+        // The transmissions are what identify an exchange.
         let pieces = vec![piece(900001, true, 100), piece(4917150, false, 130)];
         let c = assemble(&rule(), 10256, pieces).expect("a conversation");
-        assert_eq!(conv_id(c.tg, c.first_at), "CONV-10256-100");
+        let ids: Vec<i64> = c.pieces.iter().filter_map(|p| p.id).collect();
+        assert_eq!(ids, vec![100, 130], "a group is identified by its call ids");
+
+        // A stored conversation holding either call covers this group.
+        let covered: std::collections::HashSet<i64> = [130_i64].into_iter().collect();
+        assert!(
+            ids.iter().any(|id| covered.contains(id)),
+            "sharing one transmission is enough to be the same exchange"
+        );
+        // And one holding neither does not.
+        let elsewhere: std::collections::HashSet<i64> = [7_i64, 8].into_iter().collect();
+        assert!(!ids.iter().any(|id| elsewhere.contains(id)));
     }
 }
