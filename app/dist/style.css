@@ -1287,3 +1287,6 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dbpedit { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--panel-2); }
 .dbemrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .dbemrow input { flex: 1; min-width: 110px; }
+/* The Save reminder: a board lives in memory until Save, and two were lost
+   to that being invisible. */
+.dbunsaved { color: var(--amber); font-weight: 600; }

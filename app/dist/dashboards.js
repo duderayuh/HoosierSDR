@@ -16,6 +16,7 @@
   const inc = new Map();       // incidents by id
   const reports = new Map();   // stored conversations by id
   let loaded = false;
+  let dirty = false;            // edited since the last Save
 
   const MI = 1609.344;
   const shown = () => $("view-dashboard").style.display !== "none";
@@ -307,19 +308,33 @@
     </div>`;
   }
 
+  // Anything that changes `boards` goes through here, so the Save reminder
+  // cannot drift out of step with what is actually unsaved.
+  function touch() { dirty = true; renderEditor(); }
+
   function renderEditor() {
     $("dbEditEmpty").style.display = boards.length ? "none" : "";
-    $("dbMeta").textContent = boards.length ? `${boards.length} dashboard${boards.length > 1 ? "s" : ""}` : "";
+    markDirty();
     $("dbEditList").innerHTML = boards.map((b, i) =>
       `<div class="pwcard${sel === String(i) ? " on" : ""}">
         <div class="dbprow" data-open="${i}">
           <span class="grow"><b>${esc(b.name || "Dashboard")}</b>
             <span class="faint mono">${(b.panes || []).length} pane${(b.panes || []).length === 1 ? "" : "s"}</span></span>
-          <span class="faint">${sel === b.id ? "▾" : "▸"}</span>
+          <span class="faint">${sel === String(i) ? "▾" : "▸"}</span>
         </div>
-        ${sel === b.id ? editor(b, i) : ""}
+        ${sel === String(i) ? editor(b, i) : ""}
       </div>`).join("");
     wireEditor();
+  }
+
+  // The Save reminder. A board lives in memory until Save, so that a
+  // half-made one can be abandoned — but nothing about the old screen said
+  // so, and two boards were lost to that.
+  function markDirty() {
+    const n = boards.length;
+    $("dbMeta").textContent = (n ? `${n} dashboard${n > 1 ? "s" : ""}` : "") + (dirty ? " · unsaved — press Save" : "");
+    $("dbMeta").classList.toggle("dbunsaved", dirty);
+    $("dbSave").classList.toggle("primary", true);
   }
 
   function wireEditor() {
@@ -334,6 +349,7 @@
       const set = () => {
         const b = boardOf(x), k = x.dataset.b;
         b[k] = x.type === "checkbox" ? x.checked : x.value;
+        dirty = true; markDirty();
       };
       x.onchange = set; if (x.tagName !== "SELECT") x.oninput = set;
     });
@@ -344,7 +360,8 @@
         else if (k === "width" || k === "limit") p[k] = Math.max(1, +x.value || 1);
         else if (k === "within_miles") p[k] = Math.max(0, +x.value || 0);
         else p[k] = x.value;
-        if (k === "kind") renderEditor();
+        dirty = true;
+        if (k === "kind") renderEditor(); else markDirty();
       };
       x.onchange = set; if (x.tagName !== "SELECT") x.oninput = set;
     });
@@ -354,33 +371,39 @@
         e.when = e.when || {};
         if (k === "call_types" || k === "phrases") e.when[k] = parseWords(x.value);
         else e[k] = x.value;
+        dirty = true; markDirty();
       };
       x.onchange = set; if (x.tagName !== "SELECT") x.oninput = set;
     });
     $("dbEditList").querySelectorAll("[data-add-pane]").forEach((x) => x.onclick = () => {
-      boardOf(x).panes.push({ kind: "dispatch", title: "", width: 1, limit: 25, emphasis: [] }); renderEditor();
+      boardOf(x).panes.push({ kind: "dispatch", title: "", width: 1, limit: 25, emphasis: [] }); touch();
     });
     $("dbEditList").querySelectorAll("[data-del-pane]").forEach((x) => x.onclick = () => {
-      boardOf(x).panes.splice(+x.dataset.delPane, 1); renderEditor();
+      boardOf(x).panes.splice(+x.dataset.delPane, 1); touch();
     });
     $("dbEditList").querySelectorAll("[data-add-em]").forEach((x) => x.onclick = () => {
       const p = paneOf(x); p.emphasis = p.emphasis || [];
-      p.emphasis.push({ when: { call_types: [], phrases: [] }, style: "alarm", note: "" }); renderEditor();
+      p.emphasis.push({ when: { call_types: [], phrases: [] }, style: "alarm", note: "" }); touch();
     });
     $("dbEditList").querySelectorAll("[data-del-em]").forEach((x) => x.onclick = () => {
-      paneOf(x).emphasis.splice(+x.dataset.delEm, 1); renderEditor();
+      paneOf(x).emphasis.splice(+x.dataset.delEm, 1); touch();
     });
     $("dbEditList").querySelectorAll("[data-del-board]").forEach((x) => x.onclick = async () => {
       const b = boards[+x.dataset.delBoard];
       if (typeof uiConfirm === "function" && !(await uiConfirm(`Delete “${b.name}”?`))) return;
-      boards.splice(+x.dataset.delBoard, 1); sel = null; renderEditor();
+      boards.splice(+x.dataset.delBoard, 1); sel = null; touch();
     });
   }
 
   /* ---------- wiring ---------- */
 
   $("dbSetupBtn").onclick = () => { $("dbBoard").style.display = "none"; $("dbSetup").style.display = ""; renderEditor(); };
-  $("dbBack").onclick = () => { $("dbSetup").style.display = "none"; $("dbBoard").style.display = ""; render(); };
+  $("dbBack").onclick = async () => {
+    if (dirty && typeof uiConfirm === "function" &&
+        !(await uiConfirm("There are unsaved dashboard changes. Leave without saving?"))) return;
+    if (dirty) { await loadCfg(); dirty = false; }   // drop the edits, show what is stored
+    $("dbSetup").style.display = "none"; $("dbBoard").style.display = ""; render();
+  };
   // Built in memory, with no id: `sanitize` gives it one when Save writes it.
   // Nothing reaches dashboards.json until then, so backing out of a half-made
   // board is just leaving the editor.
@@ -397,16 +420,18 @@
   });
   $("dbAdd").onclick = () => {
     boards.push(blankBoard(boards.length + 1));
-    sel = null;                         // no id yet; opened by index after Save
+    sel = String(boards.length - 1);    // open it straight away
+    dirty = true;
     renderEditor();
     const last = $("dbEditList").lastElementChild;
-    if (last) last.scrollIntoView({ block: "nearest" });
+    if (last && last.scrollIntoView) last.scrollIntoView({ block: "nearest" });
   };
   $("dbSave").onclick = async () => {
     try {
       const s = await invoke("dashboards_set", { settings: { dashboards: boards } });
       boards = JSON.parse(JSON.stringify(s.dashboards || []));
       if (!boards.some((b) => b.id === curId)) curId = (boards[0] || {}).id || null;
+      dirty = false;
       renderEditor();
       if (typeof uiToast === "function") uiToast("Dashboards saved");
     } catch (e) { alert(e); }
