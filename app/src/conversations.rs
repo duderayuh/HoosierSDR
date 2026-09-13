@@ -1166,6 +1166,11 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
         }
         // Newest first → keep the run that belongs together, oldest first.
         let mut pieces: Vec<Piece> = Vec::new();
+        let tg_name = rows
+            .iter()
+            .map(|r| r.tg_name.clone())
+            .find(|n| !n.trim().is_empty());
+        let row_tg = rows[0].tg;
         let mut last = rows[0].start;
         for r in rows {
             if last - r.start > rule.end_gap_secs as i64 && !pieces.is_empty() {
@@ -1184,17 +1189,21 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
             });
         }
         pieces.reverse();
-        let tg = pieces
-            .first()
-            .map(|_| rule.tgs.first().copied().unwrap_or(0))
-            .unwrap_or(0);
+        let tg = if row_tg != 0 {
+            row_tg
+        } else {
+            rule.tgs.first().copied().unwrap_or(0)
+        };
         let c = Conversation {
             key: 0,
             rule_id: rule.id.clone(),
             rule_name: rule.name.clone(),
             tg,
-            tg_name: format!("TG {tg}"),
-            tg_desc: None,
+            tg_name: tg_name.unwrap_or_else(|| format!("TG {tg}")),
+            tg_desc: {
+                let d = crate::upload::tg_meta(&state.catalog, None, tg).desc;
+                (!d.trim().is_empty()).then_some(d)
+            },
             mobile_unit: pieces.iter().find(|p| !p.fixed).map(|p| p.unit),
             participants: {
                 let mut v: Vec<u32> = Vec::new();
@@ -1302,6 +1311,26 @@ pub fn ensure_schema(c: &Connection) {
     // empty and render as they always did.
     let _ = c.execute(
         "ALTER TABLE conversations ADD COLUMN headline TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Rows written with a placeholder talkgroup name — early backfills and
+    // rule tests said "TG 10256" — take the real name from a call on that
+    // talkgroup, and the description from a sibling row that has one. Only
+    // placeholders are touched, so this is idempotent and cannot lose a name
+    // anyone chose.
+    let _ = c.execute(
+        "UPDATE conversations SET tg_name = COALESCE((
+             SELECT c.tg_name FROM calls c
+              WHERE c.tg = conversations.tg AND c.tg_name <> '' AND c.tg_name NOT LIKE 'TG %'
+              ORDER BY c.start DESC LIMIT 1), tg_name)
+          WHERE tg_name LIKE 'TG %'",
+        [],
+    );
+    let _ = c.execute(
+        "UPDATE conversations SET tg_desc = COALESCE((
+             SELECT o.tg_desc FROM conversations o
+              WHERE o.tg = conversations.tg AND o.tg_desc <> '' LIMIT 1), tg_desc)
+          WHERE tg_desc = ''",
         [],
     );
 }
@@ -1632,8 +1661,17 @@ fn stats_rows(c: &Connection) -> Result<StoredStats, String> {
         }
         let mut stmt = c
             .prepare(
-                "SELECT tg, MAX(CASE WHEN tg_desc <> '' THEN tg_desc ELSE tg_name END), COUNT(*) AS n
-                 FROM conversations GROUP BY tg ORDER BY n DESC, tg",
+                // Prefer the catalog description, then a real talkgroup
+                // name, and only then whatever is there. A plain MAX() over
+                // the two columns let "TG 10256" win over "Med 03 - IU Health
+                // Methodist ER" on sort order alone. Ordered by talkgroup, so
+                // the list reads Med 02, Med 03, Med 04 rather than by
+                // whichever happens to be busiest today.
+                "SELECT tg, COALESCE(
+                     MAX(CASE WHEN tg_desc <> '' THEN tg_desc END),
+                     MAX(CASE WHEN tg_name <> '' AND tg_name NOT LIKE 'TG %' THEN tg_name END),
+                     MAX(tg_name)), COUNT(*) AS n
+                 FROM conversations GROUP BY tg ORDER BY tg",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -2333,13 +2371,30 @@ pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize,
                     // forwards.
                     let mut rows = rows;
                     rows.sort_by_key(|x| x.start);
+                    // The talkgroup's own name comes off the calls; its
+                    // description off the RadioReference catalog, the same
+                    // place the live path reads it. Naming it "TG 10256" — as
+                    // this did — is not just ugly: the Conversations filter
+                    // labels a talkgroup with the best name any of its rows
+                    // carries, and a placeholder beat the real one.
+                    let tg_name = rows
+                        .iter()
+                        .map(|x| x.tg_name.clone())
+                        .find(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| format!("TG {tg}"));
+                    let tg_desc = {
+                        let d = crate::upload::tg_meta(&state.catalog, None, *tg).desc;
+                        (!d.trim().is_empty()).then_some(d)
+                    };
                     let mut group: Vec<Piece> = Vec::new();
                     let flush = |group: &mut Vec<Piece>, out: &mut Vec<Conversation>| {
                         if group.is_empty() {
                             return;
                         }
                         let pieces = std::mem::take(group);
-                        if let Some(conv) = assemble(r, *tg, pieces) {
+                        if let Some(conv) =
+                            assemble(r, *tg, tg_name.clone(), tg_desc.clone(), pieces)
+                        {
                             out.push(conv);
                         }
                     };
@@ -2427,7 +2482,13 @@ pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize,
 /// One group of transmissions as a conversation, or `None` if it is not one:
 /// the same two rejections the live ticker makes, so a backfill and a live
 /// run disagree about nothing.
-fn assemble(r: &Rule, tg: u16, pieces: Vec<Piece>) -> Option<Conversation> {
+fn assemble(
+    r: &Rule,
+    tg: u16,
+    tg_name: String,
+    tg_desc: Option<String>,
+    pieces: Vec<Piece>,
+) -> Option<Conversation> {
     if pieces.len() < r.min_calls.max(1) as usize {
         return None;
     }
@@ -2445,8 +2506,8 @@ fn assemble(r: &Rule, tg: u16, pieces: Vec<Piece>) -> Option<Conversation> {
         rule_id: r.id.clone(),
         rule_name: r.name.clone(),
         tg,
-        tg_name: format!("TG {tg}"),
-        tg_desc: None,
+        tg_name,
+        tg_desc,
         mobile_unit: pieces.iter().find(|p| !p.fixed).map(|p| p.unit),
         participants,
         first_at: pieces.first().map(|p| p.at).unwrap_or(0),
@@ -2567,7 +2628,7 @@ mod backfill_tests {
         // The same rejection the live ticker makes: a hospital console talking
         // to nobody is not a hand-off. A backfill that disagreed with the live
         // engine would write rows the engine would never have written.
-        assert!(assemble(&rule(), 10256, vec![piece(900001, true, 100)]).is_none());
+        assert!(assemble(&rule(), 10256, "49M-M03".into(), None, vec![piece(900001, true, 100)]).is_none());
     }
 
     #[test]
@@ -2575,7 +2636,7 @@ mod backfill_tests {
         let mut r = rule();
         r.min_calls = 3;
         let pieces = vec![piece(900001, true, 100), piece(4917150, false, 120)];
-        assert!(assemble(&r, 10256, pieces).is_none());
+        assert!(assemble(&r, 10256, "49M-M03".into(), None, pieces).is_none());
     }
 
     #[test]
@@ -2586,7 +2647,7 @@ mod backfill_tests {
             piece(4917150, false, 160),
             piece(4917151, false, 200),
         ];
-        let c = assemble(&rule(), 10256, pieces).expect("a conversation");
+        let c = assemble(&rule(), 10256, "49M-M03".into(), Some("Med 03 - IU Health Methodist ER".into()), pieces).expect("a conversation");
         assert_eq!(c.first_at, 100);
         assert_eq!(c.last_at, 200);
         assert_eq!(c.mobile_unit, Some(4917150));
@@ -2603,7 +2664,7 @@ mod backfill_tests {
         // would therefore miss every live row and backfill a duplicate of it.
         // The transmissions are what identify an exchange.
         let pieces = vec![piece(900001, true, 100), piece(4917150, false, 130)];
-        let c = assemble(&rule(), 10256, pieces).expect("a conversation");
+        let c = assemble(&rule(), 10256, "49M-M03".into(), Some("Med 03 - IU Health Methodist ER".into()), pieces).expect("a conversation");
         let ids: Vec<i64> = c.pieces.iter().filter_map(|p| p.id).collect();
         assert_eq!(ids, vec![100, 130], "a group is identified by its call ids");
 
@@ -2616,5 +2677,115 @@ mod backfill_tests {
         // And one holding neither does not.
         let elsewhere: std::collections::HashSet<i64> = [7_i64, 8].into_iter().collect();
         assert!(!ids.iter().any(|id| elsewhere.contains(id)));
+    }
+}
+
+#[cfg(test)]
+mod talkgroup_label_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The label the Conversations filter shows for a talkgroup, and the order
+    /// the talkgroups come back in — the same SQL `conversations_stats` runs.
+    fn by_tg(db: &Connection) -> Vec<(u16, String)> {
+        let mut q = db
+            .prepare(
+                "SELECT tg, COALESCE(
+                     MAX(CASE WHEN tg_desc <> '' THEN tg_desc END),
+                     MAX(CASE WHEN tg_name <> '' AND tg_name NOT LIKE 'TG %' THEN tg_name END),
+                     MAX(tg_name)), COUNT(*) AS n
+                 FROM conversations GROUP BY tg ORDER BY tg",
+            )
+            .unwrap();
+        let rows = q
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u16, r.get::<_, String>(1)?))
+            })
+            .unwrap();
+        rows.filter_map(Result::ok).collect()
+    }
+
+    fn add(db: &Connection, tg: u16, name: &str, desc: &str, at: i64) {
+        db.execute(
+            "INSERT INTO conversations (rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at,
+             sent_at, revision, status, detail, summary, message, prompt, transcript, chat,
+             participants, pieces, calls, source, headline)
+             VALUES ('r','R',?1,?2,?3,?4,?4,0,0,'sent','','','','','','','[]','[]',1,'live','')",
+            params![tg, name, desc, at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_placeholder_name_never_wins_the_label() {
+        // A backfilled row called the talkgroup "TG 10256". The old query took
+        // MAX() across name and description, and "TG 10256" sorts above
+        // "Med 03 - …", so the placeholder became the label for the whole
+        // talkgroup — including for the rows that knew better.
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db);
+        add(&db, 10256, "49M-M03", "Med 03 - IU Health Methodist ER", 100);
+        add(&db, 10256, "TG 10256", "", 200);
+        assert_eq!(
+            by_tg(&db),
+            vec![(10256, "Med 03 - IU Health Methodist ER".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_real_name_is_used_when_there_is_no_description() {
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db);
+        add(&db, 10259, "TG 10259", "", 100);
+        add(&db, 10259, "49M-M06", "", 200);
+        assert_eq!(by_tg(&db), vec![(10259, "49M-M06".to_string())]);
+    }
+
+    #[test]
+    fn a_placeholder_is_still_better_than_nothing() {
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db);
+        add(&db, 10999, "TG 10999", "", 100);
+        assert_eq!(by_tg(&db), vec![(10999, "TG 10999".to_string())]);
+    }
+
+    #[test]
+    fn talkgroups_come_back_in_talkgroup_order() {
+        // Not by how busy each one is: the list is read as Med 02, Med 03,
+        // Med 04, and that order should not shuffle as traffic changes.
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db);
+        add(&db, 10259, "49M-M06", "Med 06", 100);
+        add(&db, 10259, "49M-M06", "Med 06", 110);
+        add(&db, 10259, "49M-M06", "Med 06", 120);
+        add(&db, 10255, "49M-M02", "Med 02", 130);
+        add(&db, 10257, "49M-M04", "Med 04", 140);
+        let tgs: Vec<u16> = by_tg(&db).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(tgs, vec![10255, 10257, 10259], "busiest first would be 10259");
+    }
+
+    #[test]
+    fn the_repair_replaces_placeholders_written_earlier() {
+        // ensure_schema carries a one-time fix for rows already stored with a
+        // placeholder; it reads the name off a call on that talkgroup.
+        let db = Connection::open_in_memory().unwrap();
+        // Just enough of the calls table for the repair to read a name from.
+        db.execute(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, tg INTEGER, tg_name TEXT)",
+            [],
+        )
+        .unwrap();
+        ensure_schema(&db);
+        db.execute(
+            "INSERT INTO calls (id, start, tg, tg_name) VALUES (1, 500, 10256, '49M-M03')",
+            [],
+        )
+        .unwrap();
+        add(&db, 10256, "TG 10256", "", 600);
+        ensure_schema(&db); // runs the repair
+        let name: String = db
+            .query_row("SELECT tg_name FROM conversations WHERE tg = 10256", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "49M-M03");
     }
 }
