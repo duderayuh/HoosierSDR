@@ -259,13 +259,15 @@ pub struct LinkedReport {
     pub tg_name: String,
     pub tg_desc: String,
     pub place: String,
+    /// The findings line the summary call named, when there is one.
+    pub headline: String,
     pub summary: String,
     pub how: String,
 }
 
 pub fn reports_for(c: &Connection, incident: i64, places: &crate::places::Settings) -> Vec<LinkedReport> {
     let Ok(mut q) = c.prepare(
-        "SELECT id, first_at, tg, tg_name, tg_desc, summary, link_how FROM conversations
+        "SELECT id, first_at, tg, tg_name, tg_desc, summary, link_how, headline FROM conversations
           WHERE incident = ?1 ORDER BY first_at",
     ) else {
         return Vec::new();
@@ -281,6 +283,7 @@ pub fn reports_for(c: &Connection, incident: i64, places: &crate::places::Settin
             place: crate::places::for_tg(places, tg, "")
                 .map(|p| p.name.clone())
                 .unwrap_or_default(),
+            headline: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
             summary: r.get(5)?,
             how: r.get(6)?,
         })

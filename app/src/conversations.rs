@@ -567,7 +567,14 @@ radio slots — HOSPITAL is the fixed party, RADIO A / RADIO B are the mobile ra
 is that radio's alias). The labels are NOT unit names: identify the EMS unit from what is said \
 (\"Medic 42\", \"Ambulance 7\", \"Engine 6\"), and if no unit name is spoken say \"the unit\". \
 Never mention radio IDs, label letters, or that the text is a transcript.\n\n\
-What to write: plain text, two or three sentences, no preamble, no headings, no markdown. Lead with \
+What to write: first a headline, then the note.\n\n\
+The headline is one line, beginning \"HEADLINE:\", listing two to four clinical findings separated \
+by commas — the presenting problem first, then what makes this patient this patient: \
+\"CVA, Severe Headache, Focal Neuro Deficit\", \"Chest Pain, STEMI Alert, Hypotensive\", \
+\"Fall, Hip Deformity, Anticoagulated\". It is a scanning aid on a board of many calls, so name \
+findings, not the unit, the hospital, the age or the ETA, and never punctuate it as a sentence. \
+Where the transcript says too little to name a finding, write \"HEADLINE: Incomplete Report\".\n\n\
+Then a blank line, then the note: plain text, two or three sentences, no preamble, no headings, no markdown. Lead with \
 the unit and destination if stated, then the patient (age/sex), chief complaint, pertinent findings \
 and vitals, interventions given, and ETA; include any request or instruction from the hospital. \
 Use only what was said — do not infer, and do not pad. Where something matters but was garbled or \
@@ -575,7 +582,42 @@ missing, write \"unclear\" for that item rather than describing the transcript's
 nothing is intelligible, write one sentence with whatever can be told (e.g. \"Medic 42 inbound with an \
 adult patient, details unclear\").";
 
-pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
+/// Split what the model returned into its headline and the note beneath it.
+///
+/// The headline rides along on the summary call rather than costing a second
+/// pass over the same transcript, so it arrives as a first line the model was
+/// asked to prefix with `HEADLINE:`. A local model does not always oblige —
+/// it may bold it, bullet it, or forget it — so anything unlabelled is
+/// treated as all summary and no headline, which is what the old rules
+/// produced and still renders correctly.
+pub fn split_headline(raw: &str) -> (String, String) {
+    let raw = raw.trim();
+    let (first, rest) = match raw.split_once('\n') {
+        Some((f, r)) => (f, r),
+        None => (raw, ""),
+    };
+    let bare = first.trim().trim_start_matches(['*', '#', '-', '•', ' ']);
+    let Some(rest_of_line) = bare
+        .strip_prefix("HEADLINE:")
+        .or_else(|| bare.strip_prefix("Headline:"))
+        .or_else(|| bare.strip_prefix("headline:"))
+    else {
+        return (String::new(), raw.to_string());
+    };
+    // Trim the decorations a model wraps a heading in, and the sentence
+    // punctuation it was told not to use.
+    let headline = rest_of_line
+        .trim()
+        .trim_matches(|c: char| c == '*' || c == '#' || c == '"' || c == '.')
+        .trim()
+        .to_string();
+    (
+        crate::analyzers::clean_line(&headline, 120),
+        rest.trim().to_string(),
+    )
+}
+
+pub fn render(r: &Rule, c: &Conversation, headline: &str, summary: &str) -> String {
     let units: Vec<String> = {
         let mut v: Vec<u32> = c
             .pieces
@@ -598,6 +640,7 @@ pub fn render(r: &Rule, c: &Conversation, summary: &str) -> String {
         v
     };
     r.message
+        .replace("{headline}", headline)
         .replace("{summary}", summary)
         .replace("{rule}", &r.name)
         .replace("{tg}", &c.tg.to_string())
@@ -712,6 +755,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
             &Outcome {
                 status: "skipped",
                 detail: &why,
+                headline: "",
                 summary: "",
                 message: "",
                 prompt: "",
@@ -740,15 +784,20 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     } else {
         String::new()
     };
-    let summary = if has_text {
+    // The headline comes back on this same completion — asking a second time
+    // would re-read the whole transcript to learn what we already know.
+    let (headline, summary) = if has_text {
         match crate::alerts::ollama_complete(&ollama, &prompt) {
-            Ok(s) => s,
-            Err(e) => format!("(summary unavailable: {e})\n{}", transcript.trim()),
+            Ok(s) => split_headline(&s),
+            Err(e) => (
+                String::new(),
+                format!("(summary unavailable: {e})\n{}", transcript.trim()),
+            ),
         }
     } else {
-        "(no transcript — audio only)".to_string()
+        (String::new(), "(no transcript — audio only)".to_string())
     };
-    let message = render(&r, &c, &summary);
+    let message = render(&r, &c, &headline, &summary);
     let files: Vec<String> = c.pieces.iter().filter_map(|p| p.audio.clone()).collect();
     let text_only = !r.attach_audio || files.is_empty();
     let mut detail = String::new();
@@ -838,6 +887,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                 &Outcome {
                     status: "sent",
                     detail: &detail,
+                    headline: &headline,
                     summary: &summary,
                     message: &message,
                     prompt: &prompt,
@@ -865,6 +915,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                 &Outcome {
                     status: "failed",
                     detail: &format!("{detail}{e}"),
+                    headline: &headline,
                     summary: &summary,
                     message: &message,
                     prompt: &prompt,
@@ -1148,12 +1199,20 @@ pub fn ensure_schema(c: &Connection) {
         CREATE INDEX IF NOT EXISTS conversations_last ON conversations(last_at);
         "#,
     );
+    // Added with the dashboards: the two-to-four findings the summary call is
+    // now asked to name on its first line. Rows written before this stay
+    // empty and render as they always did.
+    let _ = c.execute(
+        "ALTER TABLE conversations ADD COLUMN headline TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 }
 
 /// What one summary attempt produced, for the stored row.
 struct Outcome<'a> {
     status: &'a str,
     detail: &'a str,
+    headline: &'a str,
     summary: &'a str,
     message: &'a str,
     prompt: &'a str,
@@ -1251,21 +1310,21 @@ fn store_row(
         Some(id) => db.execute(
             "UPDATE conversations SET rule_name = ?1, tg_name = ?2, tg_desc = ?3, last_at = ?4, sent_at = ?5, revision = ?6,
              status = ?7, detail = ?8, summary = ?9, message = ?10, prompt = ?11, transcript = ?12, chat = ?13,
-             participants = ?14, pieces = ?15, calls = ?16 WHERE id = ?17",
+             participants = ?14, pieces = ?15, calls = ?16, headline = ?17 WHERE id = ?18",
             params![
                 r.name, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, id
+                participants, pieces, c.pieces.len() as i64, o.headline, id
             ],
         ),
         None => db.execute(
             "INSERT INTO conversations (rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision,
-             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 r.id, r.name, c.tg, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.first_at, c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, source
+                participants, pieces, c.pieces.len() as i64, source, o.headline
             ],
         ),
     };
@@ -1288,6 +1347,9 @@ pub struct Stored {
     pub revision: u32,
     pub status: String,
     pub detail: String,
+    /// Two to four clinical findings, named by the same model call that wrote
+    /// the summary. Empty on rows stored before headlines existed.
+    pub headline: String,
     pub summary: String,
     pub message: String,
     pub prompt: String,
@@ -1301,7 +1363,7 @@ pub struct Stored {
     pub units: Vec<String>,
 }
 
-const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source";
+const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline";
 
 fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
     let tg = row.get::<_, i64>(3)? as u16;
@@ -1330,6 +1392,7 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         revision: row.get::<_, i64>(9)? as u32,
         status: row.get(10)?,
         detail: row.get(11)?,
+        headline: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
         summary: row.get(12)?,
         message: row.get(13)?,
         prompt: row.get(14)?,
@@ -1540,6 +1603,7 @@ mod tests {
         let o = Outcome {
             status: "sent",
             detail: "sent (2 pieces)",
+            headline: "Chest Pain, Diaphoresis",
             summary: "Medic 3 is inbound with a 60-year-old male.",
             message: "🏥 Hospitals\nMedic 3 is inbound.",
             prompt: "Summarise…",
@@ -1906,7 +1970,7 @@ mod tests {
         };
         let t = stitched_transcript(&c);
         assert_eq!(t, "RADIO \"Medic 3\": Medic 3 inbound, 64 year old male chest pain\nHOSPITAL: Copy, ETA?\nRADIO \"Medic 3\": [no transcript]\n");
-        let m = render(&r, &c, "Chest pain, ETA unknown.");
+        let m = render(&r, &c, "", "Chest pain, ETA unknown.");
         assert!(
             m.starts_with("🏥 Hospitals · Example General ER\nChest pain, ETA unknown."),
             "{m}"
@@ -1937,5 +2001,53 @@ mod payload_tests {
         let text = serde_json::to_string_pretty(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.rules.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod headline_tests {
+    use super::split_headline;
+
+    #[test]
+    fn the_headline_comes_off_the_front_of_the_summary_call() {
+        let (h, s) = split_headline(
+            "HEADLINE: CVA, Severe Headache, Focal Neuro Deficit\n\n\
+             Medic 24 is inbound to Methodist with a 47-year-old female.",
+        );
+        assert_eq!(h, "CVA, Severe Headache, Focal Neuro Deficit");
+        assert!(s.starts_with("Medic 24 is inbound"));
+        assert!(!s.contains("HEADLINE"));
+    }
+
+    #[test]
+    fn a_model_that_dresses_the_heading_up_is_still_understood() {
+        // Local models reach for markdown and quotes even when told not to.
+        for raw in [
+            "**HEADLINE: Chest Pain, STEMI Alert**\n\nMedic 7 inbound.",
+            "## Headline: Chest Pain, STEMI Alert\n\nMedic 7 inbound.",
+            "- headline: \"Chest Pain, STEMI Alert\".\n\nMedic 7 inbound.",
+        ] {
+            let (h, s) = split_headline(raw);
+            assert_eq!(h, "Chest Pain, STEMI Alert", "from {raw:?}");
+            assert_eq!(s, "Medic 7 inbound.", "from {raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_summary_with_no_headline_is_all_summary() {
+        // What every rule produced before this existed, and what a model that
+        // ignores the instruction still produces. The note must survive whole
+        // rather than losing its first line to a headline that isn't there.
+        let plain = "Medic 3 is inbound with a 60-year-old male.\nGCS 15 throughout.";
+        let (h, s) = split_headline(plain);
+        assert_eq!(h, "");
+        assert_eq!(s, plain);
+    }
+
+    #[test]
+    fn a_headline_with_no_note_does_not_swallow_the_line() {
+        let (h, s) = split_headline("HEADLINE: Incomplete Report");
+        assert_eq!(h, "Incomplete Report");
+        assert_eq!(s, "");
     }
 }

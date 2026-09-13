@@ -3378,6 +3378,7 @@ mod tests {
             tg_name: "MED-03".into(),
             tg_desc: String::new(),
             place: "Example General".into(),
+            headline: String::new(),
             summary: "Medic 7 inbound, ROSC".into(),
             how: "Medic 7 was sent to this run".into(),
         }];
