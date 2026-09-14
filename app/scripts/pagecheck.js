@@ -68,10 +68,11 @@ Object.assign(canned, {
   radios_backfill: { calls: 10, conversations: 2, added: 7, radios: 3, learned: 2 },
 });
 const calls = [];
+const routeAsks = [];
 const sentTelegram = [];
 const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -262,6 +263,38 @@ w.__exercise = async () => {
       const none = w.dpPopup(w.dpInc.get(2));
       if (/Closest hospital/.test(none)) console.log("PAGE ERROR: a run with no pathway still lists facilities");
     } else console.log("PAGE ERROR: dpPopup is gone");
+  }
+  // A popup's Details button answers however many times the popup was
+  // rebuilt after it opened — the route arriving rebuilds it, and a button
+  // wired when it opened used to go dead.
+  {
+    const map = w.document.getElementById("dpMap");
+    const gets = () => calls.filter((c) => c === "incident_get").length;
+    const before = gets();
+    const pop = w.document.createElement("div");
+    pop.className = "leaflet-popup";
+    map.appendChild(pop);
+    // The harness has no incident to hand back, so the first Details drops
+    // run 1 from the map as gone: the popup is built once and run 1 put back.
+    const html = w.dpPopup(w.dpInc.get(1));
+    for (let k = 0; k < 2; k++) {
+      pop.innerHTML = html;
+      pop.querySelector("[data-det]").dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    if (gets() - before !== 2) console.log("PAGE ERROR: Details in a rebuilt popup did not open the incident (" + (gets() - before) + " of 2)");
+    pop.remove();
+    w.dpInc.set(1, INCS[0]);
+  }
+  // Showing a run draws its way to the closest hospital, not the pathway's
+  // first choice when that is somewhere else.
+  {
+    const ecmoFirst = Object.assign({}, INCS[0], { id: 9, targets: [INCS[0].targets[1], INCS[0].targets[0]] });
+    (listeners.incident || []).forEach((cb) => cb({ payload: ecmoFirst }));
+    routeAsks.length = 0;
+    await w.dpShow(9);
+    if (w.dpSelected() !== 9) console.log("PAGE ERROR: showing a run did not select it");
+    if (!routeAsks.length || routeAsks[0].which !== "Closest hospital") console.log("PAGE ERROR: a shown run did not ask for its closest hospital: " + JSON.stringify(routeAsks));
   }
   // Tripwires: the list is a tree. A folder renders as a row, a tripwire
   // inside one is indented, and a tripwire in a switched-off folder reads

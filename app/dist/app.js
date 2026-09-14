@@ -3482,7 +3482,14 @@ const dpDemo = async (cmd, args) => {
   }
 };
 const dpInvoke = TAURI ? invoke : dpDemo;
-const dpListen = TAURI ? listen : async () => () => {};
+// Standalone, events come from the page itself: `dpDemoEmit("incident", run)`
+// plays a run in as the radio would, so following can be watched without one.
+const dpDemoHandlers = {};
+const dpListen = TAURI ? listen : async (ev, fn) => { (dpDemoHandlers[ev] = dpDemoHandlers[ev] || []).push(fn); return () => {}; };
+if (!TAURI) window.dpDemoEmit = (ev, payload) => {
+  if (ev === "incident" && payload && !dpDemoIncidents.some((x) => x.id === payload.id)) dpDemoIncidents.push(payload);
+  (dpDemoHandlers[ev] || []).forEach((fn) => fn({ payload }));
+};
 
 /* ---------- dispatch: live incident map (Leaflet + OSM/CARTO tiles) ---------- */
 // Everything drawn here came from the model or the geocoder: it is escaped
@@ -3515,8 +3522,6 @@ function dpInitMap() {
     dpLayer = L.layerGroup().addTo(dpMap);
     dpRouteLayer = L.layerGroup().addTo(dpMap);
     dpMap.on("click", () => dpSelect(null));
-    dpMap.on("popupopen", (e) => { const el = e.popup.getElement(); if (!el) return; el.querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det));
-      el.querySelectorAll("[data-route]").forEach((b) => b.onclick = () => dpDrawRoute(+b.dataset.route, b.dataset.which)); });
     new MutationObserver(() => { $("dpMap").classList.toggle("light", !dpIsDark()); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     $("dpMap").classList.toggle("light", !dpIsDark());
     if (typeof ResizeObserver !== "undefined") {
@@ -3525,6 +3530,17 @@ function dpInitMap() {
     }
   } catch (e) { log(`map init: ${e}`); dpMap = null; }
 }
+
+// A popup's buttons are answered here, once, rather than wired each time it
+// opens: its content is rebuilt whenever the route or the run changes, and a
+// button rebuilt after the popup opened had nothing behind it — which is why
+// Details worked only now and then.
+$("dpMap").addEventListener("click", (e) => {
+  const det = e.target.closest(".leaflet-popup [data-det]");
+  if (det) { e.stopPropagation(); dpDetails(+det.dataset.det); return; }
+  const way = e.target.closest(".leaflet-popup [data-route]");
+  if (way) { e.stopPropagation(); dpDrawRoute(+way.dataset.route, way.dataset.which, { fit: false }).then(() => dpFrame(+way.dataset.route)); }
+}, true);
 
 function dpVisible(i) {
   if (dpWinHours && i.updated < dpNow() - dpWinHours * 3600) return false;
@@ -3620,8 +3636,12 @@ function dpSyncMarker(i) {
   if (!show) { if (m) { dpLayer.removeLayer(m); dpMarkers.delete(i.id); } return; }
   if (!m) {
     m = L.marker([i.lat, i.lon], { icon: dpIcon(i), riseOnHover: true });
-    m.on("click", () => { dpSelect(i.id); dpDrawRoute(i.id, ""); });
-    m.bindPopup(() => dpPopup(dpInc.get(i.id) || i), { maxWidth: 300 });
+    // No auto-pan: the map is framed around the run, its way and its
+    // hospital together, and a pan to fit the popup would undo that.
+    m.bindPopup(() => dpPopup(dpInc.get(i.id) || i), { maxWidth: 300, autoPan: false });
+    // After the popup's own click handler, so this sees whether that click
+    // opened the popup or closed it.
+    m.on("click", () => dpShow(i.id, { click: true }));
     dpLayer.addLayer(m); dpMarkers.set(i.id, m);
   } else { m.setLatLng([i.lat, i.lon]); m.setIcon(dpIcon(i)); }
   m.setZIndexOffset(Math.round((i.updated - 1.7e9) / 10));
@@ -3640,7 +3660,7 @@ function dpRender() {
   $("dpList").innerHTML = list.map(dpCard).join("");
   $("dpEmpty").style.display = list.length ? "none" : "";
   $("dpMeta").textContent = list.length ? `${list.length} incident${list.length === 1 ? "" : "s"}${dpWinHours ? ` · last ${dpWinHours >= 24 ? dpWinHours / 24 + "d" : dpWinHours + "h"}` : ""}` : "";
-  $("dpList").querySelectorAll(".dpcard").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-det]")) return; dpSelect(+c.dataset.id, { fly: true }); }; c.ondblclick = () => dpDetails(+c.dataset.id); });
+  $("dpList").querySelectorAll(".dpcard").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-det]")) return; dpShow(+c.dataset.id); }; c.ondblclick = () => dpDetails(+c.dataset.id); });
   $("dpList").querySelectorAll("[data-det]").forEach((b) => b.onclick = () => dpDetails(+b.dataset.det));
   for (const i of dpInc.values()) dpSyncMarker(i);
   $("dpPinCount").textContent = dpMarkers.size;
@@ -3651,7 +3671,7 @@ function dpRender() {
 // click, because that is the moment somebody wants to know how far it is —
 // and the map zooms out to hold both ends, since the useful thing about a
 // route is seeing the whole of it.
-async function dpDrawRoute(id, which) {
+async function dpDrawRoute(id, which, o) {
   const i = dpInc.get(id);
   if (!i || i.lat == null || !(i.targets || []).length) { dpClearRoute(); return null; }
   const key = `${id}:${which || ""}`;
@@ -3679,36 +3699,143 @@ async function dpDrawRoute(id, which) {
   L.marker(leg.to, {
     icon: L.divIcon({ className: "dpmkwrap", html: `<div class="dpmk dest" title="${esc(leg.place_name)}">🏥<span class="lbl">${esc(leg.place_name)}</span></div>`, iconSize: [34, 34], iconAnchor: [17, 17], popupAnchor: [0, -20] }),
   }).bindPopup(`<div class="pt">🏥 ${esc(leg.place_name)}</div><div class="pa">${esc(leg.label)}</div><div>${esc(leg.say)}</div>`).addTo(dpRouteLayer);
-  // Hold the whole route, with room for the popup above the marker.
-  dpMap.fitBounds(L.latLngBounds(line).extend([i.lat, i.lon]), { paddingTopLeft: [40, 90], paddingBottomRight: [40, 40], maxZoom: 15 });
   // The popup reads from dpInc, so re-opening it now shows the numbers.
   const m = dpMarkers.get(id);
   if (m && m.isPopupOpen()) m.setPopupContent(dpPopup(i));
+  if (!o || o.fit !== false) dpFrame(id);
   return leg;
 }
 window.dpDrawRoute = dpDrawRoute;
+// Hold a run in view with everything about it: the scene, the drawn way and
+// the hospital at its end, and the popup beside the scene. The popup goes on
+// the side of the scene away from the hospital, so it never sits on the
+// route; the frame leaves room for it there, measured, since a run with a
+// pathway has a taller popup. The Layers panel, when open, keeps its corner.
+function dpFrame(id) {
+  const i = dpInc.get(id);
+  if (!dpMap || !i || i.lat == null || !dpShown()) return;
+  const m = dpMarkers.get(id), leg = dpRoutes.get(id);
+  const size = dpMap.getSize();
+  if (!size.x || !size.y) return;
+  const popup = m && m.isPopupOpen() ? m.getPopup() : null;
+  // Which side: away from the hospital along whichever way it mostly lies.
+  let side = "above";
+  if (leg && popup) {
+    const dx = (leg.to[1] - i.lon) * Math.cos(i.lat * Math.PI / 180), dy = leg.to[0] - i.lat;
+    side = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? "left" : "right") : (dy > 0 ? "below" : "above");
+  }
+  const layers = $("dpLayers");
+  let pw = 0, ph = 0;
+  const el = popup && popup.getElement();
+  if (el) { pw = el.offsetWidth; ph = el.offsetHeight; }
+  // On a narrow map the popup and an open Layers panel leave the route a
+  // sliver: the panel folds to its header for the run on show. One click
+  // opens it again, and what was saved is left as it was.
+  if (popup && layers && !layers.classList.contains("closed") && size.x < pw + layers.offsetWidth + 420) layers.classList.add("closed");
+  // The panel's width, and room for a hospital's name drawn beside its pin.
+  const lw = layers && !layers.classList.contains("closed") ? layers.offsetWidth + 90 : 60;
+  if (popup) {
+    // On the right, the popup shares the map's right-hand side with the
+    // Layers panel; where the two do not both fit, it goes above or below.
+    if (side === "right" && lw + pw + 60 > size.x * 0.55) {
+      const dy = leg.to[0] - i.lat;
+      side = dy > 0 ? "below" : "above";
+    }
+    if (el) el.classList.toggle("dpside", side !== "above");
+    // Leaflet puts a popup's bottom edge at its anchor, 20 px above the pin,
+    // plus the offset; these put it beside, below or above the pin.
+    popup.options.offset = side === "left" ? L.point(-(pw / 2 + 30), ph / 2 + 20)
+      : side === "right" ? L.point(pw / 2 + 30, ph / 2 + 20)
+      : side === "below" ? L.point(0, ph + 46)
+      : L.point(0, 7);
+    popup.update();
+  }
+  const cap = (v, of) => Math.max(30, Math.min(v, of));
+  const half = pw / 2 + 24, mid = ph / 2 + 24;
+  const pad = {
+    left:  { tl: [pw + 60, mid], br: [lw, mid] },
+    right: { tl: [40, mid], br: [lw + pw + 60, mid] },
+    // Centred on the pin, half the popup reaches right, and must clear the panel too.
+    below: { tl: [half, 40], br: [half + lw, ph + 70] },
+    above: { tl: [half, ph + 44], br: [half + lw, 40] },
+  }[side];
+  const bounds = L.latLngBounds([[i.lat, i.lon]]);
+  if (leg) { for (const pt of leg.line || []) bounds.extend(pt); bounds.extend(leg.to); }
+  dpMap.flyToBounds(bounds, {
+    paddingTopLeft: [cap(pad.tl[0], size.x * 0.45), cap(pad.tl[1], size.y * 0.6)],
+    paddingBottomRight: [cap(pad.br[0], size.x * 0.65), cap(pad.br[1], size.y * 0.6)],
+    maxZoom: 16, duration: 0.9,
+  });
+}
+window.dpFrame = dpFrame;
+// The target a run is shown with: its closest hospital, when the pathway
+// names one, else the pathway's first choice.
+const dpClosest = (i) => ((i.targets || []).find((t) => /closest/i.test(t.label)) || { label: "" }).label;
+// Bring one run up in full: selected, its card in view, its popup open, the
+// way to its closest hospital drawn, and the whole of it framed.
+async function dpShow(id, o) {
+  o = o || {};
+  const i = dpInc.get(id);
+  if (!i) return;
+  dpSelect(id);
+  const card = $("dpList").querySelector(`.dpcard[data-id="${id}"]`);
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+  if (i.lat == null) { if (!o.quiet) uiToast("This incident has no map position yet — open details to fix the address"); return; }
+  const m = dpMarkers.get(id);
+  // A click on the marker has already opened or closed its popup; closed,
+  // the listener was putting it away, and is left to.
+  if (o.click && m && !m.isPopupOpen()) return;
+  if (m && !m.isPopupOpen()) m.openPopup();
+  dpFrame(id);
+  if ((i.targets || []).length) await dpDrawRoute(id, dpClosest(i), { fit: false });
+  // Something else was chosen while the router was thinking.
+  if (dpSel !== id) return;
+  dpFrame(id);
+}
+window.dpShow = dpShow;
+window.dpSelected = () => dpSel;
+// Following: each new run placed on the map is shown in turn, and held long
+// enough to read before the next one takes the map.
+const DP_HOLD_MS = 15000;
+const dpFollowed = new Set();
+let dpFollowQueue = [], dpFollowUntil = 0, dpFollowTimer = null;
+function dpFollow(id) {
+  if (dpFollowed.has(id)) return;
+  dpFollowed.add(id);
+  dpFollowQueue.push(id);
+  dpFollowNext();
+}
+function dpFollowNext() {
+  if (dpFollowTimer) return;
+  const wait = dpFollowUntil - Date.now();
+  if (wait > 0) { dpFollowTimer = setTimeout(() => { dpFollowTimer = null; dpFollowNext(); }, wait); return; }
+  while (dpFollowQueue.length) {
+    const id = dpFollowQueue.shift();
+    const i = dpInc.get(id);
+    if (!i || !dpShown() || !$("dpFollowNew").checked || !dpMarkers.has(id)) continue;
+    dpFollowUntil = Date.now() + DP_HOLD_MS;
+    dpShow(id, { quiet: true });
+    if (dpFollowQueue.length) dpFollowNext();
+    return;
+  }
+}
+window.dpFollow = dpFollow;
 function dpClearRoute() {
   dpRouteFor = null;
   if (dpRouteLayer) dpRouteLayer.clearLayers();
 }
 
-function dpSelect(id, o) {
+function dpSelect(id) {
   if (id !== dpSel) dpClearRoute();
   dpSel = id;
   $("dpList").querySelectorAll(".dpcard").forEach((c) => c.classList.toggle("on", +c.dataset.id === id));
   for (const [k, m] of dpMarkers) { const i = dpInc.get(k); if (i) m.setIcon(dpIcon(i)); }
-  const i = id != null ? dpInc.get(id) : null;
-  if (i && dpMap && i.lat != null && o && o.fly) {
-    dpMap.flyTo([i.lat, i.lon], Math.max(dpMap.getZoom(), 14), { duration: .6 });
-    const m = dpMarkers.get(id); if (m) setTimeout(() => m.openPopup(), 650);
-    const card = $("dpList").querySelector(`.dpcard[data-id="${id}"]`); if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
-  } else if (i && !i.lat && o && o.fly) uiToast("This incident has no map position yet — open details to fix the address");
 }
 async function dpLoad() {
   try {
     const since = dpWinHours ? dpNow() - dpWinHours * 3600 : 0;
     const rows = await dpInvoke("incidents_list", { since, limit: 2000 });
-    dpInc.clear(); for (const i of rows || []) dpInc.set(i.id, i);
+    dpInc.clear(); for (const i of rows || []) { dpInc.set(i.id, i); if (i.lat != null) dpFollowed.add(i.id); }
     dpRender();
   } catch (e) { log(`incidents_list: ${e}`); }
 }
@@ -3725,7 +3852,16 @@ dpListen("incident", (e) => {
   logEvent(`DISPATCH ${i.emoji} ${i.call_type} · ${i.address || "no address"}${had ? ` (update #${i.revision})` : ""}`, had ? "" : "alarm");
   if (!dpShown()) return;
   dpRender();
-  if (!had && $("dpFollowNew").checked && dpMap && i.lat != null && dpVisible(i)) dpMap.flyTo([i.lat, i.lon], Math.max(dpMap.getZoom(), 13), { duration: .8 });
+  // The run on show changed: its popup says what is new, and a way that
+  // could not be drawn before (no hospital worked out yet) is drawn now.
+  if (had && dpSel === i.id) {
+    const m = dpMarkers.get(i.id);
+    if (m && m.isPopupOpen()) m.setPopupContent(dpPopup(i));
+    if (i.lat != null && (i.targets || []).length && !dpRoutes.has(i.id)) dpShow(i.id, { quiet: true });
+  }
+  // A run is followed the first time it is on the map: when it comes in,
+  // or when an address found later puts a run already heard on it.
+  if ($("dpFollowNew").checked && dpMap && i.lat != null && dpVisible(i) && dpMarkers.has(i.id)) dpFollow(i.id);
 });
 dpListen("incident_deleted", (e) => { dpInc.delete(e.payload); if (dpShown()) dpRender(); });
 setInterval(() => { if (!dpShown()) return; $("dpList").querySelectorAll(".ago[data-t]").forEach((s) => { s.textContent = dpAgo(+s.dataset.t); }); }, 30000);
@@ -3770,7 +3906,7 @@ async function dpDetails(id) {
   m.querySelectorAll("[data-play]").forEach((b) => b.onclick = () => dpInvoke("library_play", { id: +b.dataset.play }).catch((e) => uiToast(`${e}`, "err")));
   const pl = m.querySelector("[data-playlast]"); if (pl) pl.onclick = () => { const c = [...d.calls].reverse().find((x) => x.audio); if (c) dpInvoke("library_play", { id: c.call }).catch((e) => uiToast(`${e}`, "err")); };
   m.querySelector("[data-del]").onclick = async () => { if (!(await uiConfirm(`Delete incident #${i.id} and its ${i.calls} attached transmission${i.calls === 1 ? "" : "s"}? The recordings stay in the library.`, "Delete"))) return; try { await dpInvoke("incident_delete", { id: i.id }); dpInc.delete(i.id); m.close(); dpRender(); } catch (e) { uiToast(`${e}`, "err"); } };
-  const relocate = async (args) => { try { const u = await dpInvoke("incident_locate", { id: i.id, ...args }); dpInc.set(u.id, u); m.close(); dpRender(); if (u.lat != null) { dpSelect(u.id, { fly: true }); uiToast(`Placed at ${u.validated || u.address || "the chosen point"}`); } else uiToast("Still not found near home — try an intersection or add the city", "err"); } catch (e) { uiToast(`${e}`, "err"); } };
+  const relocate = async (args) => { try { const u = await dpInvoke("incident_locate", { id: i.id, ...args }); dpInc.set(u.id, u); m.close(); dpRender(); if (u.lat != null) { dpShow(u.id); uiToast(`Placed at ${u.validated || u.address || "the chosen point"}`); } else uiToast("Still not found near home — try an intersection or add the city", "err"); } catch (e) { uiToast(`${e}`, "err"); } };
   m.querySelector("[data-fixgo]").onclick = () => relocate({ address: m.querySelector("[data-fixaddr]").value.trim() || null, lat: null, lon: null });
   m.querySelector("[data-fixmap]").onclick = () => { if (!dpMap) return; const c = dpMap.getCenter(); relocate({ address: m.querySelector("[data-fixaddr]").value.trim() || null, lat: c.lat, lon: c.lng }); };
 }
