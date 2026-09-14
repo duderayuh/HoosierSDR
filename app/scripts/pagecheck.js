@@ -344,6 +344,20 @@ w.__exercise = async () => {
       else if (field.value !== "http://mac.tail.ts.net:8042/board/b1?key=" + "k".repeat(32))
         console.log("PAGE ERROR: the share link reads " + field.value);
       if (!box.querySelector("[data-new-key]")) console.log("PAGE ERROR: no way to issue a new link");
+      // A pane can be the cardiac arrests going on now, filtered to a
+      // hospital, and it has no emphasis rules: the state colours a case.
+      {
+        const kind = box.querySelector('select[data-k="kind"]');
+        if (!kind || ![...kind.options].some((o) => o.value === "cases")) console.log("PAGE ERROR: a pane cannot be the cardiac arrests going on now");
+        else {
+          kind.value = "cases"; kind.onchange();
+          const pane = box.querySelector(".dbpedit");
+          if (!pane || !/Only cases reported to/.test(pane.textContent)) console.log("PAGE ERROR: a cases pane offers no hospital to filter by");
+          if (pane && pane.querySelector("[data-add-em]")) console.log("PAGE ERROR: a cases pane offers emphasis rules it does not use");
+          const k2 = box.querySelector('select[data-k="kind"]');
+          if (k2) { k2.value = "reports"; k2.onchange(); }
+        }
+      }
       // Collapse the board again. The sweep below clicks every button in
       // whatever order the DOM holds them, which for an open editor means
       // deleting a pane and then editing it — a sequence no listener can

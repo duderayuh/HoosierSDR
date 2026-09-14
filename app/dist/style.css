@@ -1257,7 +1257,10 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dbid { font-size: 11px; opacity: .6; }
 .dbmeta { font-size: 11.5px; margin-top: 3px; }
 .dbdist { color: var(--signal); }
-.dbbody { font-size: 13px; line-height: 1.45; margin-top: 6px; opacity: .92; }
+.dbbody { font-size: 13px; line-height: 1.45; margin-top: 6px; opacity: .92; white-space: pre-line; }
+.dblines { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; line-height: 1.5; color: var(--ink-dim); }
+.dblines li:last-child { color: var(--ink); }
+.dbmap { display: block; width: 100%; max-width: 480px; margin-top: 8px; border-radius: 6px; border: 1px solid var(--line-soft); }
 .dbtag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; opacity: .85; }
 
 /* Time to arrival. On a board of inbound patients this is the one number read

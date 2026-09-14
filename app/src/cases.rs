@@ -1501,6 +1501,13 @@ pub fn spawn(app: AppHandle) {
                         let _ = tauri::Emitter::emit(&app, "cases", ());
                         last = b;
                     }
+                    // Pictures for the boards, drawn once each.
+                    let places = crate::places::load(&app).settings;
+                    let db = app.state::<AppState>().db.lock().unwrap().clone();
+                    if let Some(db) = db {
+                        let view = list(&db.lock().unwrap(), now - LIVE_WINDOW_SECS, &places, now);
+                        crate::casemaps::tick(&app, &view);
+                    }
                     // Cheap when nothing changed: it compares what it would
                     // send with what went out, and sends nothing.
                     crate::casesend::tick(&app);

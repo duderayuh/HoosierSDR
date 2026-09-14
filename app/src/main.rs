@@ -35,6 +35,7 @@ mod link;
 mod radios;
 mod cases;
 mod casesend;
+mod casemaps;
 mod mapshot;
 mod models;
 mod names;
@@ -2370,6 +2371,7 @@ fn main() {
                         radios::ensure_schema(&c);
                         cases::ensure_schema(&c);
                         casesend::ensure_schema(&c);
+                        casemaps::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }

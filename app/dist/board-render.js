@@ -39,6 +39,14 @@
       esc(s.slice(at + card.eta.length));
   }
 
+  // Only a PNG the board itself carries, never a link: this page is on
+  // another machine, and an address in `src` would be a request it makes on
+  // the board's say-so.
+  function picture(src) {
+    if (typeof src !== "string" || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(src)) return "";
+    return `<img class="dbmap" alt="Map of the scene" src="${src}" />`;
+  }
+
   function cardHtml(c, skew) {
     const meta = (c.meta || []).map(esc).join(" · ");
     return `<article class="dbcard${c.style ? " em-" + esc(c.style) : ""}">
@@ -54,6 +62,8 @@
         ${c.eta ? ` · <span class="dbetachip">${esc(c.eta)}</span>` : ""}
       </div>
       ${c.body ? `<div class="dbbody">${body(c)}</div>` : ""}
+      ${(c.lines || []).length ? `<ol class="dblines mono">${c.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ol>` : ""}
+      ${picture(c.image)}
     </article>`;
   }
 

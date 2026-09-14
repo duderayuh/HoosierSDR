@@ -622,3 +622,24 @@ what it sends is decided by `plan`, which is.
 
 The listener's existing arrest tripwires keep sending until turned off. The
 ECPR-candidate screen is not replaced by this and stays.
+
+## Step 5 built: the board pane (2026-09-14)
+
+A dashboard pane of kind `cases`: "Cardiac arrests going on now", optionally
+only the cases reported to one hospital. Each card is the case's state
+(coloured by it: working red, ROSC green, dispatched or on its way amber,
+ended dimmed), its address and units, the expected arrival, the report's
+facts, the timeline as lines, and a map. Open cases first; one that ended
+stays half an hour. It works on shared boards like any other pane.
+
+- **The map is drawn once, not per poll.** A board is polled every few
+  seconds by every screen showing it, and a picture costs tiles and a route.
+  `casemaps.rs` draws from the case loop and keeps the PNG in `case_maps`: the
+  scene alone while no hospital is named, then scene to hospital once a crew
+  has reported to one, with the drive by road worked out at that moment. The
+  board reads the newest one and sends it inside the card as a data URI.
+- **The shared page draws only a PNG the board carries.** An `image` that is
+  not a plain base64 `data:image/png` is not drawn, so nothing on a board can
+  make another machine's screen fetch an address.
+- Maps are drawn for cases open now; a rebuild over past days does not draw
+  pictures for them.

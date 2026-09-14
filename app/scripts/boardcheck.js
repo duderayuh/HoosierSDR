@@ -126,6 +126,36 @@ const ok = (body) => async () => ({ ok: true, status: 200, json: async () => bod
       bad("the page reaches for a route it must not");
   }
 
+  // 5. A cases pane: the timeline draws as lines, the map as a picture the
+  //    board carries, and nothing else becomes a picture — not a link, and
+  //    not a data address with markup smuggled into it.
+  {
+    const CASES = Object.assign({}, BOARD, { panes: [{
+      id: "p2", kind: "cases", title: "Cardiac arrests", sub: "", width: 1, total: 3,
+      cards: [
+        { id: 7, at: 990, emoji: "🫀", title: "Cardiac arrest · ROSC", style: "calm", note: "ETA about 19:40", meta: ["1200 Example St", "Medic 7"],
+          body: "Expected at Example General: about 19:40\nWitnessed: yes", eta: null,
+          lines: ["18:55 Dispatched as Unconscious", "19:14 ROSC <script>alert(4)</script> (dispatcher)"], image: "data:image/png;base64,iVBORw0KGgo=" },
+        { id: 8, at: 980, emoji: "🫀", title: "Cardiac arrest · working", style: "alarm", note: "", meta: [], body: "", eta: null,
+          lines: ["19:02 Working arrest"], image: "https://example.invalid/track.png" },
+        { id: 9, at: 970, emoji: "🫀", title: "Cardiac arrest · dispatched", style: "warn", note: "", meta: [], body: "", eta: null,
+          lines: [], image: "data:image/png;base64,AAAA\" onerror=\"alert(5)" },
+      ],
+    }] });
+    const w = await boot(ok(CASES));
+    const panes = w.document.getElementById("bdPanes");
+    const cards = panes.querySelectorAll(".dbcard");
+    if (cards.length !== 3) bad("the cases pane drew " + cards.length + " cards, wanted 3");
+    else {
+      const img = cards[0].querySelector("img.dbmap");
+      if (!img || !img.getAttribute("src").startsWith("data:image/png;base64,")) bad("a case's map was not drawn");
+      if (cards[0].querySelectorAll(".dblines li").length !== 2) bad("a case's timeline did not draw as its lines");
+      if (cards[1].querySelector("img")) bad("a picture from an address was drawn");
+      if (cards[2].querySelector("img") || panes.querySelector("[onerror]")) bad("a data address carrying markup was drawn");
+    }
+    if (panes.querySelector("script")) bad("a timeline line's markup reached the DOM");
+  }
+
   console.log(failed ? "board: FAILED" : "board: ok");
   process.exit(failed ? 1 : 0);
 })();

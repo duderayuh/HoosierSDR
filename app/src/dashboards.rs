@@ -67,7 +67,8 @@ pub struct Pane {
     /// Shown in the pane's header. Empty takes the kind's own name.
     pub title: String,
     /// `dispatch` — runs from the dispatch channels; `reports` — the
-    /// EMS-to-hospital hand-offs for a place's talkgroups.
+    /// EMS-to-hospital hand-offs for a place's talkgroups; `cases` — the
+    /// cardiac arrests going on now, each as its timeline and its map.
     pub kind: String,
     /// Flex weight against the other panes on the board. 1 is a column.
     pub width: u32,
@@ -93,8 +94,9 @@ pub struct Pane {
     pub within_place: String,
     pub within_miles: f64,
 
-    // ---- report panes ----
-    /// Whose hand-off reports to show; matched through the place's talkgroups.
+    // ---- report and case panes ----
+    /// Whose hand-off reports to show; matched through the place's
+    /// talkgroups. On a cases pane, only cases a crew has reported to it.
     pub place: String,
 
     /// Rows that should catch the eye, first match wins.
@@ -199,7 +201,7 @@ pub fn sanitize(s: &mut Settings) {
                 p.id = format!("pn{now}-{i}-{j}");
                 pane_ids.insert(p.id.clone());
             }
-            if p.kind != "reports" {
+            if p.kind != "reports" && p.kind != "cases" {
                 p.kind = "dispatch".into();
             }
             p.title = crate::analyzers::clean_line(&p.title, 60);
@@ -314,6 +316,12 @@ pub struct Card {
     /// The stated time to arrival inside `body`, for a report row that gives
     /// one. The page marks the span by looking this phrase back up.
     pub eta: Option<String>,
+    /// A timeline, one line each, for a case.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+    /// A picture, as a `data:image/png` URI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -508,6 +516,104 @@ fn dispatch_card(
         meta,
         body: inc.summary.clone(),
         eta: None,
+        ..Default::default()
+    }
+}
+
+/// A case, with the picture drawn for it when there is one.
+#[derive(Clone, Debug)]
+pub struct CaseRow {
+    pub view: crate::cases::CaseView,
+    pub map: Option<crate::casemaps::CaseMap>,
+}
+
+/// How long an ended case stays on a board, so "efforts ceased" is seen
+/// rather than the card simply vanishing.
+const ENDED_STAYS_SECS: i64 = 30 * 60;
+
+/// The weight a case's state carries on a board.
+fn case_style(state: &str) -> &'static str {
+    match state {
+        "working" => "alarm",
+        "rosc" => "calm",
+        "dispatched" | "transporting" | "reported" | "arrived" => "warn",
+        _ => "dim",
+    }
+}
+
+fn case_card(row: &CaseRow) -> Card {
+    use base64::Engine;
+    let k = &row.view;
+    let hm = crate::library::local_hm;
+    let mut meta = Vec::new();
+    if !k.address.is_empty() {
+        meta.push(k.address.clone());
+    }
+    if !k.units.is_empty() {
+        meta.push(k.units.join(", "));
+    }
+    let mut body = Vec::new();
+    let mut note = String::new();
+    if let Some(a) = &k.arrival {
+        let window = match (a.from, a.to) {
+            (Some(f), Some(t)) if f == t => Some(format!("about {}", hm(f))),
+            (Some(f), Some(t)) => Some(format!("{}–{}", hm(f), hm(t))),
+            _ => None,
+        };
+        if let Some(w) = &window {
+            note = format!("ETA {w}");
+        }
+        // The picture's drive was worked out by road when it was drawn; the
+        // case's own is the straight line.
+        let drive = match &row.map {
+            Some(m) if m.place_id == a.place_id && m.drive_min.is_some() => m.drive_min.map(|d| (d, m.drive_how.clone())),
+            _ => a.drive_min.map(|d| (d, a.drive_how.clone())),
+        };
+        let mut line = format!("Expected at {}: {}", a.place, window.unwrap_or_else(|| "no ETA said".into()));
+        if let Some((d, how)) = drive {
+            line.push_str(&format!(" · {d} min {how} from the scene"));
+        }
+        body.push(line);
+    }
+    let mut got: Vec<(String, String)> = Vec::new();
+    for l in k.lines.iter().filter(|l| l.kind == "report") {
+        for f in &l.facts {
+            got.retain(|(key, _)| key != &f.key);
+            got.push((f.key.clone(), f.value.clone()));
+        }
+    }
+    let facts: Vec<String> = [("age", "Age"), ("sex", "Sex"), ("witnessed", "Witnessed"), ("bystander cpr", "Bystander CPR"), ("rhythm", "Rhythm"), ("downtime", "Downtime"), ("history", "History")]
+        .iter()
+        .filter_map(|(key, label)| got.iter().find(|(g, _)| g == key).map(|(_, v)| format!("{label}: {v}")))
+        .collect();
+    if !facts.is_empty() {
+        body.push(facts.join(" · "));
+    }
+    let mut lines: Vec<String> = k
+        .lines
+        .iter()
+        .filter(|l| l.kind != "repage")
+        .map(|l| format!("{} {}{}", l.clock.clone().unwrap_or_else(|| hm(l.at)), l.label, crate::casesend::source_label(l)))
+        .collect();
+    // The first line and the latest are the ones a glance needs.
+    if lines.len() > 10 {
+        let tail = lines.split_off(lines.len() - 9);
+        lines.truncate(1);
+        lines.push("…".into());
+        lines.extend(tail);
+    }
+    Card {
+        id: k.id,
+        at: k.updated,
+        emoji: "🫀".into(),
+        title: format!("{} · {}", k.title, crate::casesend::state_label(&k.state)),
+        style: case_style(&k.state).into(),
+        note,
+        meta,
+        body: body.join("\n"),
+        eta: None,
+        lines,
+        image: row.map.as_ref().map(|m| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&m.png))),
     }
 }
 
@@ -545,6 +651,7 @@ fn report_card(pane: &Pane, r: &crate::conversations::Stored) -> Card {
         },
         body: r.summary.clone(),
         eta: r.eta.clone(),
+        ..Default::default()
     }
 }
 
@@ -556,12 +663,39 @@ pub fn render(
     places: &[crate::places::Place],
     now: i64,
 ) -> RenderedBoard {
+    render_with_cases(board, incidents, reports, &[], places, now)
+}
+
+/// [`render`], with the cases a cases pane draws from.
+pub fn render_with_cases(
+    board: &Dashboard,
+    incidents: &[crate::dispatch::Incident],
+    reports: &[crate::conversations::Stored],
+    cases: &[CaseRow],
+    places: &[crate::places::Place],
+    now: i64,
+) -> RenderedBoard {
     let panes = board
         .panes
         .iter()
         .map(|pane| {
             let limit = pane.limit.max(1) as usize;
-            let (sub, total, cards) = if pane.kind == "reports" {
+            let (sub, total, cards) = if pane.kind == "cases" {
+                // Going on now first, then the ones that ended lately, each
+                // newest first.
+                let mut rows: Vec<&CaseRow> = cases
+                    .iter()
+                    .filter(|r| r.view.open || now - r.view.updated <= ENDED_STAYS_SECS)
+                    .filter(|r| pane.place.is_empty() || r.view.arrivals.iter().any(|a| a.place_id == pane.place))
+                    .collect();
+                rows.sort_by_key(|r| (!r.view.open, std::cmp::Reverse(r.view.updated)));
+                let total = rows.len();
+                (
+                    place_by(places, &pane.place).map(|p| format!("reported to {}", p.name)).unwrap_or_default(),
+                    total,
+                    rows.into_iter().take(limit).map(case_card).collect::<Vec<_>>(),
+                )
+            } else if pane.kind == "reports" {
                 let p = place_by(places, &pane.place);
                 let tgs: std::collections::HashSet<u16> =
                     p.map(|p| p.tgs.iter().copied().collect()).unwrap_or_default();
@@ -603,6 +737,8 @@ pub fn render(
                     pane.title.clone()
                 } else if pane.kind == "reports" {
                     "Reports".into()
+                } else if pane.kind == "cases" {
+                    "Cardiac arrests".into()
                 } else {
                     "Dispatch".into()
                 },
@@ -755,23 +891,36 @@ pub fn draw(state: &crate::AppState, board: &Dashboard) -> Result<RenderedBoard,
         .cloned()
         .collect();
     let db = state.db.lock().unwrap().clone();
-    let (incidents, reports) = match db {
+    let now = crate::library::now();
+    let wants_cases = board.panes.iter().any(|p| p.kind == "cases");
+    let (incidents, reports, cases) = match db {
         Some(db) => {
             let c = db.lock().unwrap();
+            // Only a board with a cases pane pays for reading them. No
+            // router here: a board is polled every few seconds, so the drive
+            // shown is the one stored with the picture.
+            let cases = if wants_cases {
+                let book = crate::places::Settings { places: places.clone() };
+                crate::cases::list(&c, now - crate::cases::LIVE_WINDOW_SECS, &book, now)
+                    .cases
+                    .into_iter()
+                    .map(|view| {
+                        let map = crate::casemaps::latest(&c, &view.profile, view.incident);
+                        CaseRow { view, map }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             (
                 crate::dispatch::inc_list(&c, 0, INCIDENT_SCAN)?,
                 crate::conversations::list_rows(&c, None, None, None, Some(REPORT_SCAN))?,
+                cases,
             )
         }
-        None => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
-    Ok(render(
-        board,
-        &incidents,
-        &reports,
-        &places,
-        crate::library::now(),
-    ))
+    Ok(render_with_cases(board, &incidents, &reports, &cases, &places, now))
 }
 
 /// How much recent traffic a board is matched against. A pane's own limit
@@ -1103,6 +1252,99 @@ mod render_tests {
             panes,
             ..Dashboard::default()
         }
+    }
+
+    fn case_row(id: i64, state: &str, updated: i64, place: &str, map: bool) -> CaseRow {
+        let line = |at: i64, kind: &str, label: &str, source: &str| crate::cases::Line {
+            at,
+            clock: None,
+            kind: kind.into(),
+            label: label.into(),
+            source: source.into(),
+            how: String::new(),
+            inferred: false,
+            call: None,
+            conversation: None,
+            detail: String::new(),
+            facts: vec![],
+        };
+        let mut arrivals = vec![];
+        if !place.is_empty() {
+            let mut a = crate::cases::predict(3, "Example General", updated - 300, Some("10 minutes"), None);
+            a.place_id = place.into();
+            arrivals.push(a);
+        }
+        let mut report = line(updated - 300, "report", "Report to Example General <b>x</b>", "report");
+        report.facts = vec![crate::conversations::Fact { key: "witnessed".into(), value: "yes".into() }];
+        CaseRow {
+            view: crate::cases::CaseView {
+                id,
+                profile: "cardiac-arrest".into(),
+                incident: id * 10,
+                title: "Cardiac arrest".into(),
+                call_type: "Unconscious".into(),
+                address: "1200 Example St".into(),
+                lat: Some(40.0),
+                lon: Some(-86.0),
+                units: vec!["Medic 7".into()],
+                incidents: vec![id * 10],
+                opened: updated - 900,
+                updated,
+                state: state.into(),
+                open: !matches!(state, "terminated" | "downgraded"),
+                lines: vec![
+                    line(updated - 900, "dispatched", "Dispatched as Unconscious", "page"),
+                    line(updated - 850, "repage", "Repaged", "page"),
+                    line(updated - 600, "rosc", "ROSC", "readback"),
+                    report,
+                ],
+                arrival: arrivals.last().cloned(),
+                arrivals,
+            },
+            map: map.then(|| crate::casemaps::CaseMap {
+                place_id: place.into(),
+                png: vec![0x89, 0x50],
+                drive_min: Some(9),
+                drive_how: "by road".into(),
+                km: Some(6.0),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_cases_pane_shows_what_is_going_on_now_with_its_timeline_and_map() {
+        let now = 100_000;
+        let pane = Pane { kind: "cases".into(), limit: 10, ..Pane::default() };
+        let mut s = Settings { dashboards: vec![board(vec![pane.clone()])], ..Default::default() };
+        sanitize(&mut s);
+        assert_eq!(s.dashboards[0].panes[0].kind, "cases", "the kind survives a save");
+        let rows = vec![
+            case_row(1, "terminated", now - 20 * 60, "", false),
+            case_row(2, "rosc", now - 60, "p-far", true),
+            case_row(3, "working", now - 3 * 3600, "", false),
+            case_row(4, "terminated", now - 2 * 3600, "", false),
+        ];
+        let out = render_with_cases(&board(vec![pane.clone()]), &[], &[], &rows, &places(), now);
+        let p = &out.panes[0];
+        assert_eq!(p.title, "Cardiac arrests");
+        // Open first; an ended case stays half an hour; an old one goes.
+        assert_eq!(p.cards.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 3, 1]);
+        let c = &p.cards[0];
+        assert_eq!(c.title, "Cardiac arrest · ROSC");
+        assert_eq!(c.style, "calm");
+        assert!(c.note.starts_with("ETA about "), "{}", c.note);
+        assert!(c.body.contains("9 min by road from the scene"), "the drive stored with the picture: {}", c.body);
+        assert!(c.body.contains("Witnessed: yes"));
+        assert_eq!(c.lines.len(), 3, "a plain repage is not a line: {:?}", c.lines);
+        assert!(c.lines[1].ends_with("ROSC (dispatcher)"));
+        assert_eq!(c.image.as_deref(), Some("data:image/png;base64,iVA="));
+        assert_eq!(p.cards[1].image, None);
+        assert_eq!(p.cards[2].style, "dim");
+        // A pane for one hospital shows the cases reported to it.
+        let one_place = Pane { place: "p-far".into(), ..pane };
+        let out = render_with_cases(&board(vec![one_place]), &[], &[], &rows, &places(), now);
+        assert_eq!(out.panes[0].cards.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2]);
+        assert!(out.panes[0].sub.starts_with("reported to "));
     }
 
     fn drawn(b: &Dashboard, incs: &[crate::dispatch::Incident]) -> Vec<i64> {

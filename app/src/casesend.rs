@@ -70,7 +70,7 @@ fn hm(epoch: i64) -> String {
     crate::library::local_hm(epoch)
 }
 
-fn state_label(state: &str) -> &str {
+pub(crate) fn state_label(state: &str) -> &str {
     match state {
         "dispatched" => "dispatched",
         "working" => "working",
@@ -84,7 +84,7 @@ fn state_label(state: &str) -> &str {
     }
 }
 
-fn source_label(l: &Line) -> String {
+pub(crate) fn source_label(l: &Line) -> String {
     let who = match l.source.as_str() {
         "readback" => "dispatcher",
         "crew" => "crew",

@@ -85,18 +85,25 @@
 
   function paneEditor(b, p, j) {
     const isRep = p.kind === "reports";
+    const isCase = p.kind === "cases";
     return `<div class="dbpedit" data-pane="${j}">
       <div class="dbprow">
         <select data-k="kind">
-          <option value="dispatch"${!isRep ? " selected" : ""}>Dispatch calls</option>
+          <option value="dispatch"${!isRep && !isCase ? " selected" : ""}>Dispatch calls</option>
           <option value="reports"${isRep ? " selected" : ""}>Hospital hand-off reports</option>
+          <option value="cases"${isCase ? " selected" : ""}>Cardiac arrests going on now</option>
         </select>
         <input data-k="title" value="${esc(p.title || "")}" placeholder="Pane title" />
         <label class="inline">width <input data-k="width" type="number" min="1" max="6" value="${p.width || 1}" style="width:56px" /></label>
         <label class="inline">rows <input data-k="limit" type="number" min="1" max="200" value="${p.limit || 25}" style="width:64px" /></label>
         <button class="btn ghost sm" data-del-pane="${j}">Remove</button>
       </div>
-      ${isRep ? `
+      ${isCase ? `
+      <div class="row2">
+        <label class="field"><span class="lab">Only cases reported to</span>
+          <select data-k="place">${placeOpts(p.place, true)}</select></label>
+        <div class="help">Each arrest as its timeline, with a map: the scene, then scene to hospital once a crew reports. Open cases first; one that ended stays half an hour. Built on the Cases tab.</div>
+      </div>` : isRep ? `
       <div class="row2">
         <label class="field"><span class="lab">Hospital</span>
           <select data-k="place">${placeOpts(p.place, false)}</select></label>
@@ -120,6 +127,7 @@
         <label class="field"><span class="lab">But not</span>
           <input data-k="except" value="${esc(words(p.except))}" placeholder="cancelled, disregard" /></label>
       </div>`}
+      ${isCase ? `<div class="help" style="margin-top:8px">A case is coloured by where it stands: working red, ROSC green, dispatched or on its way amber, ended dimmed.</div>` : `
       <div class="lab" style="margin-top:8px">Emphasis <span class="faint">first rule that matches wins${isRep ? " · reports carry no call type, so these match on words" : ""}</span></div>
       ${(p.emphasis || []).map((e, k) => `
         <div class="dbemrow" data-em="${k}">
@@ -129,7 +137,7 @@
           <input data-e="note" value="${esc(e.note || "")}" placeholder="tag (optional)" />
           <button class="btn ghost sm" data-del-em="${k}">×</button>
         </div>`).join("")}
-      <button class="btn ghost sm" data-add-em="${j}">+ Emphasis</button>
+      <button class="btn ghost sm" data-add-em="${j}">+ Emphasis</button>`}
     </div>`;
   }
 
