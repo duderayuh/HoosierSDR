@@ -53,6 +53,10 @@ pub struct Place {
     pub notes: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// The named Telegram destination (its id) this place's own chat is:
+    /// a case reported to it is sent there. Blank is none.
+    #[serde(default)]
+    pub dest: String,
 }
 
 fn other() -> String {

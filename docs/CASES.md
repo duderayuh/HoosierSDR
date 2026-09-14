@@ -580,3 +580,45 @@ gains new default events in their place in the order.
 
 The dispatcher's "advise control of your status at the hospital" is a
 there-by-now signal (an upper bound on arrival) and is not used yet.
+
+## Step 4 built: Telegram (2026-09-14)
+
+`app/src/casesend.rs`, an "On Telegram" panel on the Cases tab, and a chat on
+each place. **Off until switched on.**
+
+- **Which chats.** The profile's chat hears every case from dispatch. A
+  hospital's chat (the place's destination) hears a case once a report to that
+  hospital is joined to it, and its first message is the whole timeline so
+  far. Nothing goes to a hospital on a prediction of where the patient is
+  going; that mirrors the listener's tripwires, which announce dispatch to one
+  chat and the report to the hospital's.
+- **The timeline message** is plain text (edits are sent without markup),
+  edited when it changes, never re-sent. Plain repages are left out, and so is
+  a second "at the hospital". A long one keeps its first line and its latest.
+- **Replies** go only for the ticked kinds: working (once), ROSC and lost
+  pulses as episodes (the crew's "pulses back" and the dispatcher's "rosc 1914"
+  are one), a report (the first, then only when the arrival it gives moves
+  three minutes or more), not an arrest, efforts ceased. Keys are built from
+  the event, never a row id, so a rebuild does not resend.
+- **Cutoffs.** A reply older than twenty minutes is recorded and not sent. A
+  new thread does not reply for anything already in its first message. A case
+  quiet for two hours, or one that ended over twenty minutes ago, gets no new
+  thread, so switching this on mid-shift or restarting does not replay a
+  shift.
+- **State** is in `case_sends` (per case, per chat: the message id and the text
+  it last showed) and `case_notices`, keyed on the case's run rather than its
+  row id. A thread stays in the chat it started in.
+- **Map**: once, under the first message in a hospital's chat, scene to that
+  hospital only.
+- **Preview** counts, per day and per chat, what the built cases would have
+  sent, with each timeline as it would read at the end. On a copy of the live
+  library, with every ECMO hospital given a chat: the chat for every case
+  would have had 16 timelines and 13 replies on its busiest day.
+- A rebuild now removes a case whose run is no longer a case of its own, so no
+  thread is left pointing at a timeline nothing updates.
+
+The sending loop itself (network, then the write) is not covered by tests;
+what it sends is decided by `plan`, which is.
+
+The listener's existing arrest tripwires keep sending until turned off. The
+ECPR-candidate screen is not replaced by this and stays.

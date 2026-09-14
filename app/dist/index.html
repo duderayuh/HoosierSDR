@@ -359,6 +359,7 @@
                 <div class="row2">
                   <label class="field"><span class="lab">System <span class="mono faint">two systems can use the same numbers; blank means any</span></span><input id="plSystem" type="text" spellcheck="false" /></label>
                 </div>
+                <label class="field"><span class="lab">Telegram chat <span class="mono faint">a cardiac arrest reported here is sent to it; set up chats in Connections</span></span><select id="plDest"></select></label>
                 <label class="field"><span class="lab">Notes</span><input id="plNotes" type="text" spellcheck="false" /></label>
                 <div class="inline"><button class="btn primary sm" id="plSave">Save</button><span class="spacer"></span><button class="btn ghost sm danger" id="plDelete">Delete</button></div>
               </div>
@@ -614,7 +615,7 @@
             <select id="csHours" title="How far back"><option value="6">6 h</option><option value="24" selected>24 h</option><option value="72">3 days</option><option value="168">7 days</option></select>
             <button class="btn ghost sm" id="csRebuild" title="Build the cases again from calls already in the library. Nothing is sent.">Rebuild…</button></div>
           <div class="body tight">
-            <p class="help">A case is a run the page calls a cardiac arrest, or one the dispatcher upgrades to a working arrest, with every moment said about it on the air. Nothing here is sent anywhere yet.</p>
+            <p class="help">A case is a run the page calls a cardiac arrest, or one the dispatcher upgrades to a working arrest, with every moment said about it on the air.</p>
             <div class="cs-cards" id="csCards"></div>
             <div class="empty small" id="csEmpty">No cases in this window. They appear as arrests are paged, and “Rebuild…” builds them from calls already stored.</div>
           </div>
@@ -629,6 +630,20 @@
             <div class="body tight">
               <p class="help">An arrest event the dispatcher or a crew said that nothing tied to one run: no callsign, no learned radio, and more than one arrest open. Kept here rather than guessed.</p>
               <div id="csUnplaced"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">On Telegram</span><span class="meta" id="csSendMeta"></span></div>
+            <div class="body tight cs-send">
+              <p class="help">Each case is one message per chat: its timeline, edited as the case grows, which buzzes nobody. A reply, which does, goes out only for the events ticked below. A hospital's chat hears a case once a crew calls that hospital, never on a guess. Read the preview before switching it on, and turn off the tripwires that already announce arrests, or both will.</p>
+              <label class="check"><input type="checkbox" id="csSendOn" /> Send cases to Telegram</label>
+              <label class="field"><span class="lab">Every case goes to</span><select id="csSendDest"></select></label>
+              <label class="check"><input type="checkbox" id="csSendHosp" /> And to a hospital's own chat once a crew calls it <span class="faint small">(set the chat on the place, in Dispatch setup → Places)</span></label>
+              <label class="check"><input type="checkbox" id="csSendMap" /> With a map, scene to hospital, in the hospital's chat</label>
+              <div class="lab small">A reply for</div>
+              <div class="cs-notify" id="csNotify"></div>
+              <div class="inline"><button class="btn primary sm" id="csSendSave">Save</button><button class="btn ghost sm" id="csPreviewBtn" title="What the cases already built would have sent. Nothing is sent.">Preview…</button></div>
+              <div id="csPreview"></div>
             </div>
           </div>
         </div>

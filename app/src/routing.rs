@@ -111,6 +111,12 @@ pub fn straight(from: (f64, f64), to: (f64, f64)) -> Distance {
 
 /// How far `to` is from `from`, by road when a router is there.
 pub fn distance(state: &State<AppState>, from: (f64, f64), to: (f64, f64)) -> Distance {
+    distance_in(state, from, to)
+}
+
+/// [`distance`], for a caller holding the state itself rather than Tauri's
+/// handle to it.
+pub fn distance_in(state: &AppState, from: (f64, f64), to: (f64, f64)) -> Distance {
     let (url, quiet) = {
         let st = state.routing.lock().unwrap();
         if !st.settings.enabled {

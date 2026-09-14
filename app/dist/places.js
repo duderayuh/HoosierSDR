@@ -12,6 +12,7 @@
 
   let places = [];
   let features = [];
+  let dests = [];
   let sel = null;
 
   const KIND = { hospital: "🏥", station: "🚒", landmark: "📍", other: "•" };
@@ -23,6 +24,7 @@
       const [s, f] = await Promise.all([invoke("places_get"), invoke("place_features")]);
       places = s.places || [];
       features = f || [];
+      try { const a = await invoke("alerts_get"); dests = (a && a.settings && a.settings.destinations) || []; } catch (e) { dests = []; }
       render();
     } catch (e) { /* the panel is only shown in the app */ }
   }
@@ -65,6 +67,10 @@
     $("plFeatures").innerHTML = features.map(([k, lab]) =>
       `<label class="check"><input type="checkbox" data-feat="${esc(k)}" ${(p.features || []).includes(k) ? "checked" : ""} /> ${esc(lab)}</label>`).join("");
     $("plOwnFeatures").value = own.join(", ");
+    if ($("plDest")) {
+      $("plDest").innerHTML = `<option value="">— none —</option>` + dests.map((d) => `<option value="${esc(d.id)}" ${d.id === p.dest ? "selected" : ""}>${esc(d.name)}</option>`).join("")
+        + (p.dest && !dests.some((d) => d.id === p.dest) ? `<option value="${esc(p.dest)}" selected>a destination that was removed</option>` : "");
+    }
   }
 
   function read() {
@@ -79,6 +85,7 @@
     const ticked = [...$("plFeatures").querySelectorAll("[data-feat]")].filter((i) => i.checked).map((i) => i.dataset.feat);
     const own = $("plOwnFeatures").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     p.features = [...new Set([...ticked, ...own])];
+    if ($("plDest")) p.dest = $("plDest").value;
     return p;
   }
 

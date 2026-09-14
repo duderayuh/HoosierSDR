@@ -98,6 +98,8 @@ pub struct Profile {
     pub page_phrases: Vec<String>,
     /// Checked in order; the first that matches names the event.
     pub events: Vec<EventRule>,
+    /// Where its timelines go on Telegram. Off until switched on.
+    pub telegram: crate::casesend::Send,
 }
 
 impl Default for Profile {
@@ -109,6 +111,7 @@ impl Default for Profile {
             call_types: Vec::new(),
             page_phrases: Vec::new(),
             events: Vec::new(),
+            telegram: crate::casesend::Send::default(),
         }
     }
 }
@@ -132,6 +135,7 @@ pub fn arrest_profile() -> Profile {
         id: "cardiac-arrest".into(),
         name: "Cardiac arrest".into(),
         enabled: true,
+        telegram: crate::casesend::Send::default(),
         call_types: vec!["Cardiac Arrest".into()],
         page_phrases: vec!["cardiac arrest".into()],
         events: vec![
@@ -744,6 +748,8 @@ pub fn drive_minutes(d: &crate::routing::Distance) -> i64 {
 pub struct Arrival {
     pub conversation: i64,
     pub place: String,
+    /// The place book's id for it, when the talkgroup belongs to one.
+    pub place_id: String,
     /// The ETA as the crew said it.
     pub said: Option<String>,
     /// The start of the transmission the ETA was said in.
@@ -806,6 +812,7 @@ pub fn predict(conversation: i64, place: &str, anchor: i64, said: Option<&str>, 
 pub fn with_drive(a: &Arrival, d: crate::routing::Distance) -> Arrival {
     let mut b = predict(a.conversation, &a.place, a.anchor, a.said.as_deref(), Some(d));
     b.ends = a.ends;
+    b.place_id = a.place_id.clone();
     if let Some(at) = a.arrived {
         check_arrival(&mut b, at);
     }
@@ -1225,6 +1232,9 @@ fn insert_line(c: &Connection, case: Option<i64>, profile: &str, l: &Line, answe
 pub struct CaseView {
     pub id: i64,
     pub profile: String,
+    /// The run the case is keyed on: stable across rebuilds, where `id` is
+    /// only stable while the case is.
+    pub incident: i64,
     pub title: String,
     pub call_type: String,
     pub address: String,
@@ -1241,6 +1251,8 @@ pub struct CaseView {
     pub lines: Vec<Line>,
     /// When the latest report's unit should reach the hospital.
     pub arrival: Option<Arrival>,
+    /// Every report's prediction, oldest first.
+    pub arrivals: Vec<Arrival>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1312,6 +1324,7 @@ fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Setti
             let ends = scene.zip(hospital.and_then(|h| h.lat.zip(h.lon)));
             let mut arrival = predict(r.id, &place, anchor, eta.as_deref(), ends.map(|(a, b)| crate::routing::straight(a, b)));
             arrival.ends = ends;
+            arrival.place_id = hospital.map(|h| h.id.clone()).unwrap_or_default();
             let mut label = format!("Report to {place}");
             if let Some(e) = &eta {
                 label.push_str(&format!(" · said {e}"));
@@ -1364,7 +1377,8 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
     lines.sort_by_key(|l| l.at);
     // The latest report with a said ETA, else the latest report.
     let mut arrival = arrivals.iter().rev().find(|a| a.from.is_some()).or(arrivals.last()).cloned();
-    if let Some(a) = arrival.as_mut() {
+    let mut arrivals = arrivals;
+    for a in arrival.iter_mut().chain(arrivals.iter_mut()) {
         if let Some(at) = lines.iter().find(|l| l.kind == ARRIVED && l.at >= a.anchor).map(|l| l.at) {
             check_arrival(a, at);
         }
@@ -1381,6 +1395,7 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
     Some(CaseView {
         id,
         profile: profile.to_string(),
+        incident: primary,
         title,
         call_type: inc.call_type.clone(),
         address: inc.address.clone(),
@@ -1394,6 +1409,7 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
         state,
         lines,
         arrival,
+        arrivals,
     })
 }
 
@@ -1485,6 +1501,9 @@ pub fn spawn(app: AppHandle) {
                         let _ = tauri::Emitter::emit(&app, "cases", ());
                         last = b;
                     }
+                    // Cheap when nothing changed: it compares what it would
+                    // send with what went out, and sends nothing.
+                    crate::casesend::tick(&app);
                 }
                 Err(e) => eprintln!("[cases] {e}"),
             }
@@ -1498,22 +1517,26 @@ pub fn cases_list(app: AppHandle, state: State<AppState>, hours: Option<u32>) ->
     let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
     let c = db.lock().unwrap();
     let now = crate::library::now();
-    let mut v = list(&c, now - hours.unwrap_or(24).clamp(1, 24 * 60) as i64 * 3600, &places, now);
+    let v = list(&c, now - hours.unwrap_or(24).clamp(1, 24 * 60) as i64 * 3600, &places, now);
     drop(c);
-    // By road, where the router is running, asked with the library let go.
-    // The router is on this machine; a dead one is left alone for a minute
-    // after its first failure, so this costs one short wait at most.
+    Ok(with_roads(&state, v))
+}
+
+/// Drive times by road, where the router is running. Asked with the library
+/// let go: the router is on this machine, and a dead one is left alone for a
+/// minute after its first failure, so this costs one short wait at most.
+pub fn with_roads(state: &AppState, mut v: CasesView) -> CasesView {
     for k in v.cases.iter_mut() {
-        if let Some(a) = k.arrival.as_mut() {
+        for a in k.arrival.iter_mut().chain(k.arrivals.iter_mut()) {
             if let Some((scene, hospital)) = a.ends {
-                let d = crate::routing::distance(&state, scene, hospital);
+                let d = crate::routing::distance_in(state, scene, hospital);
                 if d.how == "road" {
                     *a = with_drive(a, d);
                 }
             }
         }
     }
-    Ok(v)
+    v
 }
 
 /// Build the cases again over the last `days` of the library. Sends nothing.
@@ -1532,6 +1555,51 @@ pub async fn cases_rebuild(app: AppHandle, days: u32) -> Result<Built, String> {
 #[tauri::command]
 pub fn cases_profiles(app: AppHandle) -> Settings {
     load(&app)
+}
+
+/// Where a profile's timelines go on Telegram.
+#[tauri::command]
+pub fn cases_set_telegram(app: AppHandle, profile: String, telegram: crate::casesend::Send) -> Result<Settings, String> {
+    let mut s = load(&app);
+    let p = s.profiles.iter_mut().find(|p| p.id == profile).ok_or("no such case profile")?;
+    p.telegram = telegram;
+    let path = settings_path(&app)?;
+    std::fs::write(&path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", path.display()))?;
+    touch();
+    Ok(s)
+}
+
+/// What a profile's timelines would have sent over the last `days`, without
+/// sending anything. Built from the cases as they stand; press Rebuild first
+/// to cover days the live rebuild has not.
+#[tauri::command]
+pub async fn cases_preview(app: AppHandle, profile: String, days: u32) -> Result<crate::casesend::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let s = load(&app);
+        let p = s.profiles.iter().find(|p| p.id == profile).ok_or("no such case profile")?.clone();
+        let places = crate::places::load(&app).settings;
+        let names: HashMap<String, String> = state
+            .alerts
+            .lock()
+            .unwrap()
+            .settings
+            .destinations
+            .iter()
+            .map(|d| (d.id.clone(), d.name.clone()))
+            .collect();
+        let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
+        let now = crate::library::now();
+        let mut view = {
+            let c = db.lock().unwrap();
+            list(&c, now - days.clamp(1, 60) as i64 * 86400, &places, now)
+        };
+        view.cases.retain(|k| k.profile == p.id);
+        let view = with_roads(&state, view);
+        Ok(crate::casesend::preview(&view, &p.telegram, &places, &names))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

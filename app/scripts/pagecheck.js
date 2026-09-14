@@ -58,6 +58,9 @@ Object.assign(canned, {
     unplaced: [{ at: 1100, clock: "17:48", kind: "working", label: "Working arrest", source: "readback", why: "2 arrests were open, and nothing named the run", call: 9, detail: "Working Arrest 1748." }],
   },
   cases_rebuild: { cases: 1, events: 4, inferred: 1, unplaced: 1 },
+  cases_profiles: { profiles: [{ id: "cardiac-arrest", name: "Cardiac arrest", enabled: true, call_types: [], page_phrases: [], events: [], telegram: { enabled: false, dest: "d1", hospitals: true, notify: ["working", "rosc", "report"], map: true } }] },
+  cases_set_telegram: { profiles: [{ id: "cardiac-arrest", name: "Cardiac arrest", enabled: true, call_types: [], page_phrases: [], events: [], telegram: { enabled: false, dest: "d1", hospitals: true, notify: ["rosc", "report"], map: true } }] },
+  cases_preview: { enabled: false, days: [{ date: "2026-09-13", dest: "Me", threads: 16, replies: 13 }], cases: [{ id: 7, title: "Cardiac arrest", address: "1200 Example St", opened: 900, chats: ["Me"], replies: ["💚 19:14 ROSC (dispatcher)"], timeline: "🫀 Cardiac arrest <b>x</b>\n18:55 Dispatched as Unconscious" }], warnings: ["No hospital has a chat of its own yet"] },
 });
 Object.assign(canned, {
   radios_list: [RADIO(900222, "Medic 32", "learned"), RADIO(900333, "Medic 44", "changed", { latest: "Medic 12" }), RADIO(900001, "", "learned", { role: "console" })],
@@ -65,8 +68,10 @@ Object.assign(canned, {
   radios_backfill: { calls: 10, conversations: 2, added: 7, radios: 3, learned: 2 },
 });
 const calls = [];
+const sentTelegram = [];
+const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -372,6 +377,39 @@ w.__exercise = async () => {
     if (!pt || !/Witnessed\s+yes/.test(pt.textContent)) console.log("PAGE ERROR: the hospital report's facts are not shown on the case");
     if (tl && tl.querySelector(".cs-chip b")) console.log("PAGE ERROR: a fact's markup reached the page");
     if (tl && !tl.querySelector(".cs-line.k-report .cs-chip")) console.log("PAGE ERROR: the report line does not carry its facts");
+    // On Telegram: the settings draw from the profile, a save sends what is
+    // ticked, and the preview shows its counts with markup kept as text.
+    await new Promise((r) => setTimeout(r, 50));
+    const dest = w.document.getElementById("csSendDest");
+    if (!dest || dest.value !== "d1" || !/Me/.test(dest.innerHTML)) console.log("PAGE ERROR: the chat every case goes to is not drawn from the profile; got " + (dest ? dest.value : "nothing"));
+    const working = w.document.querySelector('#csNotify [data-notify="working"]');
+    if (!working || !working.checked) console.log("PAGE ERROR: the events that get a reply are not ticked from the profile");
+    if (working) working.checked = false;
+    if (w.document.getElementById("csSendSave")) { w.document.getElementById("csSendSave").onclick(); await new Promise((r) => setTimeout(r, 50)); }
+    const saved = sentTelegram[0] && sentTelegram[0].telegram;
+    if (!saved || saved.dest !== "d1" || saved.notify.includes("working") || !saved.notify.includes("rosc") || saved.enabled !== false) console.log("PAGE ERROR: saving the Telegram settings did not send what was ticked; got " + JSON.stringify(saved));
+    if (w.document.getElementById("csPreviewBtn")) { await w.document.getElementById("csPreviewBtn").onclick(); await new Promise((r) => setTimeout(r, 50)); }
+    const pv = w.document.getElementById("csPreview");
+    if (!pv || !/16/.test(pv.textContent) || !/No hospital has a chat/.test(pv.textContent)) console.log("PAGE ERROR: the Telegram preview does not show its counts and warnings; got " + (pv ? pv.textContent.slice(0, 200) : "nothing"));
+    if (pv && pv.querySelector("pre b")) console.log("PAGE ERROR: a previewed timeline's markup reached the page");
+    if (pv && !/ROSC \(dispatcher\)/.test(pv.textContent)) console.log("PAGE ERROR: the preview does not show the replies a case would get");
+    // A place carries its own chat.
+    {
+      const row = w.document.querySelector("#plList [data-id]");
+      if (!row) console.log("PAGE ERROR: the place book drew no places to give a chat to");
+      else {
+        row.onclick();
+        const pick = w.document.getElementById("plDest");
+        if (!pick || !/Me/.test(pick.innerHTML)) console.log("PAGE ERROR: a place has no Telegram chat to pick");
+        else {
+          pick.value = "d1";
+          w.document.getElementById("plSave").onclick();
+          await new Promise((r) => setTimeout(r, 50));
+          const got = savedPlaces.length && savedPlaces[savedPlaces.length - 1].settings.places.find((x) => x.id === row.dataset.id);
+          if (!got || got.dest !== "d1") console.log("PAGE ERROR: a place's chat is not saved with it; got " + JSON.stringify(got));
+        }
+      }
+    }
     const un = w.document.getElementById("csUnplaced");
     if (!un || !/nothing named the run/.test(un.innerHTML)) console.log("PAGE ERROR: the unplaced event does not say why");
     w.showView("monitor");

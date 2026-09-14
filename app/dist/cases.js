@@ -128,6 +128,77 @@
     } catch (e) { uiToast(`${e}`, "err"); }
   }
 
+  /* ---------- Telegram ---------- */
+  const NOTIFY = [["working", "Working arrest"], ["rosc", "ROSC"], ["rearrest", "Lost pulses"], ["report", "Hospital report, or its ETA moving 3 min"], ["downgrade", "Not an arrest"], ["terminated", "Efforts ceased"]];
+  let profile = null, dests = [];
+
+  async function loadSend() {
+    try {
+      const s = (await invoke("cases_profiles")) || { profiles: [] };
+      profile = (s.profiles || [])[0] || null;
+      const a = await invoke("alerts_get");
+      dests = (a && a.settings && a.settings.destinations) || [];
+    } catch (e) { return; }
+    drawSend();
+  }
+
+  function drawSend() {
+    if (!profile || !$("csSendOn")) return;
+    const t = profile.telegram || {};
+    $("csSendOn").checked = !!t.enabled;
+    $("csSendDest").innerHTML = `<option value="">— none —</option>` + dests.map((d) => `<option value="${esc(d.id)}" ${d.id === t.dest ? "selected" : ""}>${esc(d.name)}</option>`).join("")
+      + (t.dest && !dests.some((d) => d.id === t.dest) ? `<option value="${esc(t.dest)}" selected>a destination that was removed</option>` : "");
+    $("csSendHosp").checked = t.hospitals !== false;
+    $("csSendMap").checked = t.map !== false;
+    $("csNotify").innerHTML = NOTIFY.map(([k, label]) => `<label class="check"><input type="checkbox" data-notify="${k}" ${(t.notify || []).includes(k) ? "checked" : ""} /> ${esc(label)}</label>`).join("");
+    $("csSendMeta").textContent = t.enabled ? "on" : "off";
+  }
+
+  function readSend() {
+    return {
+      enabled: $("csSendOn").checked,
+      dest: $("csSendDest").value,
+      hospitals: $("csSendHosp").checked,
+      map: $("csSendMap").checked,
+      notify: [...$("csNotify").querySelectorAll("[data-notify]")].filter((i) => i.checked).map((i) => i.dataset.notify),
+    };
+  }
+
+  async function saveSend() {
+    if (!profile) return;
+    const t = readSend();
+    if (t.enabled && !(profile.telegram || {}).enabled && !(await uiConfirm("Cases will start sending to Telegram. Any tripwire that already announces arrests will keep sending too — turn those off once this looks right.", "Switch on"))) {
+      $("csSendOn").checked = false; return;
+    }
+    try {
+      const s = await invoke("cases_set_telegram", { profile: profile.id, telegram: t });
+      profile = ((s && s.profiles) || []).find((p) => p.id === profile.id) || profile;
+      drawSend();
+      uiToast(t.enabled ? "Cases will be sent to Telegram" : "Saved — nothing is sent while it is off");
+    } catch (e) { uiToast(`${e}`, "err"); }
+  }
+
+  async function preview() {
+    if (!profile) return;
+    const days = await uiAsk("Preview the cases already built over how many days? Nothing is sent. Save first to preview what you changed.", "3", "Preview");
+    if (days == null || !(+days > 0)) return;
+    try {
+      const p = await invoke("cases_preview", { profile: profile.id, days: +days });
+      if (!p) return;
+      const rows = (p.days || []).map((d) => `<tr><td class="mono">${esc(d.date)}</td><td>${esc(d.dest)}</td><td class="mono">${d.threads}</td><td class="mono">${d.replies}</td></tr>`).join("");
+      const sample = (p.cases || []).filter((k) => k.chats.length).slice(0, 5).map((k) =>
+        `<details class="cs-sample"><summary>${esc(k.title)} · ${esc(k.address || "address not heard")} · ${esc(when(k.opened))} → ${esc(k.chats.join(", "))}</summary><pre>${esc(k.timeline)}</pre>${k.replies.length ? `<div class="lab small">Replies</div><pre>${esc(k.replies.join("\n"))}</pre>` : ""}</details>`).join("");
+      $("csPreview").innerHTML = (p.warnings || []).map((w) => `<div class="cs-warn">${esc(w)}</div>`).join("")
+        + (rows ? `<table class="cs-count"><thead><tr><th>Day</th><th>Chat</th><th>Cases</th><th>Replies</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty small">Nothing would have been sent.</div>')
+        + sample;
+    } catch (e) { uiToast(`${e}`, "err"); }
+  }
+
+  if ($("csSendSave")) {
+    $("csSendSave").onclick = saveSend;
+    $("csPreviewBtn").onclick = preview;
+  }
+
   $("csHours").onchange = load;
   $("csRebuild").onclick = async () => {
     const days = await uiAsk("Build cases again from how many days of the library? Nothing is sent.", "3", "Rebuild");
@@ -143,5 +214,5 @@
   if (listen) listen("cases", () => { if (!shown()) return; clearTimeout(timer); timer = setTimeout(load, 800); });
   // Keep "since dispatch" honest while the tab is open.
   setInterval(() => { if (shown() && data.cases.some((k) => k.open)) drawTimeline(); }, 30000);
-  window.casesOnShow = load;
+  window.casesOnShow = () => { load(); loadSend(); };
 })();
