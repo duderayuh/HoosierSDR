@@ -1192,7 +1192,7 @@ pub fn photo_caption(i: &crate::dispatch::Incident, shot: &crate::mapshot::Shot)
 ///
 /// A failure here is reported but never fails the alert: the words are the
 /// alert, and a missing tile server is no reason to lose a cardiac arrest.
-fn send_map(
+pub(crate) fn send_map(
     app: &AppHandle,
     state: &State<'_, AppState>,
     dest: &str,

@@ -338,7 +338,8 @@ pub struct FollowOutput {
     /// live listener sees the system *is* active — and learns the band it would
     /// need to widen to reach those calls — rather than facing silence.
     pub grants_out_of_band: Vec<(u16, u64)>,
-    /// Grants skipped because the call is encrypted.
+    /// Grants skipped because the call is encrypted (and not locked out:
+    /// a locked-out talkgroup's grants are in `grants_locked` either way).
     pub grants_encrypted: Vec<(u16, u64)>,
     /// Grants skipped because the listener locked the talkgroup out.
     pub grants_locked: Vec<(u16, u64)>,
@@ -1196,12 +1197,16 @@ impl TrunkFollower {
 
         // Start calls the control channel just granted.
         for g in &grants {
-            if g.encrypted {
-                out.grants_encrypted.push((g.talkgroup, g.freq_hz));
-                continue;
-            }
+            // Locked out first: a talkgroup the listener switched off is
+            // off whether or not it is encrypted. Asked the other way round,
+            // its encrypted traffic came back as encrypted grants, and the
+            // app logged each one as a muted call of a group that was off.
             if !self.wanted(g.talkgroup) {
                 out.grants_locked.push((g.talkgroup, g.freq_hz));
+                continue;
+            }
+            if g.encrypted {
+                out.grants_encrypted.push((g.talkgroup, g.freq_hz));
                 continue;
             }
             if let Some(loc) = self.find_by_freq(g.freq_hz) {

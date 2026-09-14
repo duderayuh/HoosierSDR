@@ -774,6 +774,16 @@ struct Reporter<'a> {
     priorities: std::collections::HashMap<u16, u8>,
 }
 
+/// The encrypted grants that become muted calls: not the ones for a
+/// talkgroup the listener locked out — a group switched off stays off, and
+/// its encrypted traffic is not logged in its place. `out.grants` is every
+/// grant the control channel issued, before any filtering.
+fn encrypted_to_log(out: &hs_core::follow::FollowOutput) -> impl Iterator<Item = &hs_core::trunk::Grant> {
+    out.grants
+        .iter()
+        .filter(|g| g.encrypted && !out.grants_locked.contains(&(g.talkgroup, g.freq_hz)))
+}
+
 impl Reporter<'_> {
     fn name_of(&self, tg: u16) -> String {
         match self.catalog.lock() {
@@ -848,10 +858,7 @@ impl Reporter<'_> {
         // another talkgroup ends the old transmission; a silent one ends by
         // timeout.
         let mut done: Vec<(u16, u32, u64, u64, u64)> = Vec::new();
-        for g in &out.grants {
-            if !g.encrypted {
-                continue;
-            }
+        for g in encrypted_to_log(out) {
             match self.encrypted_active.get_mut(&g.freq_hz) {
                 Some(a) if a.tg == g.talkgroup => {
                     a.last = now;
@@ -1424,6 +1431,21 @@ mod tests {
         std::fs::write(dir.join("a-2.json"), b"{}").unwrap();
         assert_eq!(super::unique_stem(&dir, "a".into()), "a-3");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A switched-off group's encrypted traffic is not logged as muted calls:
+    /// the grants hs-core reports locked are left out, the others kept.
+    #[test]
+    fn a_locked_out_encrypted_grant_is_not_logged() {
+        use hs_core::trunk::Grant;
+        let g = |tg: u16, freq_hz: u64, encrypted: bool| Grant { talkgroup: tg, source_unit: 7, freq_hz, encrypted };
+        let out = hs_core::follow::FollowOutput {
+            grants: vec![g(10145, 857_937_500, true), g(10256, 856_987_500, true), g(10204, 856_212_500, false)],
+            grants_locked: vec![(10145, 857_937_500)],
+            ..Default::default()
+        };
+        let logged: Vec<u16> = super::encrypted_to_log(&out).map(|g| g.talkgroup).collect();
+        assert_eq!(logged, vec![10256]);
     }
 
     use super::*;
