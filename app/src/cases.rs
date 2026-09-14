@@ -388,7 +388,31 @@ pub fn classify(text: &str, console: bool, call_minute: i64, p: &Profile) -> Opt
             });
         }
     }
+    // Nothing matched as said. A dispatcher logging one status and its time
+    // may still have been heard a letter off: "COA 1235" was "DOA 1235", and
+    // the arrest it closed stayed open on every screen.
+    if console && clock.is_some() {
+        if let Some(r) = p.events.iter().find(|r| one_letter_off(&w, r)) {
+            return Some(Heard { kind: r.kind.clone(), label: r.label.clone(), source: Source::Readback, clock });
+        }
+    }
     None
+}
+
+/// Is this readback a status word and its time, the word one letter off one
+/// of the rule's single words? Same length, one letter different, three
+/// letters or more: across the library the only short timed readbacks near a
+/// status were the misheard one, while "AOR", "for" and "end" are two or more
+/// letters from any.
+fn one_letter_off(w: &[String], r: &EventRule) -> bool {
+    let [word, time] = w else { return false };
+    if word.len() < 3 || !word.bytes().all(|b| b.is_ascii_lowercase()) || !time.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    r.readback
+        .iter()
+        .chain(r.phrases.iter().filter(|ph| !ph.contains(' ')))
+        .any(|c| c.len() == word.len() && c.bytes().zip(word.bytes()).filter(|(a, b)| a != b).count() == 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,6 +1654,17 @@ mod tests {
         assert_eq!(kind("rosc 1914", true, 19 * 60 + 14).map(|k| k.0), Some("rosc".into()));
         assert_eq!(kind("Ceasing efforts 2326.", true, 23 * 60 + 26).map(|k| k.0), Some("terminated".into()));
         assert_eq!(kind("DOA 2052.", true, 20 * 60 + 52).map(|k| k.0), Some("terminated".into()));
+        // Heard a letter off, as it was live: still the status, with its time.
+        let m1235 = 12 * 60 + 35;
+        assert_eq!(kind("COA 1235.", true, m1235), Some(("terminated".into(), Source::Readback, Some(m1235))));
+        assert_eq!(kind("Rose 1914", true, 19 * 60 + 14).map(|k| k.0), Some("rosc".into()));
+        // Not from a crew, not without its time, not two letters off, and
+        // not when more was said.
+        assert_eq!(kind("COA 1235.", false, m1235), None);
+        assert_eq!(kind("COA.", true, m1235), None);
+        assert_eq!(kind("AOR 1235.", true, m1235), None);
+        assert_eq!(kind("For 1235.", true, m1235), None);
+        assert_eq!(kind("COA at 1235.", true, m1235), None);
         assert_eq!(kind("Transporting Example General, EMS92 on board, 653.", true, 6 * 60 + 53).map(|k| k.0), Some("transporting".into()));
     }
 
