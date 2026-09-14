@@ -1352,3 +1352,14 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .cs-how { font-size: 11.5px; color: var(--ink-faint); }
 .cs-detail { font-size: 12px; color: var(--ink-dim); overflow-wrap: anywhere; }
 .cs-act { padding-top: 1px; }
+.cs-arrival { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 14px; padding: 4px 0 10px; border-bottom: 1px solid var(--line-soft); margin-bottom: 6px; }
+.cs-arrival > div { display: flex; flex-direction: column; min-width: 0; }
+.cs-arrival .k { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.cs-arrival .v { font-family: var(--mono); font-size: 14px; font-variant-numeric: tabular-nums; color: var(--signal); }
+.cs-arrival .sub { font-size: 11.5px; color: var(--ink-dim); overflow-wrap: anywhere; }
+.cs-arrival .cs-note { grid-column: 1 / -1; font-size: 12px; color: var(--amber); }
+.cs-patient { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 10px; border-bottom: 1px solid var(--line-soft); margin-bottom: 6px; }
+.cs-cap { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.cs-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.cs-chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); overflow-wrap: anywhere; }
+.cs-chip .k { color: var(--ink-faint); }

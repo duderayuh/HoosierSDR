@@ -10,10 +10,13 @@
 
   const STATE = {
     dispatched: ["Dispatched", "amber"], working: ["Working", "enc"], rosc: ["ROSC", "clear"],
-    transporting: ["Transporting", "signal"], reported: ["Reported to hospital", "signal"],
+    transporting: ["Transporting", "signal"], reported: ["Reported to hospital", "signal"], arrived: ["At the hospital", "signal"],
     terminated: ["Efforts ceased", "faint"], downgraded: ["Not an arrest", "faint"],
   };
   const SOURCE = { page: "page", readback: "dispatcher", crew: "crew", report: "hospital report" };
+  // The facts the summary call is asked for, in its order, as a clinician reads them.
+  const FACT = [["age", "Age"], ["sex", "Sex"], ["witnessed", "Witnessed"], ["bystander cpr", "Bystander CPR"], ["rhythm", "Rhythm"],
+    ["rosc", "ROSC"], ["downtime", "Downtime, as said"], ["history", "History"], ["eta", "ETA, as said"]];
   let data = { cases: [], unplaced: [] }, curId = null, timer = null;
 
   const shown = () => $("view-cases") && $("view-cases").style.display !== "none";
@@ -48,6 +51,32 @@
     return out.map(([a, b]) => `<div><span class="k">${esc(a)}</span><span class="v">${esc(b)}</span></div>`).join("");
   }
 
+  // The latest value each report gave, so a later report's update wins.
+  function patient(k) {
+    const got = new Map();
+    k.lines.filter((l) => l.kind === "report").forEach((l) => (l.facts || []).forEach((f) => got.set(f.key, f.value)));
+    return FACT.filter(([key]) => got.has(key)).map(([key, label]) => [label, got.get(key)]);
+  }
+
+  const chips = (pairs) => pairs.map(([a, b]) => `<span class="cs-chip"><span class="k">${esc(a)}</span> ${esc(b)}</span>`).join("");
+
+  function arrival(k) {
+    const a = k.arrival;
+    if (!a) return "";
+    const rows = [];
+    const window = a.from == null ? null : a.from === a.to ? `about ${hm(a.from)}` : `${hm(a.from)}–${hm(a.to)}`;
+    rows.push([`Expected at ${a.place || "the hospital"}`, window || "no ETA said",
+      a.said ? `said “${a.said}” at ${hm(a.anchor)}` : `report at ${hm(a.anchor)}`]);
+    if (a.drive_min != null) rows.push(["Drive from the scene", `${a.drive_min} min ${a.drive_how}`, a.km != null ? `${a.km} km` : ""]);
+    if (a.arrived != null) {
+      const off = a.off_by_min;
+      const vs = off == null ? "" : off === 0 ? "inside the window" : off > 0 ? `${off} min after the window` : `${-off} min before the window`;
+      rows.push(["Said at the hospital", hm(a.arrived), vs]);
+    }
+    return `<div class="cs-arrival">${rows.map(([k2, v, sub]) => `<div><span class="k">${esc(k2)}</span><span class="v">${esc(v)}</span>${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>`).join("")}`
+      + (a.note ? `<div class="cs-note">${esc(a.note)}</div>` : "") + `</div>`;
+  }
+
   function line(l) {
     const heard = l.clock && l.clock !== hm(l.at) ? ` title="The dispatcher's logged time; heard at ${esc(hms(l.at))}"` : ` title="${esc(hms(l.at))}"`;
     return `<div class="cs-line k-${esc(l.kind)}">`
@@ -55,6 +84,7 @@
       + `<span class="cs-what"><span class="cs-top"><span class="cs-label">${esc(l.label)}</span>`
       + ` <span class="cs-src">${esc(SOURCE[l.source] || l.source)}</span>${l.inferred ? ' <span class="cs-inferred" title="Placed on this run without anything on the air naming it">inferred</span>' : ""}</span>`
       + (l.how ? `<span class="cs-how">${esc(l.how)}</span>` : "")
+      + (l.facts && l.facts.length ? `<span class="cs-chips">${chips(FACT.filter(([key]) => l.facts.some((f) => f.key === key)).map(([key, label]) => [label, l.facts.find((f) => f.key === key).value]))}</span>` : "")
       + (l.detail ? `<span class="cs-detail">${esc(l.detail)}</span>` : "")
       + `</span>`
       + `<span class="cs-act">${l.call ? `<button class="btn ghost sm" data-csplay="${l.call}" title="Play the call">▶</button>` : ""}</span></div>`;
@@ -68,6 +98,8 @@
     $("csSub").textContent = `${k.address || "address not heard"}${k.call_type && k.call_type !== k.title ? ` · dispatched as ${k.call_type}` : ""}`;
     $("csTimeline").innerHTML = `<div class="cs-head">${stateChip(k.state)}<span class="faint small">${esc(k.units.join(", "))}</span></div>`
       + `<div class="cs-facts">${facts(k)}</div>`
+      + arrival(k)
+      + (patient(k).length ? `<div class="cs-patient"><span class="cs-cap">From the hospital report</span><span class="cs-chips">${chips(patient(k))}</span></div>` : "")
       + `<div class="cs-lines">${k.lines.map(line).join("")}</div>`;
     $("csTimeline").querySelectorAll("[data-csplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.csplay }).catch((e) => uiToast(`${e}`, "err")));
   }

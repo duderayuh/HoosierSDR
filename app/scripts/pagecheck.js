@@ -49,11 +49,12 @@ const canned = { library_search: [], incidents_list: INCS, incident_route: { lab
 const RADIO = (radio, callsign, state, extra) => Object.assign({ system: "Example <b>System</b>", radio, role: "unit", callsign, state, share: 0.9, weight: 5, latest: "", candidates: [], evidence: 5, first_at: 100, last_at: 200 }, extra || {});
 // Cases: one arrest with a page, an inferred readback and a report, and a
 // label carrying markup, which must arrive as text.
-const LINE = (kind, label, source, extra) => Object.assign({ at: 1000, clock: "06:29", kind, label, source, how: "", inferred: false, call: 5, conversation: null, detail: "" }, extra || {});
+const LINE = (kind, label, source, extra) => Object.assign({ at: 1000, clock: "06:29", kind, label, source, how: "", inferred: false, call: 5, conversation: null, detail: "", facts: [] }, extra || {});
 Object.assign(canned, {
   cases_list: {
     cases: [{ id: 7, profile: "cardiac-arrest", title: "Cardiac arrest", call_type: "Unconscious", address: "1200 Example St", lat: null, lon: null, units: ["Engine 5", "Medic 7"], incidents: [1], opened: 900, updated: 1300, state: "rosc", open: true,
-      lines: [LINE("dispatched", "Dispatched as Unconscious", "page"), LINE("working", "Working arrest", "readback", { inferred: true, how: "the only arrest open at the time" }), LINE("rosc", "ROSC <img src=x onerror=alert(1)>", "readback"), LINE("report", "Report to Example General · said 10 minutes → about 06:40", "report", { call: null, conversation: 3 })] }],
+      lines: [LINE("dispatched", "Dispatched as Unconscious", "page"), LINE("working", "Working arrest", "readback", { inferred: true, how: "the only arrest open at the time" }), LINE("rosc", "ROSC <img src=x onerror=alert(1)>", "readback"), LINE("report", "Report to Example General · said 10 minutes → about 06:40", "report", { call: null, conversation: 3, facts: [{ key: "witnessed", value: "yes" }, { key: "rhythm", value: "VF <b>x</b>" }] })],
+      arrival: { conversation: 3, place: "Example General", said: "10 minutes", anchor: 1300, from: 1900, to: 1900, km: 6.2, drive_min: 11, drive_how: "by road", arrived: 2200, off_by_min: 5, note: "said 25 min, and the scene is about 11 min away by road: they may not have left yet" } }],
     unplaced: [{ at: 1100, clock: "17:48", kind: "working", label: "Working arrest", source: "readback", why: "2 arrests were open, and nothing named the run", call: 9, detail: "Working Arrest 1748." }],
   },
   cases_rebuild: { cases: 1, events: 4, inferred: 1, unplaced: 1 },
@@ -361,6 +362,16 @@ w.__exercise = async () => {
     if (!/dispatcher/.test(html)) console.log("PAGE ERROR: a readback is not labelled as the dispatcher's");
     if (tl && tl.querySelector("img")) console.log("PAGE ERROR: a case label's markup reached the page");
     if (!/Since dispatch/.test(html)) console.log("PAGE ERROR: an open case does not say how long since dispatch");
+    const arr = tl && tl.querySelector(".cs-arrival");
+    const at = new Date(1900 * 1000).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    if (!arr || !arr.textContent.includes("Expected at Example General") || !arr.textContent.includes(`about ${at}`)) console.log("PAGE ERROR: the case does not show when its unit is expected; got " + (arr ? arr.textContent : "nothing"));
+    if (arr && !/11 min by road/.test(arr.textContent)) console.log("PAGE ERROR: the drive from the scene is not shown with how it was worked out");
+    if (arr && !/5 min after the window/.test(arr.textContent)) console.log("PAGE ERROR: a crew at the hospital is not checked against the window");
+    if (arr && !/may not have left yet/.test(arr.textContent)) console.log("PAGE ERROR: a stated ETA much longer than the drive is not flagged");
+    const pt = tl && tl.querySelector(".cs-patient");
+    if (!pt || !/Witnessed\s+yes/.test(pt.textContent)) console.log("PAGE ERROR: the hospital report's facts are not shown on the case");
+    if (tl && tl.querySelector(".cs-chip b")) console.log("PAGE ERROR: a fact's markup reached the page");
+    if (tl && !tl.querySelector(".cs-line.k-report .cs-chip")) console.log("PAGE ERROR: the report line does not carry its facts");
     const un = w.document.getElementById("csUnplaced");
     if (!un || !/nothing named the run/.test(un.innerHTML)) console.log("PAGE ERROR: the unplaced event does not say why");
     w.showView("monitor");

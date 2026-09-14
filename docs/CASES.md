@@ -532,10 +532,51 @@ unplaced, 170 ms.
 
 Known gaps:
 
-- The same place heard as two addresses ("520 East Market Street" and "East
-  Market Street and Wheeler Mission"-style intersections) can still be two
-  cases.
+- The same place heard as two addresses (a numbered address on a street, and
+  the same street at a cross street or landmark) can still be two cases.
 - A crew statement from a radio nobody has identified stays unplaced even when
   it is plainly about the only arrest going.
 - Facts (witnessed, bystander CPR, rhythm, comorbidities) are not extracted yet;
   the plan is to ask for them in the hospital report's existing summary call.
+  (Done in step 3.)
+
+## Step 3 built: facts and the arrival window (2026-09-14)
+
+**Facts** come back on the summary call every hospital report already makes,
+as a `FACTS:` block after the note: age, sex, witnessed, bystander CPR, rhythm,
+ROSC, downtime, history, ETA. `split_facts` takes the block off, so the note
+and the headline are unchanged, and `conversations.facts` keeps it as JSON
+(NULL on older rows). One call, not a second one: the model is shared, and a
+second round-trip per report is what a busy model cannot afford. The keys are
+fixed rather than coming from the case profile, because the summary is written
+before the report is joined to any run.
+
+- The arrest-only facts (witnessed, bystander CPR, ROSC, downtime) are asked
+  to be "not stated" for a patient who was not in arrest: without that, a fall
+  came back "bystander cpr: no".
+- Reports stored before this have no facts, and the conversation backfill
+  skips stored rows, so they stay without.
+
+**Arrival window.**
+
+- The anchor is the crew transmission the ETA was said in (the last one that
+  talks about arriving), not the first transmission of the report.
+- The ETA is the facts line's, else the one the note mentions. A clock time
+  ("at 06:40") is left out rather than read as a number of minutes.
+- The drive from the scene is asked of the router this app already runs
+  (`routing.rs`, OSRM on this machine), with the library lock let go; without
+  it, the straight line × 1.3 at 50 km/h, labelled "by distance". It checks
+  the crew, never replaces them: a stated ETA far longer than the drive is
+  flagged ("they may not have left yet").
+- The case shows the latest report's window.
+
+**Closing the loop is mostly not possible from the radio.** In the 40 most
+recent reports, the reporting radio said nothing on the ops channels about
+arriving; crews mark arrival on the MDT. An `arrived` event ("at the
+hospital") is read when it is said, and checked against the window on read,
+with no table of its own. A crew at a hospital that names no arrest is not
+listed as unplaced: it is almost always another patient. A saved `cases.json`
+gains new default events in their place in the order.
+
+The dispatcher's "advise control of your status at the hospital" is a
+there-by-now signal (an upper bound on arrival) and is not used yet.

@@ -124,6 +124,9 @@ fn rule(kind: &str, label: &str, phrases: &[&str], readback: &[&str]) -> EventRu
 
 /// The cardiac arrest profile. The order matters: "not a cardiac arrest"
 /// contains "arrest", so the downgrade is tried before the upgrade.
+/// The event kind a crew saying it is at the hospital is read as.
+pub const ARRIVED: &str = "arrived";
+
 pub fn arrest_profile() -> Profile {
     Profile {
         id: "cardiac-arrest".into(),
@@ -152,6 +155,9 @@ pub fn arrest_profile() -> Profile {
             ),
             rule("rosc", "ROSC", &["rosc", "we have pulses", "got pulses", "got a pulse", "pulses back", "we have a pulse"], &["rosc"]),
             rule("transporting", "Transporting", &["transporting emergent", "we are transporting", "transporting to"], &["transporting"]),
+            // Rare on the air: crews mark arrival on the MDT. Kept for when
+            // it is said, so the predicted arrival can be checked against it.
+            rule(ARRIVED, "At the hospital", &["at the hospital", "at hospital", "arrived at the hospital", "at the er", "at the emergency room"], &[]),
             rule(
                 "working",
                 "Working arrest",
@@ -182,7 +188,15 @@ pub fn load(app: &AppHandle) -> Settings {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<Settings>(&t).ok());
     match read {
-        Some(s) => s,
+        Some(s) => {
+            let (s, grew) = with_new_defaults(s);
+            if grew {
+                if let (Some(p), Ok(t)) = (path, serde_json::to_string_pretty(&s)) {
+                    let _ = std::fs::write(p, t);
+                }
+            }
+            s
+        }
         None => {
             let s = Settings { profiles: vec![arrest_profile()] };
             if let (Some(p), Ok(t)) = (path, serde_json::to_string_pretty(&s)) {
@@ -191,6 +205,30 @@ pub fn load(app: &AppHandle) -> Settings {
             s
         }
     }
+}
+
+/// Give a saved built-in profile the events a newer build added, each in its
+/// place in the order (the first rule that matches wins, so where it goes
+/// matters). Nothing saved is changed or removed. Says whether it grew.
+fn with_new_defaults(mut s: Settings) -> (Settings, bool) {
+    let mut grew = false;
+    for d in [arrest_profile()] {
+        let Some(saved) = s.profiles.iter_mut().find(|p| p.id == d.id) else { continue };
+        for (i, ev) in d.events.iter().enumerate() {
+            if saved.events.iter().any(|e| e.kind == ev.kind) {
+                continue;
+            }
+            let before = d.events[i + 1..]
+                .iter()
+                .find_map(|next| saved.events.iter().position(|e| e.kind == next.kind));
+            match before {
+                Some(at) => saved.events.insert(at, ev.clone()),
+                None => saved.events.push(ev.clone()),
+            }
+            grew = true;
+        }
+    }
+    (s, grew)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +463,7 @@ pub fn page_lines(call_type: &str, pages: &[Page], p: &Profile, continuing: bool
             call: Some(pg.call),
             conversation: None,
             detail: pg.text.clone(),
+            facts: Vec::new(),
         });
     }
     out
@@ -631,6 +670,8 @@ pub struct Line {
     pub call: Option<i64>,
     pub conversation: Option<i64>,
     pub detail: String,
+    /// What the hospital report said about the patient, on a report line.
+    pub facts: Vec<crate::conversations::Fact>,
 }
 
 /// Where a case stands, from its lines.
@@ -642,7 +683,8 @@ pub fn state_of(lines: &[Line]) -> &'static str {
             "rosc" => "rosc",
             "rearrest" => "working",
             "transporting" => "transporting",
-            "report" if !matches!(st, "terminated" | "downgraded") => "reported",
+            ARRIVED if !matches!(st, "terminated" | "downgraded") => "arrived",
+            "report" if !matches!(st, "terminated" | "downgraded" | "arrived") => "reported",
             "terminated" => "terminated",
             "downgrade" => "downgraded",
             _ => st,
@@ -663,6 +705,11 @@ pub fn eta_minutes(phrase: &str) -> Option<(i64, i64)> {
     if w.iter().any(|x| x.starts_with("hour") || x.starts_with("second")) {
         return None;
     }
+    // A clock time ("at 06:40", "0640") is not a number of minutes. Left out
+    // on purpose rather than read as "6 to 40".
+    if phrase.contains(':') || w.iter().any(|x| x.len() == 4 && x.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
     let nums: Vec<i64> = w
         .iter()
         .filter_map(|x| x.parse::<i64>().ok().or_else(|| WORDS.iter().find(|(n, _)| n == x).map(|(_, v)| *v)))
@@ -673,6 +720,131 @@ pub fn eta_minutes(phrase: &str) -> Option<(i64, i64)> {
         [n] => Some((*n, *n)),
         [a, b, ..] => Some(((*a).min(*b), (*a).max(*b))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// predicted arrival
+// ---------------------------------------------------------------------------
+
+/// Roads are longer than the straight line between two points.
+const ROAD_FACTOR: f64 = 1.3;
+/// An ambulance's average across a city, lights and all.
+const CITY_KMH: f64 = 50.0;
+
+/// Minutes to drive: the router's time when it gave one, else a rough
+/// figure from the straight line. Either way a check on what the crew said,
+/// and a bound when they said nothing, not a prediction of its own.
+pub fn drive_minutes(d: &crate::routing::Distance) -> i64 {
+    let mins = if d.how == "road" && d.secs > 0.0 { d.secs / 60.0 } else { d.km() * ROAD_FACTOR / CITY_KMH * 60.0 };
+    mins.ceil().max(1.0) as i64
+}
+
+/// When a report's unit should reach the hospital.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct Arrival {
+    pub conversation: i64,
+    pub place: String,
+    /// The ETA as the crew said it.
+    pub said: Option<String>,
+    /// The start of the transmission the ETA was said in.
+    pub anchor: i64,
+    /// The window the stated ETA gives, as epoch seconds.
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    /// Distance from the scene, and the drive it suggests, `by road` when
+    /// the router answered and `by distance` when it did not.
+    pub km: Option<f64>,
+    pub drive_min: Option<i64>,
+    pub drive_how: String,
+    /// The scene and the hospital, for asking the router once the library
+    /// lock is let go.
+    #[serde(skip)]
+    pub ends: Option<((f64, f64), (f64, f64))>,
+    /// When a crew said they were at the hospital, and how far that fell
+    /// outside the window (minutes; negative is early, 0 is inside).
+    pub arrived: Option<i64>,
+    pub off_by_min: Option<i64>,
+    pub note: String,
+}
+
+/// The window a stated ETA gives, checked against the distance. A stated
+/// time much longer than the drive is flagged, never corrected: the crew
+/// may not have left yet, and they know where they are.
+pub fn predict(conversation: i64, place: &str, anchor: i64, said: Option<&str>, drive: Option<crate::routing::Distance>) -> Arrival {
+    let mins = drive.as_ref().map(drive_minutes);
+    let how = match drive.map(|d| d.how) {
+        Some("road") => "by road",
+        Some(_) => "by distance",
+        None => "",
+    };
+    let eta = said.and_then(eta_minutes);
+    let mut a = Arrival {
+        conversation,
+        place: place.to_string(),
+        said: said.map(str::to_string),
+        anchor,
+        from: eta.map(|(lo, _)| anchor + lo * 60),
+        to: eta.map(|(_, hi)| anchor + hi * 60),
+        km: drive.map(|d| (d.km() * 10.0).round() / 10.0),
+        drive_min: mins,
+        drive_how: how.to_string(),
+        ..Default::default()
+    };
+    a.note = match (eta, mins) {
+        (Some((lo, _)), Some(d)) if lo > 2 * d + 5 => format!(
+            "said {lo} min, and the scene is about {d} min away {how}: they may not have left yet"
+        ),
+        (Some(_), _) => String::new(),
+        (None, Some(d)) => format!("no ETA said; the scene is about {d} min away {how}"),
+        (None, None) => "no ETA said".to_string(),
+    };
+    a
+}
+
+/// Work a prediction out again with a better distance, keeping what a crew
+/// said about arriving.
+pub fn with_drive(a: &Arrival, d: crate::routing::Distance) -> Arrival {
+    let mut b = predict(a.conversation, &a.place, a.anchor, a.said.as_deref(), Some(d));
+    b.ends = a.ends;
+    if let Some(at) = a.arrived {
+        check_arrival(&mut b, at);
+    }
+    b
+}
+
+/// Check a prediction against a crew saying they were at the hospital.
+pub fn check_arrival(a: &mut Arrival, arrived: i64) {
+    if arrived < a.anchor {
+        return;
+    }
+    a.arrived = Some(arrived);
+    if let (Some(from), Some(to)) = (a.from, a.to) {
+        // Said at the hospital is when it was said, not when they pulled in:
+        // an upper bound on the arrival, so being late is the weaker claim.
+        a.off_by_min = Some(if arrived < from {
+            -((from - arrived + 59) / 60)
+        } else if arrived > to {
+            (arrived - to + 59) / 60
+        } else {
+            0
+        });
+    }
+}
+
+/// The transmission a report's ETA was said in: the last one from the crew
+/// that talks about arriving, or the crew's first when none does.
+pub fn eta_anchor(pieces: &[crate::conversations::Piece]) -> Option<i64> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\beta\b|minutes?\s+(out|away)|\bout\b.{0,12}\bminutes?|see\s+(you|ya)\s+in|be\s+there\s+in|arriv\w*\s+in|\bin\s+(about|approximately|around)\s+\w+(\s+(to|or)\s+\w+)?\s+minutes?")
+            .expect("eta anchor pattern")
+    });
+    let crew = || pieces.iter().filter(|p| !p.fixed);
+    crew()
+        .filter(|p| p.transcript.as_deref().is_some_and(|t| re.is_match(t)))
+        .last()
+        .or_else(|| crew().next())
+        .map(|p| p.at)
 }
 
 // ---------------------------------------------------------------------------
@@ -994,8 +1166,15 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
                 Some(a) => format!("{} — answering: {}", e.call.text, a.text),
                 None => e.call.text.clone(),
             },
+            facts: Vec::new(),
         };
         let case = primary.map(|pid| ids[&pid]);
+        // A crew at a hospital that names no arrest is at a hospital with
+        // some other patient: most of them. Not worth a line in the unplaced
+        // list, which is for arrest traffic that could not be placed.
+        if case.is_none() && e.heard.kind == ARRIVED {
+            continue;
+        }
         insert_line(&tx, case, &p.id, &line, e.answers.as_ref().map(|a| a.call))?;
         match case {
             Some(_) => {
@@ -1043,6 +1222,8 @@ pub struct CaseView {
     /// Still happening: not ended, and heard from in the last two hours.
     pub open: bool,
     pub lines: Vec<Line>,
+    /// When the latest report's unit should reach the hospital.
+    pub arrival: Option<Arrival>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1081,36 +1262,50 @@ fn lines_for(c: &Connection, case: i64) -> Vec<Line> {
             call: r.get(7)?,
             conversation: None,
             detail: r.get(8)?,
+            facts: Vec::new(),
         })
     })
     .map(|rows| rows.flatten().collect())
     .unwrap_or_default()
 }
 
-/// Hospital reports joined to any run of the case, as timeline lines.
-fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Settings) -> Vec<Line> {
+/// Hospital reports joined to any run of the case, as timeline lines, with
+/// the arrival each predicts (latest report last).
+fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Settings, scene: Option<(f64, f64)>) -> (Vec<Line>, Vec<Arrival>) {
     let mut out = Vec::new();
+    let mut arrivals = Vec::new();
     for inc in incidents {
         for r in crate::link::reports_for(c, *inc, places) {
-            let (summary, pieces): (String, String) = c
-                .query_row("SELECT summary, pieces FROM conversations WHERE id = ?1", [r.id], |x| Ok((x.get(0)?, x.get(1)?)))
+            let (summary, pieces, facts): (String, String, Option<String>) = c
+                .query_row("SELECT summary, pieces, facts FROM conversations WHERE id = ?1", [r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?)))
                 .unwrap_or_default();
+            let facts = crate::conversations::parse_facts(facts.as_deref());
             let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
-            let anchor = pieces.iter().find(|p| !p.fixed).map(|p| p.at).unwrap_or(r.at);
-            let eta = crate::conversations::eta_phrase(&summary);
+            let first = pieces.iter().find(|p| !p.fixed).map(|p| p.at).unwrap_or(r.at);
+            let anchor = eta_anchor(&pieces).unwrap_or(r.at);
+            // The ETA the facts line gives, else the one the note mentions.
+            let eta = facts
+                .iter()
+                .find(|f| f.key == "eta")
+                .map(|f| f.value.clone())
+                .or_else(|| crate::conversations::eta_phrase(&summary));
+            let hospital = crate::places::for_tg(places, r.tg, "");
             let place = if r.place.is_empty() { r.tg_desc.clone() } else { r.place.clone() };
-            let mut label = format!("Report to {}", if place.is_empty() { r.tg_name.clone() } else { place });
+            let place = if place.is_empty() { r.tg_name.clone() } else { place };
+            let ends = scene.zip(hospital.and_then(|h| h.lat.zip(h.lon)));
+            let mut arrival = predict(r.id, &place, anchor, eta.as_deref(), ends.map(|(a, b)| crate::routing::straight(a, b)));
+            arrival.ends = ends;
+            let mut label = format!("Report to {place}");
             if let Some(e) = &eta {
                 label.push_str(&format!(" · said {e}"));
-                if let Some((lo, hi)) = eta_minutes(e) {
-                    let (a, b) = (local_minute(anchor + lo * 60), local_minute(anchor + hi * 60));
-                    if lo == hi {
-                        label.push_str(&format!(" → about {}", hhmm(a)));
-                    } else {
-                        label.push_str(&format!(" → {}–{}", hhmm(a), hhmm(b)));
-                    }
+                match (arrival.from, arrival.to) {
+                    (Some(a), Some(b)) if a == b => label.push_str(&format!(" → about {}", hhmm(local_minute(a)))),
+                    (Some(a), Some(b)) => label.push_str(&format!(" → {}–{}", hhmm(local_minute(a)), hhmm(local_minute(b)))),
+                    _ => {}
                 }
             }
+            arrivals.push(arrival);
+            let anchor = first;
             out.push(Line {
                 at: anchor,
                 clock: None,
@@ -1122,10 +1317,12 @@ fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Setti
                 call: pieces.iter().find(|p| !p.fixed).and_then(|p| p.id),
                 conversation: Some(r.id),
                 detail: if r.headline.is_empty() { summary } else { format!("{} — {}", r.headline, summary) },
+                facts,
             });
         }
     }
-    out
+    arrivals.sort_by_key(|a| a.anchor);
+    (out, arrivals)
 }
 
 fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, places: &crate::places::Settings, now: i64) -> Option<CaseView> {
@@ -1145,8 +1342,16 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
         }
     }
     let mut lines = lines_for(c, id);
-    lines.extend(report_lines(c, &incidents, places));
+    let (reports, arrivals) = report_lines(c, &incidents, places, inc.lat.zip(inc.lon));
+    lines.extend(reports);
     lines.sort_by_key(|l| l.at);
+    // The latest report with a said ETA, else the latest report.
+    let mut arrival = arrivals.iter().rev().find(|a| a.from.is_some()).or(arrivals.last()).cloned();
+    if let Some(a) = arrival.as_mut() {
+        if let Some(at) = lines.iter().find(|l| l.kind == ARRIVED && l.at >= a.anchor).map(|l| l.at) {
+            check_arrival(a, at);
+        }
+    }
     let state = state_of(&lines).to_string();
     let updated = lines.iter().map(|l| l.at).max().unwrap_or(opened);
     let pediatric = lines.iter().any(|l| l.source == "page" && words(&l.detail).iter().any(|w| w == "pediatric"));
@@ -1171,6 +1376,7 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
         open: !matches!(state.as_str(), "terminated" | "downgraded") && now - updated <= 2 * 3600,
         state,
         lines,
+        arrival,
     })
 }
 
@@ -1275,7 +1481,22 @@ pub fn cases_list(app: AppHandle, state: State<AppState>, hours: Option<u32>) ->
     let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
     let c = db.lock().unwrap();
     let now = crate::library::now();
-    Ok(list(&c, now - hours.unwrap_or(24).clamp(1, 24 * 60) as i64 * 3600, &places, now))
+    let mut v = list(&c, now - hours.unwrap_or(24).clamp(1, 24 * 60) as i64 * 3600, &places, now);
+    drop(c);
+    // By road, where the router is running, asked with the library let go.
+    // The router is on this machine; a dead one is left alone for a minute
+    // after its first failure, so this costs one short wait at most.
+    for k in v.cases.iter_mut() {
+        if let Some(a) = k.arrival.as_mut() {
+            if let Some((scene, hospital)) = a.ends {
+                let d = crate::routing::distance(&state, scene, hospital);
+                if d.how == "road" {
+                    *a = with_drive(a, d);
+                }
+            }
+        }
+    }
+    Ok(v)
 }
 
 /// Build the cases again over the last `days` of the library. Sends nothing.
@@ -1462,12 +1683,14 @@ mod tests {
     fn where_a_case_stands() {
         let l = |kind: &str| Line {
             at: 0, clock: None, kind: kind.into(), label: String::new(), source: String::new(), how: String::new(),
-            inferred: false, call: None, conversation: None, detail: String::new(),
+            inferred: false, call: None, conversation: None, detail: String::new(), facts: Vec::new(),
         };
         assert_eq!(state_of(&[l("dispatched"), l("working"), l("rosc")]), "rosc");
         assert_eq!(state_of(&[l("dispatched"), l("rosc"), l("rearrest")]), "working");
         assert_eq!(state_of(&[l("dispatched"), l("terminated"), l("report")]), "terminated");
         assert_eq!(state_of(&[l("dispatched"), l("downgrade")]), "downgraded");
+        assert_eq!(state_of(&[l("dispatched"), l("report"), l("arrived")]), "arrived");
+        assert_eq!(state_of(&[l("dispatched"), l("arrived"), l("report")]), "arrived");
     }
 
     #[test]
@@ -1475,6 +1698,97 @@ mod tests {
         assert_eq!(eta_minutes("ETA of 5 to 7 minutes"), Some((5, 7)));
         assert_eq!(eta_minutes("approximately ten minutes out"), Some((10, 10)));
         assert_eq!(eta_minutes("arriving in about 2 hours"), None);
+        assert_eq!(eta_minutes("two to five minutes"), Some((2, 5)));
+        // A clock time is not "6 to 40 minutes".
+        assert_eq!(eta_minutes("at 6:40"), None);
+        assert_eq!(eta_minutes("at 0640"), None);
+    }
+
+    fn piece(at: i64, fixed: bool, text: &str) -> crate::conversations::Piece {
+        crate::conversations::Piece {
+            id: None, unit: if fixed { 0 } else { 900_001 }, unit_name: None, fixed, at, secs: 5.0,
+            audio: None, transcript: Some(text.into()),
+        }
+    }
+
+    #[test]
+    fn the_eta_is_timed_from_the_transmission_it_was_said_in() {
+        let pieces = [
+            piece(100, true, "Go ahead."),
+            piece(110, false, "We have a 78-year-old male, seen by family 15 minutes before calling 911."),
+            piece(160, true, "Copy."),
+            piece(170, false, "Intubated, IO established, we'll see you in probably about 10."),
+        ];
+        assert_eq!(eta_anchor(&pieces), Some(170));
+        // An updated ETA is timed from the update.
+        let updated = [piece(110, false, "About 15 minutes out with a working arrest."), piece(400, false, "Now 5 minutes out, we lost pulses.")];
+        assert_eq!(eta_anchor(&updated), Some(400));
+        // Nothing about arriving: the crew's first word.
+        assert_eq!(eta_anchor(&pieces[..3]), Some(110));
+        assert_eq!(eta_anchor(&[piece(5, true, "Go ahead.")]), None);
+    }
+
+    fn km(k: f64) -> crate::routing::Distance {
+        crate::routing::Distance { meters: k * 1000.0, secs: 0.0, how: "straight" }
+    }
+
+    #[test]
+    fn a_stated_eta_becomes_a_window_and_a_long_one_is_flagged() {
+        let a = predict(1, "Example General", 1_000, Some("5 to 7 minutes"), Some(km(4.0)));
+        assert_eq!((a.from, a.to), (Some(1_300), Some(1_420)));
+        assert_eq!(a.drive_min, Some(drive_minutes(&km(4.0))));
+        assert_eq!(a.drive_how, "by distance");
+        assert!(a.note.is_empty());
+        // Twenty-five minutes for a scene seven minutes away: flagged, kept.
+        let d = drive_minutes(&km(4.0));
+        let long = predict(1, "Example General", 1_000, Some("25 minutes"), Some(km(4.0)));
+        assert_eq!(long.to, Some(1_000 + 25 * 60));
+        assert!(long.note.contains("may not have left"), "{d}: {}", long.note);
+        // Nothing said: no window, the distance only.
+        let none = predict(1, "Example General", 1_000, None, Some(km(4.0)));
+        assert_eq!((none.from, none.to), (None, None));
+        assert!(none.note.contains(&format!("about {d} min away by distance")));
+        // The router's time replaces the rough one, and keeps an arrival.
+        let mut checked = none.clone();
+        check_arrival(&mut checked, 2_000);
+        let road = crate::routing::Distance { meters: 6_000.0, secs: 11.0 * 60.0, how: "road" };
+        let b = with_drive(&checked, road);
+        assert_eq!((b.drive_min, b.drive_how.as_str()), (Some(11), "by road"));
+        assert!(b.note.contains("about 11 min away by road"));
+        assert_eq!(b.arrived, Some(2_000));
+    }
+
+    #[test]
+    fn a_crew_at_the_hospital_checks_the_window() {
+        let base = predict(1, "Example General", 1_000, Some("5 to 7 minutes"), None);
+        let mut inside = base.clone();
+        check_arrival(&mut inside, 1_400);
+        assert_eq!(inside.off_by_min, Some(0));
+        let mut late = base.clone();
+        check_arrival(&mut late, 1_420 + 181);
+        assert_eq!(late.off_by_min, Some(4));
+        let mut early = base.clone();
+        check_arrival(&mut early, 1_300 - 120);
+        assert_eq!(early.off_by_min, Some(-2));
+        // Said before the report: not this arrival.
+        let mut before = base;
+        check_arrival(&mut before, 900);
+        assert_eq!(before.arrived, None);
+    }
+
+    #[test]
+    fn a_saved_profile_gains_new_events_in_their_place() {
+        let mut old = arrest_profile();
+        old.events.retain(|e| e.kind != "arrived");
+        old.events[0].phrases.push("the listener's own".into());
+        let (s, grew) = with_new_defaults(Settings { profiles: vec![old] });
+        assert!(grew);
+        let kinds: Vec<&str> = s.profiles[0].events.iter().map(|e| e.kind.as_str()).collect();
+        let want: Vec<String> = arrest_profile().events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(kinds, want);
+        assert!(s.profiles[0].events[0].phrases.contains(&"the listener's own".to_string()));
+        let (_, again) = with_new_defaults(s);
+        assert!(!again);
     }
 
     #[test]
@@ -1501,11 +1815,13 @@ mod tests {
                (3, {t2}, 3, 2, 900222, 'Control, Medic 7, we have rosc'),
                (4, {t3}, 2, 2, 900001, 'rosc'),
                (5, {t4}, 2, 2, 900001, 'Working Arrest'),
-               (6, {t5}, 3, 2, 900555, 'This is going to be a DOA.');
+               (6, {t5}, 3, 2, 900555, 'This is going to be a DOA.'),
+               (7, {t6}, 3, 2, 900556, 'Control, we are delayed at hospital.'),
+               (8, {t7}, 3, 2, 900222, 'Control, Medic 7 is at the hospital.');
              INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 1, {t0}, 1, 'dispatch'), (2, 2, {t1}, 1, 'dispatch');
              INSERT INTO radio_evidence (system, radio, callsign, role, how, call, at, weight) VALUES
                ('', 900001, '', 'console', 'from_control', 101, 1, 1), ('', 900001, '', 'console', 'from_control', 102, 1, 1), ('', 900001, '', 'console', 'from_control', 103, 1, 1);",
-            t1 = t0 + 300, t2 = t0 + 900, t3 = t0 + 904, t4 = t0 + 1200, t5 = t0 + 1500,
+            t1 = t0 + 300, t2 = t0 + 900, t3 = t0 + 904, t4 = t0 + 1200, t5 = t0 + 1500, t6 = t0 + 1800, t7 = t0 + 2400,
         ))
         .unwrap();
         let tactical: HashSet<u16> = [2].into();
@@ -1521,11 +1837,13 @@ mod tests {
         let kinds: Vec<(&str, &str)> = v.cases[0].lines.iter().map(|l| (l.kind.as_str(), l.source.as_str())).collect();
         assert_eq!(
             kinds,
-            vec![("dispatched", "page"), ("working", "page"), ("rosc", "readback"), ("working", "readback")],
-            "the rosc is placed by the callsign its crew call said, the bare readback is the only open arrest, and a crew DOA naming no run is not placed"
+            vec![("dispatched", "page"), ("working", "page"), ("rosc", "readback"), ("working", "readback"), ("arrived", "crew")],
+            "the rosc is placed by the callsign its crew call said, the bare readback is the only open arrest, a crew DOA naming no run is not placed, and a crew at the hospital that names itself is"
         );
+        assert_eq!(v.cases[0].state, "arrived");
         assert!(v.cases[0].lines[3].inferred);
-        assert_eq!(v.unplaced.len(), 1);
+        // A crew at a hospital naming no run is not listed as unplaced.
+        assert_eq!(v.unplaced.len(), 1, "{:?}", v.unplaced);
         assert_eq!(v.unplaced[0].kind, "terminated");
     }
 
@@ -1551,9 +1869,21 @@ mod tests {
         let t0 = std::time::Instant::now();
         let b = rebuild(&c, &Inputs { profile: &prof, tactical_tgs: &tactical }, from, to).unwrap();
         println!("{b:?} in {:?}", t0.elapsed());
-        let v = list(&c, 0, &crate::places::Settings::default(), to);
+        let places: crate::places::Settings = std::env::var("HS_CASES_PLACES")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let v = list(&c, 0, &places, to);
         for k in &v.cases {
             println!("\n#{} {} · {} · {} · {} · units {:?}", k.id, k.title, k.call_type, k.address, k.state, k.units);
+            if let Some(a) = &k.arrival {
+                println!(
+                    "  ARRIVAL {} · said {:?} at {} → {:?}–{:?} · {:?} km, {:?} min {} · arrived {:?} off {:?} · {}",
+                    a.place, a.said, crate::library::local_hm(a.anchor), a.from.map(crate::library::local_hm), a.to.map(crate::library::local_hm),
+                    a.km, a.drive_min, a.drive_how, a.arrived.map(crate::library::local_hm), a.off_by_min, a.note
+                );
+            }
             for l in &k.lines {
                 println!(
                     "  {} {:<5} {:<12} {:<9} {}{}  | {}",
