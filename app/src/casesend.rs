@@ -46,7 +46,9 @@ pub struct Send {
     pub hospitals: bool,
     /// Event kinds that get a reply.
     pub notify: Vec<String>,
-    /// A map, scene to hospital, in the hospital's chat with its first message.
+    /// A map under a thread's first message: the run with its routes to the
+    /// hospitals its care pathway names (the nearest, the ECMO centre) in the
+    /// chat for every case, scene to hospital in a hospital's chat.
     pub map: bool,
 }
 
@@ -117,9 +119,8 @@ fn facts_of(k: &CaseView) -> HashMap<String, String> {
     got
 }
 
-/// The timeline message. Plain text: an edit is sent without markup, and a
-/// message that rendered as tags the first time it changed would be worse
-/// than one with no bold.
+/// The timeline message, as plain text. What goes out is [`linked`]: the
+/// same text with the address made a Google Maps link.
 pub fn render(k: &CaseView) -> String {
     let mut head = format!("🫀 {} · {}", k.title, state_label(&k.state));
     if !k.address.is_empty() {
@@ -194,6 +195,21 @@ pub fn render(k: &CaseView) -> String {
     out.push(String::new());
     out.extend(tail);
     out.join("\n")
+}
+
+/// The timeline as Telegram HTML, its address opening Google Maps at the
+/// run's pin (or, with none yet, at the address). `None` when there is no
+/// address to link; the plain text goes then.
+pub fn linked(k: &CaseView, text: &str, region: &str) -> Option<String> {
+    crate::alerts::link_in(text, &k.address, &crate::alerts::maps_url(k.lat, k.lon, &k.address, region))
+}
+
+/// Whether the chat for every case is still owed its map: once, while the
+/// case is going on. A map turning up for a case that ended long ago, or
+/// after an upgrade for every recent one, would be noise.
+pub fn map_due(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) -> bool {
+    let last = k.lines.last().map(|l| l.at).unwrap_or(k.opened);
+    s.map && t.place_id.is_none() && !had.is_some_and(|h| h.map_sent) && k.open && now - last <= NOTIFY_WITHIN_SECS
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +519,9 @@ pub fn tick(app: &AppHandle) {
                     sent(&c, &p.id, k.incident, &t.dest)
                 };
                 let steps = plan(k, &t, &p.telegram.notify, had.as_ref(), now);
-                if steps.is_empty() {
+                // A run is often placed a little after it is paged, so the
+                // map can be owed after its thread has nothing else to say.
+                if steps.is_empty() && !(had.is_some() && map_due(k, &t, &p.telegram, had.as_ref(), now)) {
                     continue;
                 }
                 if let Err(e) = carry_out(app, &db, p, k, &t, &target, had, steps, now) {
@@ -528,6 +546,8 @@ fn carry_out(
     now: i64,
 ) -> Result<(), String> {
     let mut root = had.as_ref().map(|h| h.root_id);
+    let state = app.state::<AppState>();
+    let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
     // A thread lives in the chat it started in, even if the destination has
     // since been pointed somewhere else: that is where its message is.
     let target = match &had {
@@ -537,7 +557,7 @@ fn carry_out(
     for step in steps {
         match step {
             Step::Root { text } => {
-                let id = crate::alerts::send_text_reply(&target, &text, None)?;
+                let id = crate::alerts::send_text_reply_html(&target, &text, linked(k, &text, &region).as_deref(), None)?;
                 root = Some(id);
                 let c = db.lock().unwrap();
                 c.execute(
@@ -548,7 +568,7 @@ fn carry_out(
                 .map_err(|e| e.to_string())?;
             }
             Step::Edit { root_id, text } => {
-                if let Err(e) = crate::alerts::edit_message(&target, root_id, &text) {
+                if let Err(e) = crate::alerts::edit_message_html(&target, root_id, &text, linked(k, &text, &region).as_deref()) {
                     // Past Telegram's edit window, or deleted by someone in
                     // the chat: remember the text so it is not tried forever.
                     if !e.contains("not modified") {
@@ -569,11 +589,31 @@ fn carry_out(
             Step::Stale { notice } => record_notice(db, p, k, t, &notice, None, now)?,
         }
     }
+    // In the chat for every case, the run's own map: the scene and the
+    // routes to where its pathway says to go, drawn once the run is placed.
+    if map_due(k, t, &p.telegram, had.as_ref(), now) {
+        if let Some(root) = root {
+            match crate::tripwires::send_map(app, &state, &target, k.incident, Some(root)) {
+                Ok(_) => {
+                    let c = db.lock().unwrap();
+                    c.execute(
+                        "UPDATE case_sends SET map_sent = 1 WHERE profile = ?1 AND incident = ?2 AND dest = ?3",
+                        params![p.id, k.incident, t.dest],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                // Not placed yet: tried again on the next pass.
+                Err(e) if e.contains("no position") => {}
+                // Anything else waits out the back-off rather than drawing
+                // and failing on every pass.
+                Err(e) => return Err(format!("map: {e}")),
+            }
+        }
+    }
     // The map goes once, under the first message in a hospital's chat.
     if p.telegram.map && t.place_id.is_some() && !had.as_ref().is_some_and(|h| h.map_sent) {
         if let (Some(root), Some(a)) = (root, k.arrivals.iter().find(|a| Some(a.conversation) == t.conversation)) {
             if let Some((scene, hospital)) = a.ends {
-                let state = app.state::<AppState>();
                 let r = crate::routing::shape(&state, scene, hospital);
                 let leg = crate::mapshot::Leg { to: hospital, line: r.line, road: r.how == "road" };
                 let caption = format!(
@@ -792,6 +832,40 @@ mod tests {
         // Before any report, the facts line would only say "not stated".
         let early = case(arrest().lines[..3].to_vec(), vec![]);
         assert!(!render(&early).contains("Witnessed"));
+    }
+
+    #[test]
+    fn the_address_opens_google_maps_at_the_pin() {
+        let mut k = arrest();
+        let text = render(&k);
+        let html = linked(&k, &text, "Testville, EX").expect("an address to link");
+        assert!(html.contains("<a href=\"https://www.google.com/maps/search/?api=1&amp;query=1200+Example+St%2C+Testville%2C+EX\">1200 Example St</a>"), "{html}");
+        k.lat = Some(39.5);
+        k.lon = Some(-86.25);
+        let html = linked(&k, &text, "Testville, EX").unwrap();
+        assert!(html.contains("query=39.500000%2C-86.250000\">1200 Example St</a>"), "{html}");
+        // Everything else is the timeline as it was, escaped for HTML.
+        assert!(html.contains("ROSC (dispatcher)"));
+        k.address.clear();
+        assert_eq!(linked(&k, &render(&k), "Testville, EX"), None);
+    }
+
+    #[test]
+    fn the_chat_for_every_case_is_owed_one_map_while_the_case_goes_on() {
+        let k = arrest();
+        let s = Send { dest: "d-all".into(), ..Send::default() };
+        let all = &threads(&k, &s, &places())[0];
+        let hosp = &threads(&k, &s, &places())[1];
+        let now = k.lines.last().unwrap().at + 30;
+        assert!(map_due(&k, all, &s, None, now));
+        let mut had = Sent { target: "x".into(), root_id: 77, rendered: render(&k), map_sent: false, notices: HashSet::new() };
+        assert!(map_due(&k, all, &s, Some(&had), now), "a map not sent yet is still owed");
+        had.map_sent = true;
+        assert!(!map_due(&k, all, &s, Some(&had), now), "once");
+        assert!(!map_due(&k, hosp, &s, None, now), "a hospital's chat has its own map");
+        assert!(!map_due(&k, all, &Send { map: false, ..s.clone() }, None, now), "maps can be switched off");
+        assert!(!map_due(&k, all, &s, None, now + NOTIFY_WITHIN_SECS), "not for a case gone quiet");
+        assert!(!map_due(&CaseView { open: false, ..k.clone() }, all, &s, None, now), "not for a case that is over");
     }
 
     #[test]

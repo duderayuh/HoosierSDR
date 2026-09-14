@@ -946,16 +946,32 @@ pub(crate) fn delete_message(chat_id: &str, id: i64) -> Result<(), String> {
 
 /// Edit a message the bot sent, in place (Telegram allows this for 48 hours).
 pub(crate) fn edit_message(chat_id: &str, id: i64, text: &str) -> Result<(), String> {
+    edit_message_html(chat_id, id, text, None)
+}
+
+/// The same, optionally as Telegram HTML. An edit replaces the message's
+/// markup along with its text, so a message sent with its address linked
+/// has to be edited with the link too, or the first edit takes it away.
+/// If Telegram refuses the markup, the plain text goes instead.
+pub(crate) fn edit_message_html(chat_id: &str, id: i64, text: &str, html: Option<&str>) -> Result<(), String> {
     if chat_id.trim().is_empty() {
         return Err("no Telegram chat id".into());
     }
-    let body =
-        serde_json::json!({ "chat_id": chat_parts(chat_id).0, "message_id": id, "text": text });
-    let (status, out) = crate::upload::post(
-        &telegram_api("editMessageText")?,
-        "application/json",
-        body.to_string().into_bytes(),
-    )?;
+    let send = |as_html: Option<&str>| -> Result<(u16, String), String> {
+        let mut body = serde_json::json!({ "chat_id": chat_parts(chat_id).0, "message_id": id, "text": as_html.unwrap_or(text) });
+        if as_html.is_some() {
+            body["parse_mode"] = "HTML".into();
+            body["link_preview_options"] = serde_json::json!({ "is_disabled": true });
+        }
+        crate::upload::post(&telegram_api("editMessageText")?, "application/json", body.to_string().into_bytes())
+    };
+    let (mut status, mut out) = send(html)?;
+    // "message is not modified" is a 400 too, and sending it plain would
+    // strip the link the message already has.
+    if html.is_some() && !(200..300).contains(&status) && !out.contains("not modified") {
+        eprintln!("[alerts] Telegram refused the linked edit ({status}), sending it plain");
+        (status, out) = send(None)?;
+    }
     check(status, &out).map(|_| ())
 }
 
