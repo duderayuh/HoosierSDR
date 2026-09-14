@@ -585,7 +585,10 @@ fn carry_out(
                 let sent = crate::mapshot::draw(app, scene, &[leg])
                     .and_then(|shot| crate::alerts::send_photo_reply(&target, &shot.png, &caption, None, Some(root)));
                 if let Err(e) = &sent {
+                    // Tried again on the next pass that has something to do
+                    // in this chat; a missing map is not worth a retry loop.
                     eprintln!("cases: map for case {} in {}: {e}", k.id, t.dest);
+                    return Ok(());
                 }
                 let c = db.lock().unwrap();
                 c.execute(
