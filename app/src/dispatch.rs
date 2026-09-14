@@ -1272,7 +1272,7 @@ fn overpass_intersection(s: &Settings, a: &str, b: &str) -> Result<Geo, String> 
     let q = format!(
         "[out:json][timeout:20];way[\"highway\"][\"name\"~\"{ra}\",i]({bbox});node(w)->.a;way[\"highway\"][\"name\"~\"{rb}\",i]({bbox});node(w)->.b;node.a.b;out 8;"
     );
-    let v = overpass(&q)?;
+    let v = overpass(&q, 30)?;
     let nodes: Vec<(f64, f64)> = v["elements"]
         .as_array()
         .map(|els| {
@@ -1292,22 +1292,28 @@ fn overpass_intersection(s: &Settings, a: &str, b: &str) -> Result<Geo, String> 
 
 /// A mapped mile marker for a highway location, anywhere in the search box.
 fn overpass_marker(s: &Settings, spot: &crate::highway::Spot) -> Result<Geo, String> {
-    let v = overpass(&crate::highway::marker_query(&spot.route, &search_bbox(s)))?;
+    let v = overpass(&crate::highway::marker_query(&spot.route, &search_bbox(s)), HIGHWAY_SECS)?;
     let hit = crate::highway::at_marker(spot, &crate::highway::markers_of(&v), &crate::highway::ways_of(&v));
     Ok(hit.map(|(lat, lon)| (lat, lon, format!("{} (mile marker, OpenStreetMap)", spot.describe()))))
 }
 
 /// A point put onto the highway it is on, when the highway is near.
 fn overpass_snap(spot: &crate::highway::Spot, lat: f64, lon: f64) -> Result<Option<(f64, f64)>, String> {
-    let v = overpass(&crate::highway::route_query(&spot.route, lat, lon))?;
+    let v = overpass(&crate::highway::route_query(&spot.route, lat, lon), HIGHWAY_SECS)?;
     Ok(crate::highway::snap((lat, lon), &crate::highway::ways_of(&v), spot.dir, crate::highway::SNAP_M as f64))
 }
 
+/// How long a highway lookup may wait on each Overpass endpoint. It runs in
+/// line with the calls behind it, and both lookups have a fallback: a
+/// marker that does not answer leaves the grid point, a snap that does not
+/// answer leaves it where it was.
+const HIGHWAY_SECS: u64 = 10;
+
 /// Ask Overpass, trying each endpoint in turn.
-fn overpass(q: &str) -> Result<serde_json::Value, String> {
+fn overpass(q: &str, timeout_secs: u64) -> Result<serde_json::Value, String> {
     let body = format!("data={}", url_encode(q));
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
         .http_status_as_error(false)
         .build()
         .into();
