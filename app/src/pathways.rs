@@ -173,7 +173,7 @@ pub fn haystack(call_type: &str, summary: &str, transcripts: &[String]) -> Strin
     s
 }
 
-fn same_type(a: &str, b: &str) -> bool {
+pub fn same_type(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 

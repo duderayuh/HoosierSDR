@@ -2477,6 +2477,7 @@ fn main() {
             places::places_set,
             places::places_suggest,
             dashboards::dashboards_get,
+            dashboards::dashboards_render,
             dashboards::dashboards_set,
             rxhealth::rx_health,
             pathways::pathways_get,

@@ -1459,7 +1459,7 @@ fn store_row(
 }
 
 /// One stored conversation, in full.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct Stored {
     pub id: i64,
     pub conv_id: String,
@@ -1568,7 +1568,7 @@ pub fn conversations_list(
     with_db(&state, |c| list_rows(c, q.as_deref(), tg, before, limit))
 }
 
-fn list_rows(
+pub fn list_rows(
     c: &Connection,
     q: Option<&str>,
     tg: Option<u16>,

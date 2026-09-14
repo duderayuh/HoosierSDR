@@ -206,6 +206,340 @@ fn clean_words(v: &[String], max: usize) -> Vec<String> {
         .collect()
 }
 
+// ------------------------------------------------------------- rendering
+
+/// One row on a board, with every decision already made.
+///
+/// The page receives this and writes it out; it does not decide what belongs
+/// on the board, because a board is also served to machines that must see
+/// this board and nothing else. Matching where the data lives is the only
+/// way that promise can be kept — a page that filtered for itself would have
+/// to be handed every incident first.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Card {
+    pub id: i64,
+    /// When this row last changed, epoch seconds — the "12 min ago" line.
+    pub at: i64,
+    pub emoji: String,
+    pub title: String,
+    /// The emphasis that fired, if one did: a [`STYLES`] key and its note.
+    pub style: String,
+    pub note: String,
+    /// Small print under the title, already in order.
+    pub meta: Vec<String>,
+    pub body: String,
+    /// The stated time to arrival inside `body`, for a report row that gives
+    /// one. The page marks the span by looking this phrase back up.
+    pub eta: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct RenderedPane {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    /// The qualifier under the title — "closest to Methodist".
+    pub sub: String,
+    pub width: u32,
+    /// How many matched, which is not how many are drawn.
+    pub total: usize,
+    pub cards: Vec<Card>,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct RenderedBoard {
+    pub id: String,
+    pub name: String,
+    pub footer: String,
+    pub refresh_secs: u32,
+    pub panes: Vec<RenderedPane>,
+    /// This machine's clock at render. A wall display's own clock may be
+    /// wrong, and "3 minutes ago" is the whole point of the board.
+    pub at: i64,
+}
+
+const MI: f64 = 1609.344;
+
+fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let r = std::f64::consts::PI / 180.0;
+    let (d_lat, d_lon) = ((b.0 - a.0) * r, (b.1 - a.1) * r);
+    let s = (d_lat / 2.0).sin().powi(2)
+        + (a.0 * r).cos() * (b.0 * r).cos() * (d_lon / 2.0).sin().powi(2);
+    2.0 * 6_371_000.0 * s.sqrt().min(1.0).asin()
+}
+
+fn at(p: &crate::places::Place) -> Option<(f64, f64)> {
+    Some((p.lat?, p.lon?))
+}
+
+/// The hospital a run is closest to, as the crow flies.
+///
+/// Deliberately not a drive time: a road route for every run against every
+/// hospital on every render is a lot of asking, and the answer to "whose
+/// patch is this" does not turn on a minute either way.
+fn closest_hospital<'a>(
+    places: &'a [crate::places::Place],
+    p: (f64, f64),
+) -> Option<(&'a crate::places::Place, f64)> {
+    places
+        .iter()
+        .filter(|h| h.kind == "hospital")
+        .filter_map(|h| at(h).map(|c| (h, haversine_m(p, c))))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Drive time, but only where it was actually measured: the pathway resolver
+/// stores a road route on the run for the facilities it picked. Anything else
+/// gets a distance and no minutes, rather than a guess.
+fn road_minutes(inc: &crate::dispatch::Incident, place_id: &str) -> Option<i64> {
+    inc.targets
+        .iter()
+        .find(|t| t.place_id == place_id && t.how == "road" && t.secs > 0.0)
+        .map(|t| ((t.secs / 60.0).round() as i64).max(1))
+}
+
+fn place_by<'a>(places: &'a [crate::places::Place], id: &str) -> Option<&'a crate::places::Place> {
+    places.iter().find(|p| p.id == id)
+}
+
+fn hay(inc: &crate::dispatch::Incident) -> String {
+    format!(
+        "{} {} {} {}",
+        inc.call_type,
+        inc.summary,
+        inc.address,
+        inc.units.join(" ")
+    )
+}
+
+fn any_word(words: &[String], text: &str) -> bool {
+    !words.is_empty() && !crate::alerts::matched_keywords(words, text).is_empty()
+}
+
+/// Does this run belong in this pane?
+///
+/// Note that `except` is read against everything the row shows, not only
+/// against what the run *is* — which is the narrower reading
+/// [`crate::pathways::matches`] uses. The two are different questions: a
+/// pathway decides where a patient is taken and must not be talked out of it
+/// by a passing word, whereas a pane is a view and the listener excluding a
+/// word means "keep it off my board".
+fn pane_takes(
+    pane: &Pane,
+    inc: &crate::dispatch::Incident,
+    places: &[crate::places::Place],
+) -> bool {
+    let h = hay(inc);
+    if any_word(&pane.except, &h) {
+        return false;
+    }
+    if !pane.call_types.is_empty()
+        && !pane
+            .call_types
+            .iter()
+            .any(|t| crate::pathways::same_type(t, &inc.call_type))
+    {
+        return false;
+    }
+    if !pane.phrases.is_empty() && !any_word(&pane.phrases, &h) {
+        return false;
+    }
+    let here = inc.lat.zip(inc.lon);
+    if !pane.closest_place.is_empty() {
+        let Some(p) = here else { return false };
+        match closest_hospital(places, p) {
+            Some((h, _)) if h.id == pane.closest_place => {}
+            _ => return false,
+        }
+    }
+    if !pane.within_place.is_empty() && pane.within_miles > 0.0 {
+        let (Some(p), Some(w)) = (here, place_by(places, &pane.within_place).and_then(at)) else {
+            return false;
+        };
+        if haversine_m(p, w) > pane.within_miles * MI {
+            return false;
+        }
+    }
+    true
+}
+
+/// The first emphasis that fires, so the loudest goes at the top of the list.
+fn emphasis_for<'a>(pane: &'a Pane, text: &str, call_type: &str) -> Option<&'a Emphasis> {
+    pane.emphasis.iter().find(|e| {
+        if e.when
+            .except_types
+            .iter()
+            .any(|t| crate::pathways::same_type(t, call_type))
+        {
+            return false;
+        }
+        if any_word(&e.when.except, text) {
+            return false;
+        }
+        let by_type = e
+            .when
+            .call_types
+            .iter()
+            .any(|t| crate::pathways::same_type(t, call_type));
+        by_type || any_word(&e.when.phrases, text)
+    })
+}
+
+fn dispatch_card(
+    pane: &Pane,
+    inc: &crate::dispatch::Incident,
+    places: &[crate::places::Place],
+) -> Card {
+    let h = hay(inc);
+    let em = emphasis_for(pane, &h, &inc.call_type);
+    let mut meta = Vec::new();
+    if !inc.address.is_empty() {
+        meta.push(inc.address.clone());
+    }
+    // Measured against whichever place the pane is about; the radius wins
+    // when it has one, because that is the number the listener asked for.
+    let refer = if pane.within_place.is_empty() {
+        &pane.closest_place
+    } else {
+        &pane.within_place
+    };
+    if let (Some(p), Some(r)) = (inc.lat.zip(inc.lon), place_by(places, refer)) {
+        if let Some(c) = at(r) {
+            meta.push(format!("{:.1} mi", haversine_m(p, c) / MI));
+            if let Some(m) = road_minutes(inc, &r.id) {
+                meta.push(format!("{m} min"));
+            }
+        }
+    }
+    Card {
+        id: inc.id,
+        at: inc.updated,
+        emoji: inc.emoji.clone(),
+        title: if inc.call_type.is_empty() {
+            "Unknown".into()
+        } else {
+            inc.call_type.clone()
+        },
+        style: em.map(|e| e.style.clone()).unwrap_or_default(),
+        note: em.map(|e| e.note.clone()).unwrap_or_default(),
+        meta,
+        body: inc.summary.clone(),
+        eta: None,
+    }
+}
+
+fn report_card(pane: &Pane, r: &crate::conversations::Stored) -> Card {
+    let text = format!(
+        "{} {} {} {}",
+        r.headline,
+        r.summary,
+        r.tg_name,
+        r.units.join(" ")
+    );
+    let em = emphasis_for(pane, &text, "");
+    // Rows stored before headlines existed have none; the summary still reads
+    // on its own, so the card loses its title rather than its meaning.
+    let title = if !r.headline.is_empty() {
+        r.headline.clone()
+    } else if !r.units.is_empty() {
+        r.units.join(", ")
+    } else if !r.tg_name.is_empty() {
+        r.tg_name.clone()
+    } else {
+        "Report".into()
+    };
+    Card {
+        id: r.id,
+        at: r.last_at,
+        emoji: String::new(),
+        title,
+        style: em.map(|e| e.style.clone()).unwrap_or_default(),
+        note: em.map(|e| e.note.clone()).unwrap_or_default(),
+        meta: if r.units.is_empty() {
+            Vec::new()
+        } else {
+            vec![r.units.join(", ")]
+        },
+        body: r.summary.clone(),
+        eta: r.eta.clone(),
+    }
+}
+
+/// Draw one board from the traffic as it stands.
+pub fn render(
+    board: &Dashboard,
+    incidents: &[crate::dispatch::Incident],
+    reports: &[crate::conversations::Stored],
+    places: &[crate::places::Place],
+    now: i64,
+) -> RenderedBoard {
+    let panes = board
+        .panes
+        .iter()
+        .map(|pane| {
+            let limit = pane.limit.max(1) as usize;
+            let (sub, total, cards) = if pane.kind == "reports" {
+                let p = place_by(places, &pane.place);
+                let tgs: std::collections::HashSet<u16> =
+                    p.map(|p| p.tgs.iter().copied().collect()).unwrap_or_default();
+                let mut rows: Vec<&crate::conversations::Stored> =
+                    reports.iter().filter(|r| tgs.contains(&r.tg)).collect();
+                rows.sort_by_key(|r| std::cmp::Reverse(r.last_at));
+                let total = rows.len();
+                (
+                    p.map(|p| p.name.clone()).unwrap_or_default(),
+                    total,
+                    rows.into_iter()
+                        .take(limit)
+                        .map(|r| report_card(pane, r))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                let mut rows: Vec<&crate::dispatch::Incident> = incidents
+                    .iter()
+                    .filter(|i| pane_takes(pane, i, places))
+                    .collect();
+                rows.sort_by_key(|i| std::cmp::Reverse(i.updated));
+                let total = rows.len();
+                let sub = place_by(places, &pane.closest_place)
+                    .map(|p| format!("closest to {}", p.name))
+                    .unwrap_or_default();
+                (
+                    sub,
+                    total,
+                    rows.into_iter()
+                        .take(limit)
+                        .map(|i| dispatch_card(pane, i, places))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            RenderedPane {
+                id: pane.id.clone(),
+                kind: pane.kind.clone(),
+                title: if !pane.title.is_empty() {
+                    pane.title.clone()
+                } else if pane.kind == "reports" {
+                    "Reports".into()
+                } else {
+                    "Dispatch".into()
+                },
+                sub,
+                width: pane.width.max(1),
+                total,
+                cards,
+            }
+        })
+        .collect();
+    RenderedBoard {
+        id: board.id.clone(),
+        name: board.name.clone(),
+        footer: board.footer.clone(),
+        refresh_secs: board.refresh_secs,
+        panes,
+        at: now,
+    }
+}
+
 // --------------------------------------------------------------- settings
 
 fn path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -281,6 +615,62 @@ pub fn dashboards_get(state: tauri::State<crate::AppState>) -> View {
             .collect(),
     }
 }
+
+/// Draw one board, ready to show.
+///
+/// The whole board is worked out here rather than on the page, because this
+/// same answer is what a shared board hands to another machine — and that
+/// machine must be able to see this board and nothing else. Filtering on the
+/// page would mean sending it everything first.
+#[tauri::command]
+pub fn dashboards_render(
+    state: tauri::State<crate::AppState>,
+    id: String,
+) -> Result<RenderedBoard, String> {
+    let board = state
+        .dashboards
+        .lock()
+        .unwrap()
+        .dashboards
+        .iter()
+        .find(|d| d.id == id)
+        .cloned()
+        .ok_or("no such dashboard")?;
+    let places: Vec<crate::places::Place> = state
+        .places
+        .lock()
+        .unwrap()
+        .settings
+        .places
+        .iter()
+        .filter(|p| p.enabled)
+        .cloned()
+        .collect();
+    let db = state.db.lock().unwrap().clone();
+    let (incidents, reports) = match db {
+        Some(db) => {
+            let c = db.lock().unwrap();
+            (
+                crate::dispatch::inc_list(&c, 0, INCIDENT_SCAN)?,
+                crate::conversations::list_rows(&c, None, None, None, Some(REPORT_SCAN))?,
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(render(
+        &board,
+        &incidents,
+        &reports,
+        &places,
+        crate::library::now(),
+    ))
+}
+
+/// How much recent traffic a board is matched against. A pane's own limit
+/// governs what it draws; these bound the work, and are well past what any
+/// board shows.
+const INCIDENT_SCAN: u32 = 2_000;
+const REPORT_SCAN: u32 = 400;
 
 #[tauri::command]
 pub fn dashboards_set(
@@ -433,5 +823,294 @@ mod tests {
         assert_eq!(s.dashboards[0].panes[0].limit, 0, "absent means default");
         assert_eq!(s.dashboards[0].refresh_secs, 10);
         assert!(s.dashboards[0].enabled);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn place(id: &str, name: &str, lat: f64, lon: f64, tgs: Vec<u16>) -> crate::places::Place {
+        crate::places::Place {
+            id: id.into(),
+            name: name.into(),
+            kind: "hospital".into(),
+            lat: Some(lat),
+            lon: Some(lon),
+            tgs,
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    // Two real hospitals about a mile apart, and a third across town.
+    fn places() -> Vec<crate::places::Place> {
+        vec![
+            place("p-meth", "Methodist", 39.7810, -86.1650, vec![10256]),
+            place("p-esk", "Eskenazi", 39.7830, -86.1780, vec![10257]),
+            place("p-far", "South", 39.7000, -86.1600, vec![]),
+        ]
+    }
+
+    fn run(id: i64, call_type: &str, lat: f64, lon: f64) -> crate::dispatch::Incident {
+        crate::dispatch::Incident {
+            id,
+            created: 100,
+            updated: 100 + id,
+            tg: 1001,
+            tg_name: "Dispatch".into(),
+            call_type: call_type.into(),
+            emoji: "🫀".into(),
+            address: "1 Example Way".into(),
+            validated: String::new(),
+            lat: Some(lat),
+            lon: Some(lon),
+            geocode: "ok".into(),
+            units: vec!["Medic 21".into()],
+            summary: String::new(),
+            confidence: 90,
+            calls: 1,
+            revision: 0,
+            pathway: String::new(),
+            targets: Vec::new(),
+        }
+    }
+
+    fn board(panes: Vec<Pane>) -> Dashboard {
+        Dashboard {
+            id: "b1".into(),
+            name: "Wall".into(),
+            panes,
+            ..Dashboard::default()
+        }
+    }
+
+    fn drawn(b: &Dashboard, incs: &[crate::dispatch::Incident]) -> Vec<i64> {
+        render(b, incs, &[], &places(), 1_000).panes[0]
+            .cards
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_pane_keeps_only_the_runs_whose_nearest_hospital_is_the_one_named() {
+        // "Whose patch is this" — a rank, not a radius.
+        let near_meth = run(1, "Chest Pain", 39.7805, -86.1640);
+        let near_esk = run(2, "Chest Pain", 39.7835, -86.1790);
+        let p = Pane {
+            limit: 25,
+            closest_place: "p-meth".into(),
+            ..Pane::default()
+        };
+        assert_eq!(drawn(&board(vec![p]), &[near_meth, near_esk]), vec![1]);
+    }
+
+    #[test]
+    fn a_radius_and_a_rank_ask_different_questions() {
+        // A run can be closest to Methodist and still be miles away, and a run
+        // on Methodist's doorstep can belong to Eskenazi. The listener asked
+        // for both at once, so neither may stand in for the other.
+        // Closest hospital is Methodist at 1.45 mi; Eskenazi is 1.73 mi away.
+        let far = run(1, "Chest Pain", 39.7600, -86.1650);
+        let p_rank = Pane {
+            limit: 25,
+            closest_place: "p-meth".into(),
+            ..Pane::default()
+        };
+        let p_near = Pane {
+            limit: 25,
+            within_place: "p-meth".into(),
+            within_miles: 1.0,
+            ..Pane::default()
+        };
+        assert_eq!(drawn(&board(vec![p_rank]), std::slice::from_ref(&far)), vec![1]);
+        assert!(
+            drawn(&board(vec![p_near]), std::slice::from_ref(&far)).is_empty(),
+            "3 miles out is not within one mile"
+        );
+    }
+
+    #[test]
+    fn a_call_type_is_matched_whole_and_without_regard_to_case() {
+        let i = run(1, "Cardiac Arrest", 39.7805, -86.1640);
+        let p = Pane {
+            limit: 25,
+            call_types: vec!["cardiac arrest".into()],
+            ..Pane::default()
+        };
+        assert_eq!(drawn(&board(vec![p]), std::slice::from_ref(&i)), vec![1]);
+        let p = Pane {
+            limit: 25,
+            call_types: vec!["Cardiac".into()],
+            ..Pane::default()
+        };
+        assert!(
+            drawn(&board(vec![p]), std::slice::from_ref(&i)).is_empty(),
+            "half a type is not the type"
+        );
+    }
+
+    #[test]
+    fn an_exception_refuses_a_run_whatever_else_it_matches() {
+        let mut i = run(1, "Cardiac Arrest", 39.7805, -86.1640);
+        i.summary = "History of cardiac arrest, patient alert".into();
+        let p = Pane {
+            limit: 25,
+            call_types: vec!["Cardiac Arrest".into()],
+            except: vec!["history of".into()],
+            ..Pane::default()
+        };
+        assert!(drawn(&board(vec![p]), &[i]).is_empty());
+    }
+
+    #[test]
+    fn the_newest_run_is_at_the_top_and_the_limit_cuts_the_tail() {
+        let runs: Vec<_> = (1..=5).map(|n| run(n, "Chest Pain", 39.7805, -86.1640)).collect();
+        let p = Pane {
+            limit: 3,
+            ..Pane::default()
+        };
+        let b = board(vec![p]);
+        assert_eq!(drawn(&b, &runs), vec![5, 4, 3], "latest first");
+        assert_eq!(
+            render(&b, &runs, &[], &places(), 1_000).panes[0].total,
+            5,
+            "the rest still matched, they are just not drawn"
+        );
+    }
+
+    #[test]
+    fn the_first_emphasis_that_fires_is_the_one_that_shows() {
+        // Loudest at the top of the list is the whole ordering convention.
+        let mut i = run(1, "Cardiac Arrest", 39.7805, -86.1640);
+        i.summary = "working arrest, CPR in progress".into();
+        let em = |style: &str, phrase: &str| Emphasis {
+            when: crate::pathways::When {
+                phrases: vec![phrase.into()],
+                ..Default::default()
+            },
+            style: style.into(),
+            note: style.into(),
+        };
+        let p = Pane {
+            limit: 25,
+            emphasis: vec![em("alarm", "working arrest"), em("warn", "cpr in progress")],
+            ..Pane::default()
+        };
+        let out = render(&board(vec![p]), &[i], &[], &places(), 1_000);
+        assert_eq!(out.panes[0].cards[0].style, "alarm");
+        assert_eq!(out.panes[0].cards[0].note, "alarm");
+    }
+
+    #[test]
+    fn an_emphasis_exception_beats_its_own_match() {
+        let mut i = run(1, "Fire Alarm", 39.7805, -86.1640);
+        i.summary = "medical alarm".into();
+        let p = Pane {
+            limit: 25,
+            emphasis: vec![Emphasis {
+                when: crate::pathways::When {
+                    phrases: vec!["alarm".into()],
+                    except_types: vec!["Fire Alarm".into()],
+                    ..Default::default()
+                },
+                style: "alarm".into(),
+                note: String::new(),
+            }],
+            ..Pane::default()
+        };
+        let out = render(&board(vec![p]), &[i], &[], &places(), 1_000);
+        assert_eq!(out.panes[0].cards[0].style, "", "the type ruled it out");
+    }
+
+    #[test]
+    fn drive_time_shows_only_where_a_road_route_was_actually_measured() {
+        let mut i = run(1, "Chest Pain", 39.7805, -86.1640);
+        i.targets = vec![crate::pathways::Target {
+            label: "Closest hospital".into(),
+            place_id: "p-meth".into(),
+            place_name: "Methodist".into(),
+            lat: 39.7810,
+            lon: -86.1650,
+            meters: 800.0,
+            secs: 480.0,
+            how: "road".into(),
+        }];
+        let p = Pane {
+            limit: 25,
+            closest_place: "p-meth".into(),
+            ..Pane::default()
+        };
+        let out = render(&board(vec![p]), std::slice::from_ref(&i), &[], &places(), 1_000);
+        assert!(out.panes[0].cards[0].meta.iter().any(|m| m == "8 min"));
+
+        i.targets[0].how = "straight".into();
+        let out = render(&board(vec![p_of(&out)]), &[i], &[], &places(), 1_000);
+        assert!(
+            !out.panes[0].cards[0].meta.iter().any(|m| m.ends_with(" min")),
+            "a straight line is a distance, not a drive"
+        );
+        assert!(out.panes[0].cards[0].meta.iter().any(|m| m.ends_with(" mi")));
+    }
+
+    // The pane used above, rebuilt — `render` borrows it, so it cannot be
+    // moved into the second call.
+    fn p_of(_prev: &RenderedBoard) -> Pane {
+        Pane {
+            limit: 25,
+            closest_place: "p-meth".into(),
+            ..Pane::default()
+        }
+    }
+
+    #[test]
+    fn a_reports_pane_follows_the_places_talkgroups_and_carries_the_eta() {
+        let stored = |id: i64, tg: u16, summary: &str| crate::conversations::Stored {
+            id,
+            tg,
+            tg_name: "Med 03".into(),
+            last_at: 100 + id,
+            headline: "Chest Pain".into(),
+            summary: summary.into(),
+            units: vec!["Medic 21".into()],
+            eta: crate::conversations::eta_phrase(summary),
+            ..Default::default()
+        };
+        let rows = vec![
+            stored(1, 10256, "Inbound. The ETA is 15 minutes."),
+            stored(2, 10257, "Different hospital's talkgroup."),
+        ];
+        let p = Pane {
+            kind: "reports".into(),
+            limit: 25,
+            place: "p-meth".into(),
+            ..Pane::default()
+        };
+        let out = render(&board(vec![p]), &[], &rows, &places(), 1_000);
+        let cards = &out.panes[0].cards;
+        assert_eq!(cards.len(), 1, "only Methodist's talkgroup");
+        assert_eq!(cards[0].id, 1);
+        assert_eq!(cards[0].eta.as_deref(), Some("ETA is 15 minutes"));
+        assert_eq!(out.panes[0].sub, "Methodist");
+    }
+
+    #[test]
+    fn a_run_with_no_position_cannot_satisfy_a_place_filter() {
+        let mut i = run(1, "Chest Pain", 0.0, 0.0);
+        i.lat = None;
+        i.lon = None;
+        let p = Pane {
+            limit: 25,
+            closest_place: "p-meth".into(),
+            ..Pane::default()
+        };
+        assert!(drawn(&board(vec![p]), std::slice::from_ref(&i)).is_empty());
+        // ...but with no place filter it is still a run worth showing.
+        let p = Pane {
+            limit: 25,
+            ..Pane::default()
+        };
+        assert_eq!(drawn(&board(vec![p]), &[i]), vec![1]);
     }
 }

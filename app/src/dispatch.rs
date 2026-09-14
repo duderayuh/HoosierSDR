@@ -567,7 +567,7 @@ pub(crate) fn inc_get(c: &Connection, id: i64) -> Result<Option<Incident>, Strin
     .map_err(|e| format!("incident: {e}"))
 }
 
-fn inc_list(c: &Connection, since: i64, limit: u32) -> Result<Vec<Incident>, String> {
+pub fn inc_list(c: &Connection, since: i64, limit: u32) -> Result<Vec<Incident>, String> {
     let mut st = c
         .prepare(&format!(
             "SELECT {INC_COLS} FROM incidents WHERE updated >= ?1 ORDER BY updated DESC LIMIT ?2"
