@@ -100,6 +100,10 @@ pub enum FollowEvent {
     },
     /// A call finished; its audio is in `pcm` (8 kHz mono), not serialized.
     Call {
+        /// The control channel announced this call, but nothing was received
+        /// on the channel. The page ends the live row and lists nothing.
+        #[serde(default)]
+        announced_only: bool,
         tg: u16,
         name: String,
         /// Human-readable description (RadioReference "Description").
@@ -936,6 +940,8 @@ impl Reporter<'_> {
         });
 
         emit(FollowEvent::Call {
+            // Replayed from the library: it was a call when it was recorded.
+            announced_only: false,
             tg,
             name,
             desc: self.description_of(tg),
@@ -1177,7 +1183,16 @@ impl Reporter<'_> {
                 }
                 continue;
             }
-            self.calls += 1;
+            // A call the control channel announced but nobody made: the
+            // channel opened on a re-announcement after the real call had
+            // already retired, and nothing was ever received on it. The live
+            // view is still told it ended — it was told the channel opened —
+            // but it is not a transmission, so it is neither counted nor
+            // recorded. Counting these is what had the receive-health panel
+            // reporting a quarter of the traffic missing.
+            if !c.announced_only {
+                self.calls += 1;
+            }
             let secs = c.pcm.len() as f64 / 8000.0;
             // A grant's clips are reported together when it retires, each
             // saying how long after the grant it began; the grant's entry
@@ -1284,7 +1299,7 @@ impl Reporter<'_> {
                     }
                 }
             });
-            let id = self.db.and_then(|db| {
+            let id = self.db.filter(|_| !c.announced_only).and_then(|db| {
                 let row = crate::library::CallRow {
                     id: 0,
                     start: start as i64,
@@ -1342,6 +1357,7 @@ impl Reporter<'_> {
                 poor_frames: c.voice_frames_poor,
                 dropped_blocks,
                 talker_alias: c.talker_alias.clone(),
+                announced_only: c.announced_only,
                 wav,
                 id,
                 pcm: c.pcm,

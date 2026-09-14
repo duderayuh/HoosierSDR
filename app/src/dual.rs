@@ -255,6 +255,8 @@ fn finish_call(
     let _ = app.emit(
         "follow",
         FollowEvent::Call {
+            // A call decoded off the second radio: real audio, always.
+            announced_only: false,
             tg: c.tg,
             name: String::new(), // filled by the front end from its own lookup
             desc: None,

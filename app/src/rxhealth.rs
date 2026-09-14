@@ -88,6 +88,21 @@ pub fn verdict(pct: f64) -> &'static str {
     }
 }
 
+/// Rows that are not transmissions and must not be weighed as if they were.
+///
+/// A system re-announces a call for a second or two after the last radio
+/// releases. Older builds recorded each of those announcements as a call of
+/// zero length with no radio named — 4391 of them in 72 hours on this
+/// library, against 127 transmissions that genuinely failed to decode.
+/// Counted as losses they put this panel's reading at 25-29% when the real
+/// figure was near 1%, and sent a day of work after a receive problem that
+/// was not happening.
+///
+/// `follow` no longer writes them, but the ones already recorded have to age
+/// out, so they are excluded on the way in as well. A row with no audio, no
+/// radio named and nothing decoded is not evidence that anything was said.
+const ANNOUNCED_ONLY: &str = "(secs <= 0 AND COALESCE(unit, 0) = 0)";
+
 pub fn read(c: &rusqlite::Connection, hours: u32, now: i64) -> Result<Health, String> {
     let hours = hours.clamp(1, 24 * 14);
     let since = now - hours as i64 * 3600;
@@ -97,13 +112,13 @@ pub fn read(c: &rusqlite::Connection, hours: u32, now: i64) -> Result<Health, St
     };
 
     let mut q = c
-        .prepare(
+        .prepare(&format!(
             "SELECT COUNT(*),
                     SUM(CASE WHEN secs <= 0 AND encrypted = 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN secs > 0 AND poor_frames > 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN encrypted = 1 THEN 1 ELSE 0 END)
-               FROM calls WHERE start >= ?1",
-        )
+               FROM calls WHERE start >= ?1 AND NOT {ANNOUNCED_ONLY}"
+        ))
         .map_err(|e| e.to_string())?;
     let (calls, silent, poor, enc) = q
         .query_row([since], |r| {
@@ -125,14 +140,14 @@ pub fn read(c: &rusqlite::Connection, hours: u32, now: i64) -> Result<Health, St
     h.verdict = verdict(h.pct).into();
 
     let mut q = c
-        .prepare(
+        .prepare(&format!(
             "SELECT CAST(start / 3600 AS INTEGER) * 3600 AS hr,
                     COUNT(*),
                     SUM(CASE WHEN secs <= 0 AND encrypted = 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN secs > 0 AND poor_frames > 0 THEN 1 ELSE 0 END)
-               FROM calls WHERE start >= ?1 AND encrypted = 0
-              GROUP BY hr ORDER BY hr",
-        )
+               FROM calls WHERE start >= ?1 AND encrypted = 0 AND NOT {ANNOUNCED_ONLY}
+              GROUP BY hr ORDER BY hr"
+        ))
         .map_err(|e| e.to_string())?;
     h.hours = q
         .query_map([since], |r| {
@@ -153,13 +168,13 @@ pub fn read(c: &rusqlite::Connection, hours: u32, now: i64) -> Result<Health, St
         .collect();
 
     let mut q = c
-        .prepare(
+        .prepare(&format!(
             "SELECT tg, MAX(tg_name), COUNT(*),
                     SUM(CASE WHEN secs <= 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN secs > 0 AND poor_frames > 0 THEN 1 ELSE 0 END)
-               FROM calls WHERE start >= ?1 AND encrypted = 0
-              GROUP BY tg ORDER BY 4 DESC, 3 DESC LIMIT 12",
-        )
+               FROM calls WHERE start >= ?1 AND encrypted = 0 AND NOT {ANNOUNCED_ONLY}
+              GROUP BY tg ORDER BY 4 DESC, 3 DESC LIMIT 12"
+        ))
         .map_err(|e| e.to_string())?;
     h.talkgroups = q
         .query_map([since], |r| {
@@ -204,19 +219,72 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER,
-             tg_name TEXT, encrypted INTEGER DEFAULT 0, poor_frames INTEGER DEFAULT 0);",
+             tg_name TEXT, encrypted INTEGER DEFAULT 0, poor_frames INTEGER DEFAULT 0,
+             unit INTEGER DEFAULT 0);",
         )
         .unwrap();
         c
     }
 
+    /// A transmission: some radio keyed up, whether or not it decoded.
     fn add(c: &Connection, start: i64, tg: u16, name: &str, secs: f64, enc: i64, poor: i64) {
+        add_from(c, start, tg, name, secs, enc, poor, 4242);
+    }
+
+    fn add_from(
+        c: &Connection,
+        start: i64,
+        tg: u16,
+        name: &str,
+        secs: f64,
+        enc: i64,
+        poor: i64,
+        unit: u32,
+    ) {
         c.execute(
-            "INSERT INTO calls (start, secs, tg, tg_name, encrypted, poor_frames)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            rusqlite::params![start, secs, tg, name, enc, poor],
+            "INSERT INTO calls (start, secs, tg, tg_name, encrypted, poor_frames, unit)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![start, secs, tg, name, enc, poor, unit],
         )
         .unwrap();
+    }
+
+    /// The control channel re-announcing a call after the last radio released:
+    /// no audio, and no radio named, because none was transmitting.
+    fn announce(c: &Connection, start: i64, tg: u16, name: &str) {
+        add_from(c, start, tg, name, 0.0, 0, 0, 0);
+    }
+
+    #[test]
+    fn an_announcement_of_a_call_nobody_made_is_not_a_loss() {
+        // A system re-announces a call for a second or two after the last
+        // radio releases. Weighing those as failed transmissions is what had
+        // this panel reporting a quarter of the traffic missing when the real
+        // figure was near one percent.
+        let c = db();
+        add(&c, 1_000_000, 10256, "49M-M03", 5.0, 0, 0);
+        for k in 0..8 {
+            announce(&c, 1_000_010 + k, 10256, "49M-M03");
+        }
+        let h = read(&c, 24, 1_000_200).unwrap();
+        assert_eq!(
+            (h.calls, h.silent),
+            (1, 0),
+            "an announcement is neither a transmission nor a lost one"
+        );
+        assert_eq!(h.verdict, "good");
+        assert!(h.talkgroups.is_empty(), "nothing was lost to report");
+    }
+
+    #[test]
+    fn a_grant_that_named_a_radio_and_decoded_nothing_is_still_a_loss() {
+        // The real thing this panel is for: a radio keyed up and none of it
+        // was heard.
+        let c = db();
+        add_from(&c, 1_000_000, 10256, "49M-M03", 0.0, 0, 0, 4242);
+        add_from(&c, 1_000_100, 10256, "49M-M03", 5.0, 0, 0, 4243);
+        let h = read(&c, 24, 1_000_200).unwrap();
+        assert_eq!((h.calls, h.silent), (2, 1));
     }
 
     #[test]

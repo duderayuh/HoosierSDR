@@ -1053,6 +1053,11 @@ function handleFollow(ev) {
     case "call":
       activeEnd(ev);
       { const c = (channelCounts.get(ev.freq_mhz) || 1) - 1; c > 0 ? channelCounts.set(ev.freq_mhz, c) : channelCounts.delete(ev.freq_mhz); }
+      // The control channel announced a call nobody made — it re-announces
+      // one for a second or two after the last radio releases. The channel
+      // opened, so the live row above has to be closed, but there is no
+      // transmission to list and none to count as having produced no audio.
+      if (ev.announced_only) break;
       if (!ev.encrypted) followVoice += ev.secs;
       if (ev.emergency && !ev.replayed) { tone("emergency"); logEvent(`EMERGENCY · ${ev.name} · unit ${ev.unit_name || ev.source}`, "alarm"); }
       addCall({ at: ev.replayed ? ev.start : null, tg: ev.tg, name: ev.name, desc: ev.desc, service: ev.service, category: ev.category, source: ev.source, unit_name: ev.unit_name, talker_alias: ev.talker_alias, freq_mhz: ev.freq_mhz, encrypted: ev.encrypted,

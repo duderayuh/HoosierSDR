@@ -763,18 +763,24 @@ fn an_update_after_the_call_ends_does_not_invent_a_second_call() {
     add_to_band(&mut band, &traffic, TRAFFIC + TUNER_ERROR);
 
     let (_started, _enc, completed) = run_follower(&band);
-    let ours: Vec<usize> = completed
+    let ours: Vec<(usize, bool)> = completed
         .iter()
         .filter(|c| c.talkgroup == TALKGROUP)
-        .map(|c| c.pcm.len())
+        .map(|c| (c.pcm.len(), c.announced_only))
         .collect();
-    let empty = ours.iter().filter(|n| **n == 0).count();
     assert!(
-        ours.iter().any(|n| *n > 0),
+        ours.iter().any(|(n, _)| *n > 0),
         "the real transmission was lost: {ours:?}"
     );
-    assert_eq!(
-        empty, 0,
-        "an update with no radio on it opened {empty} empty call(s): {ours:?}"
+    // The channel still opens — an update is also how a call already in
+    // progress is found — but a call nobody made is marked as such, so it is
+    // neither recorded nor counted as a transmission that failed to decode.
+    assert!(
+        ours.iter().all(|(n, only)| (*n == 0) == *only),
+        "every empty call must be marked announced_only, and no real one: {ours:?}"
+    );
+    assert!(
+        ours.iter().any(|(_, only)| *only),
+        "the empty call this test exists to catch did not appear: {ours:?}"
     );
 }

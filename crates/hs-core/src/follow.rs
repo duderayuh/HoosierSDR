@@ -264,6 +264,27 @@ pub struct Call {
     /// which is what a listener hears as a chop. From the decoder whose
     /// audio was kept.
     pub voice_frames_poor: u64,
+    /// The control channel announced this call, but nothing was ever received
+    /// on the channel: no audio, no frame sync, and no radio named.
+    ///
+    /// A system re-announces a call for a second or two after the last radio
+    /// releases — the channel is still assigned to the talkgroup, and those
+    /// updates name no radio. By then the call has been retired, so the
+    /// update finds no channel on the frequency and opens one; nobody is
+    /// transmitting, so it records nothing.
+    ///
+    /// It cannot be refused when the channel is opened. An update is also how
+    /// a call already in progress is found — tuning in mid-call, or after the
+    /// control channel moves — and on this system 1235 real transmissions in
+    /// 72 hours were opened by an update within five seconds of a previous
+    /// call ending, against 4233 of these. The two are only separable
+    /// afterwards, by whether anything was actually heard.
+    ///
+    /// All three conditions are required, so nothing real is swallowed: a
+    /// transmission that happened either carries audio, or locked onto the
+    /// channel and decoded it badly, or names the radio that keyed. An
+    /// encrypted call carries no audio by design and is never marked.
+    pub announced_only: bool,
     /// Talkgroups patched to this one; audio may be shared with them.
     pub patched_with: Vec<u16>,
     /// A radio signalled emergency during the call (link-control service
@@ -1108,6 +1129,11 @@ impl TrunkFollower {
                     )
                     .any(|l| l.emergency);
                 Call {
+                    announced_only: pcm.is_empty()
+                        && !encrypted
+                        && s.syncs_c4fm == 0
+                        && s.syncs_cqpsk == 0
+                        && source_unit == 0,
                     syncs_c4fm: s.syncs_c4fm,
                     syncs_cqpsk: s.syncs_cqpsk,
                     started_after_secs: s.start_age,
