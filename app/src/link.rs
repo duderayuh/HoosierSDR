@@ -164,6 +164,32 @@ pub fn decide(report: &Report, open: &[Dispatch], vocabulary: &HashSet<String>) 
     Link::None
 }
 
+/// Decide, and when nothing the report says fits a run, try what the
+/// calling radios are learned to be (`radios.rs`). The reason then says so,
+/// because the crew never said it.
+pub fn decide_with_learned(
+    report: &Report,
+    open: &[Dispatch],
+    vocabulary: &HashSet<String>,
+    learned: &[String],
+) -> Link {
+    let said = decide(report, open, vocabulary);
+    if said != Link::None || learned.is_empty() {
+        return said;
+    }
+    let by_radio = Report {
+        at: report.at,
+        text: learned.join(", "),
+    };
+    match decide(&by_radio, open, vocabulary) {
+        Link::Made { incident, how } => Link::Made {
+            incident,
+            how: format!("{how} (the radio that called is learned as {})", learned.join(", ")),
+        },
+        other => other,
+    }
+}
+
 /// What the model is asked when the clock cannot separate two runs. It is
 /// given nothing but the report and the runs, and answers with an id.
 pub fn tie_prompt(report: &Report, fits: &[&Dispatch], unit: &str) -> String {
@@ -240,6 +266,28 @@ pub fn open_dispatches(c: &Connection, at: i64) -> Vec<Dispatch> {
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
 }
 
+/// The callsigns the crew radios in a conversation are learned to be.
+fn learned_crew(c: &Connection, pieces: &[crate::conversations::Piece]) -> Vec<String> {
+    let system = pieces
+        .iter()
+        .find_map(|p| p.id)
+        .and_then(|id| c.query_row("SELECT system FROM calls WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok())
+        .unwrap_or_default();
+    let radios: Vec<(String, u32)> = pieces
+        .iter()
+        .filter(|p| !p.fixed && p.unit != 0)
+        .map(|p| (system.clone(), p.unit))
+        .collect();
+    let mut out: Vec<String> = crate::radios::identities(c, &radios)
+        .into_values()
+        .filter(|i| i.usable() && i.role == crate::radios::UNIT)
+        .map(|i| i.callsign)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Remember a link.
 pub fn attach(c: &Connection, conversation: i64, incident: i64, how: &str) -> Result<(), String> {
     c.execute(
@@ -301,13 +349,13 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
     let state = app.state::<crate::AppState>();
     let db = state.db.lock().unwrap().clone()?;
 
-    let (report, open, vocab) = {
+    let (report, open, vocab, learned) = {
         let c = db.lock().unwrap();
-        let (at, summary, transcript, already): (i64, String, String, Option<i64>) = c
+        let (at, summary, transcript, already, pieces): (i64, String, String, Option<i64>, String) = c
             .query_row(
-                "SELECT first_at, summary, transcript, incident FROM conversations WHERE id = ?1",
+                "SELECT first_at, summary, transcript, incident, pieces FROM conversations WHERE id = ?1",
                 [conversation],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .ok()?;
         if already.is_some() {
@@ -317,10 +365,11 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
             at,
             text: format!("{summary}\n{transcript}"),
         };
-        (report, open_dispatches(&c, at), vocabulary(&c))
+        let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
+        (report, open_dispatches(&c, at), vocabulary(&c), learned_crew(&c, &pieces))
     };
 
-    let (incident, how) = match decide(&report, &open, &vocab) {
+    let (incident, how) = match decide_with_learned(&report, &open, &vocab, &learned) {
         Link::Made { incident, how } => (incident, how),
         Link::None => return None,
         Link::Tie { incidents, unit } => {
@@ -447,6 +496,29 @@ mod tests {
     }
 
     #[test]
+    fn a_crew_that_never_says_its_name_is_joined_by_its_radio_and_says_so() {
+        let open = vec![dispatch(10, 1_000, &["Medic 71"]), dispatch(11, 1_100, &["Medic 74"])];
+        let quiet = report(2_400, "71, this is the ER, go ahead. Coming in with a 60 year old male.");
+        assert_eq!(decide(&quiet, &open, &vocab()), Link::None);
+        let got = decide_with_learned(&quiet, &open, &vocab(), &["Medic 71".to_string()]);
+        assert_eq!(
+            got,
+            Link::Made {
+                incident: 10,
+                how: "Medic 71 was sent to this run (the radio that called is learned as Medic 71)".into()
+            }
+        );
+        // What the crew says still wins over what the radio is learned to be.
+        let said = report(2_400, "Medic 74 is inbound");
+        assert_eq!(
+            decide_with_learned(&said, &open, &vocab(), &["Medic 71".to_string()]),
+            Link::Made { incident: 11, how: "Medic 74 was sent to this run".into() }
+        );
+        // Nothing learned, nothing joined.
+        assert_eq!(decide_with_learned(&quiet, &open, &vocab(), &[]), Link::None);
+    }
+
+    #[test]
     fn a_run_too_long_ago_is_a_different_job() {
         let open = vec![dispatch(10, 1_000, &["Medic 71"])];
         // Well past the drive-and-report window.
@@ -554,7 +626,7 @@ mod real {
             .flatten()
             .collect();
         let (mut made, mut tie, mut none) = (0, 0, 0);
-        let (mut no_sign, mut no_runs, mut unmatched) = (0, 0, 0);
+        let (mut no_sign, mut no_runs, mut unmatched, mut by_radio) = (0, 0, 0, 0);
         for (id, at, tg, tg_name, summary, transcript) in &rows {
             let report = Report {
                 at: *at,
@@ -584,6 +656,21 @@ mod real {
                 }
                 Link::None => {
                     none += 1;
+                    let pieces: String = c
+                        .query_row("SELECT pieces FROM conversations WHERE id = ?1", [id], |r| r.get(0))
+                        .unwrap_or_default();
+                    let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
+                    let learned = learned_crew(&c, &pieces);
+                    if let Link::Made { incident, how } = decide_with_learned(&report, &open, &v, &learned) {
+                        by_radio += 1;
+                        let (ct, addr): (String, String) = c
+                            .query_row("SELECT call_type, address FROM incidents WHERE id = ?1", [incident], |r| {
+                                Ok((r.get(0)?, r.get(1)?))
+                            })
+                            .unwrap_or_default();
+                        println!("  BY RADIO conv {id} ({tg_name}) → run {incident} {ct} @ {addr}  [{how}]");
+                        println!("      {}", summary.lines().next().unwrap_or("").trim());
+                    }
                     let said = callsigns(&report.text, &v);
                     if said.is_empty() {
                         no_sign += 1;
@@ -601,7 +688,7 @@ mod real {
         println!(
             "{} conversations: {made} joined, {tie} ties for the model, {none} unjoined \
              ({no_sign} named no crew, {no_runs} had no dispatch recorded in the window, \
-             {unmatched} named a crew no nearby run was sent)",
+             {unmatched} named a crew no nearby run was sent); {by_radio} of the unjoined joined by a learned radio",
             rows.len()
         );
     }

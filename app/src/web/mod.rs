@@ -56,6 +56,7 @@ fn is_heavy(frame: &Frame) -> bool {
 /// phone sees the same live feed the desktop window does.
 const APP_EVENTS: &[&str] = &[
     "follow",
+    "radios",
     "grant",
     "status",
     "spectrum",

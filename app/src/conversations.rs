@@ -1405,6 +1405,7 @@ fn store_outcome(app: &AppHandle, r: &Rule, c: &Conversation, o: &Outcome) {
         if let Some(id) = id {
             let app = app.clone();
             std::thread::spawn(move || {
+                crate::radios::from_conversation(&app, id);
                 if let Some((incident, how)) = crate::link::try_link(&app, id) {
                     println!("[link] conversation {id} → incident {incident} ({how})");
                 }
@@ -1493,6 +1494,10 @@ pub struct Stored {
     /// [`eta_phrase`]. `None` when the note gives no arrival time, which is
     /// common and not an error.
     pub eta: Option<String>,
+    /// What the radios nobody named are learned to be (`radios.rs`), by
+    /// radio ID. Filled when one conversation is read for its page.
+    #[serde(default)]
+    pub learned: HashMap<u32, String>,
 }
 
 const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline";
@@ -1527,6 +1532,7 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         detail: row.get(11)?,
         headline: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
         eta: eta_phrase(&summary),
+        learned: HashMap::new(),
         summary,
         message: row.get(13)?,
         prompt: row.get(14)?,
@@ -1601,7 +1607,29 @@ pub fn list_rows(
 
 #[tauri::command]
 pub fn conversation_get(state: State<AppState>, id: i64) -> Result<Stored, String> {
-    with_db(&state, |c| get_row(c, id))
+    with_db(&state, |c| {
+        let mut row = get_row(c, id)?;
+        row.learned = learned_names(c, &row.pieces);
+        Ok(row)
+    })
+}
+
+/// Learned names for the radios in a conversation that carry no alias.
+fn learned_names(c: &Connection, pieces: &[Piece]) -> HashMap<u32, String> {
+    let system = pieces
+        .iter()
+        .find_map(|p| p.id)
+        .and_then(|id| c.query_row("SELECT system FROM calls WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok())
+        .unwrap_or_default();
+    let radios: Vec<(String, u32)> = pieces
+        .iter()
+        .filter(|p| p.unit_name.is_none() && p.unit != 0)
+        .map(|p| (system.clone(), p.unit))
+        .collect();
+    crate::radios::identities(c, &radios)
+        .into_iter()
+        .filter_map(|((_, radio), id)| id.label().map(|l| (radio, l)))
+        .collect()
 }
 
 fn get_row(c: &Connection, id: i64) -> Result<Stored, String> {

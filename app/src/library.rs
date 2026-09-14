@@ -48,6 +48,10 @@ pub struct CallRow {
     /// the UI, from the tripwire history).
     #[serde(default)]
     pub fired: Vec<crate::events::Fired>,
+    /// What the radio is learned to be when nobody has named it
+    /// (`radios.rs`). Filled when rows are handed to the UI, never stored.
+    #[serde(default)]
+    pub learned: Option<String>,
 }
 
 pub fn open(dir: &Path) -> Result<Connection, String> {
@@ -234,6 +238,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         poor_frames: r.get::<_, i64>(23)? as u64,
         dropped_blocks: r.get::<_, i64>(24)? as u64,
         fired: Vec::new(),
+        learned: None,
     })
 }
 

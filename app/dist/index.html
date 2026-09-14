@@ -1271,6 +1271,19 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Radios learned from the air</span><span class="meta" id="rdMeta"></span><button class="btn ghost sm" id="rdBackfill" title="Read every stored call and hospital report for who each radio is. Sends nothing, asks no model.">Read the library</button></div>
+            <div class="body">
+              <p class="help">Crews say who they are: “control, Medic 32”, “this is Medic 17”, a hospital answering “Medic 44, go ahead”. Each time is kept as evidence with the call it came from. A radio is <b>learned</b> once one callsign has at least three pieces of evidence and most of what was said; below that it is <b>tentative</b> and is shown but never used. A radio whose last three sightings name someone else is <b>changed</b> and stops being used until you decide. Learned names appear in the library and on hospital reports, and join a report to its run when the crew never says its name; that join says it came from the radio. Right-click any call to say what its radio is.</p>
+              <div class="row3">
+                <label class="field"><span class="lab">Show</span><select id="rdShow"><option value="use">learned and confirmed</option><option value="attention">changed or tentative</option><option value="all">everything</option></select></label>
+                <label class="field"><span class="lab">Search</span><input id="rdSearch" type="text" placeholder="Medic 32, 9001…" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><span class="mono small faint" id="rdCounts"></span></label>
+              </div>
+              <div class="tablewrap tgs" style="max-height:340px"><table><thead><tr><th>Radio</th><th>Is</th><th title="Weight behind it, and its share of everything said about this radio">Evidence</th><th>Last heard</th><th class="actions-h">Decide</th></tr></thead><tbody id="rdBody"></tbody></table></div>
+              <div class="empty small" id="rdEmpty">Nothing learned yet. Press “Read the library” to read the calls already stored; new calls are read as their transcripts arrive.</div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">Talkgroup CSV</span></div>
             <div class="body">
               <label class="field"><span class="lab">RadioReference CSV export (no API login needed)</span>

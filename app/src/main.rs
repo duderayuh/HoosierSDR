@@ -32,6 +32,7 @@ mod follow;
 mod hook;
 mod library;
 mod link;
+mod radios;
 mod mapshot;
 mod models;
 mod names;
@@ -657,6 +658,7 @@ fn library_search(
         for r in rows.iter_mut() {
             r.fired = fired.remove(&r.id).unwrap_or_default();
         }
+        radios::fill_learned(c, &mut rows);
         Ok(rows)
     })?;
     let sids = playlists::sids_by_system_name(&app);
@@ -676,6 +678,7 @@ fn library_get(
         let mut row = library::get(c, id)?;
         if let Some(r) = row.as_mut() {
             r.fired = events::fired_for(c, &[r.id]).remove(&r.id).unwrap_or_default();
+            radios::fill_learned(c, std::slice::from_mut(r));
         }
         Ok(row)
     })?;
@@ -2360,6 +2363,7 @@ fn main() {
                         events::ensure_schema(&c);
                         backtest::ensure_schema(&c);
                         link::ensure_schema(&c);
+                        radios::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2473,6 +2477,16 @@ fn main() {
             dispatch::dispatch_regeocode,
             dispatch::dispatch_calibrate,
             link::incidents_relink,
+            radios::radios_backfill,
+            radios::radios_list,
+            radios::radio_identity,
+            radios::radio_evidence,
+            radios::radio_confirm,
+            radios::radio_reject,
+            radios::radio_unconfirm,
+            radios::radio_for_call,
+            radios::radio_answer_call,
+            radios::radio_answer,
             places::places_get,
             places::places_set,
             places::places_suggest,

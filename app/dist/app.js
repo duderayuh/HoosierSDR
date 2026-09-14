@@ -2081,6 +2081,97 @@ if (TAURI) {
   };
   renderUnits();
 
+  /* ---------- radios learned from the air (radios.rs) ---------- */
+  // What each radio is, from what was said: the evidence is kept per call in
+  // the library and the identity is worked out on read, so a decision here
+  // changes the radio everywhere at once.
+  const RD_ROLE = { console: "Dispatch console", automated: "Dispatch page voice", hospital: "Hospital radio" };
+  const RD_HOW = { said_self: "said its own name", said_status: "gave its own status", reply_to_control: "answered a console that called", hospital_addressed: "a hospital called it by name", said_to_hospital: "named itself to a hospital", from_control: "called a unit from control", automated_page: "read out a page", hospital_radio: "a hospital's own radio" };
+  const rdWhen = (s) => s ? new Date(s * 1000).toLocaleString("en-US", { hour12: false, month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+  const rdKey = (i) => `${i.system}|${i.radio}`;
+  const rdSplit = (key) => { const at = key.lastIndexOf("|"); return { system: key.slice(0, at), radio: +key.slice(at + 1) }; };
+  let rdAll = [], rdOpen = null, rdTimer = null;
+  function rdIs(i) {
+    if (i.role && i.role !== "unit") return esc(RD_ROLE[i.role] || i.role);
+    if (!i.callsign) return '<span class="faint">not enough to say</span>';
+    return `<b>${esc(i.callsign)}</b>${i.state === "changed" && i.latest ? ` <span class="faint">lately ${esc(i.latest)}</span>` : ""}`;
+  }
+  const rdBadge = (st) => `<span class="badge ${st === "confirmed" || st === "learned" ? "clear" : st === "changed" ? "enc" : ""}">${esc(st || "unsure")}</span>`;
+  function rdRender() {
+    const show = $("rdShow").value, q = $("rdSearch").value.trim().toLowerCase();
+    const use = (i) => i.state === "learned" || i.state === "confirmed";
+    const rows = rdAll
+      .filter((i) => show === "all" || (show === "use" ? use(i) : (i.state === "changed" || i.state === "tentative")))
+      .filter((i) => !q || `${i.radio} ${i.callsign} ${i.latest} ${RD_ROLE[i.role] || ""}`.toLowerCase().includes(q));
+    const n = (st) => rdAll.filter((i) => i.state === st).length;
+    $("rdMeta").textContent = rdAll.length ? `${rdAll.filter(use).length} usable` : "";
+    $("rdCounts").textContent = rdAll.length ? `${n("confirmed")} confirmed · ${n("learned")} learned · ${n("changed")} changed · ${n("tentative")} tentative` : "";
+    $("rdEmpty").style.display = rdAll.length ? "none" : "";
+    $("rdBody").innerHTML = rows.slice(0, 500).map((i) => {
+      const key = esc(rdKey(i));
+      const unitish = !i.role || i.role === "unit";
+      const ev = unitish ? `${i.weight.toFixed(1)} · ${Math.round(i.share * 100)} %` : `${i.weight.toFixed(0)}`;
+      const acts = [
+        `<button class="btn ghost sm" data-rdev="${key}">Evidence</button>`,
+        unitish && i.callsign && i.state !== "confirmed" ? `<button class="btn ghost sm" data-rdok="${key}" title="This radio is ${esc(i.callsign)}">Right</button>` : "",
+        i.state === "changed" && i.latest ? `<button class="btn ghost sm" data-rdlatest="${key}" title="This radio is ${esc(i.latest)} now">Now ${esc(i.latest)}</button>` : "",
+        unitish && i.callsign && i.state !== "confirmed" ? `<button class="btn ghost sm" data-rdno="${key}" title="This radio is not ${esc(i.callsign)}">Wrong</button>` : "",
+        `<button class="btn ghost sm" data-rdset="${key}">Set…</button>`,
+        i.state === "confirmed" ? `<button class="btn ghost sm" data-rdundo="${key}" title="Forget what you said and let the evidence decide">Undo</button>` : "",
+      ].join("");
+      return `<tr><td class="mono">${i.radio}${i.system ? `<span class="faint" style="display:block;font-size:10.5px">${esc(i.system)}</span>` : ""}</td><td>${rdIs(i)} ${rdBadge(i.state)}</td><td class="mono">${ev}</td><td class="mono">${esc(rdWhen(i.last_at))}</td><td class="act">${acts}</td></tr>`
+        + (rdOpen === rdKey(i) ? `<tr><td colspan="5" id="rdEvidence"><span class="faint">loading…</span></td></tr>` : "");
+    }).join("");
+    const find = (key) => rdAll.find((i) => rdKey(i) === key);
+    const act = async (fn) => { try { await fn(); await rdLoad(); } catch (e) { uiToast(`${e}`, "err"); } };
+    $("rdBody").querySelectorAll("[data-rdev]").forEach((b) => b.onclick = () => { rdOpen = rdOpen === b.dataset.rdev ? null : b.dataset.rdev; rdRender(); });
+    $("rdBody").querySelectorAll("[data-rdok]").forEach((b) => b.onclick = () => act(() => { const i = find(b.dataset.rdok); return invoke("radio_confirm", { system: i.system, radio: i.radio, role: "unit", callsign: i.callsign }); }));
+    $("rdBody").querySelectorAll("[data-rdlatest]").forEach((b) => b.onclick = () => act(() => { const i = find(b.dataset.rdlatest); return invoke("radio_confirm", { system: i.system, radio: i.radio, role: "unit", callsign: i.latest }); }));
+    $("rdBody").querySelectorAll("[data-rdno]").forEach((b) => b.onclick = () => act(() => { const i = find(b.dataset.rdno); return invoke("radio_reject", { system: i.system, radio: i.radio, callsign: i.callsign }); }));
+    $("rdBody").querySelectorAll("[data-rdundo]").forEach((b) => b.onclick = () => act(() => invoke("radio_unconfirm", rdSplit(b.dataset.rdundo))));
+    $("rdBody").querySelectorAll("[data-rdset]").forEach((b) => b.onclick = async () => {
+      const i = find(b.dataset.rdset);
+      const answer = await uiAsk(`What is radio ${i.radio}? A callsign like Medic 32, or console, hospital or page voice`, i.callsign || (RD_ROLE[i.role] ? i.role : ""), "Save");
+      if (answer == null || !answer.trim()) return;
+      act(() => invoke("radio_answer", { system: i.system, radio: i.radio, answer }));
+    });
+    if (rdOpen && $("rdEvidence")) rdEvidence(rdSplit(rdOpen));
+  }
+  async function rdEvidence(which) {
+    try {
+      const rows = (await invoke("radio_evidence", which)) || [];
+      const cell = $("rdEvidence"); if (!cell) return;
+      cell.innerHTML = rows.length ? `<div class="list" style="max-height:220px">${rows.map((e) =>
+        `<div class="mono small" style="display:flex;gap:8px;align-items:baseline;padding:2px 0"><span>${esc(rdWhen(e.at))}</span>`
+        + `<b>${esc(e.callsign || RD_ROLE[e.role] || e.role)}</b><span class="faint">${esc(RD_HOW[e.how] || e.how)} · ${e.weight}</span>`
+        + `<span class="faint">${esc(e.tg_name || (e.conversation ? `hospital report ${e.conversation}` : ""))}</span>`
+        + `<span style="flex:1;font-family:var(--font, inherit)">${esc(e.transcript || "")}</span>`
+        + `${e.call && e.tg != null ? `<button class="btn ghost sm" data-rdplay="${e.call}" title="Play">▶</button>` : ""}</div>`).join("")}</div>` : '<span class="faint">No evidence kept.</span>';
+      cell.querySelectorAll("[data-rdplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.rdplay }).catch((e) => uiToast(`${e}`, "err")));
+    } catch (e) { uiToast(`${e}`, "err"); }
+  }
+  async function rdLoad() {
+    try { rdAll = (await invoke("radios_list")) || []; rdRender(); } catch (e) { log(`radios: ${e}`); }
+  }
+  $("rdShow").onchange = rdRender;
+  $("rdSearch").oninput = rdRender;
+  $("rdBackfill").onclick = async () => {
+    const b = $("rdBackfill"); b.disabled = true; b.textContent = "Reading…";
+    try {
+      const r = (await invoke("radios_backfill")) || { calls: 0, conversations: 0, added: 0, learned: 0, radios: 0 };
+      uiToast(`Read ${r.calls} calls and ${r.conversations} hospital reports: ${r.added} new pieces of evidence, ${r.learned} of ${r.radios} radios usable`);
+      await rdLoad();
+    } catch (e) { uiToast(`${e}`, "err"); }
+    b.disabled = false; b.textContent = "Read the library";
+  };
+  // Transcripts keep adding evidence; redraw only while the panel is on screen.
+  if (listen) listen("radios", () => {
+    if (!$("rdBody") || $("rdBody").offsetParent === null) return;
+    clearTimeout(rdTimer); rdTimer = setTimeout(rdLoad, 3000);
+  });
+  window.rdLoad = rdLoad;
+  rdLoad();
+
   /* ---------- library: search, listen, detail, export ---------- */
   let libRows = [], libSel = null, listening = false, listenQueue = [], listenIdx = 0, listenTimer = null;
   const fmtT = (epoch) => new Date(epoch * 1000).toLocaleString("en-US", { hour12: false, month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -2108,7 +2199,7 @@ if (TAURI) {
       `<td class="time">${esc(fmtT(r.start))}</td>` +
       `<td class="tg">${esc(r.tg_name)}<span class="num">TG ${r.tg}${r.emergency ? " · EMERGENCY" : ""}</span>${r.encrypted ? '<span class="badge enc">Encrypted</span>' : ""}${r.service ? `<span class="svc">${esc(r.service)}</span>` : ""}${r.category ? `<span class="cat">${esc(r.category)}</span>` : ""}${(r.fired || []).length ? `<span class="twbox">${firedBadges(r.fired)}</span>` : ""}</td>` +
       `<td class="desc">${esc(r.tg_desc || "")}</td>` +
-      `<td class="src">${r.unit_name ? `${esc(r.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : (r.unit ? `UID ${r.unit}` : "—")}</td><td class="len">${r.secs.toFixed(1)} s</td>` +
+      `<td class="src">${r.unit_name ? `${esc(r.unit_name)}<span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : r.learned ? `<i class="learned" title="Learned from what was said on the air (Settings → Radios learned from the air)">${esc(r.learned)}</i><span class="num" style="display:block;font-size:10.5px;color:var(--ink-faint)">UID ${r.unit}</span>` : (r.unit ? `UID ${r.unit}` : "—")}</td><td class="len">${r.secs.toFixed(1)} s</td>` +
       `<td class="tr ${r.transcript_edited ? "edited" : ""}" title="${esc(t)}">${esc(t) || (r.audio ? '<span class="faint">not transcribed</span>' : '<span class="faint">no audio</span>')}</td>` +
       `<td class="act">${r.audio ? `<button title="Play" data-lplay="${r.id}">▶</button>` : ""}<button title="Star" data-lstar="${r.id}" class="${r.starred ? "pri-h" : ""}">★</button>` +
       `<button title="Run the transcriber on this call now (again, if it already has a transcript)" data-ltr="${r.id}">Transcribe</button></td></tr>`;
@@ -2166,7 +2257,7 @@ if (TAURI) {
       const r = await invoke("library_get", { id }); if (!r) return;
       $("detMeta").textContent = `#${r.id} · ${r.sha256 ? "sha256 " + r.sha256.slice(0, 12) + "…" : "no audio"}${r.dropped_blocks ? ` · ${r.dropped_blocks} stream drop(s)` : ""}${r.poor_frames ? ` · ${r.poor_frames}/${Math.round(r.secs * 50)} frames concealed` : ""}`;
       $("detBody").innerHTML = `<div class="det">
-        <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
+        <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.learned ? esc(r.learned) + " (" + r.unit + ", learned)" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
         ${(r.fired || []).length ? `<div class="k">Tripwires</div><div class="twlist">${r.fired.map((f) => `<div>${firedBadges([f])} <span class="faint">${esc(f.status === "quiet" ? "looked, stayed quiet" : f.status)} · ${esc(fmtT(f.at))}</span></div>`).join("")}</div>` : ""}
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
@@ -3058,8 +3149,10 @@ async function convOpen(id) {
   const seen = new Set(); const parts = [];
   for (const p of pieces) { if (seen.has(p.unit)) continue; seen.add(p.unit); parts.push(p); }
   const mobiles = parts.filter((p) => !p.fixed), fixed = parts.filter((p) => p.fixed);
-  $("cvdParts").innerHTML = mobiles.map((p, i) => `<div class="p">${i === 0 ? '<span class="star" title="Primary unit">★</span>' : '<span style="width:1em"></span>'}<span class="mono faint">UID ${p.unit}</span><b>${esc(convUnitName(p))}</b><span class="cvunit">unit</span>${i === 0 ? '<span class="badge">primary</span>' : ""}</div>`).join("")
-    + fixed.map((p) => `<div class="p"><span style="width:1em"></span><span class="mono faint">UID ${p.unit}</span><b>${esc(p.unit_name || "fixed party")}</b><span class="cvunit fixed">hospital</span></div>`).join("")
+  const learned = r.learned || {};
+  const unitName = (p) => p.unit_name || (learned[p.unit] ? `${learned[p.unit]} (learned)` : convUnitName(p));
+  $("cvdParts").innerHTML = mobiles.map((p, i) => `<div class="p">${i === 0 ? '<span class="star" title="Primary unit">★</span>' : '<span style="width:1em"></span>'}<span class="mono faint">UID ${p.unit}</span><b>${esc(unitName(p))}</b><span class="cvunit">unit</span>${i === 0 ? '<span class="badge">primary</span>' : ""}</div>`).join("")
+    + fixed.map((p) => `<div class="p"><span style="width:1em"></span><span class="mono faint">UID ${p.unit}</span><b>${esc(p.unit_name || learned[p.unit] || "fixed party")}</b><span class="cvunit fixed">hospital</span></div>`).join("")
     || `<div class="faint small">No radios recorded.</div>`;
   $("cvdSummary").textContent = r.summary || (r.status === "skipped" ? "(skipped — no transcript arrived, so nothing was summarised)" : "(no summary)");
   $("cvdSummMeta").textContent = r.summary ? `${r.summary.length} chars` : "";
@@ -3069,7 +3162,7 @@ async function convOpen(id) {
   $("cvdTranscript").textContent = r.transcript || "(empty)";
   $("cvdPrompt").textContent = r.prompt || "(no prompt — no transcript, so the model was not asked)";
   $("cvdSegMeta").textContent = `${pieces.length} · ${convDur(pieces.reduce((a, p) => a + (p.secs || 0), 0))} of audio`;
-  $("cvdSegs").innerHTML = pieces.map((p) => `<tr><td class="mono time">${esc(convClock(p.at))}<br><small class="faint">${(p.secs || 0).toFixed(1)} s</small></td><td class="who"><span class="cvunit ${p.fixed ? "fixed" : ""}">${p.fixed ? "hospital" : "unit"}</span><br><span class="mono faint">UID ${p.unit}</span> ${esc(p.fixed ? (p.unit_name || "") : convUnitName(p))}</td><td class="tr">${p.transcript ? esc(p.transcript) : '<span class="faint">[no transcript]</span>'}</td><td class="act">${p.id != null ? `<button class="btn ghost sm" data-cvplay="${p.id}" title="Play this transmission">▶</button>` : p.audio ? `<button class="btn ghost sm" data-cvwav="${esc(p.audio)}" title="Play this transmission">▶</button>` : ""}</td></tr>`).join("")
+  $("cvdSegs").innerHTML = pieces.map((p) => `<tr><td class="mono time">${esc(convClock(p.at))}<br><small class="faint">${(p.secs || 0).toFixed(1)} s</small></td><td class="who"><span class="cvunit ${p.fixed ? "fixed" : ""}">${p.fixed ? "hospital" : "unit"}</span><br><span class="mono faint">UID ${p.unit}</span> ${esc(p.fixed ? (p.unit_name || learned[p.unit] || "") : unitName(p))}</td><td class="tr"${p.id != null ? ` data-trid="${p.id}" title="${esc(p.transcript || "")}"` : ""}>${p.transcript ? esc(p.transcript) : '<span class="faint">[no transcript]</span>'}</td><td class="act">${p.id != null ? `<button class="btn ghost sm" data-cvplay="${p.id}" title="Play this transmission">▶</button>` : p.audio ? `<button class="btn ghost sm" data-cvwav="${esc(p.audio)}" title="Play this transmission">▶</button>` : ""}</td></tr>`).join("")
     || `<tr><td colspan="4" class="faint">No transmissions recorded.</td></tr>`;
   $("cvdSegs").querySelectorAll("[data-cvplay]").forEach((b) => b.onclick = () => invoke("library_play", { id: +b.dataset.cvplay }).catch((e) => uiToast(`${e}`, "err")));
   $("cvdSegs").querySelectorAll("[data-cvwav]").forEach((b) => b.onclick = () => invoke("play_wav", { path: b.dataset.cvwav }).catch((e) => uiToast(`${e}`, "err")));
@@ -3186,6 +3279,18 @@ document.addEventListener("contextmenu", (e) => {
       if (typeof window.libRefreshRow === "function" && tr && tr.dataset.id) window.libRefreshRow(+id);
       if (Array.isArray(history)) { const h = history.find((x) => x.el === tr); if (h) { h.text += " " + text.toLowerCase(); } }
     });
+  }]);
+  items.push(["📻 This radio is…", async () => {
+    try {
+      const i = await invoke("radio_for_call", { call: +id });
+      const now = i.callsign || (i.role && i.role !== "unit" ? i.role : "");
+      const answer = await uiAsk(`What is radio ${i.radio}? A callsign like Medic 32, or console, hospital or page voice`, now, "Save");
+      if (answer == null || !answer.trim()) return;
+      const got = await invoke("radio_answer_call", { call: +id, answer });
+      uiToast(`Radio ${got.radio} is ${got.callsign || got.role}`);
+      if (typeof window.libRefreshRow === "function" && tr && tr.dataset.id) window.libRefreshRow(+id);
+      if (typeof window.rdLoad === "function") window.rdLoad();
+    } catch (e) { uiToast(`${e}`, "err"); }
   }]);
   items.push(["⚡ Tell me when something like this happens…", () => { if (typeof window.tripwireFromCall === "function") window.tripwireFromCall(+id); }]);
   uiMenu(e.clientX, e.clientY, items);

@@ -484,6 +484,7 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                         crate::tripwires::on_transcript(&app2, id, &corrected);
                         crate::conversations::on_transcript(&app2, id, &corrected);
                         crate::dispatch::on_transcript(&app2, id, &corrected);
+                        crate::radios::on_transcript(&app2, id, &corrected);
                     }
                 } else if let Some(err) = v["error"].as_str() {
                     // A decode/transcribe failure on this file is terminal: mark
