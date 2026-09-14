@@ -186,9 +186,17 @@ fn run_digest(app: AppHandle, r: DigestRule) -> Result<String, String> {
         r.prompt.trim(),
         rollup
     );
+    // A digest the model could not write is not sent. It used to go out as
+    // the raw transcripts of the whole window, which is a wall of text in a
+    // chat that asked for a summary; the next run covers the same ground.
     let summary = match crate::alerts::ollama_complete(&ollama, &prompt) {
         Ok(s) => s.trim().to_string(),
-        Err(e) => format!("(summary unavailable: {e})\n{}", rollup.trim()),
+        Err(e) => {
+            let why = format!("summary unavailable, nothing sent: {e}");
+            record(&app, &r, "failed", &why, "", &chat, Vec::new());
+            let _ = app.emit("tripwires", ());
+            return Err(why);
+        }
     };
 
     let message = r

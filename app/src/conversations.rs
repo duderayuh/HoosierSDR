@@ -798,6 +798,33 @@ fn summarise_and_send(app: AppHandle, c: Conversation) {
 /// Retries before a conversation whose send keeps failing is given up.
 const MAX_ATTEMPTS: u32 = 3;
 
+#[derive(Debug, PartialEq)]
+enum AfterFailedSummary {
+    /// Wait and ask the model again.
+    Hold,
+    /// A summary already went out; leave it rather than replace it with a
+    /// failure.
+    KeepEarlier,
+    /// Nothing has gone out and the model is not coming back in time: send
+    /// the report without a summary, so the hospital still hears of it.
+    SendPlaceholder,
+}
+
+/// What a report does when the model did not answer.
+///
+/// It used to go out with the raw transcript in place of the summary, which
+/// is what a hospital chat got for every report while the model was busy,
+/// and a revision replaced a good summary already sent with the same.
+fn after_failed_summary(already_sent: bool, attempts: u32) -> AfterFailedSummary {
+    if attempts + 1 < MAX_ATTEMPTS {
+        AfterFailedSummary::Hold
+    } else if already_sent {
+        AfterFailedSummary::KeepEarlier
+    } else {
+        AfterFailedSummary::SendPlaceholder
+    }
+}
+
 /// The rule is passed by value so a test can override flags without
 /// touching the saved settings underneath a concurrent Save.
 fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
@@ -858,10 +885,41 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let (headline, summary) = if has_text {
         match crate::alerts::ollama_complete(&ollama, &prompt) {
             Ok(s) => split_headline(&s),
-            Err(e) => (
-                String::new(),
-                format!("(summary unavailable: {e})\n{}", transcript.trim()),
-            ),
+            Err(e) => {
+                // A test send has no live conversation to retry on.
+                let attempts = if c.key == 0 { MAX_ATTEMPTS } else { c.attempts };
+                match after_failed_summary(!c.sent_ids.is_empty(), attempts) {
+                    AfterFailedSummary::Hold => {
+                        finish(&app, c.key, n_pieces, |cc| {
+                            cc.attempts += 1;
+                            cc.last_error = Some(format!("summary: {e}; trying again"));
+                            cc.dirty = true;
+                            cc.retry_after = crate::library::now() + 60 * cc.attempts as i64;
+                        });
+                        return;
+                    }
+                    AfterFailedSummary::KeepEarlier => {
+                        let why = format!("summary: {e}; revision skipped, the earlier summary stands");
+                        log_it(&app, &r, &c, false, why.clone(), String::new());
+                        finish(&app, c.key, n_pieces, |cc| {
+                            cc.last_error = Some(why);
+                            cc.attempts = 0;
+                            cc.dirty = false;
+                        });
+                        // New pieces that arrived during the wait would
+                        // otherwise keep it dirty and start the round again.
+                        let state = app.state::<AppState>();
+                        let mut st = state.conversations.lock().unwrap();
+                        if let Some(cc) = st.open.iter_mut().find(|cc| cc.key == c.key) {
+                            cc.dirty = false;
+                        }
+                        return;
+                    }
+                    AfterFailedSummary::SendPlaceholder => {
+                        (String::new(), format!("(summary unavailable: {e})"))
+                    }
+                }
+            }
         }
     } else {
         (String::new(), "(no transcript — audio only)".to_string())
@@ -973,6 +1031,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                 cc.dirty = false;
                 cc.last_summary = Some(summary);
                 cc.last_error = None;
+                cc.attempts = 0;
             });
         }
         Err(e) => {
@@ -2172,6 +2231,25 @@ mod payload_tests {
         let text = serde_json::to_string_pretty(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.rules.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod failed_summary_tests {
+    use super::{after_failed_summary, AfterFailedSummary::*, MAX_ATTEMPTS};
+
+    #[test]
+    fn a_report_waits_for_the_model_before_going_out_without_a_summary() {
+        assert_eq!(after_failed_summary(false, 0), Hold);
+        assert_eq!(after_failed_summary(false, MAX_ATTEMPTS - 2), Hold);
+        assert_eq!(after_failed_summary(false, MAX_ATTEMPTS - 1), SendPlaceholder);
+        assert_eq!(after_failed_summary(false, MAX_ATTEMPTS + 4), SendPlaceholder);
+    }
+
+    #[test]
+    fn a_summary_already_sent_is_never_replaced_by_a_failure() {
+        assert_eq!(after_failed_summary(true, 0), Hold);
+        assert_eq!(after_failed_summary(true, MAX_ATTEMPTS - 1), KeepEarlier);
     }
 }
 
