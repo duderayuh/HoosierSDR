@@ -51,6 +51,7 @@ mod routing;
 mod tripwires;
 mod backtest;
 mod fuzzy;
+mod highway;
 mod rr;
 mod s3;
 mod secrets;

@@ -993,7 +993,13 @@ fn geocode_with(db: &Db, s: &Settings, address: &str, retry_negative: bool) -> R
     if address.len() < 4 {
         return Ok(None);
     }
-    let key = cache_key(s, &address_key(&address));
+    let highway = crate::highway::parse(&address);
+    // Highway answers are kept apart from what the geocoder said before
+    // there was a highway lookup, which was nothing.
+    let key = match &highway {
+        Some(_) => cache_key(s, &format!("highway:{}", address_key(&address))),
+        None => cache_key(s, &address_key(&address)),
+    };
     let cached = cache_get(&db.lock().unwrap(), &key);
     if let Some((g, at)) = cached {
         if g.is_some() || (!retry_negative && crate::library::now() - at < 86_400) {
@@ -1002,8 +1008,12 @@ fn geocode_with(db: &Db, s: &Settings, address: &str, retry_negative: bool) -> R
     }
     // An intersection is two streets, not an address: Nominatim returns
     // nothing for "X and Y", so find the node the two ways share instead.
-    let g = match intersection_parts(&address) {
-        Some((a, b)) => match overpass_intersection(s, &a, &b) {
+    let g = match (&highway, intersection_parts(&address)) {
+        // "Mile Marker 71, I-70 Westbound": a mapped marker, or nothing. The
+        // geocoder, asked, puts it anywhere on the interstate; nothing lets
+        // the grid reference place it instead.
+        (Some(spot), _) if spot.miles.is_some() => overpass_marker(s, spot)?,
+        (_, Some((a, b))) => match overpass_intersection(s, &a, &b) {
             Ok(Some(hit)) => Some(hit),
             Ok(None) => nominatim(s, &address)?,
             Err(e) => {
@@ -1011,7 +1021,7 @@ fn geocode_with(db: &Db, s: &Settings, address: &str, retry_negative: bool) -> R
                 nominatim(s, &address)?
             }
         },
-        None => nominatim(s, &address)?,
+        (_, None) => nominatim(s, &address)?,
     };
     cache_put(&db.lock().unwrap(), &key, &g);
     Ok(g)
@@ -1241,25 +1251,69 @@ const OVERPASS: &[&str] = &[
     "https://overpass.kumi.systems/api/interpreter",
 ];
 
-/// The node where two named highways meet, inside the search box around
-/// home. Several nodes (a divided road crossing) are averaged.
-fn overpass_intersection(s: &Settings, a: &str, b: &str) -> Result<Geo, String> {
+/// The search box around home, as Overpass writes a bounding box.
+fn search_bbox(s: &Settings) -> String {
     let dlat = s.search_radius_km / 111.0;
     let dlon = s.search_radius_km / (111.0 * s.home_lat.to_radians().cos().abs().max(0.05));
-    let bbox = format!(
+    format!(
         "{:.5},{:.5},{:.5},{:.5}",
         s.home_lat - dlat,
         s.home_lon - dlon,
         s.home_lat + dlat,
         s.home_lon + dlon
-    );
+    )
+}
+
+/// The node where two named highways meet, inside the search box around
+/// home. Several nodes (a divided road crossing) are averaged.
+fn overpass_intersection(s: &Settings, a: &str, b: &str) -> Result<Geo, String> {
+    let bbox = search_bbox(s);
     let (ra, rb) = (street_name_regex(a), street_name_regex(b));
     let q = format!(
         "[out:json][timeout:20];way[\"highway\"][\"name\"~\"{ra}\",i]({bbox});node(w)->.a;way[\"highway\"][\"name\"~\"{rb}\",i]({bbox});node(w)->.b;node.a.b;out 8;"
     );
-    let body = format!("data={}", url_encode(&q));
+    let v = overpass(&q, 30)?;
+    let nodes: Vec<(f64, f64)> = v["elements"]
+        .as_array()
+        .map(|els| {
+            els.iter()
+                .filter_map(|e| Some((e["lat"].as_f64()?, e["lon"].as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if nodes.is_empty() {
+        return Ok(None);
+    }
+    let n = nodes.len() as f64;
+    let lat = nodes.iter().map(|p| p.0).sum::<f64>() / n;
+    let lon = nodes.iter().map(|p| p.1).sum::<f64>() / n;
+    Ok(Some((lat, lon, format!("{a} & {b} (intersection, OpenStreetMap)"))))
+}
+
+/// A mapped mile marker for a highway location, anywhere in the search box.
+fn overpass_marker(s: &Settings, spot: &crate::highway::Spot) -> Result<Geo, String> {
+    let v = overpass(&crate::highway::marker_query(&spot.route, &search_bbox(s)), HIGHWAY_SECS)?;
+    let hit = crate::highway::at_marker(spot, &crate::highway::markers_of(&v), &crate::highway::ways_of(&v));
+    Ok(hit.map(|(lat, lon)| (lat, lon, format!("{} (mile marker, OpenStreetMap)", spot.describe()))))
+}
+
+/// A point put onto the highway it is on, when the highway is near.
+fn overpass_snap(spot: &crate::highway::Spot, lat: f64, lon: f64) -> Result<Option<(f64, f64)>, String> {
+    let v = overpass(&crate::highway::route_query(&spot.route, lat, lon), HIGHWAY_SECS)?;
+    Ok(crate::highway::snap((lat, lon), &crate::highway::ways_of(&v), spot.dir, crate::highway::SNAP_M as f64))
+}
+
+/// How long a highway lookup may wait on each Overpass endpoint. It runs in
+/// line with the calls behind it, and both lookups have a fallback: a
+/// marker that does not answer leaves the grid point, a snap that does not
+/// answer leaves it where it was.
+const HIGHWAY_SECS: u64 = 10;
+
+/// Ask Overpass, trying each endpoint in turn.
+fn overpass(q: &str, timeout_secs: u64) -> Result<serde_json::Value, String> {
+    let body = format!("data={}", url_encode(q));
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
         .http_status_as_error(false)
         .build()
         .into();
@@ -1285,32 +1339,10 @@ fn overpass_intersection(s: &Settings, a: &str, b: &str) -> Result<Geo, String> 
             last_err = format!("{url}: HTTP {status}");
             continue;
         }
-        let v: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                last_err = format!("{url}: {e}");
-                continue;
-            }
-        };
-        let nodes: Vec<(f64, f64)> = v["elements"]
-            .as_array()
-            .map(|els| {
-                els.iter()
-                    .filter_map(|e| Some((e["lat"].as_f64()?, e["lon"].as_f64()?)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if nodes.is_empty() {
-            return Ok(None);
+        match serde_json::from_str(&text) {
+            Ok(v) => return Ok(v),
+            Err(e) => last_err = format!("{url}: {e}"),
         }
-        let n = nodes.len() as f64;
-        let lat = nodes.iter().map(|p| p.0).sum::<f64>() / n;
-        let lon = nodes.iter().map(|p| p.1).sum::<f64>() / n;
-        return Ok(Some((
-            lat,
-            lon,
-            format!("{a} & {b} (intersection, OpenStreetMap)"),
-        )));
     }
     Err(last_err)
 }
@@ -1332,7 +1364,7 @@ fn extraction_rule(s: &Settings, ch: &Channel) -> AnalyzerRule {
         "This talkgroup is a DISPATCH channel: the dispatcher tones out units to a new call, giving the units, a street address or intersection, and the nature of the call. Acknowledgements, status checks, radio tests and chatter are NOT dispatches."
     };
     let instructions = format!(
-        "{role}\n\nExtract what is actually said. The address is a street address (\"8241 East 41st Street\") or an INTERSECTION of two streets (\"North Delaware Street and East 32nd Street\"), without city or state; write numbers as digits and spell out directions (North/South/East/West). When the dispatcher names two cross streets, the address IS that intersection — write it as \"<street> and <street>\". A trailing \"location NNNN North NNNN East\" (hundred-block coordinates, e.g. \"3200 North 100 East\") is a map GRID reference the dispatcher reads after the address: put it in `grid`, NEVER in `address`. Never invent an address. Units are radio callsigns such as \"Medic 42\", \"Engine 6\", \"Ladder 38\", \"Battalion 4\".\n\nClassify the call as exactly one of: {types}. Use \"Unknown\" when it is not stated. Choose ONE emoji that best pictures the call for a map pin. Confidence is 0-100: how sure you are about the address AND call type from this transcript (which may contain recognition errors).{}",
+        "{role}\n\nExtract what is actually said. The address is a street address (\"8241 East 41st Street\") or an INTERSECTION of two streets (\"North Delaware Street and East 32nd Street\"), without city or state; write numbers as digits and spell out directions (North/South/East/West). When the dispatcher names two cross streets, the address IS that intersection — write it as \"<street> and <street>\". On a highway the address is the route, direction and mile marker, e.g. \"Mile Marker 71, I-70 Westbound\". A trailing \"location NNNN North NNNN East\" (hundred-block coordinates, e.g. \"3200 North 100 East\") is a map GRID reference the dispatcher reads after the address: put it in `grid`, NEVER in `address`. Never invent an address. Units are radio callsigns such as \"Medic 42\", \"Engine 6\", \"Ladder 38\", \"Battalion 4\".\n\nClassify the call as exactly one of: {types}. Use \"Unknown\" when it is not stated. Choose ONE emoji that best pictures the call for a map pin. Confidence is 0-100: how sure you are about the address AND call type from this transcript (which may contain recognition errors).{}",
         if s.extra_instructions.is_empty() {
             String::new()
         } else {
@@ -1461,7 +1493,11 @@ fn tidy(s: &Settings, ch: &Channel, obj: &serde_json::Value) -> Extracted {
         } else {
             String::new()
         };
-    } else if address.is_empty() && intersection_parts(&cross).is_some() {
+    } else if address.is_empty()
+        && (intersection_parts(&cross).is_some() || crate::highway::parse(&cross).is_some())
+    {
+        // "I-70 Westbound Mile Marker 71" is where the run is, wherever the
+        // model filed it.
         address = cross.clone();
     }
     let address = address.replace(" & ", " and ");
@@ -1548,6 +1584,33 @@ fn rescue(db: &Db, settings: &Settings, address: &str, grid: &str) -> Option<Res
     let home = (settings.home_lat, settings.home_lon);
     let point = crate::addr::parse_grid(grid)
         .and_then(|g| cal.place_near(g, home, settings.search_radius_km));
+
+    // On a highway the grid point goes onto the road, on the side the
+    // traffic is going: that is where the crew is headed.
+    if let Some(spot) = crate::highway::parse(address) {
+        let (lat, lon) = point?;
+        return Some(match overpass_snap(&spot, lat, lon) {
+            Ok(Some((lat, lon))) => Rescued {
+                lat,
+                lon,
+                validated: format!("{} (grid reference {}, on the highway)", spot.describe(), grid.trim()),
+                status: "grid",
+                address: None,
+            },
+            other => {
+                if let Err(e) = other {
+                    eprintln!("[dispatch] highway lookup failed ({e}); using the grid point");
+                }
+                Rescued {
+                    lat,
+                    lon,
+                    validated: format!("near {} (grid reference)", grid.trim()),
+                    status: "grid",
+                    address: None,
+                }
+            }
+        });
+    }
 
     if let Some(heard) = crate::addr::street_of(address) {
         let streets = {
@@ -2072,6 +2135,20 @@ fn locate_blocking(
                 }
                 None => {
                     i.geocode = "none".into();
+                    // Typed in by hand, the address still has the grid
+                    // reference its dispatch carried.
+                    if settings.grid_fallback {
+                        let grid = grid_of(&db.lock().unwrap(), i.id);
+                        if let Some(r) = rescue(db, settings, &i.address, &grid) {
+                            i.lat = Some(r.lat);
+                            i.lon = Some(r.lon);
+                            i.validated = r.validated;
+                            i.geocode = r.status.into();
+                            if let Some(fixed) = r.address {
+                                i.address = fixed;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2868,6 +2945,38 @@ mod tests {
         let x = tidy(&s, &ch, &obj);
         assert!(x.address.is_empty());
         assert_eq!(x.grid, "3200 North 100 East");
+    }
+
+    #[test]
+    fn a_highway_location_filed_as_a_cross_street_is_the_address() {
+        let s = Settings::default();
+        let ch = Channel { tg: 1, name: "".into(), role: "dispatch".into(), fixed_call_type: String::new(), enabled: true };
+        let obj = serde_json::json!({ "is_dispatch": true, "call_type": "Injured Person", "address": "", "cross_street": "I-70 Westbound Mile Marker 71", "grid": "4400 South 7700 West", "units": ["Engine 81", "Medic 84"], "summary": "x", "emoji": "🏍️", "confidence": 95 });
+        let x = tidy(&s, &ch, &obj);
+        assert_eq!(x.address, "I-70 Westbound Mile Marker 71");
+        assert_eq!(x.grid, "4400 South 7700 West");
+        // A lone street in the cross street is still not an address.
+        let obj = serde_json::json!({ "is_dispatch": true, "address": "", "cross_street": "Michigan Road" });
+        assert!(tidy(&s, &ch, &obj).address.is_empty());
+    }
+
+    /// Network: the real Overpass service, on two highway runs as they were
+    /// dispatched. `cargo test -- --ignored highway_runs`.
+    #[test]
+    #[ignore]
+    fn highway_runs_land_on_the_highway() {
+        let cal = crate::addr::Calibration { lat0: 39.768, lon0: -86.1616, lat_per: 1.5393e-5, lon_per: 1.6721e-5, samples: 400, median_m: 520.0, at: 0 };
+        for (address, grid) in [("Mile Marker 71, I-70 Westbound", (-4400, -7700)), ("Mile Marker 47.5 I-465 Northbound", (-1700, 7400))] {
+            let spot = crate::highway::parse(address).unwrap();
+            let (lat, lon) = cal.place(crate::addr::Grid { ns: grid.0, ew: grid.1 }).unwrap();
+            let t = std::time::Instant::now();
+            let marker = overpass_marker(&Settings::default(), &spot);
+            eprintln!("marker lookup {:?}", t.elapsed());
+            let t = std::time::Instant::now();
+            let (a, b) = overpass_snap(&spot, lat, lon).unwrap().expect("the highway near the grid point");
+            eprintln!("{address}: grid {lat:.5},{lon:.5} → {a:.5},{b:.5} ({:.0} m, {:?}); marker {marker:?}", haversine_m(lat, lon, a, b), t.elapsed());
+            assert!(haversine_m(lat, lon, a, b) < 1_000.0);
+        }
     }
 
     #[test]
