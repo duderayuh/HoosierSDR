@@ -594,6 +594,97 @@ fn store(c: &Connection, system: &str, conversation: i64, f: &[Found]) -> usize 
     n
 }
 
+/// Store evidence, and say which radios it turned from unusable into usable
+/// — the moment their recent reports are worth trying to join again.
+fn store_noticing(c: &Connection, system: &str, conversation: i64, f: &[Found]) -> (usize, Vec<u32>) {
+    let radios: Vec<(String, u32)> = f.iter().map(|x| (system.to_string(), x.radio)).collect();
+    let before = identities(c, &radios);
+    let added = store(c, system, conversation, f);
+    if added == 0 {
+        return (0, Vec::new());
+    }
+    (added, newly_usable(&before, &identities(c, &radios)))
+}
+
+/// Radios usable in `after` that were not in `before`.
+pub fn newly_usable(before: &HashMap<(String, u32), Identity>, after: &HashMap<(String, u32), Identity>) -> Vec<u32> {
+    let mut out: Vec<u32> = after
+        .iter()
+        .filter(|(k, id)| id.usable() && id.role == UNIT && !before.get(*k).is_some_and(Identity::usable))
+        .map(|((_, radio), _)| *radio)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn retry_joins(app: &AppHandle, radios: &[u32]) {
+    for radio in radios {
+        let n = crate::link::retry_for_radio(app, *radio);
+        if n > 0 {
+            println!("[radios] radio {radio} is learned; joined {n} earlier report(s)");
+        }
+    }
+}
+
+/// Every ten minutes: read the last six hours of dispatch and ops calls
+/// again, which catches a reply whose transcript landed before the call it
+/// answered, and try once more to join the reports still unjoined. Both are
+/// rules and cost milliseconds.
+pub const SWEEP_SECS: u64 = 10 * 60;
+
+pub fn spawn_sweep(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(90));
+        loop {
+            let (added, learned, joined) = sweep(&app);
+            if added + joined > 0 {
+                println!("[radios] sweep: {added} new evidence, {} radio(s) learned, {joined} report(s) joined", learned.len());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(SWEEP_SECS));
+        }
+    });
+}
+
+fn sweep(app: &AppHandle) -> (usize, Vec<u32>, usize) {
+    let tgs = hospital_tgs(app);
+    let state = app.state::<AppState>();
+    let Some(db) = state.db.lock().unwrap().clone() else { return (0, Vec::new(), 0) };
+    let (added, learned) = {
+        let c = db.lock().unwrap();
+        let since = crate::library::now() - crate::link::RETRY_WITHIN_SECS;
+        let mut by_system: HashMap<String, Vec<Heard>> = HashMap::new();
+        if let Ok(mut q) = c.prepare(
+            "SELECT id, unit, tg, start, secs, COALESCE(transcript_edited, transcript, ''), system FROM calls
+              WHERE start >= ?1 AND unit <> 0 AND length(COALESCE(transcript_edited, transcript, '')) > 3
+              ORDER BY start, id",
+        ) {
+            if let Ok(rows) = q.query_map([since], |r| Ok((heard_row(r)?, r.get::<_, String>(6)?))) {
+                for (h, system) in rows.flatten() {
+                    if !tgs.contains(&h.tg) {
+                        by_system.entry(system).or_default().push(h);
+                    }
+                }
+            }
+        }
+        let vocab = crate::link::vocabulary(&c);
+        let known = consoles(&c);
+        let (mut added, mut learned) = (0, Vec::new());
+        for (system, heard) in &by_system {
+            let (n, new) = store_noticing(&c, system, 0, &read_calls(heard, &vocab, &known));
+            added += n;
+            learned.extend(new);
+        }
+        (added, learned)
+    };
+    if added > 0 {
+        let _ = tauri::Emitter::emit(app, "radios", ());
+    }
+    retry_joins(app, &learned);
+    let joined = crate::link::retry_recent(app);
+    (added, learned, joined)
+}
+
 /// Radios the evidence, or the listener, already calls consoles — the page
 /// voice included, since whoever keys up after a page is not answering it.
 pub fn consoles(c: &Connection) -> HashSet<u32> {
@@ -744,10 +835,12 @@ pub fn on_transcript(app: &AppHandle, id: i64, _text: &str) {
             .into_iter()
             .filter(|f| f.call == id)
             .collect();
-        if store(&c, &row.system, 0, &found) > 0 {
-            drop(c);
+        let (added, learned) = store_noticing(&c, &row.system, 0, &found);
+        drop(c);
+        if added > 0 {
             let _ = tauri::Emitter::emit(&app, "radios", ());
         }
+        retry_joins(&app, &learned);
     });
 }
 
@@ -756,17 +849,23 @@ pub fn from_conversation(app: &AppHandle, conversation: i64) {
     let state = app.state::<AppState>();
     let Some(db) = state.db.lock().unwrap().clone() else { return };
     let c = db.lock().unwrap();
-    if read_stored_conversation(&c, conversation) > 0 {
-        drop(c);
+    let (added, learned) = read_conversation_noticing(&c, conversation);
+    drop(c);
+    if added > 0 {
         let _ = tauri::Emitter::emit(app, "radios", ());
     }
+    retry_joins(app, &learned);
 }
 
 fn read_stored_conversation(c: &Connection, conversation: i64) -> usize {
+    read_conversation_noticing(c, conversation).0
+}
+
+fn read_conversation_noticing(c: &Connection, conversation: i64) -> (usize, Vec<u32>) {
     let Ok(pieces) = c.query_row("SELECT pieces FROM conversations WHERE id = ?1", [conversation], |r| {
         r.get::<_, String>(0)
     }) else {
-        return 0;
+        return (0, Vec::new());
     };
     let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
     let system = pieces
@@ -775,7 +874,7 @@ fn read_stored_conversation(c: &Connection, conversation: i64) -> usize {
         .and_then(|id| c.query_row("SELECT system FROM calls WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok())
         .unwrap_or_default();
     let vocab = crate::link::vocabulary(c);
-    store(c, &system, conversation, &read_conversation(&pieces, &vocab))
+    store_noticing(c, &system, conversation, &read_conversation(&pieces, &vocab))
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -1003,6 +1102,10 @@ pub fn radio_confirm(
         Ok(identity(c, &system, radio))
     })?;
     let _ = tauri::Emitter::emit(&app, "radios", ());
+    if out.usable() && out.role == UNIT {
+        let app = app.clone();
+        std::thread::spawn(move || retry_joins(&app, &[radio]));
+    }
     Ok(out)
 }
 
@@ -1133,6 +1236,23 @@ mod tests {
         assert_eq!(parse_answer("page voice"), Some((AUTOMATED.into(), "".into())));
         assert_eq!(parse_answer("Hospital"), Some((HOSPITAL.into(), "".into())));
         assert_eq!(parse_answer("somebody"), None);
+    }
+
+    #[test]
+    fn a_radio_is_news_the_moment_it_becomes_usable() {
+        let v = Verdicts::default();
+        let two = [s("Medic 44", 1.0, 1), s("Medic 44", 1.0, 2)];
+        let three = [s("Medic 44", 1.0, 1), s("Medic 44", 1.0, 2), s("Medic 44", 1.0, 3)];
+        let key = ("sys".to_string(), 900777);
+        let at = |sightings: &[Sighting]| HashMap::from([(key.clone(), fold("sys", 900777, sightings, &v))]);
+        assert_eq!(newly_usable(&at(&two), &at(&three)), vec![900777]);
+        // Already usable is not news again, and a radio that is still
+        // tentative is not news yet.
+        assert!(newly_usable(&at(&three), &at(&three)).is_empty());
+        assert!(newly_usable(&HashMap::new(), &at(&two)).is_empty());
+        // A console is not a crew whose reports can be joined.
+        let console: Vec<Sighting> = (0..3).map(|i| Sighting { callsign: "".into(), role: CONSOLE.into(), weight: 1.0, at: i }).collect();
+        assert!(newly_usable(&HashMap::new(), &at(&console)).is_empty());
     }
 
     #[test]

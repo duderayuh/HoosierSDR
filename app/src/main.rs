@@ -2333,6 +2333,7 @@ fn main() {
             *state.conversations.lock().unwrap() = conversations::load(app.handle());
             *state.remotes.lock().unwrap() = remotes::load(app.handle());
             conversations::spawn_ticker(app.handle().clone());
+            radios::spawn_sweep(app.handle().clone());
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());

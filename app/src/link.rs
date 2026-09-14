@@ -31,6 +31,18 @@ pub const LOOK_AHEAD_SECS: i64 = 5 * 60;
 /// A candidate this much closer in time than the next wins without asking
 /// anyone.
 const CLEAR_WIN_RATIO: f64 = 0.45;
+/// A report joined later than this after it ended is recorded, but tells no
+/// tripwire: "went to the hospital" forty minutes after the patient arrived
+/// is noise in a phone, not news.
+pub const NOTIFY_WITHIN_SECS: i64 = 20 * 60;
+/// How far back a retry looks for reports that are still unjoined.
+pub const RETRY_WITHIN_SECS: i64 = 6 * 3600;
+
+/// Whether a join made `now` about a report that ended at `ended` should
+/// still reach the tripwires.
+pub fn still_news(now: i64, ended: i64) -> bool {
+    now - ended <= NOTIFY_WITHIN_SECS
+}
 
 /// What a hospital report says about itself.
 #[derive(Clone, Debug, Default)]
@@ -301,14 +313,54 @@ fn learned_crew(c: &Connection, pieces: &[crate::conversations::Piece]) -> Vec<S
     out
 }
 
-/// Remember a link.
-pub fn attach(c: &Connection, conversation: i64, incident: i64, how: &str) -> Result<(), String> {
+/// Remember a link. False when the report was already joined — two retries
+/// can reach the same report, and only the one that writes the link may
+/// announce it.
+pub fn attach(c: &Connection, conversation: i64, incident: i64, how: &str) -> Result<bool, String> {
     c.execute(
-        "UPDATE conversations SET incident = ?1, link_how = ?2 WHERE id = ?3",
+        "UPDATE conversations SET incident = ?1, link_how = ?2 WHERE id = ?3 AND incident IS NULL",
         params![incident, how, conversation],
     )
-    .map(|_| ())
+    .map(|n| n == 1)
     .map_err(|e| e.to_string())
+}
+
+/// Reports from the last `RETRY_WITHIN_SECS` that are still unjoined,
+/// optionally only those a given radio took part in.
+pub fn unjoined(c: &Connection, now: i64, radio: Option<u32>) -> Vec<i64> {
+    let since = now - RETRY_WITHIN_SECS;
+    let sql = match radio {
+        Some(_) => "SELECT id FROM conversations WHERE incident IS NULL AND first_at >= ?1
+                     AND EXISTS (SELECT 1 FROM json_each(conversations.participants) WHERE value = ?2)
+                     ORDER BY first_at",
+        None => "SELECT id FROM conversations WHERE incident IS NULL AND first_at >= ?1 AND ?2 IS NULL ORDER BY first_at",
+    };
+    let Ok(mut q) = c.prepare(sql) else { return Vec::new() };
+    q.query_map(params![since, radio], |r| r.get(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Try again to join the recent reports a radio took part in, now that it
+/// has a name. The model may break a tie: this runs once per radio, when it
+/// is learned or confirmed, not on a timer.
+pub fn retry_for_radio(app: &tauri::AppHandle, radio: u32) -> usize {
+    use tauri::Manager;
+    let state = app.state::<crate::AppState>();
+    let Some(db) = state.db.lock().unwrap().clone() else { return 0 };
+    let ids = unjoined(&db.lock().unwrap(), crate::library::now(), Some(radio));
+    ids.into_iter().filter(|id| join(app, *id, true).is_some()).count()
+}
+
+/// Try again to join every recent unjoined report, by rules alone: a timer
+/// that asked the model about the same tie every few minutes would only
+/// keep it busy.
+pub fn retry_recent(app: &tauri::AppHandle) -> usize {
+    use tauri::Manager;
+    let state = app.state::<crate::AppState>();
+    let Some(db) = state.db.lock().unwrap().clone() else { return 0 };
+    let ids = unjoined(&db.lock().unwrap(), crate::library::now(), None);
+    ids.into_iter().filter(|id| join(app, *id, false).is_some()).count()
 }
 
 /// The hospital reports linked to a run, oldest first.
@@ -358,17 +410,22 @@ pub fn reports_for(c: &Connection, incident: i64, places: &crate::places::Settin
 /// model is asked only when two runs fit equally well, and a model that
 /// cannot be reached means no link rather than a guess.
 pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, String)> {
+    join(app, conversation, true)
+}
+
+/// Join one report, asking the model to break a tie only when `ask_model`.
+fn join(app: &tauri::AppHandle, conversation: i64, ask_model: bool) -> Option<(i64, String)> {
     use tauri::Manager;
     let state = app.state::<crate::AppState>();
     let db = state.db.lock().unwrap().clone()?;
 
-    let (report, open, vocab, learned) = {
+    let (report, open, vocab, learned, ended) = {
         let c = db.lock().unwrap();
-        let (at, summary, transcript, already, pieces): (i64, String, String, Option<i64>, String) = c
+        let (at, summary, transcript, already, pieces, ended): (i64, String, String, Option<i64>, String, i64) = c
             .query_row(
-                "SELECT first_at, summary, transcript, incident, pieces FROM conversations WHERE id = ?1",
+                "SELECT first_at, summary, transcript, incident, pieces, last_at FROM conversations WHERE id = ?1",
                 [conversation],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .ok()?;
         if already.is_some() {
@@ -379,12 +436,13 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
             text: format!("{summary}\n{transcript}"),
         };
         let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
-        (report, open_dispatches(&c, at), vocabulary(&c), learned_crew(&c, &pieces))
+        (report, open_dispatches(&c, at), vocabulary(&c), learned_crew(&c, &pieces), ended)
     };
 
     let (incident, how) = match decide_with_learned(&report, &open, &vocab, &learned) {
         Link::Made { incident, how } => (incident, how),
         Link::None => return None,
+        Link::Tie { .. } if !ask_model => return None,
         Link::Tie { incidents, unit } => {
             let fits: Vec<&Dispatch> = open.iter().filter(|d| incidents.contains(&d.id)).collect();
             let o = crate::alerts::shared_settings(&state).1;
@@ -399,7 +457,9 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
     };
     {
         let c = db.lock().unwrap();
-        attach(&c, conversation, incident, &how).ok()?;
+        if !attach(&c, conversation, incident, &how).ok()? {
+            return None;
+        }
     }
     let _ = tauri::Emitter::emit(
         app,
@@ -407,7 +467,11 @@ pub fn try_link(app: &tauri::AppHandle, conversation: i64) -> Option<(i64, Strin
         serde_json::json!({ "conversation": conversation, "incident": incident, "how": how }),
     );
     // A tripwire waiting for the outcome — "tell me where the arrest went" —
-    // has been waiting for exactly this.
+    // has been waiting for exactly this, unless it is old news by now.
+    if !still_news(crate::library::now(), ended) {
+        println!("[link] conversation {conversation} joined late; no tripwire told");
+        return Some((incident, how));
+    }
     {
         let c = db.lock().unwrap();
         if let Ok(Some(run)) = crate::dispatch::inc_get(&c, incident) {
@@ -529,6 +593,31 @@ mod tests {
         );
         // Nothing learned, nothing joined.
         assert_eq!(decide_with_learned(&quiet, &open, &vocab(), &[]), Link::None);
+    }
+
+    #[test]
+    fn a_late_join_is_recorded_but_is_not_news() {
+        assert!(still_news(10_000, 10_000 - NOTIFY_WITHIN_SECS));
+        assert!(!still_news(10_000, 10_000 - NOTIFY_WITHIN_SECS - 1));
+    }
+
+    #[test]
+    fn only_the_first_join_counts_and_retries_find_what_is_left() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE conversations (id INTEGER PRIMARY KEY, first_at INTEGER, participants TEXT, incident INTEGER, link_how TEXT);
+             INSERT INTO conversations VALUES (1, 100000, '[900777]', NULL, ''), (2, 100000, '[900888]', NULL, ''),
+                                              (3, 1, '[900777]', NULL, ''), (4, 100000, '[900777]', 55, 'x');",
+        )
+        .unwrap();
+        let now = 100000 + 60;
+        assert_eq!(unjoined(&c, now, None), vec![1, 2]);
+        assert_eq!(unjoined(&c, now, Some(900777)), vec![1], "only that radio's, only recent, only unjoined");
+        assert!(attach(&c, 1, 10, "first").unwrap());
+        assert!(!attach(&c, 1, 11, "second").unwrap(), "a report already joined is not joined again");
+        let how: String = c.query_row("SELECT link_how FROM conversations WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(how, "first");
+        assert_eq!(unjoined(&c, now, None), vec![2]);
     }
 
     #[test]

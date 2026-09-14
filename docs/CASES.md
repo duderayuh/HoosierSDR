@@ -485,11 +485,21 @@ through the radio that called (116 → 175).
 Known gaps, deliberately left:
 
 - **A reply's transcript can land before the console's.** Live, the reply
-  rule then sees a console call with no text yet and writes nothing; the
-  backfill, which reads in order, catches it.
+  rule then sees a console call with no text yet and writes nothing. A sweep
+  every 10 minutes re-reads the last 6 hours in order and catches it.
 - **Identity has no time window yet.** A learned callsign applies to every
   call from that radio, old or new. "Changed" catches a radio that moves to
   another crew, but only after three sightings.
 - **More joins means more incident tripwires fire.** A join made through a
   learned radio counts as linked, so a tripwire waiting for the hospital
   report fires for those runs too.
+
+**Retrying joins (added the same day).** A report tries to join its run when
+it is stored, and its radio may not be learned yet. So a report is tried
+again when any radio in it becomes learned or is confirmed (the model may
+break a tie, once), and every 10 minutes all unjoined reports from the last
+6 hours are tried by rules alone. A join made more than 20 minutes after the
+report ended is recorded and shown, but tells no tripwire, so nothing reaches
+Telegram after the patient has arrived. Two retries reaching the same report
+cannot both join it: the link is written only where none exists, and only
+the retry that wrote it announces it.
