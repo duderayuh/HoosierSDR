@@ -688,6 +688,41 @@ fn grant_updates_do_not_reopen_an_encrypted_call() {
     );
 }
 
+/// An encrypted talkgroup the listener locked out is locked out, not
+/// encrypted: reported as an encrypted grant, the app logged every one of its
+/// transmissions as a muted call of a group that was switched off.
+#[test]
+fn a_locked_out_encrypted_talkgroup_is_reported_locked() {
+    let mut band = Vec::new();
+    add_to_band(
+        &mut band,
+        &tsdu_stream_n(
+            &[
+                (0x3D, 0, iden_args(PLAN_BASE)),
+                (0x00, 0, (0x40u64 << 56) | grant_args(TALKGROUP)),
+            ],
+            20,
+        ),
+        CONTROL + TUNER_ERROR,
+    );
+    let run = |lockout: &[u16]| {
+        let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+        f.set_lockout(lockout.iter().copied());
+        let (mut encrypted, mut locked) = (0, 0);
+        for chunk in band.chunks((RATE as usize / 10) * 2) {
+            let out = f.process(chunk);
+            encrypted += out.grants_encrypted.iter().filter(|(tg, _)| *tg == TALKGROUP).count();
+            locked += out.grants_locked.iter().filter(|(tg, _)| *tg == TALKGROUP).count();
+        }
+        (encrypted, locked)
+    };
+    let (encrypted, locked) = run(&[]);
+    assert!(encrypted > 0 && locked == 0, "unlocked: {encrypted} encrypted, {locked} locked");
+    let (encrypted, locked) = run(&[TALKGROUP]);
+    assert_eq!(encrypted, 0, "a locked-out talkgroup was reported as an encrypted grant");
+    assert!(locked > 0, "the locked-out grant was not reported as locked");
+}
+
 /// A call granted in the clear whose transmission turns out to be encrypted
 /// (a missed full grant, or a radio answering encrypted on a clear call):
 /// once a validated Encryption Sync says so, the transmission's audio —
