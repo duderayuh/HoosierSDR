@@ -834,6 +834,8 @@ button.info:hover, button.info:focus-visible { color: var(--signal); border-colo
 .dpmap { position: absolute; inset: 0; background: #0b1416; }
 .dpmap.light { background: #e9eeed; }
 .dpmap:not(.light) .dptiles { filter: invert(1) hue-rotate(180deg) brightness(.82) contrast(.92) saturate(.55); }
+/* A popup set beside or below its pin, clear of the route: its tip would point the wrong way. */
+.dpmap .dpside .leaflet-popup-tip-container { display: none; }
 .dplayers { position: absolute; top: 10px; right: 10px; z-index: 500; width: 230px; background: color-mix(in srgb, var(--panel) 86%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
 .dplhead { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; cursor: pointer; }
 .dplayers.closed .dplbody { display: none; }
