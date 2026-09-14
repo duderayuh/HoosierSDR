@@ -161,7 +161,7 @@ const BACKSTOP_GRACE_SECS: u64 = 30;
 /// catches. Priming the decoder with a vocabulary is what makes a keyup
 /// answer with a paragraph instead of two words, so the vocabulary is left
 /// off here.
-const UNPROMPTED_SECS: f64 = 1.0;
+pub const UNPROMPTED_SECS: f64 = 1.0;
 
 /// Could this many words have been said in a clip this long?
 ///

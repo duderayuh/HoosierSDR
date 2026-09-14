@@ -1587,6 +1587,16 @@ fn rescue(db: &Db, settings: &Settings, address: &str, grid: &str) -> Option<Res
 }
 
 /// log and for the test command.
+/// Is a transcript worth a model call to read it for a run.
+///
+/// Clips under a second are transcribed now ("Thank you.", "Clear."), and
+/// none of them on a dispatch channel is a page, which takes several seconds
+/// to read out. On an ops channel a short "Squad 29." is still a unit
+/// speaking, so only the length of the text holds it back there.
+pub fn worth_extracting(role: &str, secs: f64, text: &str) -> bool {
+    text.trim().chars().count() >= 8 && !(role == "dispatch" && secs < crate::transcribe::UNPROMPTED_SECS)
+}
+
 pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Incident>), String> {
     let state = app.state::<AppState>();
     let settings = state.dispatch.lock().unwrap().settings.clone();
@@ -1602,7 +1612,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
         }
     }
     let text = f.transcript.as_deref().unwrap_or("").trim();
-    if text.chars().count() < 8 {
+    if !worth_extracting(&ch.role, f.secs, text) {
         return Ok(("transcript too short".into(), None));
     }
     let rule = extraction_rule(&settings, &ch);
@@ -2402,6 +2412,19 @@ pub fn dispatch_backfill(
         let _ = app2.emit("dispatch", ());
     });
     Ok(n)
+}
+
+#[cfg(test)]
+mod short_clip_tests {
+    use super::worth_extracting;
+
+    #[test]
+    fn a_short_clip_on_a_dispatch_channel_costs_no_model_call() {
+        assert!(!worth_extracting("dispatch", 0.4, "Thank you."));
+        assert!(worth_extracting("dispatch", 9.0, "Medic 7, 1200 Example St, Cardiac Arrest."));
+        assert!(worth_extracting("tactical", 0.9, "Squad 29, en route."));
+        assert!(!worth_extracting("tactical", 3.0, "Clear."));
+    }
 }
 
 #[cfg(test)]

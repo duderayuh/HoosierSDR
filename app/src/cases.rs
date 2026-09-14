@@ -836,7 +836,7 @@ pub fn check_arrival(a: &mut Arrival, arrived: i64) {
 pub fn eta_anchor(pieces: &[crate::conversations::Piece]) -> Option<i64> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)\beta\b|minutes?\s+(out|away)|\bout\b.{0,12}\bminutes?|see\s+(you|ya)\s+in|be\s+there\s+in|arriv\w*\s+in|\bin\s+(about|approximately|around)\s+\w+(\s+(to|or)\s+\w+)?\s+minutes?")
+        regex::Regex::new(r"(?i)\beta\b|minutes?\s+(out|away)|\bout\b.{0,12}\bminutes?|see\s+(you\s+|ya\s+)?in|be\s+there\s+in|arriv\w*\s+in|\bin\s+(about|approximately|around)\s+\w+(\s+(to|or)\s+\w+)?\s+minutes?")
             .expect("eta anchor pattern")
     });
     let crew = || pieces.iter().filter(|p| !p.fixed);
@@ -1717,7 +1717,7 @@ mod tests {
             piece(100, true, "Go ahead."),
             piece(110, false, "We have a 78-year-old male, seen by family 15 minutes before calling 911."),
             piece(160, true, "Copy."),
-            piece(170, false, "Intubated, IO established, we'll see you in probably about 10."),
+            piece(170, false, "Intubated, IO established, we'll see in probably about 10."),
         ];
         assert_eq!(eta_anchor(&pieces), Some(170));
         // An updated ETA is timed from the update.
