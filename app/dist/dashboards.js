@@ -18,6 +18,7 @@
   let loaded = false;
   let dirty = false;            // edited since the last Save
   let skew = 0;                 // this machine's clock, less the app's
+  let remotes = null;           // tailnet name and port, for a share link
 
   const shown = () => $("view-dashboard").style.display !== "none";
   const board = () => boards.find((b) => b.id === curId) || boards[0] || null;
@@ -57,6 +58,9 @@
   /* ---------- data ---------- */
 
   async function loadCfg() {
+    // Only needed to spell a share link; a board still edits and draws
+    // without it, so a failure here is not worth stopping for.
+    try { remotes = await invoke("remotes_get"); } catch (e) { remotes = null; }
     const v = await invoke("dashboards_get");
     cfg = v;
     boards = JSON.parse(JSON.stringify(v.settings.dashboards || []));
@@ -140,7 +144,50 @@
       <button class="btn ghost sm" data-add-pane="${i}">+ Pane</button>
       <label class="field" style="margin-top:10px"><span class="lab">Footer <span class="faint">pinned along the bottom — an attestation, a caveat, whatever this board is read under</span></span>
         <textarea data-b="footer" rows="3" placeholder="CONFIDENTIAL — for peer review and quality improvement use only.">${esc(b.footer || "")}</textarea></label>
+      ${shareEditor(b, i)}
     </div>`;
+  }
+
+  // Sharing one board over the tailnet.
+  //
+  // The link carries a key that opens this board and nothing else — not the
+  // library, not another board, not the radio. That is worth saying here,
+  // because the obvious alternative (hand someone the web token) would give
+  // them the whole application.
+  function shareEditor(b, i) {
+    const on = !!b.shared;
+    const url = on && b.share_key && b.id ? shareUrl(b) : "";
+    return `<div class="dbshare" style="margin-top:10px">
+      <label class="check"><input data-b="shared" type="checkbox"${on ? " checked" : ""} />
+        share this board over Tailscale</label>
+      ${!on ? `<div class="faint">Off. Nothing outside this machine can ask for it.</div>` : url
+        ? `<div class="dbprow" style="margin-top:6px">
+             <input class="mono" value="${esc(url)}" readonly onfocus="this.select()" style="flex:1" />
+             <button class="btn ghost sm" data-copy-share="${i}">Copy</button>
+             <button class="btn ghost sm" data-new-key="${i}">New link</button>
+           </div>
+           <div class="faint">Open this on any device signed in to your tailnet. It shows this
+             board, read-only, and can reach nothing else. “New link” stops the old one working.</div>`
+        : `<div class="faint">Press <b>Save</b> to get the link.</div>`}
+      ${on && trustWarning() ? `<div class="dbwarn">${esc(trustWarning())}</div>` : ""}
+    </div>`;
+  }
+
+  // Built from the tailnet name this machine answers to, so the link works
+  // from the other laptop rather than only from here.
+  function shareUrl(b) {
+    const t = (remotes && remotes.tailnet) || {};
+    const host = t.dns || t.ip || location.hostname;
+    const port = (remotes && remotes.port) || 8042;
+    return `http://${host}:${port}/board/${encodeURIComponent(b.id)}?key=${encodeURIComponent(b.share_key)}`;
+  }
+
+  // The board's own key is the narrow thing. Tailnet trust is not, and it is
+  // a separate switch elsewhere that undoes the point of sharing carefully.
+  function trustWarning() {
+    return remotes && remotes.settings && remotes.settings.trust_tailnet
+      ? "Tailnet trust is switched on in Connections, so every device on your account already has full control of this app — not just this board."
+      : "";
   }
 
   // Anything that changes `boards` goes through here, so the Save reminder
@@ -184,9 +231,32 @@
       const set = () => {
         const b = boardOf(x), k = x.dataset.b;
         b[k] = x.type === "checkbox" ? x.checked : x.value;
+        // Turning sharing on or off changes what the panel offers, so this
+        // one redraws the editor rather than only noting the change.
+        if (k === "shared") { touch(); return; }
         dirty = true; markDirty();
       };
       x.onchange = set; if (x.tagName !== "SELECT") x.oninput = set;
+    });
+    $("dbEditList").querySelectorAll("[data-copy-share]").forEach((x) => x.onclick = async () => {
+      const b = boards[+x.dataset.copyShare];
+      const url = shareUrl(b);
+      try { await navigator.clipboard.writeText(url); uiToast("Share link copied"); }
+      catch (e) {
+        // No clipboard in this webview; the field is right there and already
+        // selects itself, so say that rather than failing silently.
+        uiToast("Select the link and copy it", "err");
+      }
+    });
+    // There is no command for this: clearing the key and saving is what mints
+    // a new one, because a shared board is always given one on the way in.
+    $("dbEditList").querySelectorAll("[data-new-key]").forEach((x) => x.onclick = async () => {
+      const b = boards[+x.dataset.newKey];
+      if (typeof uiConfirm === "function" &&
+          !(await uiConfirm("Make a new link for this board? The link you have already shared will stop working."))) return;
+      b.share_key = "";
+      touch();
+      uiToast("Press Save to issue the new link");
     });
     $("dbEditList").querySelectorAll("[data-k]").forEach((x) => {
       const set = () => {
