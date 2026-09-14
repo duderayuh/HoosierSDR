@@ -1,9 +1,11 @@
 /* Dashboards: boards the listener composes out of panes.
  *
- * Two jobs in one file — drawing a board, and editing one. Matching happens
- * here rather than in Rust: the page already holds every incident it has been
- * told about, so an `incident` event re-renders from memory with no round
- * trip, which is what lets a board sit on a wall and keep up.
+ * Two jobs in one file — showing a board, and editing one. What belongs on a
+ * board is decided in `dashboards::render`, not here: the same answer is
+ * served to another machine over Tailscale, and that machine must be able to
+ * see one board and nothing else, which is only true if the filtering happens
+ * before anything leaves. Drawing is shared with that page too, in
+ * board-render.js.
  */
 (() => {
   if (typeof invoke !== "function") return;
@@ -13,226 +15,46 @@
   let places = [];             // enabled places, whole
   let curId = null;            // board on screen
   let sel = null;              // board open in the editor
-  const inc = new Map();       // incidents by id
-  const reports = new Map();   // stored conversations by id
   let loaded = false;
   let dirty = false;            // edited since the last Save
+  let skew = 0;                 // this machine's clock, less the app's
 
-  const MI = 1609.344;
   const shown = () => $("view-dashboard").style.display !== "none";
   const board = () => boards.find((b) => b.id === curId) || boards[0] || null;
 
-  /* ---------- matching ---------- */
-
-  // Lower-case, punctuation to spaces, single-spaced — the same shape as the
-  // Rust `alerts::normalize`, so a phrase typed here behaves as it does in a
-  // tripwire.
-  const norm = (s) => (" " + String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ") + " ").replace(/\s+/g, " ");
-  const hasWord = (hay, words) => words.some((w) => { const n = norm(w).trim(); return n && hay.includes(" " + n + " "); });
-  const sameType = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
-
-  function haversineM(a, b) {
-    const R = 6371000, r = Math.PI / 180;
-    const dLat = (b[0] - a[0]) * r, dLon = (b[1] - a[1]) * r;
-    const s = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLon / 2) ** 2;
-    return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
-  }
-  const placeById = (id) => places.find((p) => p.id === id) || null;
-  const located = (p) => p && p.lat != null && p.lon != null;
-  const hospitals = () => places.filter((p) => p.kind === "hospital" && located(p));
-
-  // The hospital an incident is closest to, as the crow flies. Deliberately
-  // not a drive time: a road route for every incident against every hospital
-  // on every render is a lot of asking, and the answer to "whose patch is
-  // this" does not turn on a minute either way.
-  function closestHospital(i) {
-    if (i.lat == null || i.lon == null) return null;
-    let best = null, bestM = Infinity;
-    for (const h of hospitals()) {
-      const m = haversineM([i.lat, i.lon], [h.lat, h.lon]);
-      if (m < bestM) { bestM = m; best = h; }
-    }
-    return best ? { place: best, meters: bestM } : null;
-  }
-
-  // Drive time is only ever shown when it was actually measured: the pathway
-  // resolver stores a road route on the incident for the facilities it picked.
-  // Anything else gets a distance and no minutes, rather than a guess.
-  function roadTo(i, placeId) {
-    const t = (i.targets || []).find((t) => t.place_id === placeId && t.how === "road" && t.secs > 0);
-    return t ? Math.max(1, Math.round(t.secs / 60)) : null;
-  }
-
-  function incHay(i) {
-    return norm([i.call_type, i.summary, i.address, (i.units || []).join(" ")].join(" "));
-  }
-
-  function matches(p, i) {
-    const hay = incHay(i);
-    if (p.except && p.except.length && hasWord(hay, p.except)) return false;
-    if (p.call_types && p.call_types.length && !p.call_types.some((t) => sameType(t, i.call_type))) return false;
-    if (p.phrases && p.phrases.length && !hasWord(hay, p.phrases)) return false;
-    if (p.closest_place) {
-      const c = closestHospital(i);
-      if (!c || c.place.id !== p.closest_place) return false;
-    }
-    if (p.within_place && p.within_miles > 0) {
-      const w = placeById(p.within_place);
-      if (!located(w) || i.lat == null || i.lon == null) return false;
-      if (haversineM([i.lat, i.lon], [w.lat, w.lon]) > p.within_miles * MI) return false;
-    }
-    return true;
-  }
-
-  // First rule wins, so the loudest emphasis goes at the top of the list.
-  function emphasisFor(p, hay, callType) {
-    for (const e of p.emphasis || []) {
-      const w = e.when || {};
-      if ((w.except_types || []).some((t) => sameType(t, callType))) continue;
-      if ((w.except || []).length && hasWord(hay, w.except)) continue;
-      const byType = (w.call_types || []).some((t) => sameType(t, callType));
-      const byWord = (w.phrases || []).length && hasWord(hay, w.phrases);
-      if (byType || byWord) return e;
-    }
-    return null;
-  }
-
-  /* ---------- rendering ---------- */
-
-  const ago = (t) => {
-    const s = Math.max(0, Math.floor(Date.now() / 1000) - t);
-    if (s < 60) return s + "s ago";
-    if (s < 3600) return Math.floor(s / 60) + " min ago";
-    if (s < 86400) return Math.floor(s / 3600) + " h ago";
-    return Math.floor(s / 86400) + " d ago";
-  };
-
-  function dispatchRows(p) {
-    const out = [];
-    for (const i of inc.values()) if (matches(p, i)) out.push(i);
-    out.sort((a, b) => b.updated - a.updated);       // latest at the top
-    return out.slice(0, p.limit || 25);
-  }
-
-  function reportRows(p) {
-    const pl = placeById(p.place);
-    const tgs = new Set((pl && pl.tgs) || []);
-    const out = [];
-    for (const r of reports.values()) if (tgs.has(r.tg)) out.push(r);
-    out.sort((a, b) => b.last_at - a.last_at);
-    return out.slice(0, p.limit || 25);
-  }
-
-  function dispatchCard(p, i) {
-    const hay = incHay(i);
-    const em = emphasisFor(p, hay, i.call_type);
-    const bits = [];
-    if (p.closest_place || p.within_place) {
-      const ref = placeById(p.within_place || p.closest_place);
-      if (located(ref) && i.lat != null && i.lon != null) {
-        const mi = haversineM([i.lat, i.lon], [ref.lat, ref.lon]) / MI;
-        const min = roadTo(i, ref.id);
-        bits.push(`<span class="dbdist">${mi.toFixed(1)} mi</span>`);
-        if (min != null) bits.push(`<span class="dbdist">${min} min</span>`);
-      }
-    }
-    return `<article class="dbcard${em ? " em-" + esc(em.style) : ""}">
-      <div class="dbcardhead">
-        <span class="dbtitle">${esc(i.emoji || "")} ${esc(i.call_type || "Unknown")}</span>
-        ${em && em.note ? `<span class="dbtag">${esc(em.note)}</span>` : ""}
-        <span class="spacer"></span>
-        <span class="dbid mono">#${i.id}</span>
-      </div>
-      <div class="dbmeta mono faint">
-        <span class="ago" data-t="${i.updated}">${ago(i.updated)}</span>
-        ${i.address ? " · " + esc(i.address) : ""}
-        ${bits.length ? " · " + bits.join(" · ") : ""}
-      </div>
-      ${i.summary ? `<div class="dbbody">${esc(i.summary)}</div>` : ""}
-    </article>`;
-  }
-
-  // The summary with its stated time to arrival marked. `r.eta` is the exact
-  // phrase Rust found in this text (see `conversations::eta_phrase`), so the
-  // span is located by looking the phrase back up rather than by matching
-  // again here — one matcher, no second opinion to drift from it.
-  function etaBody(r) {
-    const s = r.summary || "";
-    const at = r.eta ? s.indexOf(r.eta) : -1;
-    if (at < 0) return esc(s);
-    return esc(s.slice(0, at)) + `<mark class="dbeta">${esc(r.eta)}</mark>` +
-      esc(s.slice(at + r.eta.length));
-  }
-
-  function reportCard(p, r) {
-    const hay = norm([r.headline, r.summary, r.tg_name, (r.units || []).join(" ")].join(" "));
-    const em = emphasisFor(p, hay, "");
-    // Rows stored before headlines existed have none; the summary still reads
-    // on its own, so the card simply loses its title rather than its meaning.
-    const title = r.headline || (r.units || []).join(", ") || r.tg_name || "Report";
-    return `<article class="dbcard${em ? " em-" + esc(em.style) : ""}">
-      <div class="dbcardhead">
-        <span class="dbtitle">${esc(title)}</span>
-        ${em && em.note ? `<span class="dbtag">${esc(em.note)}</span>` : ""}
-        <span class="spacer"></span>
-        <span class="dbid mono">#${r.id}</span>
-      </div>
-      <div class="dbmeta mono faint">
-        <span class="ago" data-t="${r.last_at}">${ago(r.last_at)}</span>
-        ${r.units && r.units.length ? " · " + esc(r.units.join(", ")) : ""}
-        ${r.eta ? ` · <span class="dbetachip">${esc(r.eta)}</span>` : ""}
-      </div>
-      ${r.summary ? `<div class="dbbody">${etaBody(r)}</div>` : ""}
-    </article>`;
-  }
-
-  function paneHtml(p) {
-    const isRep = p.kind === "reports";
-    const rows = isRep ? reportRows(p) : dispatchRows(p);
-    const sub = isRep ? (placeById(p.place) || {}).name || "" :
-      (p.closest_place ? "closest to " + ((placeById(p.closest_place) || {}).name || "") : "");
-    const cards = rows.map((r) => (isRep ? reportCard(p, r) : dispatchCard(p, r))).join("");
-    return `<section class="dbpane" style="flex:${Math.max(1, p.width || 1)}">
-      <div class="dbpanehead">
-        <span class="eyebrow">${esc(p.title || (isRep ? "Reports" : "Dispatch"))}</span>
-        ${sub ? `<span class="faint">${esc(sub)}</span>` : ""}
-        <span class="spacer"></span>
-        <span class="mono faint">${rows.length}</span>
-      </div>
-      <div class="dbpanebody">${cards || `<div class="empty small">Nothing matching yet.</div>`}</div>
-    </section>`;
-  }
-
-  function render() {
+  // Draw. The board itself comes from Rust already matched, ordered and cut
+  // to each pane's limit, so nothing here decides what is shown.
+  async function render() {
     if (!shown()) return;
     const live = boards.filter((b) => b.enabled !== false);
     $("dbPick").innerHTML = live.map((b) =>
       `<button data-b="${esc(b.id)}"${b.id === curId ? ' aria-pressed="true"' : ""}>${esc(b.name)}</button>`).join("");
     $("dbPick").querySelectorAll("button").forEach((x) => x.onclick = () => { curId = x.dataset.b; render(); });
-    const b = board();
     $("dbEmpty").style.display = live.length ? "none" : "";
-    $("dbPanes").innerHTML = b ? (b.panes || []).map(paneHtml).join("") : "";
-    $("dbFooter").style.display = b && b.footer ? "" : "none";
-    if (b && b.footer) $("dbFooter").textContent = b.footer;
     $("dbClock").textContent = new Date().toLocaleTimeString();
+    const b = board();
+    if (!b || !b.id) { $("dbPanes").innerHTML = ""; $("dbFooter").style.display = "none"; return; }
+    let view;
+    try { view = await invoke("dashboards_render", { id: b.id }); }
+    catch (e) { log(`dashboards render: ${e}`); return; }
+    // A board saved a moment ago may not be the one just asked for, and a
+    // call that answered with nothing must not blank a wall display.
+    if (!view || !window.HSBoard || board() !== b) return;
+    skew = HSBoard.paint($("dbPanes"), view);
+    $("dbFooter").style.display = view.footer ? "" : "none";
+    if (view.footer) $("dbFooter").textContent = view.footer;
+  }
+
+  // Runs arrive in bursts, and each draw is now a database scan rather than a
+  // pass over memory. One draw per burst is enough to look live.
+  let pending = null;
+  function redraw() {
+    if (!shown()) return;
+    clearTimeout(pending);
+    pending = setTimeout(() => { pending = null; render(); }, 300);
   }
 
   /* ---------- data ---------- */
-
-  async function loadIncidents() {
-    try {
-      const list = await invoke("incidents_list", { since: 0, limit: 2000 });
-      inc.clear();
-      (list || []).forEach((i) => inc.set(i.id, i));
-    } catch (e) { log(`dashboards incidents: ${e}`); }
-  }
-  async function loadReports() {
-    try {
-      const rs = await invoke("conversations_list", { limit: 300 });
-      reports.clear();
-      (rs || []).forEach((r) => reports.set(r.id, r));
-    } catch (e) { log(`dashboards reports: ${e}`); }
-  }
 
   async function loadCfg() {
     const v = await invoke("dashboards_get");
@@ -243,7 +65,7 @@
   }
 
   async function show() {
-    if (!loaded) { loaded = true; await loadCfg(); await loadIncidents(); await loadReports(); }
+    if (!loaded) { loaded = true; await loadCfg(); }
     render();
   }
 
@@ -453,15 +275,17 @@
   // Live. Everything a board shows arrives as an event it is already told
   // about, so there is nothing to poll; the interval only ages the timestamps.
   if (typeof listen === "function") {
-    listen("incident", (e) => { const i = e.payload; if (i && i.id != null) { inc.set(i.id, i); render(); } });
-    listen("incident_deleted", (e) => { inc.delete(e.payload); render(); });
-    listen("conversations", async () => { if (!shown()) return; await loadReports(); render(); });
+    listen("incident", redraw);
+    listen("incident_deleted", redraw);
+    listen("conversations", redraw);
     listen("places", async () => { await loadCfg(); render(); });
   }
+  // The clock and the "12 min ago" labels age between draws without asking
+  // for the board again.
   setInterval(() => {
     if (!shown()) return;
     $("dbClock").textContent = new Date().toLocaleTimeString();
-    document.querySelectorAll("#dbPanes .ago[data-t]").forEach((n) => { n.textContent = ago(+n.dataset.t); });
+    if (window.HSBoard) HSBoard.tick($("dbPanes"), skew);
   }, 10000);
 
   window.dashboardsOnShow = show;

@@ -13,15 +13,19 @@
 //! matters to a STEMI centre is not the one that matters to a burn unit, and
 //! neither is worth hard-coding.
 //!
-//! Panes are filtered here in Rust only as far as the stored settings go; the
-//! matching itself is done on the page against incidents it already holds, so
-//! a board re-renders on a `incident` event without a round trip.
+//! Matching happens here, not on the page. A board can be shared over the
+//! tailnet to a machine that must see that board and nothing else, and that
+//! is only true if the filtering is done before anything is sent — a page
+//! that chose for itself would have to be handed every run first. The page,
+//! and the shared one, are both given finished cards.
 
 use serde::{Deserialize, Serialize};
 
 const MAX_DASHBOARDS: usize = 40;
 const MAX_PANES: usize = 8;
 const MAX_EMPHASIS: usize = 12;
+/// Rows a pane draws when it does not say.
+const DEFAULT_LIMIT: u32 = 25;
 
 /// How a pane draws attention to some of its rows.
 ///
@@ -166,6 +170,12 @@ pub fn sanitize(s: &mut Settings) {
             }
             p.title = crate::analyzers::clean_line(&p.title, 60);
             p.width = p.width.clamp(1, 6);
+            // Absent means the default, not "none": a board written before
+            // this field existed reads back as zero, and clamping that to one
+            // would quietly shrink a full pane to a single row.
+            if p.limit == 0 {
+                p.limit = DEFAULT_LIMIT;
+            }
             p.limit = p.limit.clamp(1, 200);
             p.call_types = clean_words(&p.call_types, 40);
             p.phrases = clean_words(&p.phrases, 40);
@@ -549,12 +559,19 @@ fn path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(d.join("dashboards.json"))
 }
 
+/// Read the stored boards, and put them through the same cleaning a save
+/// does. `dashboards.json` is hand-editable and outlives the fields it was
+/// written with, so what comes off disk is not necessarily what a save would
+/// have produced: a board written before `limit` existed reads back as zero,
+/// which would draw one row where it used to draw twenty-five.
 pub fn load(app: &tauri::AppHandle) -> Settings {
-    path(app)
+    let mut s: Settings = path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    sanitize(&mut s);
+    s
 }
 
 pub fn store(app: &tauri::AppHandle, s: &Settings) -> Result<(), String> {
@@ -813,6 +830,17 @@ mod tests {
         sanitize(&mut s);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_board_written_before_a_limit_existed_still_draws_a_full_pane() {
+        // What reaches `render` has been through `sanitize`, because `load`
+        // puts it there. Without that, `limit: 0` draws a single row.
+        let old = r#"{"dashboards":[{"id":"db1","name":"Wall","panes":[{"id":"p1","kind":"dispatch"}]}]}"#;
+        let mut s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.dashboards[0].panes[0].limit, 0, "as it reads off disk");
+        sanitize(&mut s);
+        assert_eq!(s.dashboards[0].panes[0].limit, 25, "as it is used");
     }
 
     #[test]
