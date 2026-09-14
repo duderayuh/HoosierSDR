@@ -3729,9 +3729,10 @@ function dpFrame(id) {
   const el = popup && popup.getElement();
   if (el) { pw = el.offsetWidth; ph = el.offsetHeight; }
   // On a narrow map the popup and an open Layers panel leave the route a
-  // sliver: the panel folds to its header for the run on show. One click
-  // opens it again, and what was saved is left as it was.
-  if (popup && layers && !layers.classList.contains("closed") && size.x < pw + layers.offsetWidth + 420) layers.classList.add("closed");
+  // sliver: the panel folds to its header. One click opens it again, and
+  // what was saved is left as it was.
+  // Once a session: opened again, it stays open.
+  if (popup && !dpLayersFolded && layers && !layers.classList.contains("closed") && size.x < pw + layers.offsetWidth + 420) { layers.classList.add("closed"); dpLayersFolded = true; }
   // The panel's width, and room for a hospital's name drawn beside its pin.
   const lw = layers && !layers.classList.contains("closed") ? layers.offsetWidth + 90 : 60;
   if (popup) {
@@ -3797,7 +3798,10 @@ window.dpSelected = () => dpSel;
 // Following: each new run placed on the map is shown in turn, and held long
 // enough to read before the next one takes the map.
 const DP_HOLD_MS = 15000;
+// How old a run missed while the map was out of sight may be and still be shown.
+const DP_FOLLOW_RECENT_SECS = 15 * 60;
 const dpFollowed = new Set();
+let dpLoaded = false, dpLayersFolded = false;
 let dpFollowQueue = [], dpFollowUntil = 0, dpFollowTimer = null;
 function dpFollow(id) {
   if (dpFollowed.has(id)) return;
@@ -3835,8 +3839,18 @@ async function dpLoad() {
   try {
     const since = dpWinHours ? dpNow() - dpWinHours * 3600 : 0;
     const rows = await dpInvoke("incidents_list", { since, limit: 2000 });
-    dpInc.clear(); for (const i of rows || []) { dpInc.set(i.id, i); if (i.lat != null) dpFollowed.add(i.id); }
+    // Runs already on the map the first time it loads are not news. After
+    // that, a run placed while the map was out of sight (another tab) is
+    // shown when it comes back, if it is still recent.
+    const first = !dpLoaded;
+    dpLoaded = true;
+    dpInc.clear(); for (const i of rows || []) { dpInc.set(i.id, i); if (first && i.lat != null) dpFollowed.add(i.id); }
     dpRender();
+    if (!first && $("dpFollowNew").checked) {
+      const recent = dpNow() - DP_FOLLOW_RECENT_SECS;
+      [...dpInc.values()].filter((i) => i.lat != null && i.created >= recent && !dpFollowed.has(i.id) && dpMarkers.has(i.id))
+        .sort((a, b) => a.created - b.created).forEach((i) => dpFollow(i.id));
+    }
   } catch (e) { log(`incidents_list: ${e}`); }
 }
 async function dpSettingsLoad() {
