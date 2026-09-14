@@ -415,3 +415,61 @@ a rule for "medic 32 from control" found exactly those five and nothing else.
 3. **Arrival window.**
 4. **Telegram**, replacing the step tripwires.
 5. **Board pane.**
+
+## The listener's answers (2026-09-14)
+
+1. **Arrests start under other names.** A run can be dispatched as unconscious
+   person, difficulty breathing or something else and become an arrest later.
+   It can also skip straight to "Cardiac Arrest Working" (transcribed as
+   "cardiac arrest, working" or with a typo). Pediatric arrests follow the same
+   pattern, and a pediatric arrest almost always goes to the closest children's
+   hospital, which the existing pediatric-arrest pathway already expresses.
+2. **One Telegram chat per hospital.** A place gains its own destination,
+   additive; the default chat is the fallback.
+3. **Cadence agreed:** one edited timeline, notifications on the key events.
+4. **Every arrest dispatch opens a case**, working or not.
+5. **Radio IDs are rarely named by the system.** Identity comes from what is
+   said: units calling the hospital, the ops channels, and the automated
+   dispatch voice, which names every unit sent to an address.
+
+Further facts from the listener, checked against the library:
+
+- **The dispatch talkgroup is an automated voice.** A page reads: units,
+  address, call type, then the same again, then "<time> Hours, Location <grid>",
+  sometimes "Assigned to Op N". One radio carries it.
+- **A run is repaged as it grows, and the repage carries the upgrade.** One
+  arrest was paged five times in nine minutes, each page naming the units
+  added, and the last two as "Cardiac Arrest Working". Because the page repeats
+  the address, the address key links the upgrade to its run with no callsign
+  and no radio ID. The upgrade now has three sources, ranked by how clean they
+  are: the automated repage on dispatch, the console readback on ops, and the
+  crew's own request on ops. A bare "can you upgrade this" is usually followed
+  by a repage that does carry a key.
+- **Units swap runs.** "Control, EMS 93, I can take that from 91, I'm closer",
+  and the run is repaged with the new unit. The incident's unit list is a union,
+  so both stay on it; harmless for linking, but a case shows the swap.
+- **"Refer to MDT for units."** Some pages name no units. A hospital report
+  about a very similar complaint shortly after is probably that run, but no
+  rule can prove it, so the join gains a third outcome, *inferred*, which is
+  always labelled as such wherever it is shown or sent.
+
+Two gaps seen while checking:
+
+- `tidy()` snaps "Cardiac Arrest Working" to the configured "Cardiac Arrest",
+  so the qualifier is lost from the incident's type and survives only in the
+  transcript and the stored extraction. The case engine reads the dispatch
+  transcripts for it rather than the incident's type.
+- **A repage can fork the run.** One page was transcribed without its house
+  number, its key became the bare street, the geocode landed on the street's
+  centre beyond the 150 m radius, and a second incident opened. A case built on
+  incidents must merge these: same street, compatible type, a shared or added
+  unit, within minutes.
+
+**What "generic case" and "readback as event" mean.** A *case* is one timeline
+mechanism, and a *profile* is a settings file that tells it which call types
+open a case and which phrases are events. Cardiac arrest is the first profile;
+stroke or trauma later is a second profile, not new code. *Readback as event*
+means that when a crew's garbled "can you upgrade this to a working arrest" is
+followed by the dispatcher's clean "Working Arrest 1748", the timeline records
+the dispatcher's version and time, with the crew's call kept as supporting
+evidence.
