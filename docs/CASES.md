@@ -16,9 +16,9 @@ session starts from it rather than from the codebase again.
   cadence that edits one message** instead of sending many.
 - Build it as a generic *case* with a *profile*, cardiac arrest being the first
   profile. The repo's own rule is no county's talkgroups or names in the code;
-  10202 / 10244 / 49F / the hospital channels already have homes in Dispatch
-  setup and the place book, and the profile refers to those roles, not the
-  numbers.
+  the dispatch talkgroup, its backup, the ops talkgroups and the hospital
+  channels already have homes in Dispatch setup and the place book, and the
+  profile refers to those roles, not the numbers.
 - Three honest pushbacks, detailed below: low-flow time cannot come off the
   radio; the arrival prediction must be anchored on the crew's report, not the
   scene; and the timestamps are the trustworthy part while the labels are the
@@ -48,7 +48,7 @@ memory of a run's state.
    counter. There is no ordered log of events, no state (dispatched → working →
    ROSC → re-arrest → terminated / transporting → arrived), and no downgrade
    ("this is an overdose, not an arrest").
-2. **Linking the ops-channel traffic reliably.** A 49F call attaches to an
+2. **Linking the ops-channel traffic reliably.** An ops-channel call attaches to an
    incident only when the extraction model pulls a unit callsign the incident
    already has. Most upgrades do name the unit ("Medic 32, upgrade to a
    working arrest"), so this mostly works, but the transcriber writing
@@ -89,7 +89,7 @@ template for stroke / STEMI / trauma later):
   `terminated` / `cancelled`
 
 This is how "the original dispatch could be an unconscious person" falls out:
-the case opens at the *upgrade* on 49F, and the timeline backfills the
+the case opens at the *upgrade* on the ops channel, and the timeline backfills the
 dispatch line from the incident the upgrade linked to. Nothing opens a case
 for every unconscious person.
 
@@ -150,7 +150,7 @@ inferences.
   time unknown").
 - **Output**: a window, `anchor + lo` to `anchor + hi`, replaced by each new
   ETA. Rendered as "said 5–7 min at 06:32 → 06:37–06:39".
-- **Closing the loop**: an "arrived" / "at Methodist" call on the ops channel
+- **Closing the loop**: an "arrived" / "at the hospital" call on the ops channel
   records the actual arrival, and the predicted-versus-actual error is kept
   per unit. That error, over weeks, is the only thing that could ever make the
   prediction better than restating what the crew said. This is not a model. It
@@ -213,11 +213,11 @@ case that lives an hour.
 The root message, with the anchors the ED can trust:
 
 ```
-🫀 Working arrest · 4350 Madison Ave · Medic 32, Engine 6
+🫀 Working arrest · 1200 Example St · Medic 32, Engine 6
 06:01  dispatched as Unconscious Person
 06:12  upgraded to working arrest · Medic 32
 06:23  ROSC reported
-06:27  report to Methodist · said ETA 10 min → arrives 06:37
+06:27  report to General · said ETA 10 min → arrives 06:37
 06:32  lost pulses
 06:40  re-report · said ETA 7 min → arrives 06:47
 Since dispatch 39 min · CPR first reported 06:12 · ROSC 06:23
@@ -225,7 +225,7 @@ Witnessed: not stated · Bystander CPR: not stated · Comorbidities: not stated
 ```
 
 Which chat: a place in the place book can carry its own Telegram destination,
-so a report to Methodist goes to Methodist's chat, with the default chat as
+so a report to one hospital goes to that hospital's chat, with the default chat as
 the fallback. Whether you want that or one chat is a question below.
 
 **Nothing is sent until it has been replayed.** A "replay over the library"
@@ -269,27 +269,27 @@ stays in Rust, as the boards already insist.
 
 Answers to these change what gets built, in the order they matter.
 
-1. In Dispatch setup today, are 49F North and South marked as **tactical**
+1. In Dispatch setup today, are the ops talkgroups marked as **tactical**
    channels, and do the hospital talkgroups sit on their hospitals in the
    place book? If not, the linking that already exists is not running on your
    library, and that is the first thing to fix.
-2. Does an arrest always start with a dispatch on 10202 / 10244, or can a crew
+2. Does an arrest always start with a dispatch on the dispatch talkgroup or its backup, or can a crew
    upgrade a run that has no dispatch in the library (mutual aid, a channel
-   you do not record)? This decides whether a bare "working arrest" on 49F
+   you do not record)? This decides whether a bare "working arrest" on an ops channel
    opens a case on its own.
-3. Do crews call "transporting", "en route to Methodist", or "arrived" on 49F?
+3. Do crews call "transporting", "en route to <hospital>", or "arrived" on the ops channels?
    Arrival is what makes the ETA error measurable.
 4. Telegram audience: one chat (yours, at one hospital), or a chat per hospital
    routed by which hospital the crew called?
 5. Cadence: is "one edited timeline plus a notification on those seven event
    kinds" right, or do you want every event as its own reply?
-6. Send the console radio IDs (the 7900xx ones), the hospital radio IDs you
+6. Send the dispatch console radio IDs, the hospital radio IDs you
    know, and the system they are on. They seed the identity table and let the
    "medic 32 from control" rule work from day one.
 7. Should a run dispatched as a cardiac arrest that is never upgraded and
    never produces a hospital report open a Telegram thread at all? Many are
    cancelled or not transported.
-8. What are the actual words on 49F for upgrade and downgrade? "Working
+8. What are the actual words on the ops channels for upgrade and downgrade? "Working
    arrest", "working code", "upgrade to a working", "this is going to be an
    overdose"… The dead-phrase tool can verify them against the library, but
    only you know the vernacular.
@@ -311,3 +311,107 @@ to Telegram until its preview has been read.
 
 All schema changes are additive (new tables, one nullable column on
 `incidents` at most), so an older build still opens the library.
+
+## Findings from the library
+
+Measured 2026-09-14 on the live library, read-only: 67 hours, 18,472 calls,
+1,555 incidents, 334 hospital reports of which 105 are joined to a run. The
+library is short because an old retention setting deleted every unstarred call
+at each start until 2026-09-11; cleanup is off now, so it will grow.
+
+Talkgroup numbers, hospital names and radio IDs are kept out of this file on
+purpose. Roles below: *dispatch* is the tone-out talkgroup, *ops* the two
+conversational channels between dispatch and the units, *consoles* the
+dispatch centre's own radios.
+
+### The answers that were in the data
+
+**Question 1: the ops channels are not configured.** Only the dispatch
+talkgroup is marked in Dispatch setup. The two ops talkgroups carry no role, so
+the tactical path in `pick_target` has never run on them, and an upgrade said
+there reaches no incident. The backup dispatch talkgroup has no calls in the
+library. Every hospital talkgroup is on its hospital in the place book. This is
+a settings change for the listener, not code.
+
+**Question 3: transport is announced, arrival barely.** Crews say
+"transporting, emergent" and name the hospital, and the console reads it back.
+"At the hospital" appears mostly as the dispatcher asking for a status.
+Arrival closure is feasible for some runs, not most.
+
+**Question 8: the vernacular, counted on the two ops channels.**
+
+| Phrase | Ops calls in 67 h | Note |
+|---|---|---|
+| working (cardiac) arrest | 10 | crew request, then console readback |
+| not a cardiac arrest / not an arrest | 7 | the downgrade; often "overdose, not a cardiac arrest" |
+| transport(ing) | 24 | mostly requests for a second transport unit |
+| DOA | 6 | "this is going to be a DOA", then a time asked for |
+| ceasing efforts | 2 | transcribed once as "A ceasing effort to hate" |
+| ROSC | 2 | one crew call and its readback |
+| upgrade | 4 | "can you upgrade this to a working cardiac arrest" |
+| CPR, compressions, pulses, lost pulses, v-fib, asystole | 0 | never said on ops in this window |
+
+So a timeline built from the ops channels gets *working*, *downgrade*,
+*transporting*, *DOA / ceasing efforts* and occasionally *ROSC*. Pulses lost
+and regained are said to the hospital, if at all, not to dispatch.
+
+**Question 6, partly: consoles identify themselves.** One console radio carries
+the dispatch talkgroup almost alone. Five others answer on the ops channels, and
+a rule for "medic 32 from control" found exactly those five and nothing else.
+
+### What the data changes in the design
+
+1. **The console readback is the event.** Every crew status on ops is read back
+   by a console within about five seconds, with a clock time: "Working Arrest
+   1748", "rosc 1914", "Ceasing efforts 2326", "Not a cardiac arrest, 1714",
+   "Transporting <hospital>, … 663". The speaker is a known radio, the format is
+   fixed, the speech is cleaner than a crew on scene, and the time is the one
+   the dispatch centre logged. The design now takes the readback as the
+   canonical event and the crew's request as supporting evidence, and it uses
+   the spoken time as a second clock to check the call's start against.
+2. **The radio ID is a weaker key on ops than assumed.** 14–15 % of transcribed
+   ops calls have no radio ID, against 1.4 % on dispatch, and 4 of the 11 arrest
+   upgrade or downgrade calls are among them. These calls have speech, so they
+   are not the announcement rows fixed on 2026-09-14. The ops channels are
+   granted through Motorola regroup grants; if a call is opened by the update
+   form, which names no radio, only a confirmed Link Control word can. Recorded
+   here as a decoder question, not part of this work.
+3. **The same-radio bridge rarely reaches the hospital.** Arrests are mostly
+   marked by the engine crew, and the engine does not call the hospital; the
+   medic does. Of the arrest calls from a named radio, one (perhaps two) went on to
+   report to a hospital. The chain is therefore upgrade → incident (by console
+   readback time, callsign, or radio identity) and incident → hospital report
+   (by the existing callsign join), not upgrade → report directly.
+4. **Time alone links about half.** For the 11 ops arrest calls, the dispatch
+   incidents open in the previous 30 minutes were: exactly one Cardiac Arrest
+   run in 5 cases, none in 3 (the run had been dispatched as something else),
+   two or more in 3. A bare "can you upgrade this to a working cardiac arrest"
+   with no radio ID and no callsign had ten runs open and none of them an
+   arrest; no key reaches it, and it goes to the tie-break or stays unlinked.
+   Where a radio was named, identity helped: the radio that said "working
+   arrest" at one run had self-identified four times as the medic on that run.
+5. **Fuzzy matching is not optional.** "Oregon arrest 1157", "receiving
+   efforts", "not under arrest", "A ceasing effort to hate". The profile
+   vocabulary goes through `fuzzy.rs` the way tripwire phrases already do.
+6. **Radio identity grows with time.** A self-identification rule
+   ("control, medic 32", "medic 32 to control", "control from engine 44") over
+   6,553 transcribed dispatch and ops calls gave some identification for 156 of
+   388 field radios and an accepted one, at ≥3 hits and ≥60 % agreement, for
+   19. Its disagreements were misheard digits (24 and 44, 54 and 64), which the
+   majority absorbs. In 67 hours that is thin; it is not thin after a month.
+7. **The listener's arrest tripwires are what cases replace.** A folder of
+   step tripwires already does this by hand: arrest chatter on ops, working
+   arrest on dispatch, updates on ops, the report on each hospital channel with
+   follow-ups by radio, and an ECPR screen. When cases send to Telegram, that
+   folder is migrated or switched off, or every arrest is announced twice.
+
+### Build order, revised
+
+0. **Listener:** mark the two ops talkgroups as tactical in Dispatch setup, so
+   the existing unit matching runs on them while the rest is built.
+1. **Radio identity**, with console detection first, because the readback rule
+   needs to know which radios are consoles.
+2. **Cases**, reading events from console readbacks, replayed over the library.
+3. **Arrival window.**
+4. **Telegram**, replacing the step tripwires.
+5. **Board pane.**
