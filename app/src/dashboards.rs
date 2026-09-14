@@ -174,6 +174,10 @@ pub fn sanitize(s: &mut Settings) {
         // is already in someone's browser. Sharing is the only thing that
         // mints one, and un-sharing forgets it, so switching sharing back on
         // hands out a new link rather than reviving the old one.
+        //
+        // This is also how "new link" works, and why there is no command for
+        // it: the editor clears `share_key` and saves, and a board that is
+        // still shared is issued a fresh one on the way in.
         d.share_key = d
             .share_key
             .chars()
@@ -634,12 +638,20 @@ fn path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// have produced: a board written before `limit` existed reads back as zero,
 /// which would draw one row where it used to draw twenty-five.
 pub fn load(app: &tauri::AppHandle) -> Settings {
-    let mut s: Settings = path(app)
+    let raw: Settings = path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+    let mut s = raw.clone();
     sanitize(&mut s);
+    // Write back when cleaning changed something. A file hand-edited to share
+    // a board is given a key here, and a key that only ever lived in memory
+    // would be a different one after every restart — so the link someone was
+    // sent would stop working on the next launch.
+    if s != raw {
+        let _ = store(app, &s);
+    }
     s
 }
 
@@ -722,6 +734,16 @@ pub fn dashboards_render(
         .find(|d| d.id == id)
         .cloned()
         .ok_or("no such dashboard")?;
+    draw(&state, &board)
+}
+
+/// Gather what a board is matched against, and draw it.
+///
+/// Split out because two callers reach it: the desktop, which may draw any
+/// board, and the tailnet handler, which may draw only a shared one. Which
+/// board is allowed is settled before this is called; this only fetches and
+/// renders.
+pub fn draw(state: &crate::AppState, board: &Dashboard) -> Result<RenderedBoard, String> {
     let places: Vec<crate::places::Place> = state
         .places
         .lock()
@@ -744,7 +766,7 @@ pub fn dashboards_render(
         None => (Vec::new(), Vec::new()),
     };
     Ok(render(
-        &board,
+        board,
         &incidents,
         &reports,
         &places,

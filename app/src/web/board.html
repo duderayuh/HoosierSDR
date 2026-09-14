@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- The key is in the address bar; nothing should carry it off this page. -->
+<meta name="referrer" content="no-referrer" />
+<title>Board</title>
+<link rel="stylesheet" href="/desktop/style.css" />
+<style>
+  body { margin: 0; padding: 14px; }
+  .bdtop { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  .bdname { font-size: 18px; font-weight: 650; }
+  /* Stale is the failure this page exists to prevent: an ETA read off a wall
+     as though it were current. It is said loudly, and the board stays up
+     underneath — a blank screen tells a passing clinician nothing. */
+  .bdstale { display: none; background: var(--amber); color: #111; font-weight: 650;
+             padding: 6px 12px; border-radius: 6px; margin-bottom: 10px; }
+  .bdgone { display: none; padding: 40px 12px; text-align: center; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+  <div class="bdstale" id="bdStale"></div>
+  <div class="bdtop">
+    <span class="bdname" id="bdName"></span>
+    <span class="spacer"></span>
+    <span class="mono faint" id="bdClock"></span>
+  </div>
+  <div class="dbpanes" id="bdPanes"></div>
+  <div class="dbfoot faint" id="bdFoot" style="display:none"></div>
+  <div class="bdgone" id="bdGone">This board is no longer shared.</div>
+
+<script src="/desktop/board-render.js"></script>
+<script>
+/* A board on someone else's screen.
+ *
+ * Read-only by construction, not by politeness: this page can reach exactly
+ * two URLs, and the key in its address opens no other route. There is no
+ * `invoke`, no event stream, and nothing here that could ask for a call, a
+ * recording, or another board.
+ */
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const id = decodeURIComponent(location.pathname.replace(/^\/board\//, ""));
+  const key = new URLSearchParams(location.search).get("key") || "";
+
+  let every = 10000;       // until the board says otherwise
+  let skew = 0;
+  let lastOk = 0;          // when a board last arrived
+  let haveBoard = false;
+
+  const hhmm = (t) => new Date(t * 1000).toLocaleTimeString();
+
+  function stale() {
+    // Only meaningful once something has been shown; before that the page is
+    // simply still loading.
+    if (!haveBoard) return;
+    const secs = Math.floor(Date.now() / 1000) - lastOk;
+    // Two missed polls, so a single slow answer is not an alarm.
+    const bad = secs > Math.max(30, (every / 1000) * 2.5);
+    $("bdStale").style.display = bad ? "" : "none";
+    if (bad) $("bdStale").textContent = `Not updating — last reached the radio at ${hhmm(lastOk)}.`;
+  }
+
+  async function poll() {
+    let r;
+    try {
+      r = await fetch(`/api/board/${encodeURIComponent(id)}?key=${encodeURIComponent(key)}`,
+                      { cache: "no-store" });
+    } catch (e) {
+      stale();                       // unreachable: keep the board, say so
+      return;
+    }
+    if (r.status === 404) {
+      // Sharing was switched off, or the board was deleted. That is somebody
+      // deciding this screen should stop, so it stops.
+      haveBoard = false;
+      $("bdPanes").innerHTML = "";
+      $("bdFoot").style.display = "none";
+      $("bdStale").style.display = "none";
+      $("bdName").textContent = "";
+      $("bdGone").style.display = "";
+      return;
+    }
+    if (!r.ok) { stale(); return; }
+    let b;
+    try { b = await r.json(); } catch (e) { stale(); return; }
+    if (!b || !window.HSBoard) { stale(); return; }
+
+    $("bdGone").style.display = "none";
+    $("bdName").textContent = b.name || "";
+    document.title = b.name || "Board";
+    skew = HSBoard.paint($("bdPanes"), b);
+    $("bdFoot").style.display = b.footer ? "" : "none";
+    if (b.footer) $("bdFoot").textContent = b.footer;
+    every = Math.max(5, +b.refresh_secs || 10) * 1000;
+    lastOk = Math.floor(Date.now() / 1000);
+    haveBoard = true;
+    stale();
+  }
+
+  // The clock and the "12 min ago" labels keep moving between polls, so a
+  // board that has stopped arriving visibly ages instead of looking current.
+  setInterval(() => {
+    $("bdClock").textContent = new Date().toLocaleTimeString();
+    if (window.HSBoard) HSBoard.tick($("bdPanes"), skew);
+    stale();
+  }, 5000);
+
+  // Rescheduled after each attempt rather than on a fixed interval, so the
+  // board's own refresh rate is followed and a slow answer cannot stack up
+  // requests behind it.
+  async function loop() {
+    await poll();
+    setTimeout(loop, every);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>

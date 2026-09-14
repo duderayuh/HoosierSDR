@@ -372,6 +372,8 @@ pub fn spawn(app: AppHandle) {
         .route("/desktop/", get(desktop_index))
         .route("/desktop/{*path}", get(desktop_asset))
         .route("/tiles/{*path}", get(tile))
+        .route("/board/{id}", get(board_page))
+        .route("/api/board/{id}", get(board_data))
         .route("/api/health", get(health))
         .route("/api/status", get(status))
         .route("/api/snapshot", get(snapshot))
@@ -415,6 +417,80 @@ pub fn spawn(app: AppHandle) {
 
 async fn mobile_page() -> impl IntoResponse {
     axum::response::Html(MOBILE_HTML)
+}
+
+// ---------------------------------------------------------------------------
+// A shared board.
+//
+// Deliberately outside `Auth`. The token and tailnet trust both open
+// `/api/command`, which is the whole desktop — so neither can be what lets a
+// display in another room see a board. A shared board carries its own key
+// instead, and that key opens exactly one board and no other route.
+//
+// The board is matched and cut to size before it is serialised, so what goes
+// out is the rows this board shows and nothing else: no other board, no
+// unmatched run, no hand-off from another hospital's talkgroup.
+
+const BOARD_HTML: &str = include_str!("board.html");
+
+#[derive(Deserialize)]
+struct BoardKey {
+    #[serde(default)]
+    key: String,
+}
+
+/// The board named, if this request may have it.
+///
+/// Every refusal is a 404 — a wrong key must not confirm that the board is
+/// there, since the id is the guessable half of the link.
+fn allowed(st: &WebState, id: &str, key: &str) -> Option<crate::dashboards::Dashboard> {
+    let state = st.app.state::<AppState>();
+    let s = state.dashboards.lock().unwrap();
+    crate::dashboards::shared_board(&s, id, key).cloned()
+}
+
+const NO_STORE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-store");
+
+async fn board_page(
+    State(st): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Query(q): Query<BoardKey>,
+) -> axum::response::Response {
+    // Checked on the shell as well as the data. It costs nothing, and it
+    // means the page is not even fetchable without the key.
+    if allowed(&st, &id, &q.key).is_none() {
+        return (StatusCode::NOT_FOUND, "no such board").into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            NO_STORE,
+        ],
+        BOARD_HTML,
+    )
+        .into_response()
+}
+
+async fn board_data(
+    State(st): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Query(q): Query<BoardKey>,
+) -> axum::response::Response {
+    let Some(board) = allowed(&st, &id, &q.key) else {
+        return (StatusCode::NOT_FOUND, "no such board").into_response();
+    };
+    let app = st.app.clone();
+    // Reading the library is blocking work; keep it off the async threads.
+    let drawn = tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::dashboards::draw(&state, &board)
+    })
+    .await;
+    match drawn {
+        Ok(Ok(b)) => ([NO_STORE], Json(b)).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
