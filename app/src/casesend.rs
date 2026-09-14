@@ -33,6 +33,8 @@ pub const NOTIFY_WITHIN_SECS: i64 = crate::link::NOTIFY_WITHIN_SECS;
 pub const START_WITHIN_SECS: i64 = 2 * 3600;
 /// An ETA that moves by less than this is not news.
 pub const ETA_MOVE_SECS: i64 = 180;
+/// How long after a case opens its map waits for the run's routes.
+const ROUTES_WITHIN_SECS: i64 = 120;
 /// Telegram's limit on a message is 4096 characters.
 const MAX_CHARS: usize = 3900;
 
@@ -591,22 +593,34 @@ fn carry_out(
     }
     // In the chat for every case, the run's own map: the scene and the
     // routes to where its pathway says to go, drawn once the run is placed.
-    if map_due(k, t, &p.telegram, had.as_ref(), now) {
-        if let Some(root) = root {
-            match crate::tripwires::send_map(app, &state, &target, k.incident, Some(root)) {
-                Ok(_) => {
-                    let c = db.lock().unwrap();
-                    c.execute(
-                        "UPDATE case_sends SET map_sent = 1 WHERE profile = ?1 AND incident = ?2 AND dest = ?3",
-                        params![p.id, k.incident, t.dest],
-                    )
-                    .map_err(|e| e.to_string())?;
+    let map_key = format!("{}:{}:{}:map", p.id, k.incident, t.dest);
+    if map_due(k, t, &p.telegram, had.as_ref(), now) && !waiting(&map_key, now) {
+        let routes = {
+            let c = db.lock().unwrap();
+            crate::dispatch::inc_get(&c, k.incident).ok().flatten().map(|i| (i.lat.is_some(), i.targets.len()))
+        };
+        if let (Some(root), Some((placed, targets))) = (root, routes) {
+            // A run's position is stored a moment before its routes are
+            // worked out from it. Drawn in between, the map would go without
+            // them for good; a run whose pathway names nowhere still gets
+            // its scene once that moment has plainly passed.
+            if placed && (targets > 0 || now - k.opened > ROUTES_WITHIN_SECS) {
+                match crate::tripwires::send_map(app, &state, &target, k.incident, Some(root)) {
+                    Ok(_) => {
+                        let c = db.lock().unwrap();
+                        c.execute(
+                            "UPDATE case_sends SET map_sent = 1 WHERE profile = ?1 AND incident = ?2 AND dest = ?3",
+                            params![p.id, k.incident, t.dest],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    // The map waits on its own: a tile server down must not
+                    // hold up the thread's next reply.
+                    Err(e) => {
+                        eprintln!("cases: map for case {} in {}: {e}", k.id, t.dest);
+                        back_off(&map_key, now);
+                    }
                 }
-                // Not placed yet: tried again on the next pass.
-                Err(e) if e.contains("no position") => {}
-                // Anything else waits out the back-off rather than drawing
-                // and failing on every pass.
-                Err(e) => return Err(format!("map: {e}")),
             }
         }
     }
