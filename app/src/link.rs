@@ -93,26 +93,39 @@ fn title(w: &str) -> String {
     }
 }
 
+/// How many dispatches must use a title before it is a title. The model
+/// that reads the dispatches writes what the transcriber heard, so "Medix
+/// 21" and "Letter 14" turn up once or twice; a real title turns up every
+/// hour.
+const TITLE_SEEN: usize = 3;
+
 /// The words this library's dispatches put in front of a unit number.
 pub fn vocabulary(c: &Connection) -> HashSet<String> {
-    let mut out: HashSet<String> = HashSet::new();
-    let Ok(mut q) = c.prepare("SELECT units FROM incidents WHERE units <> '[]' LIMIT 4000") else {
-        return out;
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let Ok(mut q) = c.prepare("SELECT units FROM incidents WHERE units <> '[]' ORDER BY id DESC LIMIT 4000") else {
+        return HashSet::new();
     };
     let rows = q.query_map([], |r| r.get::<_, String>(0));
-    let Ok(rows) = rows else { return out };
+    let Ok(rows) = rows else { return HashSet::new() };
     for text in rows.flatten() {
         let list: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
         for u in list {
             if let Some(word) = u.split_whitespace().next() {
                 let low = word.to_ascii_lowercase();
                 if low.chars().all(|c| c.is_alphabetic()) && low.len() >= 3 {
-                    out.insert(low);
+                    *seen.entry(low).or_default() += 1;
                 }
             }
         }
     }
-    out
+    let common: HashSet<String> = seen.iter().filter(|(_, n)| **n >= TITLE_SEEN).map(|(w, _)| w.clone()).collect();
+    // A library with only a handful of dispatches has no title seen three
+    // times; better every word it has than none.
+    if common.is_empty() {
+        seen.into_keys().collect()
+    } else {
+        common
+    }
 }
 
 fn same_unit(units: &[String], sign: &str) -> bool {
@@ -582,11 +595,14 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE incidents (id INTEGER PRIMARY KEY, units TEXT NOT NULL DEFAULT '[]');
-             INSERT INTO incidents (units) VALUES ('[\"Medic 41\",\"Rescue 7\"]'), ('[\"Squad 12\"]'), ('[]');",
+             INSERT INTO incidents (units) VALUES ('[\"Medic 41\",\"Rescue 7\"]'), ('[\"Squad 12\"]'), ('[]'),
+               ('[\"Medic 2\",\"Rescue 1\",\"Squad 3\"]'), ('[\"Medic 9\",\"Rescue 4\",\"Squad 5\",\"Medix 9\"]');",
         )
         .unwrap();
         let v = vocabulary(&c);
         assert!(v.contains("medic") && v.contains("rescue") && v.contains("squad"));
+        // A title heard once is the transcriber, not the county.
+        assert!(!v.contains("medix"));
         // Which means an agency nobody wrote into this file is understood.
         assert_eq!(callsigns("Squad 12 is inbound", &v), vec!["Squad 12"]);
     }

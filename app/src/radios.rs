@@ -594,12 +594,13 @@ fn store(c: &Connection, system: &str, conversation: i64, f: &[Found]) -> usize 
     n
 }
 
-/// Radios the evidence, or the listener, already calls consoles.
+/// Radios the evidence, or the listener, already calls consoles — the page
+/// voice included, since whoever keys up after a page is not answering it.
 pub fn consoles(c: &Connection) -> HashSet<u32> {
     let mut out = HashSet::new();
     if let Ok(mut q) = c.prepare(
-        "SELECT radio FROM radio_evidence WHERE role = 'console' GROUP BY system, radio HAVING SUM(weight) >= ?1
-         UNION SELECT radio FROM radio_verdicts WHERE verdict = 'confirm' AND role = 'console'",
+        "SELECT radio FROM radio_evidence WHERE role IN ('console', 'automated') GROUP BY system, radio HAVING SUM(weight) >= ?1
+         UNION SELECT radio FROM radio_verdicts WHERE verdict = 'confirm' AND role IN ('console', 'automated')",
     ) {
         if let Ok(rows) = q.query_map([ACCEPT_WEIGHT], |r| r.get::<_, i64>(0)) {
             out.extend(rows.flatten().map(|r| r as u32));

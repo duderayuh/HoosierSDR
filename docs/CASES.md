@@ -473,3 +473,23 @@ means that when a crew's garbled "can you upgrade this to a working arrest" is
 followed by the dispatcher's clean "Working Arrest 1748", the timeline records
 the dispatcher's version and time, with the crew's call kept as supporting
 evidence.
+
+## Step 1 built: radio identity (2026-09-14)
+
+`app/src/radios.rs`. Evidence per call in `radio_evidence`, the listener's
+word in `radio_verdicts`, identities folded on read. On a copy of the live
+library: 270 radios with evidence, 50 units learned, 4 consoles, the page
+voice, 13 hospital radios; 59 more hospital reports joined to their runs
+through the radio that called (116 → 175).
+
+Known gaps, deliberately left:
+
+- **A reply's transcript can land before the console's.** Live, the reply
+  rule then sees a console call with no text yet and writes nothing; the
+  backfill, which reads in order, catches it.
+- **Identity has no time window yet.** A learned callsign applies to every
+  call from that radio, old or new. "Changed" catches a radio that moves to
+  another crew, but only after three sightings.
+- **More joins means more incident tripwires fire.** A join made through a
+  learned radio counts as linked, so a tripwire waiting for the hospital
+  report fires for those runs too.
