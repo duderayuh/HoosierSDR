@@ -160,14 +160,20 @@
     return `<div class="dbshare" style="margin-top:10px">
       <label class="check"><input data-b="shared" type="checkbox"${on ? " checked" : ""} />
         share this board over Tailscale</label>
-      ${!on ? `<div class="faint">Off. Nothing outside this machine can ask for it.</div>` : url
+      ${!on ? `<div class="faint">Off. Nothing outside this machine can ask for it.</div>` : !haveTailnet()
+        ? `<div class="dbwarn">Tailscale was not found on this machine, so there is no address to
+             share. Sign in to Tailscale and reopen this panel.</div>`
+        : url
         ? `<div class="dbprow" style="margin-top:6px">
              <input class="mono" value="${esc(url)}" readonly onfocus="this.select()" style="flex:1" />
              <button class="btn ghost sm" data-copy-share="${i}">Copy</button>
              <button class="btn ghost sm" data-new-key="${i}">New link</button>
            </div>
-           <div class="faint">Open this on any device signed in to your tailnet. It shows this
-             board, read-only, and can reach nothing else. “New link” stops the old one working.</div>`
+           <div class="faint">Open this on any device signed in to your tailnet — it is refused
+             from anywhere else, key or not. It shows this board, read-only, and can reach nothing
+             else. “New link” stops the old one working.
+             <b>A board that is not “shown” is not shared either</b>, so unticking that above will
+             blank this display.</div>`
         : `<div class="faint">Press <b>Save</b> to get the link.</div>`}
       ${on && trustWarning() ? `<div class="dbwarn">${esc(trustWarning())}</div>` : ""}
     </div>`;
@@ -177,10 +183,14 @@
   // from the other laptop rather than only from here.
   function shareUrl(b) {
     const t = (remotes && remotes.tailnet) || {};
-    const host = t.dns || t.ip || location.hostname;
     const port = (remotes && remotes.port) || 8042;
-    return `http://${host}:${port}/board/${encodeURIComponent(b.id)}?key=${encodeURIComponent(b.share_key)}`;
+    return `http://${t.dns || t.ip}:${port}/board/${encodeURIComponent(b.id)}?key=${encodeURIComponent(b.share_key)}`;
   }
+
+  // Without a tailnet address there is no link worth showing. The page's own
+  // hostname would be one that cannot work from the other laptop, which is
+  // worse than saying so.
+  const haveTailnet = () => !!(remotes && remotes.tailnet && (remotes.tailnet.dns || remotes.tailnet.ip));
 
   // The board's own key is the narrow thing. Tailnet trust is not, and it is
   // a separate switch elsewhere that undoes the point of sharing carefully.

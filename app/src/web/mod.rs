@@ -443,7 +443,23 @@ struct BoardKey {
 ///
 /// Every refusal is a 404 — a wrong key must not confirm that the board is
 /// there, since the id is the guessable half of the link.
-fn allowed(st: &WebState, id: &str, key: &str) -> Option<crate::dashboards::Dashboard> {
+///
+/// The caller must be on the tailnet as well as hold the key. The key lives
+/// in the address bar of a screen on a wall, which means it is also in that
+/// browser's history and in every photograph of it; the server listens on
+/// every interface, so without this a key that got out would work from the
+/// office network, or from the internet if this port were ever put behind
+/// `tailscale funnel`. Loopback and the LAN do not qualify, which is the
+/// same line `remotes` draws and for the same reason.
+fn allowed(
+    st: &WebState,
+    from: std::net::IpAddr,
+    id: &str,
+    key: &str,
+) -> Option<crate::dashboards::Dashboard> {
+    if !crate::remotes::is_tailnet_ip(from) {
+        return None;
+    }
     let state = st.app.state::<AppState>();
     let s = state.dashboards.lock().unwrap();
     crate::dashboards::shared_board(&s, id, key).cloned()
@@ -453,12 +469,13 @@ const NO_STORE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-store")
 
 async fn board_page(
     State(st): State<Arc<WebState>>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     Query(q): Query<BoardKey>,
 ) -> axum::response::Response {
     // Checked on the shell as well as the data. It costs nothing, and it
     // means the page is not even fetchable without the key.
-    if allowed(&st, &id, &q.key).is_none() {
+    if allowed(&st, from.ip(), &id, &q.key).is_none() {
         return (StatusCode::NOT_FOUND, "no such board").into_response();
     }
     (
@@ -473,10 +490,11 @@ async fn board_page(
 
 async fn board_data(
     State(st): State<Arc<WebState>>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     Query(q): Query<BoardKey>,
 ) -> axum::response::Response {
-    let Some(board) = allowed(&st, &id, &q.key) else {
+    let Some(board) = allowed(&st, from.ip(), &id, &q.key) else {
         return (StatusCode::NOT_FOUND, "no such board").into_response();
     };
     let app = st.app.clone();
