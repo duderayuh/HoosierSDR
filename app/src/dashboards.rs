@@ -117,6 +117,18 @@ pub struct Dashboard {
     /// redraws on events regardless; this only governs the "20 minutes ago"
     /// text and the freshness fade.
     pub refresh_secs: u32,
+
+    /// Whether this board answers on the tailnet at all. Off unless the
+    /// listener says otherwise, one board at a time.
+    pub shared: bool,
+    /// The secret in a share link, and the only thing that opens a shared
+    /// board.
+    ///
+    /// A board gets its own credential rather than reusing the web token or
+    /// tailnet trust, because both of those open `/api/command` — every
+    /// command the desktop has, including the one that hands back the token
+    /// itself. Lending someone a board must not lend them the radio.
+    pub share_key: String,
 }
 
 impl Default for Dashboard {
@@ -128,6 +140,8 @@ impl Default for Dashboard {
             panes: Vec::new(),
             footer: String::new(),
             refresh_secs: 10,
+            shared: false,
+            share_key: String::new(),
         }
     }
 }
@@ -156,6 +170,22 @@ pub fn sanitize(s: &mut Settings) {
         // those have paragraphs. Everything else is a single line.
         d.footer = crate::analyzers::clean_text(&d.footer, 2_000);
         d.refresh_secs = d.refresh_secs.clamp(5, 3_600);
+        // A shared board always has a key, and keeps the one it has: the link
+        // is already in someone's browser. Sharing is the only thing that
+        // mints one, and un-sharing forgets it, so switching sharing back on
+        // hands out a new link rather than reviving the old one.
+        d.share_key = d
+            .share_key
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(64)
+            .collect();
+        if d.shared && d.share_key.len() < SHARE_KEY_CHARS {
+            d.share_key = new_share_key();
+        }
+        if !d.shared {
+            d.share_key = String::new();
+        }
 
         d.panes.truncate(MAX_PANES);
         let mut pane_ids = std::collections::HashSet::new();
@@ -205,6 +235,45 @@ pub fn sanitize(s: &mut Settings) {
             }
         }
     }
+}
+
+/// Long enough that guessing is not a strategy: 32 characters of base-36 is
+/// about 165 bits.
+const SHARE_KEY_CHARS: usize = 32;
+
+fn new_share_key() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..SHARE_KEY_CHARS)
+        .map(|_| {
+            let n: u8 = rng.gen_range(0..36);
+            if n < 10 {
+                (b'0' + n) as char
+            } else {
+                (b'a' + n - 10) as char
+            }
+        })
+        .collect()
+}
+
+/// May this request see this board?
+///
+/// Written apart from the routing so it can be tested without a server, and
+/// so the rule is in one readable place. A board is reachable only when it
+/// exists, is switched on, is shared, and the caller quotes its key — and
+/// when any of that fails the answer is the same, because saying "wrong key"
+/// would confirm the board is there.
+pub fn shared_board<'a>(s: &'a Settings, id: &str, key: &str) -> Option<&'a Dashboard> {
+    let d = s.dashboards.iter().find(|d| d.id == id)?;
+    if !d.enabled || !d.shared || d.share_key.is_empty() {
+        return None;
+    }
+    // Fixed-time compare: the key is a secret, and a byte-at-a-time answer
+    // is one someone can walk.
+    let (a, b) = (d.share_key.as_bytes(), key.as_bytes());
+    let same = a.len() == b.len()
+        && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0;
+    same.then_some(d)
 }
 
 fn clean_words(v: &[String], max: usize) -> Vec<String> {
@@ -810,6 +879,107 @@ mod tests {
         };
         sanitize(&mut long);
         assert!(long.dashboards[0].footer.chars().count() <= 2_000);
+    }
+
+    fn shared_one() -> Settings {
+        let mut s = Settings {
+            dashboards: vec![Dashboard {
+                id: "b1".into(),
+                name: "Wall".into(),
+                shared: true,
+                ..Dashboard::default()
+            }],
+        };
+        sanitize(&mut s);
+        s
+    }
+
+    #[test]
+    fn sharing_a_board_mints_a_key_and_saving_it_again_keeps_it() {
+        // The link is already in someone's browser by the second save. The
+        // editor sends the whole board back on every Save, so a key that did
+        // not survive `sanitize` would break the display silently.
+        let s = shared_one();
+        let key = s.dashboards[0].share_key.clone();
+        assert_eq!(key.len(), SHARE_KEY_CHARS);
+        assert!(key.chars().all(|c| c.is_ascii_alphanumeric()));
+        let mut again = s.clone();
+        sanitize(&mut again);
+        assert_eq!(again.dashboards[0].share_key, key, "a save must not rotate it");
+    }
+
+    #[test]
+    fn two_shared_boards_do_not_get_the_same_key() {
+        let mut s = Settings {
+            dashboards: vec![
+                Dashboard { id: "b1".into(), shared: true, ..Dashboard::default() },
+                Dashboard { id: "b2".into(), shared: true, ..Dashboard::default() },
+            ],
+        };
+        sanitize(&mut s);
+        assert_ne!(s.dashboards[0].share_key, s.dashboards[1].share_key);
+    }
+
+    #[test]
+    fn un_sharing_forgets_the_key_so_the_old_link_cannot_come_back() {
+        let mut s = shared_one();
+        let old = s.dashboards[0].share_key.clone();
+        s.dashboards[0].shared = false;
+        sanitize(&mut s);
+        assert_eq!(s.dashboards[0].share_key, "");
+        assert!(shared_board(&s, "b1", &old).is_none());
+        // Sharing again is a new link, not the old one waking up.
+        s.dashboards[0].shared = true;
+        sanitize(&mut s);
+        assert_ne!(s.dashboards[0].share_key, old);
+    }
+
+    #[test]
+    fn only_the_right_key_opens_a_shared_board() {
+        let s = shared_one();
+        let key = s.dashboards[0].share_key.clone();
+        assert!(shared_board(&s, "b1", &key).is_some());
+        for wrong in ["", "x", &key[..key.len() - 1], &format!("{key}x")] {
+            assert!(shared_board(&s, "b1", wrong).is_none(), "opened with {wrong:?}");
+        }
+        assert!(shared_board(&s, "nosuch", &key).is_none(), "another board's id");
+    }
+
+    #[test]
+    fn a_board_that_was_never_shared_is_not_reachable_even_with_a_key() {
+        let mut s = Settings {
+            dashboards: vec![Dashboard {
+                id: "b1".into(),
+                // As if hand-edited into dashboards.json: a key, but no
+                // intention to share.
+                share_key: "a".repeat(SHARE_KEY_CHARS),
+                shared: false,
+                ..Dashboard::default()
+            }],
+        };
+        let key = s.dashboards[0].share_key.clone();
+        assert!(shared_board(&s, "b1", &key).is_none(), "before cleaning");
+        sanitize(&mut s);
+        assert!(shared_board(&s, "b1", &key).is_none(), "after cleaning");
+    }
+
+    #[test]
+    fn switching_a_board_off_takes_it_off_the_tailnet_too() {
+        let mut s = shared_one();
+        let key = s.dashboards[0].share_key.clone();
+        s.dashboards[0].enabled = false;
+        sanitize(&mut s);
+        assert!(shared_board(&s, "b1", &key).is_none());
+    }
+
+    #[test]
+    fn a_drawn_board_never_carries_the_key_that_opens_it() {
+        // `RenderedBoard` is what goes out over the wire to the display.
+        let s = shared_one();
+        let out = render(&s.dashboards[0], &[], &[], &[], 1_000);
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains(&s.dashboards[0].share_key), "{json}");
+        assert!(!json.contains("share_key"));
     }
 
     #[test]
