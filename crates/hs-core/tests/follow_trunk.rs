@@ -724,3 +724,57 @@ fn a_transmission_found_encrypted_reports_no_audio() {
         "the transmission should be reported as encrypted"
     );
 }
+
+#[test]
+fn an_update_after_the_call_ends_does_not_invent_a_second_call() {
+    // A system keeps re-announcing a call for a second or two after the last
+    // radio releases — the channel is still assigned to the talkgroup even
+    // though nobody is speaking. Those updates name no radio.
+    //
+    // By then the follower has retired the call, so each update finds no
+    // channel on that frequency and opens one. Nothing is transmitting, so it
+    // records nothing, and retires as a call of zero length. On the live
+    // library that is 4391 such rows in 72 hours — and because they look
+    // exactly like a transmission that failed to decode, they read as a 25%
+    // receive loss that is not happening.
+    let mut control = tsdu_stream_n(
+        &[
+            (0x3D, 0, iden_args(PLAN_BASE)),
+            (0x00, 0, grant_args(TALKGROUP)),
+        ],
+        6,
+    );
+    // The call ends here; the updates carry on well past the hang.
+    control.extend(tsdu_stream_n(
+        &[(0x3D, 0, iden_args(PLAN_BASE)), (0x02, 0, update_args(TALKGROUP))],
+        60,
+    ));
+
+    // Traffic: a short transmission, a terminator, then dead air.
+    let mut traffic = traffic_dibits_n(6);
+    for _ in 0..4 {
+        traffic.extend(build_tdu(0x293));
+        traffic.extend(preamble(40));
+    }
+    traffic.extend(preamble(28_800)); // 6 s of silence
+
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control, CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic, TRAFFIC + TUNER_ERROR);
+
+    let (_started, _enc, completed) = run_follower(&band);
+    let ours: Vec<usize> = completed
+        .iter()
+        .filter(|c| c.talkgroup == TALKGROUP)
+        .map(|c| c.pcm.len())
+        .collect();
+    let empty = ours.iter().filter(|n| **n == 0).count();
+    assert!(
+        ours.iter().any(|n| *n > 0),
+        "the real transmission was lost: {ours:?}"
+    );
+    assert_eq!(
+        empty, 0,
+        "an update with no radio on it opened {empty} empty call(s): {ours:?}"
+    );
+}
