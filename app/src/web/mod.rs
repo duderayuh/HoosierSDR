@@ -57,6 +57,7 @@ fn is_heavy(frame: &Frame) -> bool {
 const APP_EVENTS: &[&str] = &[
     "follow",
     "radios",
+    "cases",
     "grant",
     "status",
     "spectrum",

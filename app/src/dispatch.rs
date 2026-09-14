@@ -1716,6 +1716,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             drop(c);
             apply_pathways(app, &mut i);
             let _ = app.emit("incident", &i);
+            crate::cases::touch();
             crate::tripwires::on_incident(app, &i, false);
             log_it(app, f, "update", format!("{how} → #{}", i.id), Some(i.id));
             Ok((format!("updated incident #{} ({how})", i.id), Some(i)))
@@ -1764,6 +1765,7 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             drop(c);
             apply_pathways(app, &mut i);
             let _ = app.emit("incident", &i);
+            crate::cases::touch();
             crate::tripwires::on_incident(app, &i, false);
             log_it(
                 app,
@@ -2178,6 +2180,7 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                 // worked out again from the new position.
                 apply_pathways(app, &mut i);
                 let _ = app.emit("incident", &i);
+            crate::cases::touch();
                 if was_grid {
                     upgraded += 1;
                 } else {
@@ -2205,6 +2208,7 @@ fn regeocode_blocking(app: &AppHandle, db: &Db, settings: &Settings) -> Result<(
                     }
                     apply_pathways(app, &mut i);
                     let _ = app.emit("incident", &i);
+            crate::cases::touch();
                     placed += 1;
                 }
             }

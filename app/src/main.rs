@@ -33,6 +33,7 @@ mod hook;
 mod library;
 mod link;
 mod radios;
+mod cases;
 mod mapshot;
 mod models;
 mod names;
@@ -2334,6 +2335,7 @@ fn main() {
             *state.remotes.lock().unwrap() = remotes::load(app.handle());
             conversations::spawn_ticker(app.handle().clone());
             radios::spawn_sweep(app.handle().clone());
+            cases::spawn(app.handle().clone());
             *state.digests.lock().unwrap() = digest::load(app.handle());
             digest::spawn_ticker(app.handle().clone());
             *state.analyzers.lock().unwrap() = analyzers::load(app.handle());
@@ -2365,6 +2367,7 @@ fn main() {
                         backtest::ensure_schema(&c);
                         link::ensure_schema(&c);
                         radios::ensure_schema(&c);
+                        cases::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
                         *state.library_dir.lock().unwrap() = Some(lib.join("calls"));
                     }
@@ -2479,6 +2482,9 @@ fn main() {
             dispatch::dispatch_calibrate,
             link::incidents_relink,
             radios::radios_backfill,
+            cases::cases_list,
+            cases::cases_rebuild,
+            cases::cases_profiles,
             radios::radios_list,
             radios::radio_identity,
             radios::radio_evidence,

@@ -461,6 +461,7 @@ fn join(app: &tauri::AppHandle, conversation: i64, ask_model: bool) -> Option<(i
             return None;
         }
     }
+    crate::cases::touch();
     let _ = tauri::Emitter::emit(
         app,
         "incident_linked",

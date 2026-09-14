@@ -4,9 +4,9 @@
 //! that is a bare number. The alias table in `units.rs` names a number when
 //! someone has typed it in or the system broadcast it, which on most
 //! systems is almost never. But the crews say who they are all the time:
-//! "control, Medic 32", "Engine 44 to control", "Community North, this is
+//! "control, Medic 32", "Engine 44 to control", "Example General, this is
 //! Medic 17". And the other end says it for them: a hospital answers
-//! "Medic 44, this is Community North", a dispatcher calls "Medic 35 from
+//! "Medic 44, this is Example General", a dispatcher calls "Medic 35 from
 //! control" and the next radio to key up is Medic 35.
 //!
 //! Each of those is *evidence*, kept as a row with the call it came from, so
@@ -184,7 +184,7 @@ pub fn read_speaker(text: &str, vocab: &HashSet<String>) -> Vec<Said> {
                 out.push(Said::Callsign { sign: signs[0].clone(), weight: 1.0, how: "said_self" });
                 return out;
             }
-            // "Medic 37 calling Riley"
+            // "Medic 37 calling Example General"
             if at(k) == Some("calling") {
                 out.push(Said::Callsign { sign: signs[0].clone(), weight: 1.0, how: "said_self" });
                 return out;
@@ -326,9 +326,9 @@ fn found(h: &Heard, sign: &str, role: &'static str, how: &'static str, weight: f
 
 /// Read one stored hospital conversation. The hospital's own radios are
 /// hospital radios; when exactly one crew radio took part, the hospital
-/// opening with a callsign names it ("Medic 44, this is Community North");
+/// opening with a callsign names it ("Medic 44, this is Example General");
 /// and a crew radio naming itself ("this is Medic 17", "Medic 37 calling
-/// Riley") names itself.
+/// Example General") names itself.
 pub fn read_conversation(pieces: &[crate::conversations::Piece], vocab: &HashSet<String>) -> Vec<Found> {
     let mut out = Vec::new();
     let mobiles: HashSet<u32> = pieces.iter().filter(|p| !p.fixed && p.unit != 0).map(|p| p.unit).collect();
@@ -1225,7 +1225,7 @@ mod tests {
         assert_eq!(sign("Control engine 24, can you start us an ALS transport?"), Some(("Engine 24".into(), 1.0)));
         assert_eq!(sign("Medic 32 to control."), Some(("Medic 32".into(), 1.0)));
         assert_eq!(sign("uh control, EMS93, I can take that from 91"), Some(("EMS 93".into(), 1.0)));
-        assert_eq!(sign("Community North, this is Medic 17, how do you copy?"), Some(("Medic 17".into(), 1.0)));
+        assert_eq!(sign("Example General, this is Medic 17, how do you copy?"), Some(("Medic 17".into(), 1.0)));
         assert_eq!(sign("Medic 37 calling Children's. Go ahead."), Some(("Medic 37".into(), 1.0)));
     }
 
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn a_page_is_the_automated_voice() {
-        let page = "Engine 27, Medic 20, 4006 East 10th St, Cardiac Arrest. Engine 27, Medic 20, 4006 East 10th St, Cardiac Arrest. 623 Hours. Location 1000 North 4000 East.";
+        let page = "Engine 27, Medic 20, 1200 Example St, Cardiac Arrest. Engine 27, Medic 20, 1200 Example St, Cardiac Arrest. 623 Hours. Location 1000 North 4000 East.";
         assert_eq!(one(page), vec![Said::Automated]);
         assert!(!is_page("Working arrest 1748."));
     }
