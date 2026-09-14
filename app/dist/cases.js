@@ -150,6 +150,7 @@
       + (t.dest && !dests.some((d) => d.id === t.dest) ? `<option value="${esc(t.dest)}" selected>a destination that was removed</option>` : "");
     $("csSendHosp").checked = t.hospitals !== false;
     $("csSendMap").checked = t.map !== false;
+    $("csSendAudio").checked = t.audio !== false;
     $("csNotify").innerHTML = NOTIFY.map(([k, label]) => `<label class="check"><input type="checkbox" data-notify="${k}" ${(t.notify || []).includes(k) ? "checked" : ""} /> ${esc(label)}</label>`).join("");
     $("csSendMeta").textContent = t.enabled ? "on" : "off";
   }
@@ -160,6 +161,7 @@
       dest: $("csSendDest").value,
       hospitals: $("csSendHosp").checked,
       map: $("csSendMap").checked,
+      audio: $("csSendAudio").checked,
       notify: [...$("csNotify").querySelectorAll("[data-notify]")].filter((i) => i.checked).map((i) => i.dataset.notify),
     };
   }
