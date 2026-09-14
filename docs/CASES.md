@@ -503,3 +503,39 @@ report ended is recorded and shown, but tells no tripwire, so nothing reaches
 Telegram after the patient has arrived. Two retries reaching the same report
 cannot both join it: the link is written only where none exists, and only
 the retry that wrote it announces it.
+
+## Step 2 built: cases (2026-09-14)
+
+`app/src/cases.rs`, `app/dist/cases.js`, a Cases tab. The profile lives in
+`cases.json` (seeded with cardiac arrest). Cases are rebuilt from the library
+over the last six hours whenever a transcript, a run or a join changes, and
+every ten minutes; "Rebuild…" does any number of days. Nothing is sent.
+
+What changed from the design while building it, because of the data:
+
+- **The page decides whether a run is an arrest**, not the dispatch model's
+  type. "Chest Pain/Heart" transcribed as "Tesspain Heart" was filed as a
+  cardiac arrest four times in 67 hours.
+- **An ops event is an event only as a readback or a statement.** Most ops
+  traffic that mentions an arrest is administrative ("add us to that cardiac
+  arrest", "any working arrests?").
+- **A page upgrading an open arrest within three minutes outranks a
+  callsign.** A page transcribed "End in 36" loses Engine 36 from its run, and
+  the callsign then points at the last run Engine 36 was on.
+- **Runs the dispatch map split are grouped** by street, or by the same house
+  number of three digits or more, within twenty minutes.
+- **Inference is narrower than designed**: only a readback, only when exactly
+  one arrest was dispatched in the last 45 minutes, and always labelled.
+
+On a copy of the live library (67 hours): 33 cases, 81 lines, 3 inferred, 6
+unplaced, 170 ms.
+
+Known gaps:
+
+- The same place heard as two addresses ("520 East Market Street" and "East
+  Market Street and Wheeler Mission"-style intersections) can still be two
+  cases.
+- A crew statement from a radio nobody has identified stays unplaced even when
+  it is plainly about the only arrest going.
+- Facts (witnessed, bystander CPR, rhythm, comorbidities) are not extracted yet;
+  the plan is to ask for them in the hospital report's existing summary call.

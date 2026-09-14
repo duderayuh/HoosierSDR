@@ -47,6 +47,17 @@ const canned = { library_search: [], incidents_list: INCS, incident_route: { lab
 // Radios learned from the air: one learned, one that changed hands, and a
 // system label carrying markup, which must arrive as text.
 const RADIO = (radio, callsign, state, extra) => Object.assign({ system: "Example <b>System</b>", radio, role: "unit", callsign, state, share: 0.9, weight: 5, latest: "", candidates: [], evidence: 5, first_at: 100, last_at: 200 }, extra || {});
+// Cases: one arrest with a page, an inferred readback and a report, and a
+// label carrying markup, which must arrive as text.
+const LINE = (kind, label, source, extra) => Object.assign({ at: 1000, clock: "06:29", kind, label, source, how: "", inferred: false, call: 5, conversation: null, detail: "" }, extra || {});
+Object.assign(canned, {
+  cases_list: {
+    cases: [{ id: 7, profile: "cardiac-arrest", title: "Cardiac arrest", call_type: "Unconscious", address: "1200 Example St", lat: null, lon: null, units: ["Engine 5", "Medic 7"], incidents: [1], opened: 900, updated: 1300, state: "rosc", open: true,
+      lines: [LINE("dispatched", "Dispatched as Unconscious", "page"), LINE("working", "Working arrest", "readback", { inferred: true, how: "the only arrest open at the time" }), LINE("rosc", "ROSC <img src=x onerror=alert(1)>", "readback"), LINE("report", "Report to Example General · said 10 minutes → about 06:40", "report", { call: null, conversation: 3 })] }],
+    unplaced: [{ at: 1100, clock: "17:48", kind: "working", label: "Working arrest", source: "readback", why: "2 arrests were open, and nothing named the run", call: 9, detail: "Working Arrest 1748." }],
+  },
+  cases_rebuild: { cases: 1, events: 4, inferred: 1, unplaced: 1 },
+});
 Object.assign(canned, {
   radios_list: [RADIO(900222, "Medic 32", "learned"), RADIO(900333, "Medic 44", "changed", { latest: "Medic 12" }), RADIO(900001, "", "learned", { role: "console" })],
   radio_evidence: [{ at: 150, callsign: "Medic 32", role: "unit", how: "said_self", weight: 1, call: 77, conversation: 0, tg: 1, tg_name: "OPS", transcript: "Control, Medic 32 <script>x</script>" }],
@@ -336,6 +347,23 @@ w.__exercise = async () => {
       const back = w.document.getElementById("dbBack");
       if (back && back.onclick) await back.onclick();
     }
+  }
+
+  // Cases: the timeline draws with where each line was heard, an inferred
+  // line says so, and markup in a label stays text.
+  {
+    w.showView("cases");
+    await new Promise((r) => setTimeout(r, 100));
+    const tl = w.document.getElementById("csTimeline");
+    const html = tl ? tl.innerHTML : "";
+    if (tl && tl.querySelectorAll(".cs-line").length !== 4) console.log("PAGE ERROR: the case timeline drew " + (tl ? tl.querySelectorAll(".cs-line").length : 0) + " lines, wanted 4");
+    if (!tl || !tl.querySelector(".cs-inferred")) console.log("PAGE ERROR: an inferred line does not say it was inferred");
+    if (!/dispatcher/.test(html)) console.log("PAGE ERROR: a readback is not labelled as the dispatcher's");
+    if (tl && tl.querySelector("img")) console.log("PAGE ERROR: a case label's markup reached the page");
+    if (!/Since dispatch/.test(html)) console.log("PAGE ERROR: an open case does not say how long since dispatch");
+    const un = w.document.getElementById("csUnplaced");
+    if (!un || !/nothing named the run/.test(un.innerHTML)) console.log("PAGE ERROR: the unplaced event does not say why");
+    w.showView("monitor");
   }
 
   // Radios learned from the air: the list draws, markup stays text, and the

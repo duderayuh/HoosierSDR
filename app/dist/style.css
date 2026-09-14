@@ -1312,3 +1312,43 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .rx-fair { color: var(--signal); }
 .rx-poor { color: var(--amber); }
 .rx-bad  { color: var(--enc); }
+
+/* ---------- Cases: a run as a timeline ---------- */
+.cs-layout { display: grid; grid-template-columns: minmax(260px, 1fr) 1.7fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .cs-layout { grid-template-columns: 1fr; } }
+.cs-cards { display: flex; flex-direction: column; gap: 6px; max-height: calc(74vh / var(--z)); overflow-y: auto; }
+.cs-card { display: flex; gap: 10px; text-align: left; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; overflow: hidden; }
+.cs-card:hover { border-color: var(--signal); }
+.cs-card.sel { border-color: var(--signal); box-shadow: 0 0 0 1px var(--signal) inset; }
+.cs-card:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.cs-card:not(.open) { opacity: .82; }
+.cs-stripe { width: 5px; flex: none; background: var(--ink-faint); }
+.cs-stripe.enc { background: var(--enc); } .cs-stripe.clear { background: var(--clear); } .cs-stripe.amber { background: var(--amber); } .cs-stripe.signal { background: var(--signal); }
+.cs-cardbody { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 8px 0; min-width: 0; }
+.cs-cardtop { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.cs-addr { font-size: 12.5px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-state { font-family: var(--mono); font-size: 10.5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; color: var(--ink-faint); background: color-mix(in srgb, var(--ink-faint) 12%, transparent); }
+.cs-state.enc { color: var(--enc); background: color-mix(in srgb, var(--enc) 15%, transparent); }
+.cs-state.clear { color: var(--clear); background: color-mix(in srgb, var(--clear) 15%, transparent); }
+.cs-state.amber { color: var(--amber); background: color-mix(in srgb, var(--amber) 15%, transparent); }
+.cs-state.signal { color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); }
+.cs-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.cs-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 14px; padding: 8px 0 12px; border-bottom: 1px solid var(--line-soft); margin-bottom: 6px; }
+.cs-facts > div { display: flex; flex-direction: column; min-width: 0; }
+.cs-facts .k { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.cs-facts .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cs-lines { display: flex; flex-direction: column; }
+.cs-line { display: grid; grid-template-columns: 4.2em 1fr auto; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); align-items: start; }
+.cs-line:last-child { border-bottom: 0; }
+.cs-time { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink-dim); padding-top: 1px; }
+.cs-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cs-top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.cs-label { font-weight: 600; }
+.cs-line.k-repage .cs-label { font-weight: 400; color: var(--ink-dim); }
+.cs-line.k-working .cs-time, .cs-line.k-rearrest .cs-time { color: var(--enc); }
+.cs-line.k-rosc .cs-time { color: var(--clear); }
+.cs-src { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+.cs-inferred { font-family: var(--mono); font-size: 10.5px; color: var(--amber); border: 1px dashed color-mix(in srgb, var(--amber) 60%, transparent); border-radius: 999px; padding: 0 6px; }
+.cs-how { font-size: 11.5px; color: var(--ink-faint); }
+.cs-detail { font-size: 12px; color: var(--ink-dim); overflow-wrap: anywhere; }
+.cs-act { padding-top: 1px; }

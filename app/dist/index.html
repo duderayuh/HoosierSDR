@@ -19,6 +19,7 @@
       <button data-v="library" aria-pressed="false">Library</button>
       <button data-v="tripwires" aria-pressed="false">Tripwires</button>
       <button data-v="conversations" aria-pressed="false">Conversations</button>
+      <button data-v="cases" aria-pressed="false">Cases</button>
       <button data-v="dispatch" aria-pressed="false">Dispatch</button>
       <button data-v="dashboard" aria-pressed="false">Dashboards</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
@@ -606,6 +607,33 @@
     </div>
 
     <!-- ===================== CONVERSATIONS ===================== -->
+    <div class="view" id="view-cases" style="display:none">
+      <section class="cs-layout">
+        <div class="panel cs-listpanel">
+          <div class="head"><span class="eyebrow">Cases</span><span class="meta" id="csMeta"></span>
+            <select id="csHours" title="How far back"><option value="6">6 h</option><option value="24" selected>24 h</option><option value="72">3 days</option><option value="168">7 days</option></select>
+            <button class="btn ghost sm" id="csRebuild" title="Build the cases again from calls already in the library. Nothing is sent.">Rebuild…</button></div>
+          <div class="body tight">
+            <p class="help">A case is a run the page calls a cardiac arrest, or one the dispatcher upgrades to a working arrest, with every moment said about it on the air. Nothing here is sent anywhere yet.</p>
+            <div class="cs-cards" id="csCards"></div>
+            <div class="empty small" id="csEmpty">No cases in this window. They appear as arrests are paged, and “Rebuild…” builds them from calls already stored.</div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel grow">
+            <div class="head"><span class="eyebrow" id="csTitle">Timeline</span><span class="meta" id="csSub"></span></div>
+            <div class="body"><div id="csTimeline"></div><div class="empty small" id="csPick">Pick a case to see its timeline.</div></div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Heard but not placed</span><span class="meta" id="csUnMeta"></span></div>
+            <div class="body tight">
+              <p class="help">An arrest event the dispatcher or a crew said that nothing tied to one run: no callsign, no learned radio, and more than one arrest open. Kept here rather than guessed.</p>
+              <div id="csUnplaced"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
     <div class="view" id="view-conversations" style="display:none">
       <section class="cv-layout">
         <div class="cv-main">
@@ -1470,5 +1498,6 @@
   <script src="backup.js"></script>
   <script src="board-render.js"></script>
   <script src="dashboards.js"></script>
+  <script src="cases.js"></script>
 </body>
 </html>
