@@ -636,7 +636,7 @@ radio slots — HOSPITAL is the fixed party, RADIO A / RADIO B are the mobile ra
 is that radio's alias). The labels are NOT unit names: identify the EMS unit from what is said \
 (\"Medic 42\", \"Ambulance 7\", \"Engine 6\"), and if no unit name is spoken say \"the unit\". \
 Never mention radio IDs, label letters, or that the text is a transcript.\n\n\
-What to write: first a headline, then the note.\n\n\
+What to write: first a headline, then the note, then the facts.\n\n\
 The headline is one line, beginning \"HEADLINE:\", listing two to four clinical findings separated \
 by commas — the presenting problem first, then what makes this patient this patient: \
 \"CVA, Severe Headache, Focal Neuro Deficit\", \"Chest Pain, STEMI Alert, Hypotensive\", \
@@ -649,7 +649,75 @@ and vitals, interventions given, and ETA; include any request or instruction fro
 Use only what was said — do not infer, and do not pad. Where something matters but was garbled or \
 missing, write \"unclear\" for that item rather than describing the transcript's quality. If almost \
 nothing is intelligible, write one sentence with whatever can be told (e.g. \"Medic 42 inbound with an \
-adult patient, details unclear\").";
+adult patient, details unclear\").\n\n\
+Last, after the note, a blank line and the facts: a line \"FACTS:\" and then exactly these lines, in \
+this order, each written \"key: value\". The value is \"not stated\" unless the transcript says it; \
+never work one out. Witnessed, bystander cpr, rosc and downtime are about a cardiac arrest: for a \
+patient who was not in arrest, each is \"not stated\".\n\
+age: the patient's age as said\n\
+sex: male or female\n\
+witnessed: yes or no — was the collapse seen by someone\n\
+bystander cpr: yes or no — had anyone started CPR before EMS arrived\n\
+rhythm: the heart rhythm named (asystole, PEA, VF, sinus …)\n\
+rosc: yes or no — are there pulses back, with when if said\n\
+downtime: how long the patient was down, in the crew's words\n\
+history: the medical history named, separated by commas\n\
+eta: the time to arrival as said (\"10 minutes\")";
+
+/// One fact the summary call lifted out of a report.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Fact {
+    pub key: String,
+    pub value: String,
+}
+
+/// The facts the summary call is asked for, in the order it is asked.
+pub const FACT_KEYS: &[&str] = &["age", "sex", "witnessed", "bystander cpr", "rhythm", "rosc", "downtime", "history", "eta"];
+
+/// Take the facts block off the end of a note.
+///
+/// The block is asked for last so that a model which stops early loses the
+/// facts, not the note. Only the asked-for keys are read, a value the model
+/// marked as not said is left out, and anything after the block that is not
+/// a fact is kept as note, so a model that puts the block in the wrong place
+/// costs the facts and nothing else.
+pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
+    let clean = |l: &str| l.trim().trim_matches(|c: char| c == '*' || c == '#' || c == '-' || c == '•' || c == ' ').to_string();
+    let lines: Vec<&str> = note.lines().collect();
+    let Some(start) = lines.iter().position(|l| clean(l).to_ascii_lowercase().starts_with("facts:")) else {
+        return (note.trim().to_string(), Vec::new());
+    };
+    let mut facts: Vec<Fact> = Vec::new();
+    let mut end = start + 1;
+    while end < lines.len() {
+        let l = clean(lines[end]);
+        if l.is_empty() {
+            end += 1;
+            continue;
+        }
+        let Some((k, v)) = l.split_once(':') else { break };
+        let key = k.trim().trim_matches('*').trim().to_ascii_lowercase().replace('_', " ");
+        if !FACT_KEYS.contains(&key.as_str()) {
+            break;
+        }
+        let value = v.trim().trim_matches(|c: char| c == '*' || c == '"' || c == '.').trim().to_string();
+        let unsaid = ["not stated", "not said", "unknown", "unclear", "n/a", "none stated", "not mentioned", "not reported", ""];
+        if !unsaid.contains(&value.to_ascii_lowercase().as_str()) && !facts.iter().any(|f| f.key == key) {
+            facts.push(Fact { key, value: crate::analyzers::clean_line(&value, 120) });
+        }
+        end += 1;
+    }
+    let mut kept: Vec<&str> = lines[..start].to_vec();
+    kept.extend(&lines[end..]);
+    (kept.join("\n").trim().to_string(), facts)
+}
+
+/// Headline, note and facts, from what the summary call returned.
+pub fn read_summary(raw: &str) -> (String, String, Vec<Fact>) {
+    let (headline, rest) = split_headline(raw);
+    let (note, facts) = split_facts(&rest);
+    (headline, note, facts)
+}
 
 /// Split what the model returned into its headline and the note beneath it.
 ///
@@ -853,6 +921,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                 detail: &why,
                 headline: "",
                 summary: "",
+                facts: "",
                 message: "",
                 prompt: "",
                 chat: &chat,
@@ -882,9 +951,9 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     };
     // The headline comes back on this same completion — asking a second time
     // would re-read the whole transcript to learn what we already know.
-    let (headline, summary) = if has_text {
+    let (headline, summary, facts) = if has_text {
         match crate::alerts::ollama_complete(&ollama, &prompt) {
-            Ok(s) => split_headline(&s),
+            Ok(s) => read_summary(&s),
             Err(e) => {
                 // A test send has no live conversation to retry on.
                 let attempts = if c.key == 0 { MAX_ATTEMPTS } else { c.attempts };
@@ -916,14 +985,15 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                         return;
                     }
                     AfterFailedSummary::SendPlaceholder => {
-                        (String::new(), format!("(summary unavailable: {e})"))
+                        (String::new(), format!("(summary unavailable: {e})"), Vec::new())
                     }
                 }
             }
         }
     } else {
-        (String::new(), "(no transcript — audio only)".to_string())
+        (String::new(), "(no transcript — audio only)".to_string(), Vec::new())
     };
+    let facts = if facts.is_empty() { String::new() } else { serde_json::to_string(&facts).unwrap_or_default() };
     let message = render(&r, &c, &headline, &summary);
     let files: Vec<String> = c.pieces.iter().filter_map(|p| p.audio.clone()).collect();
     let text_only = !r.attach_audio || files.is_empty();
@@ -1016,6 +1086,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                     detail: &detail,
                     headline: &headline,
                     summary: &summary,
+                    facts: &facts,
                     message: &message,
                     prompt: &prompt,
                     chat: &chat,
@@ -1045,6 +1116,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
                     detail: &format!("{detail}{e}"),
                     headline: &headline,
                     summary: &summary,
+                    facts: &facts,
                     message: &message,
                     prompt: &prompt,
                     chat: &chat,
@@ -1372,6 +1444,9 @@ pub fn ensure_schema(c: &Connection) {
         "ALTER TABLE conversations ADD COLUMN headline TEXT NOT NULL DEFAULT ''",
         [],
     );
+    // Added with case timelines: the facts the summary call lifts out of a
+    // report (witnessed, rhythm, ETA …), as JSON. NULL on older rows.
+    let _ = c.execute("ALTER TABLE conversations ADD COLUMN facts TEXT", []);
     // Rows written with a placeholder talkgroup name — early backfills and
     // rule tests said "TG 10256" — take the real name from a call on that
     // talkgroup, and the description from a sibling row that has one. Only
@@ -1400,6 +1475,8 @@ struct Outcome<'a> {
     detail: &'a str,
     headline: &'a str,
     summary: &'a str,
+    /// The facts as JSON, or empty when the call gave none.
+    facts: &'a str,
     message: &'a str,
     prompt: &'a str,
     chat: &'a str,
@@ -1497,25 +1574,30 @@ fn store_row(
         Some(id) => db.execute(
             "UPDATE conversations SET rule_name = ?1, tg_name = ?2, tg_desc = ?3, last_at = ?4, sent_at = ?5, revision = ?6,
              status = ?7, detail = ?8, summary = ?9, message = ?10, prompt = ?11, transcript = ?12, chat = ?13,
-             participants = ?14, pieces = ?15, calls = ?16, headline = ?17 WHERE id = ?18",
+             participants = ?14, pieces = ?15, calls = ?16, headline = ?17, facts = ?18 WHERE id = ?19",
             params![
                 r.name, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, o.headline, id
+                participants, pieces, c.pieces.len() as i64, o.headline, facts_column(o.facts), id
             ],
         ),
         None => db.execute(
             "INSERT INTO conversations (rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision,
-             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline, facts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 r.id, r.name, c.tg, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.first_at, c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, source, o.headline
+                participants, pieces, c.pieces.len() as i64, source, o.headline, facts_column(o.facts)
             ],
         ),
     };
     res.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// No facts is NULL, which is also what every row stored before facts has.
+fn facts_column(facts: &str) -> Option<&str> {
+    (!facts.is_empty()).then_some(facts)
 }
 
 /// One stored conversation, in full.
@@ -1553,13 +1635,22 @@ pub struct Stored {
     /// [`eta_phrase`]. `None` when the note gives no arrival time, which is
     /// common and not an error.
     pub eta: Option<String>,
+    /// What the summary call lifted out of the report. Empty on rows stored
+    /// before facts were asked for.
+    #[serde(default)]
+    pub facts: Vec<Fact>,
     /// What the radios nobody named are learned to be (`radios.rs`), by
     /// radio ID. Filled when one conversation is read for its page.
     #[serde(default)]
     pub learned: HashMap<u32, String>,
 }
 
-const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline";
+/// The facts column, read back.
+pub fn parse_facts(json: Option<&str>) -> Vec<Fact> {
+    json.and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
+}
+
+const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline, facts";
 
 fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
     let tg = row.get::<_, i64>(3)? as u16;
@@ -1590,6 +1681,7 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         status: row.get(10)?,
         detail: row.get(11)?,
         headline: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
+        facts: parse_facts(row.get::<_, Option<String>>(22)?.as_deref()),
         eta: eta_phrase(&summary),
         learned: HashMap::new(),
         summary,
@@ -1835,6 +1927,7 @@ mod tests {
             detail: "sent (2 pieces)",
             headline: "Chest Pain, Diaphoresis",
             summary: "Medic 3 is inbound with a 60-year-old male.",
+            facts: r#"[{"key":"age","value":"60"}]"#,
             message: "🏥 Hospitals\nMedic 3 is inbound.",
             prompt: "Summarise…",
             chat: "123",
@@ -1852,6 +1945,7 @@ mod tests {
             .transcript
             .starts_with("RADIO \"Medic 3\": Medic 3 inbound"));
         assert_eq!(row.status, "sent");
+        assert_eq!(row.facts, vec![Fact { key: "age".into(), value: "60".into() }]);
 
         // A late transmission revises the same conversation: one row, rev 1.
         c.pieces.push(Piece {
@@ -2250,6 +2344,95 @@ mod failed_summary_tests {
     fn a_summary_already_sent_is_never_replaced_by_a_failure() {
         assert_eq!(after_failed_summary(true, 0), Hold);
         assert_eq!(after_failed_summary(true, MAX_ATTEMPTS - 1), KeepEarlier);
+    }
+}
+
+#[cfg(test)]
+mod facts_tests {
+    use super::{read_summary, split_facts, Fact, FACT_KEYS, SUMMARY_GUIDE};
+
+    fn fact(k: &str, v: &str) -> Fact {
+        Fact { key: k.into(), value: v.into() }
+    }
+
+    #[test]
+    fn the_facts_come_off_the_end_and_the_note_is_left_alone() {
+        let raw = "HEADLINE: Cardiac Arrest, ROSC, STEMI\n\n\
+            Medic 54 inbound with a 78-year-old male in cardiac arrest with ROSC. ETA about 10 minutes.\n\n\
+            FACTS:\n\
+            age: 78\n\
+            sex: male\n\
+            witnessed: yes\n\
+            bystander cpr: yes\n\
+            rhythm: not stated\n\
+            rosc: yes\n\
+            downtime: about 15 minutes before 911 was called\n\
+            history: dialysis\n\
+            eta: about 10 minutes";
+        let (headline, note, facts) = read_summary(raw);
+        assert_eq!(headline, "Cardiac Arrest, ROSC, STEMI");
+        assert_eq!(note, "Medic 54 inbound with a 78-year-old male in cardiac arrest with ROSC. ETA about 10 minutes.");
+        assert_eq!(
+            facts,
+            vec![
+                fact("age", "78"),
+                fact("sex", "male"),
+                fact("witnessed", "yes"),
+                fact("bystander cpr", "yes"),
+                fact("rosc", "yes"),
+                fact("downtime", "about 15 minutes before 911 was called"),
+                fact("history", "dialysis"),
+                fact("eta", "about 10 minutes"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_model_that_decorates_or_misplaces_the_block_loses_nothing_else() {
+        let (note, facts) = split_facts("**FACTS:**\n- **Witnessed:** No\n- rhythm: Asystole.\n\nMedic 7 inbound, details unclear.");
+        assert_eq!(note, "Medic 7 inbound, details unclear.");
+        assert_eq!(facts, vec![fact("witnessed", "No"), fact("rhythm", "Asystole")]);
+        // No block at all: all note, no facts.
+        let (note, facts) = split_facts("Medic 7 inbound.");
+        assert_eq!((note.as_str(), facts.len()), ("Medic 7 inbound.", 0));
+        // A key nobody asked for ends the block; it is not a fact.
+        let (note, facts) = split_facts("Note.\nFACTS:\nage: 40\nmood: calm");
+        assert_eq!(note, "Note.\nmood: calm");
+        assert_eq!(facts, vec![fact("age", "40")]);
+    }
+
+    /// Ask the real model about stored reports and print what comes back.
+    /// Point `HS_FACTS_DB` at a copy of a library, `HS_FACTS_IDS` at
+    /// conversation ids, and `HS_FACTS_MODEL` at the model.
+    #[test]
+    #[ignore]
+    fn real_model() {
+        let db = rusqlite::Connection::open(std::env::var("HS_FACTS_DB").unwrap()).unwrap();
+        let o = crate::alerts::Ollama {
+            url: "http://localhost:11434".into(),
+            model: std::env::var("HS_FACTS_MODEL").unwrap(),
+            timeout_secs: 180,
+            fail_open: false,
+        };
+        for id in std::env::var("HS_FACTS_IDS").unwrap().split(',') {
+            let (tg, tg_name, transcript): (i64, String, String) = db
+                .query_row("SELECT tg, tg_name, transcript FROM conversations WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            let prompt = format!(
+                "Summarise this EMS-to-hospital radio report.\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {tg_name} (TG {tg}).\n\nTranscript:\n{transcript}\n\nSummary:"
+            );
+            let t = std::time::Instant::now();
+            let raw = crate::alerts::ollama_complete(&o, &prompt).unwrap();
+            let (h, n, f) = read_summary(&raw);
+            println!("--- {id} ({:.1} s)\nHEADLINE {h}\nNOTE {n}\nFACTS {f:?}", t.elapsed().as_secs_f64());
+        }
+    }
+
+    #[test]
+    fn the_guide_asks_for_every_key_that_is_read() {
+        for k in FACT_KEYS {
+            assert!(SUMMARY_GUIDE.contains(&format!("\n{k}: ")), "guide does not ask for {k}");
+        }
     }
 }
 
@@ -2684,10 +2867,11 @@ fn summarise_only(app: &AppHandle, c: &Conversation, r: &Rule) {
         c.tg,
         transcript
     );
-    let (headline, summary) = match crate::alerts::ollama_complete(&ollama, &prompt) {
-        Ok(s) => split_headline(&s),
-        Err(e) => (String::new(), format!("(summary unavailable: {e})")),
+    let (headline, summary, facts) = match crate::alerts::ollama_complete(&ollama, &prompt) {
+        Ok(s) => read_summary(&s),
+        Err(e) => (String::new(), format!("(summary unavailable: {e})"), Vec::new()),
     };
+    let facts = if facts.is_empty() { String::new() } else { serde_json::to_string(&facts).unwrap_or_default() };
     let message = render(r, c, &headline, &summary);
     store_outcome(
         app,
@@ -2698,6 +2882,7 @@ fn summarise_only(app: &AppHandle, c: &Conversation, r: &Rule) {
             detail: "summarised from the library; not sent",
             headline: &headline,
             summary: &summary,
+            facts: &facts,
             message: &message,
             prompt: &prompt,
             chat: "",
