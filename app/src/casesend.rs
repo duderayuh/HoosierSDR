@@ -52,6 +52,10 @@ pub struct Send {
     /// hospitals its care pathway names (the nearest, the ECMO centre) in the
     /// chat for every case, scene to hospital in a hospital's chat.
     pub map: bool,
+    /// The radio with it: a reply is the clip of the call that said it, and
+    /// a thread's first reply is the page (or, in a hospital's chat, the
+    /// report).
+    pub audio: bool,
 }
 
 impl Default for Send {
@@ -62,6 +66,7 @@ impl Default for Send {
             hospitals: true,
             notify: ["working", "rosc", "rearrest", "report", "downgrade", "terminated"].map(String::from).to_vec(),
             map: true,
+            audio: true,
         }
     }
 }
@@ -224,8 +229,11 @@ pub struct Notice {
     pub key: String,
     pub at: i64,
     pub text: String,
-    /// The report a map goes under, in a hospital's chat.
+    /// The report a map goes under, in a hospital's chat. A report's audio
+    /// is every transmission of it.
     pub conversation: Option<i64>,
+    /// The call that said it, whose recording goes with it.
+    pub call: Option<i64>,
 }
 
 fn window(a: &Arrival) -> String {
@@ -307,7 +315,7 @@ pub fn notices(k: &CaseView, notify: &[String]) -> Vec<Notice> {
         if !wants(kind) {
             continue;
         }
-        out.push(Notice { key, at: l.at, text, conversation: l.conversation });
+        out.push(Notice { key, at: l.at, text, conversation: l.conversation, call: l.call });
     }
     out
 }
@@ -345,6 +353,25 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
         }
     }
     out
+}
+
+/// The first reply under a thread, which is only ever audio: the page that
+/// opened the case in the chat for every case, and the report that brought
+/// a hospital's chat in, in that chat. Both are already in the timeline as
+/// words; what a listener cannot get from the timeline is hearing them.
+pub fn intro(k: &CaseView, t: &Thread) -> Option<Notice> {
+    match t.conversation {
+        None => {
+            let l = k.lines.iter().find(|l| l.kind == "dispatched" && l.call.is_some())?;
+            let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
+            Some(Notice { key: "audio:page".into(), at: l.at, text: format!("📻 {when} {}", l.label), conversation: None, call: l.call })
+        }
+        Some(conv) => {
+            let l = k.lines.iter().find(|l| l.kind == "report" && l.conversation == Some(conv))?;
+            let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
+            Some(Notice { key: format!("audio:report:{conv}"), at: l.at, text: format!("📻 {when} {}", l.label), conversation: Some(conv), call: l.call })
+        }
+    }
 }
 
 /// A hospital's chat is told what happens after it joined; the report that
@@ -435,7 +462,8 @@ pub enum Step {
 }
 
 /// What one chat needs for one case, from what it already has.
-pub fn plan(k: &CaseView, t: &Thread, notify: &[String], had: Option<&Sent>, now: i64) -> Vec<Step> {
+pub fn plan(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) -> Vec<Step> {
+    let notify = &s.notify;
     let text = render(k);
     let mut steps = Vec::new();
     let root = match had {
@@ -456,6 +484,18 @@ pub fn plan(k: &CaseView, t: &Thread, notify: &[String], had: Option<&Sent>, now
         }
     };
     let done = had.map(|h| &h.notices);
+    // The page or the report, heard: under the first message, and only
+    // while it is news. A thread that already existed before audio was sent
+    // gets it too, if it is still recent.
+    if let Some(n) = intro(k, t).filter(|_| s.audio) {
+        if !done.is_some_and(|d| d.contains(&n.key)) {
+            if now - n.at > NOTIFY_WITHIN_SECS {
+                steps.push(Step::Stale { notice: n });
+            } else {
+                steps.push(Step::Reply { root_id: root, notice: n });
+            }
+        }
+    }
     for n in notices_for(t, &notices(k, notify)) {
         if done.is_some_and(|d| d.contains(&n.key)) {
             continue;
@@ -520,7 +560,7 @@ pub fn tick(app: &AppHandle) {
                     let c = db.lock().unwrap();
                     sent(&c, &p.id, k.incident, &t.dest)
                 };
-                let steps = plan(k, &t, &p.telegram.notify, had.as_ref(), now);
+                let steps = plan(k, &t, &p.telegram, had.as_ref(), now);
                 // A run is often placed a little after it is paged, so the
                 // map can be owed after its thread has nothing else to say.
                 if steps.is_empty() && !(had.is_some() && map_due(k, &t, &p.telegram, had.as_ref(), now)) {
@@ -585,7 +625,11 @@ fn carry_out(
                 .map_err(|e| e.to_string())?;
             }
             Step::Reply { notice, .. } => {
-                let id = crate::alerts::send_text_reply(&target, &notice.text, root)?;
+                let id = if p.telegram.audio {
+                    send_heard(db, k, &target, &notice, root)?
+                } else {
+                    crate::alerts::send_text_reply(&target, &notice.text, root)?
+                };
                 record_notice(db, p, k, t, &notice, Some(id), now)?;
             }
             Step::Stale { notice } => record_notice(db, p, k, t, &notice, None, now)?,
@@ -656,6 +700,51 @@ fn carry_out(
     Ok(())
 }
 
+/// The recordings behind a notice, oldest first, and the talkgroup they were
+/// on: every transmission of a report, else the one call.
+fn recordings(c: &Connection, n: &Notice) -> (Vec<String>, String) {
+    if let Some(conv) = n.conversation {
+        let row: Option<(String, String)> = c
+            .query_row("SELECT pieces, tg_name FROM conversations WHERE id = ?1", [conv], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .ok()
+            .flatten();
+        if let Some((pieces, tg_name)) = row {
+            let mut pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
+            pieces.sort_by_key(|p| p.at);
+            return (pieces.into_iter().filter_map(|p| p.audio).collect(), tg_name);
+        }
+    }
+    let Some(call) = n.call else { return (Vec::new(), String::new()) };
+    c.query_row("SELECT audio, tg_name FROM calls WHERE id = ?1", [call], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))
+        .optional()
+        .ok()
+        .flatten()
+        .map(|(a, tg)| (a.into_iter().collect(), tg))
+        .unwrap_or_default()
+}
+
+/// A notice as the radio said it: an audio message with the notice as its
+/// caption. With no recording to hand, or one that cannot be put together,
+/// the words go on their own — a missing clip is no reason to miss ROSC.
+fn send_heard(db: &Db, k: &CaseView, target: &str, n: &Notice, root: Option<i64>) -> Result<i64, String> {
+    let (files, tg_name) = recordings(&db.lock().unwrap(), n);
+    let files: Vec<String> = files.into_iter().filter(|f| !f.is_empty() && std::path::Path::new(f).exists()).collect();
+    if files.is_empty() {
+        return crate::alerts::send_text_reply(target, &n.text, root);
+    }
+    let (path, mp3) = match crate::alerts::combine_clips(&files, &format!("case_{}", k.incident)) {
+        Ok(clip) => clip,
+        Err(e) => {
+            eprintln!("cases: audio for case {}: {e}", k.id);
+            return crate::alerts::send_text_reply(target, &n.text, root);
+        }
+    };
+    let sent = crate::alerts::send_audio_reply(target, &path, mp3, &n.text, None, &k.title, &tg_name, root);
+    let _ = std::fs::remove_file(&path);
+    sent?.last().copied().ok_or_else(|| "Telegram audio had no message id".into())
+}
+
 fn record_notice(
     db: &Db,
     p: &crate::cases::Profile,
@@ -721,7 +810,7 @@ pub fn preview(view: &crate::cases::CasesView, s: &Send, places: &crate::places:
         for t in &ts {
             let d = days.entry((date.clone(), t.dest.clone())).or_insert_with(|| PreviewDay { date: date.clone(), dest: name(&t.dest), ..Default::default() });
             d.threads += 1;
-            d.replies += notices_for(t, &all).len() as u32;
+            d.replies += notices_for(t, &all).len() as u32 + (s.audio && intro(k, t).is_some()) as u32;
         }
         cases.push(PreviewCase {
             id: k.id,
@@ -936,7 +1025,7 @@ mod tests {
         let k = arrest();
         let t = Thread { dest: "d-all".into(), since: k.opened, place_id: None, conversation: None };
         let now = k.lines.last().unwrap().at + 30;
-        let first = plan(&k, &t, &notify(), None, now);
+        let first = plan(&k, &t, &Send::default(), None, now);
         assert!(matches!(first[0], Step::Root { .. }));
         assert!(first[1..].iter().all(|s| matches!(s, Step::Stale { .. })), "a new thread buzzes for nothing already in it");
         // Later: one new event.
@@ -946,19 +1035,73 @@ mod tests {
                 had.notices.insert(notice.key.clone());
             }
         }
-        assert!(plan(&k, &t, &notify(), Some(&had), now).is_empty(), "nothing changed, nothing sent");
+        assert!(plan(&k, &t, &Send::default(), Some(&had), now).is_empty(), "nothing changed, nothing sent");
         let mut later = k.clone();
         later.lines.push(line(now + 60, "terminated", "Efforts ceased", "readback"));
         later.state = "terminated".into();
-        let steps = plan(&later, &t, &notify(), Some(&had), now + 90);
+        let steps = plan(&later, &t, &Send::default(), Some(&had), now + 90);
         assert!(matches!(&steps[0], Step::Edit { root_id: 77, .. }));
         assert!(matches!(&steps[1], Step::Reply { root_id: Some(77), notice } if notice.key == "terminated"));
         assert_eq!(steps.len(), 2);
         // Twenty minutes late, the edit still goes and the buzz does not.
-        let late = plan(&later, &t, &notify(), Some(&had), now + 60 + NOTIFY_WITHIN_SECS + 1);
+        let late = plan(&later, &t, &Send::default(), Some(&had), now + 60 + NOTIFY_WITHIN_SECS + 1);
         assert!(matches!(&late[1], Step::Stale { .. }));
         // A case that ended long ago gets no new thread.
-        assert!(plan(&later, &t, &notify(), None, now + 60 + NOTIFY_WITHIN_SECS + 1).is_empty());
+        assert!(plan(&later, &t, &Send::default(), None, now + 60 + NOTIFY_WITHIN_SECS + 1).is_empty());
+    }
+
+    #[test]
+    fn a_thread_opens_with_the_page_heard_and_a_hospital_with_its_report() {
+        let k = arrest();
+        let s = Send { dest: "d-all".into(), ..Send::default() };
+        let ts = threads(&k, &s, &places());
+        let page = intro(&k, &ts[0]).unwrap();
+        assert_eq!((page.key.as_str(), page.call), ("audio:page", Some(1_000_000)));
+        assert!(page.text.starts_with("📻 ") && page.text.ends_with("Dispatched as Unconscious"), "{}", page.text);
+        let report = intro(&k, &ts[1]).unwrap();
+        assert_eq!((report.key.as_str(), report.conversation), ("audio:report:3", Some(3)));
+
+        // A case just paged: the timeline, then the page as its first reply.
+        let fresh = case(k.lines[..1].to_vec(), vec![]);
+        let now = fresh.opened + 30;
+        let steps = plan(&fresh, &ts[0], &s, None, now);
+        assert!(matches!(&steps[0], Step::Root { .. }));
+        assert!(matches!(&steps[1], Step::Reply { notice, .. } if notice.key == "audio:page"), "{steps:?}");
+        assert_eq!(steps.len(), 2);
+        // Sent once.
+        let had = Sent { target: "x".into(), root_id: 9, rendered: render(&fresh), map_sent: false, notices: ["audio:page".to_string()].into() };
+        assert!(plan(&fresh, &ts[0], &s, Some(&had), now + 5).is_empty());
+        // A thread from before audio, still recent, gets its page.
+        let before = Sent { notices: HashSet::new(), ..had.clone() };
+        assert!(matches!(&plan(&fresh, &ts[0], &s, Some(&before), now)[..], [Step::Reply { root_id: Some(9), notice }] if notice.key == "audio:page"));
+        // Twenty minutes on, it is not news.
+        assert!(matches!(&plan(&fresh, &ts[0], &s, Some(&before), fresh.opened + NOTIFY_WITHIN_SECS + 1)[..], [Step::Stale { .. }]));
+        // Switched off, there is none.
+        let quiet = Send { audio: false, ..s.clone() };
+        assert_eq!(plan(&fresh, &ts[0], &quiet, None, now).len(), 1);
+        // A case with no dispatch page has nothing to play first.
+        let no_page = case(vec![line(1_000_000, "working", "Working arrest", "readback")], vec![]);
+        assert_eq!(intro(&no_page, &ts[0]), None);
+    }
+
+    #[test]
+    fn a_report_is_heard_whole_and_an_event_as_its_call() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, tg_name TEXT NOT NULL, audio TEXT);
+             CREATE TABLE conversations (id INTEGER PRIMARY KEY, tg_name TEXT NOT NULL, pieces TEXT NOT NULL);
+             INSERT INTO calls VALUES (7, '49F-DISPATCH', '/lib/page.m4a'), (8, '49F-DISPATCH', NULL);",
+        )
+        .unwrap();
+        let pieces = r#"[{"id":2,"unit":1,"unit_name":null,"fixed":true,"at":20,"secs":2.0,"audio":"/lib/b.m4a","transcript":"go ahead"},
+                         {"id":1,"unit":5,"unit_name":null,"fixed":false,"at":10,"secs":9.0,"audio":"/lib/a.m4a","transcript":"report"},
+                         {"id":3,"unit":5,"unit_name":null,"fixed":false,"at":30,"secs":1.0,"audio":null,"transcript":"thanks"}]"#;
+        c.execute("INSERT INTO conversations VALUES (3, '49M-M03', ?1)", [pieces]).unwrap();
+        let n = |conversation: Option<i64>, call: Option<i64>| Notice { key: "k".into(), at: 0, text: "t".into(), conversation, call };
+        assert_eq!(recordings(&c, &n(Some(3), Some(1))), (vec!["/lib/a.m4a".to_string(), "/lib/b.m4a".to_string()], "49M-M03".to_string()));
+        assert_eq!(recordings(&c, &n(None, Some(7))), (vec!["/lib/page.m4a".to_string()], "49F-DISPATCH".to_string()));
+        assert_eq!(recordings(&c, &n(None, Some(8))).0, Vec::<String>::new(), "a call with no recording");
+        assert_eq!(recordings(&c, &n(None, None)).0, Vec::<String>::new());
     }
 
     /// Against a copy of a library whose cases are built (run the cases
@@ -997,9 +1140,9 @@ mod tests {
         let names: HashMap<String, String> = [("d-all".to_string(), "All arrests".to_string()), ("d-general".to_string(), "Example General".to_string())].into();
         let p = preview(&view, &s, &places(), &names);
         let all = p.days.iter().find(|d| d.dest == "All arrests").unwrap();
-        assert_eq!((all.threads, all.replies), (1, 5));
+        assert_eq!((all.threads, all.replies), (1, 6), "five events and the page");
         let general = p.days.iter().find(|d| d.dest == "Example General").unwrap();
-        assert_eq!((general.threads, general.replies), (1, 2));
+        assert_eq!((general.threads, general.replies), (1, 3), "two events and its report");
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         let none = preview(&view, &Send::default(), &crate::places::Settings::default(), &names);
         assert_eq!(none.warnings.len(), 2);
