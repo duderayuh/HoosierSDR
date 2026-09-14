@@ -1136,6 +1136,23 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
         params![p.id, from, to],
     )
     .map_err(|e| e.to_string())?;
+    // A run read here that is no longer a case of its own (it joined an
+    // earlier run's case, or its page turned out not to be an arrest) goes,
+    // so nothing is left showing, or being sent, a timeline nobody updates.
+    let kept: Vec<String> = ids.values().map(|id| id.to_string()).collect();
+    let gone = format!(
+        "SELECT id FROM cases WHERE profile = ?1 AND incident IN (SELECT id FROM incidents WHERE created BETWEEN ?2 AND ?3){}",
+        if kept.is_empty() { String::new() } else { format!(" AND id NOT IN ({})", kept.join(",")) }
+    );
+    let stale: Vec<i64> = tx
+        .prepare(&gone)
+        .and_then(|mut q| q.query_map(params![p.id, from, to], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .map_err(|e| e.to_string())?;
+    for id in stale {
+        for table in ["case_events WHERE case_id", "case_incidents WHERE case_id", "cases WHERE id"] {
+            tx.execute(&format!("DELETE FROM {table} = ?1"), [id]).map_err(|e| e.to_string())?;
+        }
+    }
     let mut built = Built { cases: primaries.len(), ..Default::default() };
     for (inc, pid) in &case_of {
         let how = merged_how(*inc, *pid);
@@ -1832,6 +1849,18 @@ mod tests {
         assert_eq!(b.cases, 1, "{b:?}");
         let again = rebuild(&c, &inp, t0 - 60, t0 + 3600).unwrap();
         assert_eq!(again, b, "a rebuild is repeatable");
+        // A case left from an earlier build for a run that is not one now
+        // goes, events and all.
+        c.execute_batch(&format!(
+            "INSERT INTO cases (id, profile, incident, opened) VALUES (99, '{}', 3, {t0});
+             INSERT INTO case_events (case_id, profile, at, kind, label, source) VALUES (99, '{}', {t0}, 'dispatched', 'x', 'page');",
+            prof.id, prof.id
+        ))
+        .unwrap();
+        rebuild(&c, &inp, t0 - 60, t0 + 3600).unwrap();
+        let left: i64 = c.query_row("SELECT COUNT(*) FROM cases WHERE id = 99", [], |r| r.get(0)).unwrap();
+        let events: i64 = c.query_row("SELECT COUNT(*) FROM case_events WHERE case_id = 99", [], |r| r.get(0)).unwrap();
+        assert_eq!((left, events), (0, 0));
         let v = list(&c, 0, &crate::places::Settings::default(), t0 + 3600);
         assert_eq!(v.cases.len(), 1);
         let kinds: Vec<(&str, &str)> = v.cases[0].lines.iter().map(|l| (l.kind.as_str(), l.source.as_str())).collect();
