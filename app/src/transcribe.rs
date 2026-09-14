@@ -150,22 +150,29 @@ const RELOAD_JOB_SECS: u64 = 120;
 /// replaces a worker that has gone silent.
 const BACKSTOP_GRACE_SECS: u64 = 30;
 
-/// Below this, a clip is a keyup, not speech, and is not worth asking about.
+/// Below this, a clip is transcribed without the dispatch vocabulary.
 ///
-/// Whisper does not answer "nothing was said" — asked about a fifth of a second
-/// of squelch it invents a sentence, and every sub-second transcript in this
-/// library is one: "Thank you.", "For more information visit www.fema.gov",
-/// a line of Korean. Of 309 clips under half a second, 300 came back as junk
-/// and the other nine were longer junk. Priming the decoder with a vocabulary
-/// makes this worse, not better — with a prompt to riff on, a 0.18 s keyup
-/// answers with a paragraph instead of two words.
+/// These clips used to be skipped outright, on the evidence that Whisper
+/// invents a sentence for a keyup ("Thank you.", "For more information visit
+/// www.fema.gov"). Most of them are not keyups. Of 40 skipped sub-second
+/// clips transcribed afterwards without a prompt, most were real traffic —
+/// "Go ahead.", "Clear.", "Switch over.", "Squad 29.", a unit acknowledging
+/// its callsign — and one was an invented paragraph, which [`plausible`]
+/// catches. Priming the decoder with a vocabulary is what makes a keyup
+/// answer with a paragraph instead of two words, so the vocabulary is left
+/// off here.
+const UNPROMPTED_SECS: f64 = 1.0;
+
+/// Could this many words have been said in a clip this long?
 ///
-/// The floor is deliberately low. Real traffic this short exists ("Fire 84.",
-/// "1329 hours.") and starts appearing around a second; clips between 1 and 3
-/// seconds are still a coin flip, but duration cannot tell a short truth from
-/// a short invention, so that is left to a later pass rather than paid for
-/// here in dropped calls.
-const MIN_TRANSCRIBE_SECS: f64 = 1.0;
+/// Speech on the radio runs at two to four words a second; a readback of
+/// numbers can run faster. Whisper's inventions on a keyup do not respect
+/// that — a 0.36 s clip came back as fourteen words — so a transcript far
+/// past any talking speed is an invention, whatever it says.
+pub fn plausible(text: &str, secs: f64) -> bool {
+    let words = text.split_whitespace().count() as f64;
+    words <= 4.0 + 6.0 * secs.max(0.0)
+}
 
 /// The worker's limit for one clip. Every engine here runs well under real
 /// time (mlx-whisper ~0.3 s for a 21 s call, faster-whisper on the CPU ~5 s),
@@ -451,14 +458,26 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                     let model = v["model"].as_str().unwrap_or("whisper");
                     // Transcript corrections: each call gets the global rules
                     // plus any rules that name its talkgroup.
-                    let corrected = {
+                    let before = {
                         let guard = state.db.lock().unwrap();
-                        let tg = guard.as_ref().and_then(|db| {
-                            library::get(&db.lock().unwrap(), id)
-                                .ok()
-                                .flatten()
-                                .map(|r| r.tg)
-                        });
+                        guard.as_ref().and_then(|db| {
+                            library::get(&db.lock().unwrap(), id).ok().flatten()
+                        })
+                    };
+                    let tg = before.as_ref().map(|r| r.tg);
+                    // A clip an earlier build skipped as too short, filled in
+                    // now: it is kept and read for radio identity, but it is
+                    // old news, so nothing alerts on it or maps it.
+                    let late = before
+                        .as_ref()
+                        .is_some_and(|r| r.transcript_model.as_deref() == Some("too-short"));
+                    let invented = before.as_ref().is_some_and(|r| !plausible(text, r.secs));
+                    let (text, model) = if invented {
+                        ("", "implausible")
+                    } else {
+                        (text, model)
+                    };
+                    let corrected = {
                         let corr = state.corrections.lock().unwrap();
                         let rules: Vec<(String, String)> = corr
                             .iter()
@@ -476,14 +495,16 @@ fn ensure_started(app: &AppHandle, shared: &Shared) -> bool {
                             None => Err("library not open".into()),
                         }
                     };
-                    if res.is_ok() {
+                    if res.is_ok() && !invented {
                         let _ = app2.emit(
                             "transcript",
                             serde_json::json!({ "id": id, "text": corrected, "model": model }),
                         );
-                        crate::tripwires::on_transcript(&app2, id, &corrected);
+                        if !late {
+                            crate::tripwires::on_transcript(&app2, id, &corrected);
+                            crate::dispatch::on_transcript(&app2, id, &corrected);
+                        }
                         crate::conversations::on_transcript(&app2, id, &corrected);
-                        crate::dispatch::on_transcript(&app2, id, &corrected);
                         crate::radios::on_transcript(&app2, id, &corrected);
                         crate::cases::touch();
                     }
@@ -686,15 +707,14 @@ pub fn spawn_pump(app: AppHandle) {
                     .and_then(|v| v.into_iter().next()),
             }
         };
+        // Nothing waiting: fill in the short clips an earlier build skipped,
+        // newest first.
+        let next = next.or_else(|| {
+            let db = state.db.lock().unwrap().clone()?;
+            let c = db.lock().unwrap();
+            library::skipped_short(&c, 1).ok().and_then(|v| v.into_iter().next())
+        });
         let Some(row) = next else { continue };
-        // Too short to be speech — but an explicit "Transcribe now" is the
-        // listener overruling that, so only the automatic pump skips it.
-        if wanted != Some(row.id) && row.secs < MIN_TRANSCRIBE_SECS {
-            if let Some(db) = state.db.lock().unwrap().clone() {
-                let _ = library::set_transcript(&db.lock().unwrap(), row.id, "", "too-short");
-            }
-            continue;
-        }
         let Some(path) = row.audio else { continue };
         if !std::path::Path::new(&path).exists() {
             // Audio gone: mark so we don't loop on it.
@@ -709,7 +729,11 @@ pub fn spawn_pump(app: AppHandle) {
         let prompt = {
             let tr = state.transcriber.lock().unwrap().settings.clone();
             let di = state.dispatch.lock().unwrap().settings.clone();
-            prompt_for(row.tg, &tr, &di)
+            if row.secs < UNPROMPTED_SECS {
+                String::new()
+            } else {
+                prompt_for(row.tg, &tr, &di)
+            }
         };
         if !(ensure_started(&app, &state.transcriber)
             && submit(&state.transcriber, row.id, &path, row.secs, &prompt))
@@ -782,13 +806,29 @@ mod tests {
     }
 
     #[test]
-    fn the_short_clip_floor_keeps_the_shortest_real_traffic() {
-        // Real dispatch traffic this brief exists and is worth keeping; the
-        // junk is below it. Guards the constant against being raised to where
-        // it would start eating "Fire 84." (1.4 s) and "1329 hours." (1.8 s).
-        assert!(MIN_TRANSCRIBE_SECS <= 1.4);
-        // And against being lowered back into the bucket that is all noise.
-        assert!(MIN_TRANSCRIBE_SECS > 0.9);
+    fn the_vocabulary_stays_on_the_calls_long_enough_to_use_it() {
+        // "Fire 84." (1.4 s) and "1329 hours." (1.8 s) want the dispatch
+        // words; a keyup given them to riff on answers with a paragraph.
+        assert!(UNPROMPTED_SECS <= 1.4);
+        assert!(UNPROMPTED_SECS > 0.5);
+    }
+
+    #[test]
+    fn short_real_traffic_is_kept_and_an_invented_paragraph_is_not() {
+        // All heard on sub-second clips an earlier build skipped.
+        assert!(plausible("Go ahead.", 0.36));
+        assert!(plausible("Squad 29.", 0.9));
+        assert!(plausible("Thank you very much.", 0.5));
+        assert!(plausible("", 0.18));
+        assert!(!plausible(
+            "Which i am Thank you very much that your Ms Finley education additional Mrs Bay",
+            0.36
+        ));
+        // A long page is quick but not that quick.
+        assert!(plausible(
+            "Ambulance 27, 1001, North Delaware St, Apartment 13, Mental Emotional, Suicidal, 0954 Hours, Location 4521",
+            10.4
+        ));
     }
 
     #[test]

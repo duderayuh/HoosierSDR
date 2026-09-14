@@ -410,6 +410,21 @@ pub fn untranscribed(c: &Connection, limit: u32) -> Result<Vec<CallRow>, String>
     Ok(rows)
 }
 
+/// Clips an earlier build skipped as too short to transcribe, newest first.
+pub fn skipped_short(c: &Connection, limit: u32) -> Result<Vec<CallRow>, String> {
+    let mut st = c
+        .prepare(&format!(
+            "SELECT {COLS} FROM calls WHERE audio IS NOT NULL AND transcript_model = 'too-short' ORDER BY id DESC LIMIT ?1"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![limit], row)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 /// Delete calls (and their audio) older than `days`. Starred calls stay.
 pub fn prune(c: &Connection, days: u32) -> Result<usize, String> {
     let cutoff = now() - days as i64 * 86400;
