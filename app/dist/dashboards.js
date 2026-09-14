@@ -152,6 +152,18 @@
     </article>`;
   }
 
+  // The summary with its stated time to arrival marked. `r.eta` is the exact
+  // phrase Rust found in this text (see `conversations::eta_phrase`), so the
+  // span is located by looking the phrase back up rather than by matching
+  // again here — one matcher, no second opinion to drift from it.
+  function etaBody(r) {
+    const s = r.summary || "";
+    const at = r.eta ? s.indexOf(r.eta) : -1;
+    if (at < 0) return esc(s);
+    return esc(s.slice(0, at)) + `<mark class="dbeta">${esc(r.eta)}</mark>` +
+      esc(s.slice(at + r.eta.length));
+  }
+
   function reportCard(p, r) {
     const hay = norm([r.headline, r.summary, r.tg_name, (r.units || []).join(" ")].join(" "));
     const em = emphasisFor(p, hay, "");
@@ -168,8 +180,9 @@
       <div class="dbmeta mono faint">
         <span class="ago" data-t="${r.last_at}">${ago(r.last_at)}</span>
         ${r.units && r.units.length ? " · " + esc(r.units.join(", ")) : ""}
+        ${r.eta ? ` · <span class="dbetachip">${esc(r.eta)}</span>` : ""}
       </div>
-      ${r.summary ? `<div class="dbbody">${esc(r.summary)}</div>` : ""}
+      ${r.summary ? `<div class="dbbody">${etaBody(r)}</div>` : ""}
     </article>`;
   }
 

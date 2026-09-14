@@ -174,7 +174,10 @@
               <div class="tablewrap tgs" style="max-height:170px"><table>
                 <thead><tr><th>Talkgroup</th><th>Heard</th><th>Lost</th><th></th></tr></thead>
                 <tbody id="rxTgs"></tbody></table></div>
-              <p class="help" id="rxHelp"></p>
+              <!-- Not `p.help`: helpify() folds those into an ⓘ button and
+                   deletes the empty ones outright, and this line is written
+                   after every reading rather than being fixed advice. -->
+              <p class="faint" id="rxHelp" style="margin-top:8px"></p>
             </div>
           </div>
         </aside>

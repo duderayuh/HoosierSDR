@@ -1488,6 +1488,11 @@ pub struct Stored {
     pub source: String,
     /// Mobile units by name (or ID), first appearance first.
     pub units: Vec<String>,
+    /// The stated time to arrival, lifted out of the summary prose so a board
+    /// can show it on its own. Derived on read, not stored -- see
+    /// [`eta_phrase`]. `None` when the note gives no arrival time, which is
+    /// common and not an error.
+    pub eta: Option<String>,
 }
 
 const STORED_COLS: &str = "id, rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision, status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline";
@@ -1505,6 +1510,7 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         .collect();
     let mut seen = std::collections::HashSet::new();
     units.retain(|u| seen.insert(u.clone()));
+    let summary: String = row.get(12)?;
     Ok(Stored {
         id: row.get(0)?,
         conv_id: conv_id(tg, first_at),
@@ -1520,7 +1526,8 @@ fn stored_row(row: &rusqlite::Row) -> rusqlite::Result<Stored> {
         status: row.get(10)?,
         detail: row.get(11)?,
         headline: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
-        summary: row.get(12)?,
+        eta: eta_phrase(&summary),
+        summary,
         message: row.get(13)?,
         prompt: row.get(14)?,
         transcript: row.get(15)?,
@@ -2787,5 +2794,134 @@ mod talkgroup_label_tests {
             .query_row("SELECT tg_name FROM conversations WHERE tg = 10256", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "49M-M03");
+    }
+}
+
+// ------------------------------------------------------------------- ETA
+
+/// The stated time to arrival in a hand-off note, if it gives one.
+///
+/// On a board of inbound patients the ETA is the one number read at a glance,
+/// and it is buried mid-sentence in prose. This finds it so a renderer can
+/// lift it out. Derived on read rather than stored: the phrasings vary more
+/// than a column could keep up with, and improving the pattern should improve
+/// every row already written, not just the next one.
+///
+/// Drawn from 288 stored summaries. The shapes that occur:
+/// "ETA of 5 to 7 minutes", "The ETA is approximately 11 minutes",
+/// "three to four minutes out", "arriving in approximately three minutes",
+/// "an arrival time of five minutes", "a five-minute ETA".
+///
+/// What must *not* match matters as much: 43 of those summaries say the ETA
+/// is unclear or was never given, and a highlight on "unclear" would be worse
+/// than no highlight at all.
+pub fn eta_phrase(summary: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        const WORD: &str = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|a\s+few|a\s+couple\s+of|a\s+couple)";
+        let num = format!(r"(?:\d{{1,3}}(?:\.\d)?|{WORD})");
+        let dur = format!(r"{num}(?:\s*(?:to|-|or)\s*{num})?");
+        const LEAD: &str = r"(?:approximately|about|around|roughly|under|less\s+than|just\s+over|nearly)?";
+        const UNIT: &str = r"(?:minutes?|mins?|hours?|seconds?)";
+        let pat = format!(
+            r"(?ix)
+             (?:
+                 (?:ETA|estimated\s+time\s+of\s+arrival|arrival\s+time)
+                 \s*(?:is|of|at|around)?\s*{LEAD}\s*{dur}\s*{UNIT}(?:\s*out)?
+               | {LEAD}\s*{dur}\s*(?:minutes?|mins?)\s+out\b
+               | arriv\w*\s+(?:in|within)\s+{LEAD}\s*{dur}\s*{UNIT}
+               | {LEAD}\s*{dur}\s*{UNIT}\s+(?:from\s+arrival|away)\b
+               | {num}\s*-\s*minute\s+ETA
+             )"
+        );
+        regex::Regex::new(&pat).expect("eta pattern")
+    });
+    re.find(summary).map(|m| m.as_str().trim().to_string())
+}
+
+#[cfg(test)]
+mod eta_tests {
+    use super::eta_phrase;
+
+    #[test]
+    fn the_phrasings_that_actually_occur_are_found() {
+        // Every one of these is a real line from the stored summaries.
+        for (s, want) in [
+            ("The unit estimates an ETA of 5 to 7 minutes.", "ETA of 5 to 7 minutes"),
+            ("The ETA is 15 minutes.", "ETA is 15 minutes"),
+            ("The ETA is approximately 11 minutes.", "ETA is approximately 11 minutes"),
+            ("The unit estimates an ETA of five minutes.", "ETA of five minutes"),
+            ("The unit reports an ETA of seven to eight minutes.", "ETA of seven to eight minutes"),
+            ("The unit is approximately eight minutes out.", "approximately eight minutes out"),
+            ("Leg four is three to four minutes out with a 97-year-old female.", "three to four minutes out"),
+            ("The unit estimates an arrival time of 5 to 10 minutes.", "arrival time of 5 to 10 minutes"),
+            ("The estimated time of arrival is eight minutes.", "estimated time of arrival is eight minutes"),
+            ("Medic 24 is transporting a male, arriving in approximately three minutes.", "arriving in approximately three minutes"),
+            ("Intranasal fentanyl was administered, and the unit is less than 10 minutes from arrival.", "less than 10 minutes from arrival"),
+            ("The unit is approximately five minutes from arrival.", "approximately five minutes from arrival"),
+            ("The unit is approximately 10 minutes away and has been authorized.", "approximately 10 minutes away"),
+            ("The patient has an estimated arrival time of 45.8 minutes.", "arrival time of 45.8 minutes"),
+            ("The unit has a five-minute ETA, and the hospital reports no instructions.", "five-minute ETA"),
+        ] {
+            assert_eq!(eta_phrase(s).as_deref(), Some(want), "in {s:?}");
+        }
+    }
+
+    #[test]
+    fn an_eta_that_was_never_given_is_not_highlighted() {
+        // 43 of 288 summaries say this. Lighting up the word "unclear" as
+        // though it were a time would be worse than showing nothing.
+        for s in [
+            "The ETA is unclear.",
+            "The ETA is unclear, and the hospital acknowledged the report.",
+            "Medic 472 is inbound, but the patient's age, sex, vitals, and ETA are unclear.",
+            "No ETA was provided.",
+            "The hospital has instructed the team to proceed to Shot Room 3 upon arrival.",
+            // A duration that belongs to the history, not to the trip.
+            "The patient had a generalized tonic-clonic seizure lasting approximately 30 seconds.",
+            "The duration of the fall is unclear but estimated to be at least eight hours.",
+        ] {
+            assert_eq!(eta_phrase(s), None, "in {s:?}");
+        }
+    }
+
+    #[test]
+    fn a_clinical_number_is_not_mistaken_for_a_time() {
+        // The summaries are full of numbers; only the ones attached to
+        // arrival wording are the ETA.
+        for s in [
+            "A 58-year-old male with a heart rate of 84 and blood pressure 189/104.",
+            "Vitals show a heart rate of 99, blood pressure of 131/79, and oxygen saturation of 97%.",
+            "The patient received 100 mcg of fentanyl and has a 20 gauge in the left arm.",
+            "GCS 15 with three shocks delivered and EtCO2 of 28.",
+        ] {
+            assert_eq!(eta_phrase(s), None, "in {s:?}");
+        }
+    }
+
+    /// Parity check against the real stored corpus. Run with:
+    ///   ETA_CORPUS=/path/to/corpus.txt cargo test eta_corpus -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn eta_corpus() {
+        let path = std::env::var("ETA_CORPUS").expect("set ETA_CORPUS");
+        let text = std::fs::read_to_string(path).expect("read corpus");
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut hit = 0usize;
+        for l in &lines {
+            if let Some(m) = eta_phrase(l) {
+                hit += 1;
+                println!("HIT\t{m}");
+            } else if l.to_lowercase().contains("eta") || l.to_lowercase().contains("arriv") {
+                println!("MISS\t{l}");
+            }
+        }
+        println!("=== {hit} of {} matched", lines.len());
+    }
+
+    #[test]
+    fn the_first_arrival_time_wins_when_a_note_gives_two() {
+        let s = "The unit is ten minutes out; the second unit has an ETA of 20 minutes.";
+        assert_eq!(eta_phrase(s).as_deref(), Some("ten minutes out"));
     }
 }

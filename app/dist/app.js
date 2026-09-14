@@ -3783,6 +3783,10 @@ window.dispatchOnShow = async () => {
     let h;
     try { h = await invoke("rx_health", { hours }); }
     catch (e) { $("rxMeta").textContent = ""; $("rxHeadline").textContent = `${e}`; return; }
+    // An answer that never came back is not a reading of zero, and reaching
+    // into it throws inside a timer — which takes the whole page down, not
+    // just this panel. Say nothing rather than that.
+    if (!h) { $("rxMeta").textContent = ""; $("rxHeadline").textContent = "No reading yet."; return; }
 
     const p = h.pct || 0;
     const v = h.verdict || "good";

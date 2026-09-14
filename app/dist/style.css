@@ -1260,6 +1260,12 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .dbbody { font-size: 13px; line-height: 1.45; margin-top: 6px; opacity: .92; }
 .dbtag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; opacity: .85; }
 
+/* Time to arrival. On a board of inbound patients this is the one number read
+   from across the room, and it arrives buried mid-sentence — so it is marked
+   where it sits and repeated in the meta line, which is what the eye scans. */
+.dbeta { background: color-mix(in srgb, var(--amber) 26%, transparent); color: inherit; border-radius: 3px; padding: 0 3px; font-weight: 650; }
+.dbetachip { color: var(--amber); font-weight: 650; opacity: 1; }
+
 /* Emphasis. Named for weight, not for meaning — what counts as an alarm is
    the listener's rule, not ours. */
 .dbcard.em-alarm { border-left-color: var(--enc); background: color-mix(in srgb, var(--enc) 10%, var(--panel-2)); }
