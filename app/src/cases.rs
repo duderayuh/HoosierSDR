@@ -458,6 +458,9 @@ pub fn page_clock(text: &str, call_minute: i64) -> Option<i64> {
     spoken_clock(&before.join(" "), call_minute)
 }
 
+/// A repage that says nothing new: the label the Telegram timeline leaves out.
+pub const REPAGED: &str = "Repaged";
+
 /// The timeline lines a run's pages make: the first is the dispatch, a later
 /// one that says the run is working is the upgrade, and the rest are repages.
 /// `continuing` is a run the dispatch map split off an earlier one, whose
@@ -477,8 +480,12 @@ pub fn page_lines(call_type: &str, pages: &[Page], p: &Profile, continuing: bool
         } else if says_working && !working {
             working = true;
             ("working", "Repaged as a working arrest".to_string())
+        } else if i == 0 && !call_type.is_empty() && !call_type.eq_ignore_ascii_case("unknown") && !p.call_types.iter().any(|t| t.eq_ignore_ascii_case(call_type)) {
+            // A run split off an earlier one, paged as something else: what
+            // it was paged as is news (an arrest re-sent as unconscious).
+            ("repage", format!("Repaged as {call_type}"))
         } else {
-            ("repage", "Repaged".to_string())
+            ("repage", REPAGED.to_string())
         };
         out.push(Line {
             at: pg.at,

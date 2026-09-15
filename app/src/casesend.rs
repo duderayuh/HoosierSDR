@@ -107,12 +107,30 @@ pub(crate) fn source_label(l: &Line) -> String {
     }
 }
 
-const FACTS_SHOWN: &[(&str, &str)] = &[
-    ("witnessed", "Witnessed"),
-    ("bystander cpr", "Bystander CPR"),
-    ("rhythm", "Rhythm"),
-    ("downtime", "Downtime (as said)"),
-    ("history", "History"),
+/// Who said a line, for a reader: "dispatcher", "crew", and whether the
+/// run itself went unnamed — an event placed on the only arrest open at
+/// the time says so, rather than a bare "inferred".
+fn said_by(l: &Line) -> String {
+    let who = match l.source.as_str() {
+        "readback" => "dispatcher",
+        "crew" => "crew",
+        _ => "",
+    };
+    match (who, l.inferred) {
+        ("", false) => String::new(),
+        ("", true) => "run not named on the air".into(),
+        (w, false) => w.into(),
+        (w, true) => format!("{w}, run not named on the air"),
+    }
+}
+
+/// The fact's key, how it is labelled, and how it is named when unstated.
+const FACTS_SHOWN: &[(&str, &str, &str)] = &[
+    ("witnessed", "Witnessed", "witnessed"),
+    ("bystander cpr", "Bystander CPR", "bystander CPR"),
+    ("rhythm", "Rhythm", "rhythm"),
+    ("downtime", "Downtime (as said)", "downtime"),
+    ("history", "History", "history"),
 ];
 
 /// The latest value each report gave.
@@ -126,28 +144,89 @@ fn facts_of(k: &CaseView) -> HashMap<String, String> {
     got
 }
 
-/// The timeline message, as plain text. What goes out is [`linked`]: the
-/// same text with the address made a Google Maps link.
-pub fn render(k: &CaseView) -> String {
-    let mut head = format!("🫀 {} · {}", k.title, state_label(&k.state));
-    if !k.address.is_empty() {
-        head.push_str(&format!(" · {}", k.address));
+/// The number a case goes by, in its messages and on its recordings: the
+/// dispatch map's own number for the run, so the app finds it by the same
+/// one. Never the talkgroup, whose "49F" reads as a patient's age and sex.
+pub fn number(k: &CaseView) -> String {
+    format!("Incident #{}", k.incident)
+}
+
+/// Where a case stands, as it heads the message: a colour and the words.
+pub(crate) fn banner(state: &str) -> (&'static str, String) {
+    match state {
+        "dispatched" => ("🟡", "DISPATCHED".into()),
+        "working" => ("🔴", "WORKING ARREST".into()),
+        "rosc" => ("💚", "ROSC · PULSES BACK".into()),
+        "transporting" => ("🚑", "TRANSPORTING".into()),
+        "reported" => ("🏥", "HOSPITAL NOTIFIED".into()),
+        "arrived" => ("🏥", "AT THE HOSPITAL".into()),
+        "terminated" => ("⚫", "EFFORTS CEASED".into()),
+        "downgraded" => ("⚪", "NOT A CARDIAC ARREST".into()),
+        other => ("🔵", state_label(other).to_uppercase()),
     }
-    let mut out = vec![head];
+}
+
+fn esc(s: &str) -> String {
+    crate::alerts::html_escape(s)
+}
+
+/// A line of a message twice over: as plain text, which is what is kept and
+/// compared, and as Telegram HTML, which is what goes out.
+#[derive(Clone, Debug, Default)]
+struct Row {
+    plain: String,
+    html: String,
+}
+
+impl Row {
+    fn new(plain: String, html: String) -> Row {
+        Row { plain, html }
+    }
+}
+
+/// The timeline message: what it is and where, how it stands and who is on
+/// it; then what happened, a line each; then what the hospital was told.
+fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
+    let mut head = Vec::new();
+    let place = if k.address.is_empty() { "address not heard".to_string() } else { k.address.clone() };
+    let url = crate::alerts::maps_url(k.lat, k.lon, &k.address, region);
+    let place_html = if k.address.is_empty() || url.is_empty() {
+        esc(&place)
+    } else {
+        format!("<a href=\"{}\">{}</a>", esc(&url), esc(&place))
+    };
+    head.push(Row::new(format!("🫀 {} · {place}", k.title), format!("🫀 <b>{} · {place_html}</b>", esc(&k.title))));
+    let (icon, words) = banner(&k.state);
+    head.push(Row::new(format!("{icon} {words}"), format!("{icon} <b>{}</b>", esc(&words))));
     if !k.units.is_empty() {
-        out.push(k.units.join(", "));
+        let units = k.units.join(", ");
+        head.push(Row::new(format!("🚒 {units}"), format!("🚒 {}", esc(&units))));
     }
-    // A repage says nothing an edit needs to show, and a crew at the
+    // An address that never placed is only what the transcript heard, and
+    // may be misheard: it must not read as a checked one.
+    if !k.address.is_empty() && k.lat.is_none() {
+        let s = "⚠️ Address as heard on the radio; not found on the map";
+        head.push(Row::new(s.into(), format!("<i>{}</i>", esc(s))));
+    }
+
+    // A repage that says nothing new is not a line, and a crew at the
     // hospital said again an hour later is not a second arrival.
     let first_arrived = k.lines.iter().position(|l| l.kind == crate::cases::ARRIVED);
-    let mut timeline: Vec<String> = k
+    let timeline: Vec<Row> = k
         .lines
         .iter()
         .enumerate()
-        .filter(|(i, l)| l.kind != "repage" && (l.kind != crate::cases::ARRIVED || Some(*i) == first_arrived))
-        .map(|(_, l)| l)
-        .map(|l| format!("{} {}{}", l.clock.clone().unwrap_or_else(|| hm(l.at)), l.label, source_label(l)))
+        .filter(|(i, l)| !(l.kind == "repage" && l.label == crate::cases::REPAGED) && (l.kind != crate::cases::ARRIVED || Some(*i) == first_arrived))
+        .map(|(_, l)| {
+            let clock = l.clock.clone().unwrap_or_else(|| hm(l.at));
+            let by = said_by(l);
+            Row::new(
+                format!("{clock} {}{}", l.label, if by.is_empty() { String::new() } else { format!(" · {by}") }),
+                format!("<b>{clock}</b> {}{}", esc(&l.label), if by.is_empty() { String::new() } else { format!(" <i>· {}</i>", esc(&by)) }),
+            )
+        })
         .collect();
+
     let facts = facts_of(k);
     let mut tail = Vec::new();
     if let Some(a) = &k.arrival {
@@ -156,59 +235,87 @@ pub fn render(k: &CaseView) -> String {
             (Some(f), Some(t)) => format!("{}–{}", hm(f), hm(t)),
             _ => "no ETA said".into(),
         };
-        let mut s = format!("Expected at {}: {window}", a.place);
-        if let Some(d) = a.drive_min {
-            s.push_str(&format!(" · {d} min {} from the scene", a.drive_how));
-        }
-        tail.push(s);
+        let drive = a.drive_min.map(|d| format!(" · {d} min {} from the scene", a.drive_how)).unwrap_or_default();
+        tail.push(Row::new(
+            format!("🏥 Expected at {}: {window}{drive}", a.place),
+            format!("🏥 <b>Expected at {}</b>: {}{}", esc(&a.place), esc(&window), esc(&drive)),
+        ));
         if !a.note.is_empty() && a.from.is_some() {
-            tail.push(format!("⚠️ {}", a.note));
+            tail.push(Row::new(format!("⚠️ {}", a.note), format!("⚠️ <i>{}</i>", esc(&a.note))));
         }
     }
     if k.lines.iter().any(|l| l.kind == "report") {
-        let mut who = Vec::new();
-        if let Some(age) = facts.get("age") {
-            who.push(age.clone());
-        }
-        if let Some(sex) = facts.get("sex") {
-            who.push(sex.clone());
-        }
+        let who: Vec<&str> = ["age", "sex"].iter().filter_map(|f| facts.get(*f).map(String::as_str)).collect();
         if !who.is_empty() {
-            tail.push(format!("Patient: {}", who.join(", ")));
+            let who = who.join(", ");
+            tail.push(Row::new(format!("👤 Patient: {who}"), format!("👤 <b>Patient</b>: {}", esc(&who))));
         }
-        tail.push(
-            FACTS_SHOWN
-                .iter()
-                .map(|(key, label)| format!("{label}: {}", facts.get(*key).map(String::as_str).unwrap_or("not stated")))
-                .collect::<Vec<_>>()
-                .join(" · "),
-        );
+        let stated: Vec<(&str, &str)> = FACTS_SHOWN.iter().filter_map(|(key, label, _)| facts.get(*key).map(|v| (*label, v.as_str()))).collect();
+        if !stated.is_empty() {
+            tail.push(Row::new(
+                format!("🩺 {}", stated.iter().map(|(l, v)| format!("{l}: {v}")).collect::<Vec<_>>().join(" · ")),
+                format!("🩺 {}", stated.iter().map(|(l, v)| format!("{}: <b>{}</b>", esc(l), esc(v))).collect::<Vec<_>>().join(" · ")),
+            ));
+        }
+        let unstated: Vec<&str> = FACTS_SHOWN.iter().filter(|(key, _, _)| !facts.contains_key(*key)).map(|(_, _, name)| *name).collect();
+        if !unstated.is_empty() {
+            let s = format!("Not stated: {}", unstated.join(", "));
+            tail.push(Row::new(s.clone(), format!("<i>{}</i>", esc(&s))));
+        }
     }
-    if let Some(last) = k.lines.last() {
-        tail.push(format!("Updated {}", hm(last.at)));
-    }
-    // Too long for one message: the oldest lines after the first go, and
-    // say so, because the first line and the latest are what the ED needs.
-    let size = |t: &[String]| out.iter().chain(t).chain(tail.iter()).map(|x| x.chars().count() + 1).sum::<usize>();
+    (head, timeline, tail)
+}
+
+/// Drop the oldest lines after the first until the message fits, and say
+/// so: the first line and the latest are what the ED needs.
+fn fit(head: &[Row], mut timeline: Vec<Row>, tail: &[Row]) -> Vec<Row> {
+    let size = |t: &[Row]| head.iter().chain(t).chain(tail.iter()).map(|x| x.plain.chars().count() + 1).sum::<usize>() + 40;
     let mut dropped = 0;
     while size(&timeline) > MAX_CHARS && timeline.len() > 2 {
         timeline.remove(1);
         dropped += 1;
     }
     if dropped > 0 {
-        timeline.insert(1, format!("… {dropped} earlier lines"));
+        let s = format!("… {dropped} earlier lines");
+        timeline.insert(1, Row::new(s.clone(), format!("<i>{}</i>", esc(&s))));
     }
-    out.extend(timeline);
-    out.push(String::new());
-    out.extend(tail);
+    timeline
+}
+
+/// The timeline message, as plain text: what is kept, compared to know
+/// when to edit, and shown in the Cases tab's preview.
+pub fn render(k: &CaseView) -> String {
+    let (head, timeline, tail) = compose(k, "");
+    let timeline = fit(&head, timeline, &tail);
+    let mut out: Vec<&str> = head.iter().map(|r| r.plain.as_str()).collect();
+    for block in [&timeline[..], &tail[..]] {
+        if !block.is_empty() {
+            out.push("");
+            out.extend(block.iter().map(|r| r.plain.as_str()));
+        }
+    }
+    let number = number(k);
+    out.push("");
+    out.push(&number);
     out.join("\n")
 }
 
-/// The timeline as Telegram HTML, its address opening Google Maps at the
-/// run's pin (or, with none yet, at the address). `None` when there is no
-/// address to link; the plain text goes then.
-pub fn linked(k: &CaseView, text: &str, region: &str) -> Option<String> {
-    crate::alerts::link_in(text, &k.address, &crate::alerts::maps_url(k.lat, k.lon, &k.address, region))
+/// The same message as Telegram HTML: the headline bold with its address
+/// opening Google Maps at the run's pin (or, with none yet, at the
+/// address), the timeline set off as a quote, and the incident number in
+/// monospace, which Telegram copies with a tap.
+pub fn html(k: &CaseView, region: &str) -> String {
+    let (head, timeline, tail) = compose(k, region);
+    let timeline = fit(&head, timeline, &tail);
+    let mut out = head.iter().map(|r| r.html.clone()).collect::<Vec<_>>().join("\n");
+    if !timeline.is_empty() {
+        out.push_str(&format!("\n<blockquote>{}</blockquote>", timeline.iter().map(|r| r.html.as_str()).collect::<Vec<_>>().join("\n")));
+    }
+    if !tail.is_empty() {
+        out.push_str(&format!("\n{}", tail.iter().map(|r| r.html.as_str()).collect::<Vec<_>>().join("\n")));
+    }
+    out.push_str(&format!("\n\n<code>{}</code>", esc(&number(k))));
+    out
 }
 
 /// Whether the chat for every case is still owed its map: once, while the
@@ -229,6 +336,10 @@ pub struct Notice {
     pub key: String,
     pub at: i64,
     pub text: String,
+    /// The same, as Telegram HTML.
+    pub html: String,
+    /// What happened, in a few words: the recording's title.
+    pub name: String,
     /// The report a map goes under, in a hospital's chat. A report's audio
     /// is every transmission of it.
     pub conversation: Option<i64>,
@@ -241,6 +352,32 @@ fn window(a: &Arrival) -> String {
         (Some(f), Some(t)) if f == t => format!(" → about {}", hm(f)),
         (Some(f), Some(t)) => format!(" → {}–{}", hm(f), hm(t)),
         _ => String::new(),
+    }
+}
+
+/// A reply's words: the event and its time in bold on the first line, and
+/// under it what was said and by whom, where that adds anything.
+fn event_text(icon: &str, words: &str, when: &str, detail: &[String]) -> (String, String) {
+    let detail: Vec<&String> = detail.iter().filter(|d| !d.is_empty()).collect();
+    let mut plain = format!("{icon} {words} · {when}");
+    let mut html = format!("{icon} <b>{}</b> · {when}", esc(words));
+    if !detail.is_empty() {
+        let d = detail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
+        let mut c = d.chars();
+        let d: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+        plain.push_str(&format!("\n{d}"));
+        html.push_str(&format!("\n{}", esc(&d)));
+    }
+    (plain, html)
+}
+
+/// "from the crew", for a reply's second line.
+fn from_whom(l: &Line) -> String {
+    let by = said_by(l);
+    if by.is_empty() || by.starts_with("run ") {
+        by
+    } else {
+        format!("from the {by}")
     }
 }
 
@@ -260,17 +397,27 @@ pub fn notices(k: &CaseView, notify: &[String]) -> Vec<Notice> {
     for l in &k.lines {
         let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
         let kind = l.kind.as_str();
-        let (key, text) = match kind {
+        // What the label says beyond the banner: "Repaged as a working
+        // arrest" under WORKING ARREST, but not "Working arrest" again.
+        let beyond = |words: &str| {
+            let first = words.split(" · ").next().unwrap_or(words);
+            if l.label.eq_ignore_ascii_case(first) {
+                String::new()
+            } else {
+                l.label.clone()
+            }
+        };
+        let (key, name, (text, html)) = match kind {
             "working" | "downgrade" | "terminated" => {
                 if !once.insert(kind) {
                     continue;
                 }
-                let icon = match kind {
-                    "working" => "🔴",
-                    "downgrade" => "⚪",
-                    _ => "⚫",
+                let (icon, words) = match kind {
+                    "working" => ("🔴", "WORKING ARREST"),
+                    "downgrade" => ("⚪", "NOT A CARDIAC ARREST"),
+                    _ => ("⚫", "EFFORTS CEASED"),
                 };
-                (kind.to_string(), format!("{icon} {when} {}{}", l.label, source_label(l)))
+                (kind.to_string(), l.label.clone(), event_text(icon, words, &when, &[beyond(words), from_whom(l)]))
             }
             "rosc" | "rearrest" => {
                 if pulse == Some(kind) {
@@ -279,8 +426,10 @@ pub fn notices(k: &CaseView, notify: &[String]) -> Vec<Notice> {
                 pulse = Some(if kind == "rosc" { "rosc" } else { "rearrest" });
                 let n = episodes.entry(if kind == "rosc" { "rosc" } else { "rearrest" }).or_insert(0);
                 *n += 1;
-                let icon = if kind == "rosc" { "💚" } else { "🔴" };
-                (format!("{kind}:{n}"), format!("{icon} {when} {}{}", l.label, source_label(l)))
+                // Lost pulses is not the first working arrest again: its
+                // own sign, so the two cannot be mistaken in a busy chat.
+                let (icon, words) = if kind == "rosc" { ("💚", "ROSC · PULSES BACK") } else { ("💔", "PULSES LOST AGAIN") };
+                (format!("{kind}:{n}"), l.label.clone(), event_text(icon, words, &when, &[beyond(words), from_whom(l)]))
             }
             "report" => {
                 let Some(conv) = l.conversation else { continue };
@@ -302,20 +451,22 @@ pub fn notices(k: &CaseView, notify: &[String]) -> Vec<Notice> {
                 if !news {
                     continue;
                 }
-                let said = a.and_then(|a| a.said.clone()).map(|s| format!(" · said {s}")).unwrap_or_default();
                 let place = a.map(|a| a.place.clone()).unwrap_or_default();
                 let place = if place.is_empty() { "the hospital".to_string() } else { place };
-                (
-                    format!("report:{conv}"),
-                    format!("🏥 {when} Report to {place}{said}{}", a.map(window).unwrap_or_default()),
-                )
+                let eta = match a.and_then(|a| a.said.clone()) {
+                    // As the crew put it, quoted: it is their words, not a time.
+                    Some(said) => format!("ETA as said: “{said}”{}", a.map(window).unwrap_or_default()),
+                    None => "No ETA said".into(),
+                };
+                let words = format!("Report to {place}");
+                (format!("report:{conv}"), words.clone(), event_text("🏥", &words, &when, &[eta, from_whom(l)]))
             }
             _ => continue,
         };
         if !wants(kind) {
             continue;
         }
-        out.push(Notice { key, at: l.at, text, conversation: l.conversation, call: l.call });
+        out.push(Notice { key, at: l.at, text, html, name, conversation: l.conversation, call: l.call });
     }
     out
 }
@@ -360,18 +511,21 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
 /// a hospital's chat in, in that chat. Both are already in the timeline as
 /// words; what a listener cannot get from the timeline is hearing them.
 pub fn intro(k: &CaseView, t: &Thread) -> Option<Notice> {
-    match t.conversation {
+    let (key, l, name, icon) = match t.conversation {
         None => {
             let l = k.lines.iter().find(|l| l.kind == "dispatched" && l.call.is_some())?;
-            let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
-            Some(Notice { key: "audio:page".into(), at: l.at, text: format!("📻 {when} {}", l.label), conversation: None, call: l.call })
+            ("audio:page".to_string(), l, "Dispatch page".to_string(), "📻")
         }
         Some(conv) => {
             let l = k.lines.iter().find(|l| l.kind == "report" && l.conversation == Some(conv))?;
-            let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
-            Some(Notice { key: format!("audio:report:{conv}"), at: l.at, text: format!("📻 {when} {}", l.label), conversation: Some(conv), call: l.call })
+            (format!("audio:report:{conv}"), l, l.label.clone(), "🏥")
         }
-    }
+    };
+    let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
+    let words = if t.conversation.is_none() { name.to_uppercase() } else { name.clone() };
+    let detail = if t.conversation.is_none() { l.label.clone() } else { String::new() };
+    let (text, html) = event_text(icon, &words, &when, &[detail]);
+    Some(Notice { key, at: l.at, text, html, name, conversation: l.conversation, call: l.call })
 }
 
 /// A hospital's chat is told what happens after it joined; the report that
@@ -599,7 +753,7 @@ fn carry_out(
     for step in steps {
         match step {
             Step::Root { text } => {
-                let id = crate::alerts::send_text_reply_html(&target, &text, linked(k, &text, &region).as_deref(), None)?;
+                let id = crate::alerts::send_text_reply_html(&target, &text, Some(&html(k, &region)), None)?;
                 root = Some(id);
                 let c = db.lock().unwrap();
                 c.execute(
@@ -610,7 +764,7 @@ fn carry_out(
                 .map_err(|e| e.to_string())?;
             }
             Step::Edit { root_id, text } => {
-                if let Err(e) = crate::alerts::edit_message_html(&target, root_id, &text, linked(k, &text, &region).as_deref()) {
+                if let Err(e) = crate::alerts::edit_message_html(&target, root_id, &text, Some(&html(k, &region))) {
                     // Past Telegram's edit window, or deleted by someone in
                     // the chat: remember the text so it is not tried forever.
                     if !e.contains("not modified") {
@@ -628,7 +782,7 @@ fn carry_out(
                 let id = if p.telegram.audio {
                     send_heard(db, k, &target, &notice, root)?
                 } else {
-                    crate::alerts::send_text_reply(&target, &notice.text, root)?
+                    crate::alerts::send_text_reply_html(&target, &notice.text, Some(&notice.html), root)?
                 };
                 record_notice(db, p, k, t, &notice, Some(id), now)?;
             }
@@ -700,49 +854,69 @@ fn carry_out(
     Ok(())
 }
 
-/// The recordings behind a notice, oldest first, and the talkgroup they were
-/// on: every transmission of a report, else the one call.
-fn recordings(c: &Connection, n: &Notice) -> (Vec<String>, String) {
+/// The recordings behind a notice, oldest first: every transmission of a
+/// report, else the call that said it — with its second half, when the
+/// radio heard a page as two calls.
+fn recordings(c: &Connection, n: &Notice) -> Vec<String> {
     if let Some(conv) = n.conversation {
-        let row: Option<(String, String)> = c
-            .query_row("SELECT pieces, tg_name FROM conversations WHERE id = ?1", [conv], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()
-            .ok()
-            .flatten();
-        if let Some((pieces, tg_name)) = row {
+        let pieces: Option<String> = c.query_row("SELECT pieces FROM conversations WHERE id = ?1", [conv], |r| r.get(0)).optional().ok().flatten();
+        if let Some(pieces) = pieces {
             let mut pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
             pieces.sort_by_key(|p| p.at);
-            return (pieces.into_iter().filter_map(|p| p.audio).collect(), tg_name);
+            return pieces.into_iter().filter_map(|p| p.audio).collect();
         }
     }
-    let Some(call) = n.call else { return (Vec::new(), String::new()) };
-    c.query_row("SELECT audio, tg_name FROM calls WHERE id = ?1", [call], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))
-        .optional()
-        .ok()
-        .flatten()
-        .map(|(a, tg)| (a.into_iter().collect(), tg))
-        .unwrap_or_default()
+    let Some(call) = n.call else { return Vec::new() };
+    let audio = |id: i64| c.query_row("SELECT audio FROM calls WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0)).optional().ok().flatten().flatten();
+    let mut out: Vec<String> = audio(call).into_iter().collect();
+    if let Some((rest, false)) = crate::dispatch::split_partner(c, call) {
+        out.extend(audio(rest));
+    }
+    out
 }
 
 /// A notice as the radio said it: an audio message with the notice as its
-/// caption. With no recording to hand, or one that cannot be put together,
-/// the words go on their own — a missing clip is no reason to miss ROSC.
+/// caption, titled with what happened and where and filed under the case's
+/// incident number. With no recording to hand, or one that cannot be put
+/// together, the words go on their own — a missing clip is no reason to
+/// miss ROSC.
 fn send_heard(db: &Db, k: &CaseView, target: &str, n: &Notice, root: Option<i64>) -> Result<i64, String> {
-    let (files, tg_name) = recordings(&db.lock().unwrap(), n);
+    let files = recordings(&db.lock().unwrap(), n);
     let files: Vec<String> = files.into_iter().filter(|f| !f.is_empty() && std::path::Path::new(f).exists()).collect();
+    let words = || crate::alerts::send_text_reply_html(target, &n.text, Some(&n.html), root);
     if files.is_empty() {
-        return crate::alerts::send_text_reply(target, &n.text, root);
+        return words();
     }
     let (path, mp3) = match crate::alerts::combine_clips(&files, &format!("case_{}", k.incident)) {
         Ok(clip) => clip,
         Err(e) => {
             eprintln!("cases: audio for case {}: {e}", k.id);
-            return crate::alerts::send_text_reply(target, &n.text, root);
+            return words();
         }
     };
-    let sent = crate::alerts::send_audio_reply(target, &path, mp3, &n.text, None, &k.title, &tg_name, root);
+    // Saved or forwarded, the file keeps the number too.
+    let named = path.with_file_name(format!("{}.{}", clip_stem(k, n), if mp3 { "mp3" } else { "wav" }));
+    let path = if std::fs::rename(&path, &named).is_ok() { named } else { path };
+    let title = if k.address.is_empty() { n.name.clone() } else { format!("{} · {}", n.name, k.address) };
+    let sent = crate::alerts::send_audio_reply(target, &path, mp3, &n.text, Some(&n.html), &title, &number(k), root);
     let _ = std::fs::remove_file(&path);
     sent?.last().copied().ok_or_else(|| "Telegram audio had no message id".into())
+}
+
+/// "incident-2048_2329_dispatch-page": the number, the time and the event.
+pub fn clip_stem(k: &CaseView, n: &Notice) -> String {
+    let slug: String = n
+        .name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("incident-{}_{}_{slug}", k.incident, hm(n.at).replace(':', ""))
 }
 
 fn record_notice(
@@ -921,36 +1095,55 @@ mod tests {
     #[test]
     fn the_timeline_reads_as_the_ed_needs_it() {
         let text = render(&arrest());
-        assert!(text.starts_with("🫀 Cardiac arrest · reported to hospital · 1200 Example St"), "{text}");
-        assert!(text.contains("Engine 5, Medic 7"));
-        assert!(!text.contains("Repaged\n"), "a plain repage is not a line: {text}");
-        assert!(text.contains("ROSC (dispatcher)"));
-        assert!(text.contains("Lost pulses (crew, inferred)"));
+        let rows: Vec<&str> = text.lines().collect();
+        // Where it is first, since that is what tells one arrest from the
+        // next in a chat of them; then how it stands, then who is on it.
+        assert_eq!(rows[..3], ["🫀 Cardiac arrest · 1200 Example St", "🏥 HOSPITAL NOTIFIED", "🚒 Engine 5, Medic 7"], "{text}");
+        assert!(text.contains("⚠️ Address as heard on the radio; not found on the map"), "an unplaced address says it is unchecked: {text}");
+        assert!(!text.contains("Repaged\n") && !text.ends_with("Repaged"), "a plain repage is not a line: {text}");
+        assert!(text.contains("Repaged as a working arrest"));
+        assert!(text.contains("ROSC · dispatcher"), "{text}");
+        assert!(text.contains("Lost pulses · crew, run not named on the air"), "{text}");
         let mut twice = arrest();
         twice.lines.push(line(1_003_000, "arrived", "At the hospital", "crew"));
         twice.lines.push(line(1_006_000, "arrived", "At the hospital", "crew"));
         assert_eq!(render(&twice).matches("At the hospital").count(), 1);
-        assert!(text.contains("Expected at Example General: about"));
-        assert!(text.contains("Witnessed: yes · Bystander CPR: not stated · Rhythm: VF"), "{text}");
-        // Before any report, the facts line would only say "not stated".
+        assert!(text.contains("🏥 Expected at Example General: about"));
+        assert!(text.contains("🩺 Witnessed: yes · Rhythm: VF"), "only what was said is a fact: {text}");
+        assert!(text.contains("Not stated: bystander CPR, downtime, history"), "{text}");
+        assert!(text.ends_with("\n\nIncident #11"), "the number it goes by closes it: {text}");
+        assert!(!text.contains("Updated"), "the last line's own time says when: {text}");
+        // Placed, the warning goes; before any report there are no facts.
+        let placed = CaseView { lat: Some(39.5), lon: Some(-86.25), ..arrest() };
+        assert!(!render(&placed).contains("not found on the map"));
         let early = case(arrest().lines[..3].to_vec(), vec![]);
-        assert!(!render(&early).contains("Witnessed"));
+        assert!(!render(&early).contains("Witnessed") && !render(&early).contains("Not stated"));
+        let unheard = CaseView { address: String::new(), ..early };
+        assert!(render(&unheard).starts_with("🫀 Cardiac arrest · address not heard\n🔴 WORKING ARREST\n"), "{}", render(&unheard));
     }
 
     #[test]
-    fn the_address_opens_google_maps_at_the_pin() {
+    fn the_message_goes_out_formatted_with_the_address_opening_google_maps() {
         let mut k = arrest();
-        let text = render(&k);
-        let html = linked(&k, &text, "Testville, EX").expect("an address to link");
-        assert!(html.contains("<a href=\"https://www.google.com/maps/search/?api=1&amp;query=1200+Example+St%2C+Testville%2C+EX\">1200 Example St</a>"), "{html}");
+        let h = html(&k, "Testville, EX");
+        assert!(
+            h.starts_with("🫀 <b>Cardiac arrest · <a href=\"https://www.google.com/maps/search/?api=1&amp;query=1200+Example+St%2C+Testville%2C+EX\">1200 Example St</a></b>\n🏥 <b>HOSPITAL NOTIFIED</b>\n"),
+            "{h}"
+        );
+        assert!(h.contains("\n<blockquote><b>"), "the timeline is set off: {h}");
+        assert!(h.contains(" <i>· dispatcher</i>"), "{h}");
+        assert!(h.ends_with("\n\n<code>Incident #11</code>"), "{h}");
         k.lat = Some(39.5);
         k.lon = Some(-86.25);
-        let html = linked(&k, &text, "Testville, EX").unwrap();
-        assert!(html.contains("query=39.500000%2C-86.250000\">1200 Example St</a>"), "{html}");
-        // Everything else is the timeline as it was, escaped for HTML.
-        assert!(html.contains("ROSC (dispatcher)"));
+        assert!(html(&k, "Testville, EX").contains("query=39.500000%2C-86.250000\">1200 Example St</a>"));
+        // What was heard is data: it cannot become markup.
+        k.address = "12 <b>Oak</b> & Elm".into();
+        k.units = vec!["Medic <7>".into()];
+        let h = html(&k, "");
+        assert!(h.contains("12 &lt;b&gt;Oak&lt;/b&gt; &amp; Elm</a>") && h.contains("Medic &lt;7&gt;"), "{h}");
+        assert_eq!(h.matches("<b>").count(), h.matches("</b>").count());
         k.address.clear();
-        assert_eq!(linked(&k, &render(&k), "Testville, EX"), None);
+        assert!(html(&k, "Testville, EX").starts_with("🫀 <b>Cardiac arrest · address not heard</b>"));
     }
 
     #[test]
@@ -993,8 +1186,12 @@ mod tests {
         // minutes later, lands where the first said, which is not news; the
         // third moves it five minutes.
         assert_eq!(keys, vec!["working", "rosc:1", "report:3", "rearrest:1", "report:5"]);
-        assert!(n[3].text.contains("inferred"));
-        assert!(n[2].text.contains("said 10 minutes"));
+        assert!(n[3].text.starts_with("💔 PULSES LOST AGAIN · ") && n[3].text.ends_with("\nLost pulses · from the crew, run not named on the air"), "{}", n[3].text);
+        assert!(n[2].text.starts_with("🏥 Report to Example General · ") && n[2].text.contains("\nETA as said: “10 minutes” → about "), "{}", n[2].text);
+        assert!(n[2].html.starts_with("🏥 <b>Report to Example General</b> · "), "{}", n[2].html);
+        // The readback says "Working arrest": the banner says it already.
+        assert!(n[0].text.starts_with("🔴 WORKING ARREST · ") && n[0].text.ends_with("\nFrom the dispatcher"), "{}", n[0].text);
+        assert!(n[1].text.starts_with("💚 ROSC · PULSES BACK · ") && n[1].text.ends_with("\nFrom the crew"), "{}", n[1].text);
         // The same case rebuilt gives the same keys.
         assert_eq!(notices(&arrest(), &notify()).iter().map(|x| x.key.clone()).collect::<Vec<_>>(), keys);
         // A kind the listener dropped is not sent.
@@ -1057,7 +1254,9 @@ mod tests {
         let ts = threads(&k, &s, &places());
         let page = intro(&k, &ts[0]).unwrap();
         assert_eq!((page.key.as_str(), page.call), ("audio:page", Some(1_000_000)));
-        assert!(page.text.starts_with("📻 ") && page.text.ends_with("Dispatched as Unconscious"), "{}", page.text);
+        assert!(page.text.starts_with("📻 DISPATCH PAGE · ") && page.text.ends_with("\nDispatched as Unconscious"), "{}", page.text);
+        assert_eq!(page.name, "Dispatch page");
+        assert!(clip_stem(&k, &page).starts_with("incident-11_") && clip_stem(&k, &page).ends_with("_dispatch-page"), "{}", clip_stem(&k, &page));
         let report = intro(&k, &ts[1]).unwrap();
         assert_eq!((report.key.as_str(), report.conversation), ("audio:report:3", Some(3)));
 
@@ -1088,27 +1287,30 @@ mod tests {
     fn a_report_is_heard_whole_and_an_event_as_its_call() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
-            "CREATE TABLE calls (id INTEGER PRIMARY KEY, tg_name TEXT NOT NULL, audio TEXT);
-             CREATE TABLE conversations (id INTEGER PRIMARY KEY, tg_name TEXT NOT NULL, pieces TEXT NOT NULL);
-             INSERT INTO calls VALUES (7, '49F-DISPATCH', '/lib/page.m4a'), (8, '49F-DISPATCH', NULL);",
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER, unit INTEGER, audio TEXT);
+             CREATE TABLE conversations (id INTEGER PRIMARY KEY, pieces TEXT NOT NULL);
+             INSERT INTO calls VALUES (7, 100, 5.0, 1, 900900, '/lib/page.m4a'), (8, 200, 5.0, 1, 900900, NULL),
+                                      (9, 300, 10.0, 1, 900900, '/lib/head.m4a'), (10, 311, 4.0, 1, 0, '/lib/tail.m4a');",
         )
         .unwrap();
         let pieces = r#"[{"id":2,"unit":1,"unit_name":null,"fixed":true,"at":20,"secs":2.0,"audio":"/lib/b.m4a","transcript":"go ahead"},
                          {"id":1,"unit":5,"unit_name":null,"fixed":false,"at":10,"secs":9.0,"audio":"/lib/a.m4a","transcript":"report"},
                          {"id":3,"unit":5,"unit_name":null,"fixed":false,"at":30,"secs":1.0,"audio":null,"transcript":"thanks"}]"#;
-        c.execute("INSERT INTO conversations VALUES (3, '49M-M03', ?1)", [pieces]).unwrap();
-        let n = |conversation: Option<i64>, call: Option<i64>| Notice { key: "k".into(), at: 0, text: "t".into(), conversation, call };
-        assert_eq!(recordings(&c, &n(Some(3), Some(1))), (vec!["/lib/a.m4a".to_string(), "/lib/b.m4a".to_string()], "49M-M03".to_string()));
-        assert_eq!(recordings(&c, &n(None, Some(7))), (vec!["/lib/page.m4a".to_string()], "49F-DISPATCH".to_string()));
-        assert_eq!(recordings(&c, &n(None, Some(8))).0, Vec::<String>::new(), "a call with no recording");
-        assert_eq!(recordings(&c, &n(None, None)).0, Vec::<String>::new());
+        c.execute("INSERT INTO conversations VALUES (3, ?1)", [pieces]).unwrap();
+        let n = |conversation: Option<i64>, call: Option<i64>| Notice { key: "k".into(), at: 0, text: "t".into(), html: "t".into(), name: "t".into(), conversation, call };
+        assert_eq!(recordings(&c, &n(Some(3), Some(1))), vec!["/lib/a.m4a".to_string(), "/lib/b.m4a".to_string()]);
+        assert_eq!(recordings(&c, &n(None, Some(7))), vec!["/lib/page.m4a".to_string()]);
+        assert_eq!(recordings(&c, &n(None, Some(9))), vec!["/lib/head.m4a".to_string(), "/lib/tail.m4a".to_string()], "a page heard as two calls is heard whole");
+        assert_eq!(recordings(&c, &n(None, Some(8))), Vec::<String>::new(), "a call with no recording");
+        assert_eq!(recordings(&c, &n(None, None)), Vec::<String>::new());
     }
 
     /// Against a copy of a library whose cases are built (run the cases
     /// real_library test on it first): `HS_SEND_DB=copy.db
     /// HS_CASES_PLACES=places.json cargo test casesend::tests::real_library
     /// -- --ignored --nocapture`. Every place with the feature named in
-    /// `HS_SEND_FEATURE` is given a chat, to see what those would hear.
+    /// `HS_SEND_FEATURE` is given a chat, to see what those would hear;
+    /// `HS_SEND_CASE` shows that one case.
     #[test]
     #[ignore]
     fn real_library() {
@@ -1128,7 +1330,8 @@ mod tests {
         for d in &p.days {
             println!("{} {:<24} threads {:>2} replies {:>2}", d.date, d.dest, d.threads, d.replies);
         }
-        for k in p.cases.iter().filter(|k| k.chats.len() > 1 || k.replies.len() > 2).take(4) {
+        let only: Option<i64> = std::env::var("HS_SEND_CASE").ok().and_then(|v| v.parse().ok());
+        for k in p.cases.iter().filter(|k| only.map_or(k.chats.len() > 1 || k.replies.len() > 2, |id| k.id == id)).take(4) {
             println!("\n=== case {} → {:?}\n{}\n--- replies\n{}", k.id, k.chats, k.timeline, k.replies.join("\n"));
         }
     }

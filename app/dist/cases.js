@@ -95,7 +95,7 @@
     $("csPick").style.display = k ? "none" : "";
     if (!k) { $("csTimeline").innerHTML = ""; $("csTitle").textContent = "Timeline"; $("csSub").textContent = ""; return; }
     $("csTitle").textContent = k.title;
-    $("csSub").textContent = `${k.address || "address not heard"}${k.call_type && k.call_type !== k.title ? ` · dispatched as ${k.call_type}` : ""}`;
+    $("csSub").textContent = `Incident #${k.incident} · ${k.address || "address not heard"}${k.call_type && k.call_type !== k.title ? ` · dispatched as ${k.call_type}` : ""}`;
     $("csTimeline").innerHTML = `<div class="cs-head">${stateChip(k.state)}<span class="faint small">${esc(k.units.join(", "))}</span></div>`
       + `<div class="cs-facts">${facts(k)}</div>`
       + arrival(k)

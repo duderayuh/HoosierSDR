@@ -3622,7 +3622,7 @@ function dpVisible(i) {
   if (dpWinHours && i.updated < dpNow() - dpWinHours * 3600) return false;
   if (dpChanFilter && String(i.tg) !== dpChanFilter) return false;
   if (dpHidden.has(i.call_type)) return false;
-  if (dpQuery) { const hay = `${i.call_type} ${i.address} ${i.validated} ${(i.units || []).join(" ")} ${i.summary} ${i.tg_name}`.toLowerCase(); if (!hay.includes(dpQuery)) return false; }
+  if (dpQuery) { const hay = `#${i.id} ${i.call_type} ${i.address} ${i.validated} ${(i.units || []).join(" ")} ${i.summary} ${i.tg_name}`.toLowerCase(); if (!hay.includes(dpQuery)) return false; }
   return true;
 }
 const dpUnits = (i, cls) => (i.units || []).map((u) => `<span class="unit ${cls || ""}">${esc(u)}</span>`).join("");
