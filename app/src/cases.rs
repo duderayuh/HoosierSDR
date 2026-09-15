@@ -990,7 +990,23 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
             let at: i64 = r.get(1)?;
             Ok(Page { call: r.get(0)?, at, minute: local_minute(at), text: r.get(2)? })
         })
-        .map(|rows| rows.flatten().filter(|p| !p.text.trim().is_empty()).collect())
+        .map(|rows| {
+            // A page the radio heard as two calls is one page: its second
+            // half is not a repage.
+            let mut pages: Vec<Page> = Vec::new();
+            let mut heard_last = None;
+            for p in rows.flatten().filter(|p| !p.text.trim().is_empty()) {
+                let call = p.call;
+                match pages.last_mut() {
+                    Some(last) if heard_last.is_some() && crate::dispatch::split_partner(c, call) == heard_last.map(|h| (h, true)) => {
+                        last.text = format!("{} {}", last.text.trim(), p.text.trim());
+                    }
+                    _ => pages.push(p),
+                }
+                heard_last = Some(call);
+            }
+            pages
+        })
         .unwrap_or_default()
     };
 
@@ -1916,6 +1932,37 @@ mod tests {
         assert!(s.profiles[0].events[0].phrases.contains(&"the listener's own".to_string()));
         let (_, again) = with_new_defaults(s);
         assert!(!again);
+    }
+
+    #[test]
+    fn a_page_heard_as_two_calls_is_one_line() {
+        let c = Connection::open_in_memory().unwrap();
+        crate::dispatch::ensure_schema(&c);
+        c.execute_batch(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER, tg_name TEXT, unit INTEGER, unit_name TEXT,
+               transcript TEXT, transcript_edited TEXT, system TEXT NOT NULL DEFAULT '');
+             CREATE TABLE conversations (id INTEGER PRIMARY KEY, incident INTEGER);",
+        )
+        .unwrap();
+        crate::radios::ensure_schema(&c);
+        ensure_schema(&c);
+        let t0 = 1_000_000;
+        c.execute_batch(&format!(
+            "INSERT INTO incidents (id, created, updated, tg, call_type, address, address_key, units) VALUES
+               (1, {t0}, {t0}, 1, 'Cardiac Arrest', '1200 Example St', '1200 example street', '[\"Engine 5\",\"Medic 7\"]');
+             INSERT INTO calls (id, start, secs, tg, unit, transcript) VALUES
+               (1, {t0}, 5, 1, 900900, 'Engine 5, Medic 7, 1200 Example St, Cardiac'),
+               (2, {t1}, 4, 1, 0, 'Arrest Working. 1200 Hours, Location 1 North');
+             INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 1, {t0}, 1, 'dispatch'), (1, 2, {t1}, 1, 'dispatch');",
+            t1 = t0 + 6,
+        ))
+        .unwrap();
+        let tactical: HashSet<u16> = [2].into();
+        let prof = p();
+        rebuild(&c, &Inputs { profile: &prof, tactical_tgs: &tactical }, t0 - 60, t0 + 3600).unwrap();
+        let v = list(&c, 0, &crate::places::Settings::default(), t0 + 3600);
+        let lines: Vec<(&str, &str)> = v.cases[0].lines.iter().map(|l| (l.kind.as_str(), l.label.as_str())).collect();
+        assert_eq!(lines, vec![("dispatched", "Dispatched as a working arrest")], "the second half of a page is not a repage");
     }
 
     #[test]
