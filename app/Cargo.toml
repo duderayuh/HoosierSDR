@@ -30,6 +30,7 @@ hmac = "0.12"
 age = { version = "0.11", default-features = false }
 tar = "0.4"
 flate2 = "1"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 rand = "0.8"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
 cpal = "0.15"

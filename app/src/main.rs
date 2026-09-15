@@ -53,6 +53,7 @@ mod backtest;
 mod fuzzy;
 mod highway;
 mod uistate;
+mod convexport;
 mod rr;
 mod s3;
 mod secrets;
@@ -2444,6 +2445,7 @@ fn main() {
             set_muted,
             uistate::ui_state_get,
             uistate::ui_state_set,
+            convexport::conversation_export,
             set_max_calls,
             set_queue_limit,
             set_channelizer,

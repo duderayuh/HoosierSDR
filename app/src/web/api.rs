@@ -606,6 +606,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         // A remote page navigates to the other instance itself (see shim.js);
         // opening a window here would put it on the far machine's screen.
         "remote_open" => Err("open remote instances from the desktop".into()),
+        // A remote page downloads the archive to its own computer, from
+        // /api/conversation/{id}/export; nothing lands in this machine's Downloads.
+        "conversation_export" => Err("download conversations from /api/conversation/{id}/export".into()),
         "catalogs_list" => jv(crate::rr::catalogs_list(app.clone())),
         "catalog_lookup" => jv(crate::rr::catalog_lookup(app.clone(), arg(args, "tg")?)),
         "catalog_remove" => jv(crate::rr::catalog_remove(app.clone(), state, arg(args, "name")?)?),

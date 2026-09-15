@@ -72,11 +72,12 @@ Object.assign(canned, {
 const REMOTE_MODE = process.env.PAGECHECK_REMOTE === "1";
 const calls = [];
 const uiSets = [];
+const exportAsks = [];
 const routeAsks = [];
 const sentTelegram = [];
 const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "conversation_export") exportAsks.push(args || {}); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -267,6 +268,19 @@ w.__exercise = async () => {
       const none = w.dpPopup(w.dpInc.get(2));
       if (/Closest hospital/.test(none)) console.log("PAGE ERROR: a run with no pathway still lists facilities");
     } else console.log("PAGE ERROR: dpPopup is gone");
+  }
+  // Each conversation downloads as one archive, from its card and its page.
+  {
+    w.showView("conversations");
+    await new Promise((r) => setTimeout(r, 300));
+    const btn = w.document.querySelector('#cvCards [data-cvexport="1"]');
+    if (!btn) console.log("PAGE ERROR: a conversation card has no Download button");
+    else {
+      btn.click();
+      await new Promise((r) => setTimeout(r, 50));
+      if (!exportAsks.some((a) => a.id === 1)) console.log("PAGE ERROR: Download did not ask for that conversation's archive: " + JSON.stringify(exportAsks));
+    }
+    if (!w.document.getElementById("cvdExport")) console.log("PAGE ERROR: a conversation's page has no Download button");
   }
   // The window on this machine publishes its shared settings as it opens,
   // and a change arriving from a remote page is shown without being sent

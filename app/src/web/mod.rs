@@ -384,6 +384,7 @@ pub fn spawn(app: AppHandle) {
         .route("/api/command", post(command))
         .route("/api/audio/{id}", get(audio_clip))
         .route("/api/file", get(audio_file))
+        .route("/api/conversation/{id}/export", get(conversation_export))
         .with_state(state);
 
     std::thread::spawn(move || {
@@ -635,6 +636,29 @@ async fn audio_clip(State(st): State<Arc<WebState>>, _auth: Auth, Path(id): Path
         },
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, "no such call").into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// A conversation's archive, downloaded to the browser asking — a remote
+/// page's download lands on the computer it is open on, not this one.
+async fn conversation_export(State(st): State<Arc<WebState>>, _auth: Auth, Path(id): Path<i64>) -> axum::response::Response {
+    let app = st.app.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::with_db(&state, |c| crate::convexport::archive(c, id))
+    })
+    .await;
+    match built {
+        Ok(Ok(a)) => (
+            [
+                (header::CONTENT_TYPE, "application/zip".to_string()),
+                (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", a.name)),
+            ],
+            a.bytes,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

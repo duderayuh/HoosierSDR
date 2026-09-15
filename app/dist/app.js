@@ -3130,12 +3130,23 @@ function convRenderList() {
     <div class="when">${esc(convWhen(r.first_at))} · ${esc(r.rule_name)} · ${r.calls} transmission${r.calls === 1 ? "" : "s"} · ${convDur(r.last_at - r.first_at)}</div>
     <div class="tags">${(r.units || []).map((u) => `<span class="cvunit">${esc(u)}</span>`).join("")}</div>
     <div class="summ"><span class="eyebrow">AI summary</span>${esc(r.summary || r.detail || "(no summary)")}</div>
-    <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button></div>
+    <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button><button class="btn ghost sm" data-cvexport="${r.id}" title="A zip of everything about this conversation: summary, transcript, message, the run, and every recording">⤓ Download</button></div>
   </div>`).join("");
   const cards = $("cvCards");
   cards.querySelectorAll("[data-cvopen]").forEach((b) => b.onclick = () => convOpen(+b.dataset.cvopen));
   cards.querySelectorAll("[data-cvlisten]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvlisten); if (r) convListen(r); });
   cards.querySelectorAll("[data-cvcopy]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvcopy); if (r) convCopy(r); });
+  cards.querySelectorAll("[data-cvexport]").forEach((b) => b.onclick = () => convExport(+b.dataset.cvexport, b));
+}
+// Everything about one conversation, as a zip. In the app it is saved in
+// Downloads; on a remote page it downloads to the computer the page is on.
+async function convExport(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const where = await invoke("conversation_export", { id });
+    uiToast(REMOTE ? `Downloaded ${String(where).replace(/^downloaded /, "")}` : `Saved to ${where}`);
+  } catch (e) { uiToast(`Download failed: ${e}`, "err"); }
+  finally { if (btn) btn.disabled = false; }
 }
 function convCopy(r) { const cb = navigator.clipboard; if (!cb) return; cb.writeText(r.message || r.summary || "").then(() => uiToast("Message copied"), () => {}); }
 async function convListen(r) {
@@ -3197,6 +3208,7 @@ $("cvSeg").querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.d
 $("cvdBack").onclick = () => convShowPage("list");
 $("cvdListen").onclick = () => { if (convSel) convListen(convSel); };
 $("cvdCopy").onclick = () => { if (convSel) convCopy(convSel); };
+$("cvdExport").onclick = () => { if (convSel) convExport(convSel.id, $("cvdExport")); };
 $("cvdDelete").onclick = async () => {
   if (!convSel) return;
   if (!(await uiConfirm(`Delete stored conversation ${convSel.conv_id}? The library calls it points at are kept.`, "Delete"))) return;
