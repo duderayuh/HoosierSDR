@@ -98,6 +98,11 @@ fn overview(r: &Stored, incident: Option<&crate::dispatch::Incident>) -> String 
     }
     o.push_str("\nTransmissions\n");
     for (n, p) in r.pieces.iter().enumerate() {
+        // An announcement row carries neither sound nor words; numbers still
+        // follow the recordings' own, so the list and audio/ agree.
+        if p.secs == 0.0 && p.audio.is_none() && p.transcript.is_none() {
+            continue;
+        }
         o.push_str(&format!(
             "  {:>2}. {}  {:>5.1} s  {}{}\n",
             n + 1,
