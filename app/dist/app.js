@@ -329,7 +329,24 @@ $("clear").onclick = () => { tbody.innerHTML = ""; history.length = 0; $("empty"
 
 /* ---------- per-talkgroup settings (kept in localStorage) ---------- */
 const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (_) { return d; } };
-const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+// A page opened over remote access has a browser storage of its own. What
+// in it steers the radio is shared through the backend (uistate.rs keeps the
+// same list): saved here, it is sent there, and a change from the other page
+// arrives as `ui_state` and is applied by `applyUiState`.
+const SYNCED = ["hs.groups", "hs.grouprec", "hs.policy", "hs.lockout", "hs.prio", "hs.tgrules"];
+const UI_ORIGIN = Math.random().toString(36).slice(2);
+const REMOTE = !!window.__HS_REMOTE__;
+// Set while a change from the other page is applied, so applying it does not
+// send it back: two quick changes could otherwise cross on the wire and the
+// first come back to undo the second.
+let applyingUiState = false;
+const save = (k, v) => {
+  localStorage.setItem(k, JSON.stringify(v));
+  if (TAURI && SYNCED.includes(k) && !applyingUiState) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`));
+};
+// The window on this machine is where these settings have always lived:
+// it hands them over as it opens, so a remote page finds them.
+if (TAURI && !REMOTE) for (const k of SYNCED) { const v = store(k, null); if (v !== null) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`)); }
 
 /* ---------- theme ---------- */
 // [id, label, swatch colour]. The seasonal ones are picked by hand, not by
@@ -708,7 +725,11 @@ if ($("grpKeepRec")) {
       : "groups that are off are no longer followed");
   };
 }
-filtFor(""); renderLockout(); renderGroupChips(); pushLockout(""); pushMuted();
+filtFor(""); renderLockout(); renderGroupChips();
+// A remote page sends nothing to the radio as it opens: what it has is this
+// browser's storage, not the radio's settings, which arrive through
+// applyUiState once it has connected.
+if (!REMOTE) { pushLockout(""); pushMuted(); }
 $("histHideNa").checked = !!store("hs.hidena", false); $("histHideNa").onchange = () => { save("hs.hidena", $("histHideNa").checked); applyHistFilter(); };
 
 /* ---------- spectrum + waterfall (SDR++-style controls) ---------- */
@@ -806,8 +827,11 @@ function wfApply() {
   $("wfMax").disabled = wfCfg.auto;
   sp.style.display = wfCfg.line ? "" : "none";
   save("hs.wf", wfCfg);
-  if (TAURI) invoke("spectrum_set", { fft: +wfCfg.fft, average: +wfCfg.avg }).catch(() => {});
+  if (TAURI && !(REMOTE && !wfTouched)) invoke("spectrum_set", { fft: +wfCfg.fft, average: +wfCfg.avg }).catch(() => {});
 }
+// A remote page's waterfall settings reach the radio once someone changes one.
+let wfTouched = false;
+["wfFft", "wfAvg"].forEach((id) => $(id).addEventListener("change", () => { wfTouched = true; }, true));
 $("wfFft").onchange = () => { wfCfg.fft = +$("wfFft").value; wfApply(); };
 $("wfAvg").onchange = () => { wfCfg.avg = +$("wfAvg").value; wfApply(); };
 $("wfMap").onchange = () => { wfCfg.map = $("wfMap").value; wfApply(); };
@@ -1609,7 +1633,7 @@ if (TAURI) {
     }
     catch (err) { alert(err); } finally { setState("standby"); }
   };
-  pushLockout(); pushPriorities(); pushRanges(); pushPolicies();
+  if (!REMOTE) { pushLockout(); pushPriorities(); pushRanges(); pushPolicies(); }
   POLICIES.forEach((k) => { const sel = $("pol" + k[0].toUpperCase() + k.slice(1)); sel.value = policy[k].all ? "all" : "none"; sel.onchange = () => { policy[k].all = sel.value === "all"; policy[k].except = []; pushPolicies(); if (typeof alRender === "function") alRender(); }; });
   $("skipBtn").onclick = () => invoke("skip_call").catch((e) => alert(e));
 
@@ -1630,13 +1654,13 @@ if (TAURI) {
   $("learnAliases").checked = !!prefs.learnAliases; $("tmod").value = prefs.tmod ?? "auto";
   $("maxCalls").value = String(prefs.maxCalls ?? 12); $("queueLimit").value = prefs.queueLimit ?? "45"; $("chanMode").value = prefs.chanMode ?? "channelizer"; $("uvQuality").value = String(prefs.uvQuality ?? 16);
   const pushScan = () => { invoke("set_max_calls", { n: parseInt($("maxCalls").value, 10) || 12 }).catch(() => {}); invoke("set_queue_limit", { secs: parseFloat($("queueLimit").value) || 0 }).catch(() => {}); invoke("set_channelizer", { on: $("chanMode").value !== "classic" }).catch(() => {}); invoke("set_uv_quality", { q: parseInt($("uvQuality").value, 10) || 16 }).catch(() => {}); };
-  pushScan();
+  if (!REMOTE) pushScan();
   const savePrefs = () => save("hs.prefs", { ...store("hs.prefs", {}), hangMs: $("hangMs").value, avoidMin: $("avoidMin").value, autostart: $("autostart").checked,
     tones: $("tones").checked, callsdir: $("callsdir").value, play: $("play").checked, lastPlaylist: $("playlist").value, learnAliases: $("learnAliases").checked, maxCalls: $("maxCalls").value, queueLimit: $("queueLimit").value, chanMode: $("chanMode").value, tmod: $("tmod").value, uvQuality: $("uvQuality").value });
   ["hangMs", "avoidMin", "autostart", "tones", "callsdir", "play", "tmod"].forEach((id) => $(id).onchange = savePrefs);
   $("maxCalls").onchange = $("queueLimit").onchange = $("chanMode").onchange = $("uvQuality").onchange = () => { savePrefs(); pushScan(); if ($("pillText").textContent !== "standby") uiToast("Calls-at-once applies on the next Start; the queue limit applies now."); };
   $("learnAliases").onchange = () => { savePrefs(); invoke("set_learn_aliases", { on: $("learnAliases").checked }).catch((e) => log(`learn: ${e}`)); };
-  invoke("set_learn_aliases", { on: $("learnAliases").checked }).catch(() => {});
+  if (!REMOTE) invoke("set_learn_aliases", { on: $("learnAliases").checked }).catch(() => {});
   $("ppmUse").onclick = () => { if (measuredPpm == null) return; const applied = parseFloat($("ppm").value) || 0; $("ppm").value = (applied + measuredPpm).toFixed(1); devSave(); $("ppmUse").disabled = true; $("ppmMeasured").textContent = `set to ${$("ppm").value} ppm for this radio — applies on the next start`; };
 
   /* ---------- devices: what is attached, and each radio's own settings ---------- */
@@ -2925,17 +2949,18 @@ if (TAURI) {
     sites = st || [];
     renderPlaylists(pl || []);
     renderSavedSites(sites);
-    migrateLocalFilters();
+    if (!REMOTE) migrateLocalFilters();
     renderLockout();
     // Now that the playlists are known, send their filters again. The first
     // push happened before this list arrived, so it only reached the
     // unscoped set — and the part that carries muted listen groups (`extra`)
     // is deliberately never saved on the Rust side, so a run started now
     // would have nothing muted at all.
-    pushLockout(); pushPriorities(); pushMuted();
-    // Auto-start: opt-in, and only if the last-used site still exists.
+    if (!REMOTE) { pushLockout(); pushPriorities(); pushMuted(); }
+    // Auto-start: opt-in, and only if the last-used site still exists. Never
+    // from a remote page: it would restart the radio on the far machine.
     const pr = store("hs.prefs", {});
-    if (pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
+    if (!REMOTE && pr.autostart && pr.lastPlaylist && sites.some((p) => p.id === pr.lastPlaylist) && !location.hash.startsWith("#autostart")) {
       // The detected radio decides the rate and centre a site gets (an RTL-SDR
       // is centred on the control channel); wait, briefly, until the radio list
       // has replaced the placeholder options before tuning.
@@ -3105,12 +3130,23 @@ function convRenderList() {
     <div class="when">${esc(convWhen(r.first_at))} · ${esc(r.rule_name)} · ${r.calls} transmission${r.calls === 1 ? "" : "s"} · ${convDur(r.last_at - r.first_at)}</div>
     <div class="tags">${(r.units || []).map((u) => `<span class="cvunit">${esc(u)}</span>`).join("")}</div>
     <div class="summ"><span class="eyebrow">AI summary</span>${esc(r.summary || r.detail || "(no summary)")}</div>
-    <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button></div>
+    <div class="acts"><button class="btn ghost sm" data-cvopen="${r.id}">View details</button><button class="btn ghost sm" data-cvlisten="${r.id}">▶ Listen</button><button class="btn ghost sm" data-cvcopy="${r.id}">Copy message</button><button class="btn ghost sm" data-cvexport="${r.id}" title="A zip of everything about this conversation: summary, transcript, message, the run, and every recording">⤓ Download</button></div>
   </div>`).join("");
   const cards = $("cvCards");
   cards.querySelectorAll("[data-cvopen]").forEach((b) => b.onclick = () => convOpen(+b.dataset.cvopen));
   cards.querySelectorAll("[data-cvlisten]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvlisten); if (r) convListen(r); });
   cards.querySelectorAll("[data-cvcopy]").forEach((b) => b.onclick = () => { const r = convRows.find((x) => x.id === +b.dataset.cvcopy); if (r) convCopy(r); });
+  cards.querySelectorAll("[data-cvexport]").forEach((b) => b.onclick = () => convExport(+b.dataset.cvexport, b));
+}
+// Everything about one conversation, as a zip. In the app it is saved in
+// Downloads; on a remote page it downloads to the computer the page is on.
+async function convExport(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const where = await invoke("conversation_export", { id });
+    uiToast(REMOTE ? `Downloaded ${String(where).replace(/^downloaded /, "")}` : `Saved to ${where}`);
+  } catch (e) { uiToast(`Download failed: ${e}`, "err"); }
+  finally { if (btn) btn.disabled = false; }
 }
 function convCopy(r) { const cb = navigator.clipboard; if (!cb) return; cb.writeText(r.message || r.summary || "").then(() => uiToast("Message copied"), () => {}); }
 async function convListen(r) {
@@ -3172,6 +3208,7 @@ $("cvSeg").querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.d
 $("cvdBack").onclick = () => convShowPage("list");
 $("cvdListen").onclick = () => { if (convSel) convListen(convSel); };
 $("cvdCopy").onclick = () => { if (convSel) convCopy(convSel); };
+$("cvdExport").onclick = () => { if (convSel) convExport(convSel.id, $("cvdExport")); };
 $("cvdDelete").onclick = async () => {
   if (!convSel) return;
   if (!(await uiConfirm(`Delete stored conversation ${convSel.conv_id}? The library calls it points at are kept.`, "Delete"))) return;
@@ -3440,6 +3477,45 @@ function obRender() {
 $("help").onclick = obOpen;
 /* first run: open the guide once */
 setTimeout(() => { if (!store("hs.onboarded", false)) obOpen(); }, 700);
+
+/* ---------- shared settings: a change made on the other page ---------- */
+window.applyUiState = (key, value, origin) => {
+  if (origin === UI_ORIGIN || !SYNCED.includes(key)) return;
+  applyingUiState = true;
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    // Each is put in place and sent to the radio again: for the page that
+    // made the change that is a repeat, and for a remote page that has just
+    // connected it is the first time its view and the radio agree.
+    switch (key) {
+      case "hs.groups":
+        groups.splice(0, groups.length, ...(Array.isArray(value) ? value : []));
+        renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList();
+        pushMuted(); pushLockout();
+        break;
+      case "hs.grouprec":
+        if ($("grpKeepRec")) $("grpKeepRec").checked = value === true;
+        renderGroupChips(); pushLockout(); pushMuted();
+        break;
+      case "hs.policy":
+        for (const k of POLICIES) if (value && value[k]) policy[k] = value[k];
+        POLICIES.forEach((k) => { const sel = $("pol" + k[0].toUpperCase() + k.slice(1)); if (sel) sel.value = policy[k].all ? "all" : "none"; });
+        pushPolicies();
+        break;
+      case "hs.lockout":
+      case "hs.prio":
+        filt.delete(""); filtFor(""); renderLockout();
+        pushLockout(""); pushPriorities("");
+        break;
+      case "hs.tgrules":
+        tgRules.splice(0, tgRules.length, ...(Array.isArray(value) ? value : []));
+        if (typeof renderRules === "function") renderRules();
+        pushRanges();
+        break;
+    }
+  } finally { applyingUiState = false; }
+};
+if (listen) listen("ui_state", (e) => { const p = e.payload || {}; window.applyUiState(p.key, p.value, p.origin); });
 
 /* ---------- dispatch bridge: the Tauri backend, or canned data when the page is opened standalone ---------- */
 const dpDemoNow = Math.floor(Date.now() / 1000);

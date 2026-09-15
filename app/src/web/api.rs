@@ -363,6 +363,11 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::set_policies(state, record, stream, upload);
             Ok(Value::Null)
         }
+        "ui_state_get" => jv(crate::uistate::ui_state_get(app.clone(), state)),
+        "ui_state_set" => {
+            crate::uistate::ui_state_set(app.clone(), state, arg(args, "key")?, arg(args, "value")?, arg(args, "origin")?)?;
+            Ok(Value::Null)
+        }
         "set_muted" => {
             crate::set_muted(state, arg(args, "tgs")?);
             Ok(Value::Null)
@@ -601,6 +606,9 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
         // A remote page navigates to the other instance itself (see shim.js);
         // opening a window here would put it on the far machine's screen.
         "remote_open" => Err("open remote instances from the desktop".into()),
+        // A remote page downloads the archive to its own computer, from
+        // /api/conversation/{id}/export; nothing lands in this machine's Downloads.
+        "conversation_export" => Err("download conversations from /api/conversation/{id}/export".into()),
         "catalogs_list" => jv(crate::rr::catalogs_list(app.clone())),
         "catalog_lookup" => jv(crate::rr::catalog_lookup(app.clone(), arg(args, "tg")?)),
         "catalog_remove" => jv(crate::rr::catalog_remove(app.clone(), state, arg(args, "name")?)?),

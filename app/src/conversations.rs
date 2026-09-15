@@ -1765,6 +1765,14 @@ pub fn conversation_get(state: State<AppState>, id: i64) -> Result<Stored, Strin
     })
 }
 
+/// A stored conversation with the names learned for its unnamed radios, as
+/// its page shows it.
+pub(crate) fn stored_with_names(c: &Connection, id: i64) -> Result<Stored, String> {
+    let mut row = get_row(c, id)?;
+    row.learned = learned_names(c, &row.pieces);
+    Ok(row)
+}
+
 /// Learned names for the radios in a conversation that carry no alias.
 fn learned_names(c: &Connection, pieces: &[Piece]) -> HashMap<u32, String> {
     let system = pieces

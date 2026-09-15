@@ -102,8 +102,24 @@
     ui_log: async (a) => { console.log("[hs]", a && a.msg); return null; },
     library_play: async (a) => { await playUrl(`/api/audio/${encodeURIComponent(a.id)}`); return null; },
     play_wav: async (a) => { await playUrl(`/api/file?path=${encodeURIComponent(a.path)}`); return null; },
+    // A conversation's archive downloads here, to this computer.
+    conversation_export: async (a) => {
+      for (;;) {
+        const res = await fetch(`/api/conversation/${encodeURIComponent(a.id)}/export`, { headers: headers() });
+        if (res.status === 401) { await login(); continue; }
+        if (!res.ok) throw await res.text();
+        const m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") || "");
+        const name = m ? m[1] : `conversation-${a.id}.zip`;
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement("a");
+        link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        return `downloaded ${name}`;
+      }
+    },
     remote_open: async (a) => { location.href = String(a.url || "").replace(/\/+$/, "") + "/desktop/"; return null; },
-    set_volume: async (a) => { ensureAudio(); if (gain) gain.gain.value = Math.max(0, Math.min(2, +a.gain || +a.value || 1)); return post("set_volume", a); },
+    // This browser's volume. The far machine's speakers are its own business.
+    set_volume: async (a) => { ensureAudio(); if (gain) gain.gain.value = Math.max(0, Math.min(2, Number.isFinite(+a.gain) ? +a.gain : 1)); return null; },
   };
   async function invoke(cmd, args) {
     const local = LOCAL[cmd];
@@ -148,6 +164,13 @@
       if (res.status === 401) { await login(); continue; }
       break;
     }
+    // Take the far machine's settings that steer the radio — its listen
+    // groups, what it records — so this page shows them and switches them
+    // for it, rather than this browser's own empty storage.
+    try {
+      const shared = await post("ui_state_get", {});
+      if (typeof window.applyUiState === "function") for (const [k, v] of Object.entries(shared || {})) { try { window.applyUiState(k, v, "far"); } catch (e) { console.error("[hs] ui_state:", e); } }
+    } catch (e) { console.error("[hs] ui_state_get:", e); }
     // Catch up with the run in progress, then follow it live. The page's
     // own `applySnapshot` (app.js) sets the controls; the replayed frames
     // rebuild the panels through the same handlers the live feed uses.
