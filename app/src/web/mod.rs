@@ -85,6 +85,7 @@ const APP_EVENTS: &[&str] = &[
     "transcribe_error",
     "transcribe_ready",
     "transcript",
+    "ui_state",
 ];
 
 pub fn port() -> u16 {

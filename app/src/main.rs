@@ -52,6 +52,7 @@ mod tripwires;
 mod backtest;
 mod fuzzy;
 mod highway;
+mod uistate;
 mod rr;
 mod s3;
 mod secrets;
@@ -137,6 +138,8 @@ struct AppState {
     dispatch: dispatch::Shared,
     places: places::Shared,
     routing: routing::Shared,
+    /// What steers the radio from a page, shared with remote pages.
+    ui_state: uistate::Shared,
     /// Filename template for stored calls.
     names: Mutex<names::Settings>,
     /// The audio thread, started on first use. `Some(None)` = no device.
@@ -2439,6 +2442,8 @@ fn main() {
             set_learn_aliases,
             set_policies,
             set_muted,
+            uistate::ui_state_get,
+            uistate::ui_state_set,
             set_max_calls,
             set_queue_limit,
             set_channelizer,

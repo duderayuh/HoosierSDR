@@ -67,12 +67,16 @@ Object.assign(canned, {
   radio_evidence: [{ at: 150, callsign: "Medic 32", role: "unit", how: "said_self", weight: 1, call: 77, conversation: 0, tg: 1, tg_name: "OPS", transcript: "Control, Medic 32 <script>x</script>" }],
   radios_backfill: { calls: 10, conversations: 2, added: 7, radios: 3, learned: 2 },
 });
+// A second pass boots the page as a remote page (PAGECHECK_REMOTE=1), with
+// an empty browser storage, as a computer connecting over the tailnet has.
+const REMOTE_MODE = process.env.PAGECHECK_REMOTE === "1";
 const calls = [];
+const uiSets = [];
 const routeAsks = [];
 const sentTelegram = [];
 const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -263,6 +267,16 @@ w.__exercise = async () => {
       const none = w.dpPopup(w.dpInc.get(2));
       if (/Closest hospital/.test(none)) console.log("PAGE ERROR: a run with no pathway still lists facilities");
     } else console.log("PAGE ERROR: dpPopup is gone");
+  }
+  // The window on this machine publishes its shared settings as it opens,
+  // and a change arriving from a remote page is shown without being sent
+  // back.
+  {
+    if (!uiSets.some((a) => a.key === "hs.groups")) console.log("PAGE ERROR: this machine's listen groups were not shared as the page opened");
+    const n = uiSets.length;
+    w.applyUiState("hs.groups", [{ id: "g9", name: "Switched remotely", tgs: [1001], listen: true }], "far");
+    if (!/Switched remotely/.test(w.document.getElementById("grpChips").textContent)) console.log("PAGE ERROR: a group switched on a remote page did not show here");
+    if (uiSets.length !== n) console.log("PAGE ERROR: a change from a remote page was sent straight back");
   }
   // A popup's Details button answers however many times the popup was
   // rebuilt after it opened — the route arriving rebuilds it, and a button
@@ -488,8 +502,41 @@ w.__exercise = async () => {
 };
 w.addEventListener("error", (e) => console.log("PAGE ERROR:", e.message, e.error && e.error.stack));
 w.console.log = (m) => { if (/error|rejection/i.test(String(m))) console.log("LOG:", m); };
-w.localStorage.setItem("hs.groups", JSON.stringify([{ id: "g1", name: "Everything", tgs: [1001, 1002], listen: false }]));
+if (REMOTE_MODE) w.__HS_REMOTE__ = true;
+else w.localStorage.setItem("hs.groups", JSON.stringify([{ id: "g1", name: "Everything", tgs: [1001, 1002], listen: false }]));
 try { w.eval(pageScripts.map((f) => fs.readFileSync(require("path").join(__dirname, "..", "dist", f), "utf8")).join("\n;\n")); } catch (e) { console.log("THROW:", e.stack); }
+// The remote page: it sends the radio nothing of its own as it opens, shows
+// the far machine's groups when they arrive and silences what they say, does
+// not send them back, and a group switched here goes to the far machine.
+if (REMOTE_MODE) w.__exercise = async () => {
+  const radio = ["set_muted", "set_lockout", "set_policies", "set_priorities", "set_lockout_ranges", "set_priority_ranges", "set_max_calls", "set_queue_limit", "set_channelizer", "set_uv_quality", "set_learn_aliases", "spectrum_set", "ui_state_set"];
+  const sent = radio.filter((c) => calls.includes(c));
+  if (sent.length) console.log("PAGE ERROR: a remote page sent its own settings to the radio as it opened: " + sent.join(" "));
+  mutes.length = 0;
+  const far = [{ id: "g1", name: "MESA ALL", tgs: [1001, 1002], listen: false }, { id: "g2", name: "Hospitals", tgs: [1002], listen: true }];
+  w.applyUiState("hs.groups", far, "far");
+  const chips = w.document.getElementById("grpChips").textContent;
+  if (!/MESA ALL/.test(chips) || !/Hospitals/.test(chips)) console.log("PAGE ERROR: the far machine's listen groups do not show: " + chips);
+  const muted = mutes[mutes.length - 1];
+  if (!muted || JSON.stringify(muted.tgs) !== "[1001]") console.log("PAGE ERROR: the far machine's groups were not sent to its radio: " + JSON.stringify(mutes));
+  if (uiSets.length) console.log("PAGE ERROR: a change from the far machine was sent back to it: " + JSON.stringify(uiSets));
+  const chip = w.document.querySelector('#grpChips .chip[data-grp="g2"]');
+  if (!chip) { console.log("PAGE ERROR: no chip for the far machine's group"); return; }
+  chip.click();
+  const back = uiSets.find((a) => a.key === "hs.groups");
+  const g2 = back && (back.value || []).find((g) => g.id === "g2");
+  if (!g2 || g2.listen !== false) console.log("PAGE ERROR: a group switched on the remote page did not reach the far machine: " + JSON.stringify(uiSets));
+  const after = mutes[mutes.length - 1];
+  if (!after || !after.tgs.includes(1002)) console.log("PAGE ERROR: a group switched off remotely was not silenced: " + JSON.stringify(after));
+};
 let failed = false;
 const origLog = console.log; console.log = (...a) => { if (/PAGE ERROR|THROW|LOG:/.test(String(a[0]))) failed = true; origLog(...a); };
-setTimeout(async () => { await w.__exercise(); setTimeout(() => { console.log("invoked:", [...new Set(calls)].join(" ")); process.exit(failed ? 1 : 0); }, 800); }, 1500);
+setTimeout(async () => { await w.__exercise(); setTimeout(() => {
+  if (!REMOTE_MODE) {
+    const child = require("child_process").spawnSync(process.execPath, [__filename], { env: Object.assign({}, process.env, { PAGECHECK_REMOTE: "1" }), encoding: "utf8" });
+    process.stdout.write((child.stdout || "").replace(/^invoked:/m, "remote page invoked:"));
+    process.stderr.write(child.stderr || "");
+    if (child.status !== 0) console.log("PAGE ERROR: the remote page check failed (exit " + child.status + ")");
+  }
+  console.log("invoked:", [...new Set(calls)].join(" ")); process.exit(failed ? 1 : 0);
+}, 800); }, 1500);

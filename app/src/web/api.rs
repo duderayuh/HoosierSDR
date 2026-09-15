@@ -363,6 +363,11 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             crate::set_policies(state, record, stream, upload);
             Ok(Value::Null)
         }
+        "ui_state_get" => jv(crate::uistate::ui_state_get(app.clone(), state)),
+        "ui_state_set" => {
+            crate::uistate::ui_state_set(app.clone(), state, arg(args, "key")?, arg(args, "value")?, arg(args, "origin")?)?;
+            Ok(Value::Null)
+        }
         "set_muted" => {
             crate::set_muted(state, arg(args, "tgs")?);
             Ok(Value::Null)
