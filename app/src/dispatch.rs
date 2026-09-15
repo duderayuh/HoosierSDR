@@ -1859,9 +1859,15 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
                 } else {
                     i.geocode = status.into();
                 }
-            } else if whole_page && lat.is_some() && i.geocode != "manual" && !x.address.is_empty() {
+            } else if whole_page
+                && lat.is_some()
+                && i.geocode != "manual"
+                && !x.address.is_empty()
+                && !(matches!(i.geocode.as_str(), "ok" | "corrected") && status != "ok")
+            {
                 // The whole page read together says where better than
-                // either half did on its own.
+                // either half did on its own — unless a half already placed
+                // exactly and the whole only comes out approximate.
                 i.address = x.address.clone();
                 ikey = key.clone();
                 i.lat = lat;
