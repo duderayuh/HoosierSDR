@@ -29,8 +29,9 @@
 //! the summary is redone, the earlier Telegram messages are deleted, and a
 //! revised one is sent.
 //!
-//! Fixed IDs can also be learned: a radio heard in most conversations on a
-//! talkgroup is proposed as fixed (shown in the UI; the listener accepts it).
+//! Fixed IDs can also be learned: a radio heard in a third or more of a
+//! talkgroup's conversations is taken as fixed. What is learned belongs to
+//! the talkgroup, so every rule watching it starts out knowing the console.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -120,10 +121,10 @@ impl Default for Rule {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Settings {
     pub rules: Vec<Rule>,
-    /// Learned fixed IDs per (rule id, talkgroup): unit → conversations seen in.
+    /// Learned fixed IDs per talkgroup: unit → conversations heard in.
     #[serde(default)]
     pub learned: HashMap<String, HashMap<u32, u32>>,
-    /// Conversations seen per (rule id, talkgroup), the denominator.
+    /// Conversations seen per talkgroup, the denominator.
     #[serde(default)]
     pub seen: HashMap<String, u32>,
 }
@@ -216,6 +217,14 @@ fn path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(d.join("conversations.json"))
 }
 
+/// The settings file as the app holds them, with counts kept the old way
+/// folded in.
+fn read_settings(text: &str) -> Result<Settings, serde_json::Error> {
+    let mut s: Settings = serde_json::from_str(text)?;
+    fold_old_keys(&mut s);
+    Ok(s)
+}
+
 pub fn load(app: &AppHandle) -> ConvState {
     let Ok(p) = path(app) else {
         return ConvState::default();
@@ -224,7 +233,7 @@ pub fn load(app: &AppHandle) -> ConvState {
     let Ok(text) = std::fs::read_to_string(&p) else {
         return ConvState::default();
     };
-    match serde_json::from_str::<Settings>(&text) {
+    match read_settings(&text) {
         Ok(settings) => ConvState {
             settings,
             ..Default::default()
@@ -252,8 +261,30 @@ fn store(app: &AppHandle, s: &Settings) -> Result<(), String> {
     .map_err(|e| format!("{}: {e}", p.display()))
 }
 
-fn learn_key(rule: &str, tg: u16) -> String {
-    format!("{rule}:{tg}")
+/// Learning is keyed by talkgroup alone: which radio is the hospital's
+/// console is a fact about the talkgroup, not about the rule that happens
+/// to watch it. Keyed per rule, a newly made rule began knowing nothing —
+/// and until it had heard the console three times it took the hospital for
+/// a second unit and filed each side of the exchange as its own report.
+fn learn_key(tg: u16) -> String {
+    tg.to_string()
+}
+
+/// Counts kept the old way, per "rule:talkgroup", folded into the
+/// talkgroup's own. Rules watching the same talkgroup heard the same
+/// radios, so their counts add up and the share each radio holds stands.
+fn fold_old_keys(s: &mut Settings) {
+    for (key, m) in std::mem::take(&mut s.learned) {
+        let tg = key.rsplit(':').next().unwrap_or(&key).to_string();
+        let into = s.learned.entry(tg).or_default();
+        for (unit, n) in m {
+            *into.entry(unit).or_default() += n;
+        }
+    }
+    for (key, n) in std::mem::take(&mut s.seen) {
+        let tg = key.rsplit(':').next().unwrap_or(&key).to_string();
+        *s.seen.entry(tg).or_default() += n;
+    }
 }
 
 /// Is this radio the fixed party for the rule on this talkgroup — listed,
@@ -265,7 +296,7 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
     if !r.learn_fixed {
         return false;
     }
-    let k = learn_key(&r.id, tg);
+    let k = learn_key(tg);
     let total = s.seen.get(&k).copied().unwrap_or(0);
     let n = s
         .learned
@@ -563,7 +594,7 @@ fn learn(s: &mut Settings, r: &Rule, c: &Conversation) {
     if !r.learn_fixed {
         return;
     }
-    let k = learn_key(&r.id, c.tg);
+    let k = learn_key(c.tg);
     *s.seen.entry(k.clone()).or_default() += 1;
     let m = s.learned.entry(k).or_default();
     let mut units: Vec<u32> = c
@@ -1162,7 +1193,7 @@ pub fn conversations_get(state: State<AppState>) -> View {
     let mut proposed = HashMap::new();
     for r in &st.settings.rules {
         for tg in &r.tgs {
-            let k = learn_key(&r.id, *tg);
+            let k = learn_key(*tg);
             let units: Vec<u32> = st
                 .settings
                 .learned
@@ -2042,7 +2073,7 @@ mod tests {
         assert!(is_fixed(&s, &r, 10202, 900001));
         assert!(!is_fixed(&s, &r, 10202, 790065));
         // Learned: seen in 3 of 4 conversations.
-        let k = learn_key("r", 10202);
+        let k = learn_key(10202);
         s.seen.insert(k.clone(), 4);
         s.learned.entry(k.clone()).or_default().insert(790065, 3);
         assert!(is_fixed(&s, &r, 10202, 790065));
@@ -2059,6 +2090,38 @@ mod tests {
         let mut off = r.clone();
         off.learn_fixed = false;
         assert!(!is_fixed(&s, &off, 10202, 790065));
+        // A rule made this morning knows the console the talkgroup's older
+        // rule learned: whose console it is does not depend on who watches.
+        let fresh = Rule { id: "made-today".into(), ..r.clone() };
+        s.seen.insert(learn_key(10202), 4);
+        assert!(is_fixed(&s, &fresh, 10202, 790065), "a new rule starts knowing the talkgroup's console");
+    }
+
+    #[test]
+    fn counts_kept_per_rule_are_folded_into_the_talkgroup() {
+        // As the file on disk holds them, from before the counts moved.
+        let s = read_settings(
+            r#"{"rules":[],"learned":{"c1:10256":{"31709":53},"t2:10256":{"31709":1}},"seen":{"c1:10256":81,"t2:10256":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.seen.get("10256"), Some(&83), "every rule's count of a talkgroup is one count");
+        assert_eq!(s.learned.get("10256").and_then(|m| m.get(&31709)), Some(&54));
+        assert!(!s.seen.keys().any(|k| k.contains(':')), "nothing is left keyed by rule: {:?}", s.seen);
+        let mut s = Settings::default();
+        s.seen.insert("c1:10256".into(), 81);
+        s.seen.insert("t2:10256".into(), 2);
+        s.seen.insert("c1:10255".into(), 9);
+        s.learned.entry("c1:10256".into()).or_default().insert(31709, 53);
+        s.learned.entry("t2:10256".into()).or_default().insert(31709, 1);
+        s.learned.entry("c1:10255".into()).or_default().insert(4911391, 1);
+        fold_old_keys(&mut s);
+        assert_eq!(s.seen.get("10256"), Some(&83));
+        assert_eq!(s.learned.get("10256").and_then(|m| m.get(&31709)), Some(&54));
+        assert_eq!(s.seen.get("10255"), Some(&9));
+        // Folding again is the same file read twice, and changes nothing.
+        let once = s.clone();
+        fold_old_keys(&mut s);
+        assert_eq!((s.seen, s.learned), (once.seen, once.learned));
     }
 
     /// A bare open conversation for attribution tests.
