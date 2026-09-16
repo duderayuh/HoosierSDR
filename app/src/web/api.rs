@@ -480,6 +480,7 @@ pub async fn dispatch(app: &AppHandle, cmd: &str, args: &Value) -> Result<Value,
             arg(args, "lon")?,
         )
         .await?),
+        "call_redo" => jv(crate::dispatch::call_redo(app.clone(), arg(args, "id")?).await?),
         "dispatch_regeocode" => jv(crate::dispatch::dispatch_regeocode(app.clone(), state).await?),
         "dispatch_calibrate" => jv(crate::dispatch::dispatch_calibrate(app.clone(), state)?),
         "incidents_relink" => jv(crate::link::incidents_relink(app.clone(), state)?),

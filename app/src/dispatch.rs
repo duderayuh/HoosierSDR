@@ -2030,6 +2030,69 @@ fn pick_target(
     (None, "")
 }
 
+/// Read a call again from the transcript as it now stands — after the
+/// listener has corrected it — and file it afresh. The run it was on lets
+/// it go first, so a call that said one thing and now says another does not
+/// stay counted on the old one; a run left with nothing on it goes too.
+pub fn redo(app: &AppHandle, id: i64) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let Some(db) = state.db.lock().unwrap().clone() else {
+        return Err("library not open".into());
+    };
+    let (row, emptied) = {
+        let c = db.lock().unwrap();
+        let row = crate::library::get(&c, id)?.ok_or("that call is gone")?;
+        (row, unfile(&c, id)?)
+    };
+    if let Some(inc) = emptied {
+        let _ = app.emit("incident_deleted", inc);
+        crate::cases::touch();
+    }
+    let text = row.transcript_edited.clone().or_else(|| row.transcript.clone()).unwrap_or_default();
+    if text.trim().is_empty() {
+        return Err("that call has nothing written down to read".into());
+    }
+    let f = crate::alerts::facts_from_row(app, row, Some(text));
+    process(app, &f).map(|(what, _)| what)
+}
+
+/// Take a call off the run it was filed on. A run left with nothing on it
+/// is no longer a run: it is deleted, and named in the answer so the map
+/// can drop its pin.
+fn unfile(c: &Connection, call: i64) -> Result<Option<i64>, String> {
+    let was: Option<i64> = c
+        .query_row("SELECT incident FROM incident_calls WHERE call = ?1 LIMIT 1", [call], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM incident_calls WHERE call = ?1", [call]).map_err(|e| e.to_string())?;
+    let Some(inc) = was else { return Ok(None) };
+    let left: i64 = c
+        .query_row("SELECT COUNT(*) FROM incident_calls WHERE incident = ?1", [inc], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if left == 0 {
+        c.execute("DELETE FROM incidents WHERE id = ?1", [inc]).map_err(|e| e.to_string())?;
+        return Ok(Some(inc));
+    }
+    c.execute("UPDATE incidents SET calls = MAX(?2, 1), revision = revision + 1 WHERE id = ?1", params![inc, left])
+        .map_err(|e| e.to_string())?;
+    Ok(None)
+}
+
+/// Send a corrected transcript through the dispatch map again, for the
+/// Library's own button. The model is asked here, so it is done off the
+/// window's thread.
+#[tauri::command]
+pub async fn call_redo(app: AppHandle, id: i64) -> Result<String, String> {
+    let conv = crate::conversations::redo_call(&app, id);
+    let mut said = tauri::async_runtime::spawn_blocking(move || redo(&app, id))
+        .await
+        .map_err(|e| e.to_string())??;
+    if let Some(c) = conv {
+        said.push_str(&format!("; {c}"));
+    }
+    Ok(said)
+}
+
 fn log_it(app: &AppHandle, f: &CallFacts, outcome: &str, detail: String, incident: Option<i64>) {
     let state = app.state::<AppState>();
     let mut st = state.dispatch.lock().unwrap();
@@ -2603,6 +2666,28 @@ mod short_clip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_read_again_leaves_the_run_it_was_on() {
+        let c = Connection::open_in_memory().unwrap();
+        ensure_schema(&c);
+        c.execute_batch(
+            "INSERT INTO incidents (id, created, updated, tg, call_type, address, address_key, calls) VALUES
+               (1, 100, 100, 10, 'Unconscious', '1200 Example St', '1200 example street', 2),
+               (2, 100, 100, 10, 'Sick Person', '9 Other Road', '9 other road', 1);
+             INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 7, 100, 10, 'dispatch'), (1, 8, 101, 10, 'dispatch'), (2, 9, 100, 10, 'dispatch');",
+        )
+        .unwrap();
+        // A run with other calls on it keeps going, one call lighter.
+        assert_eq!(unfile(&c, 7), Ok(None));
+        let (calls, rev): (i64, i64) = c.query_row("SELECT calls, revision FROM incidents WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((calls, rev), (1, 1));
+        // The run that was only this call goes with it.
+        assert_eq!(unfile(&c, 9), Ok(Some(2)));
+        assert_eq!(c.query_row("SELECT COUNT(*) FROM incidents WHERE id = 2", [], |r| r.get::<_, i64>(0)), Ok(0));
+        // A call on no run at all is nothing to undo.
+        assert_eq!(unfile(&c, 99), Ok(None));
+    }
 
     #[test]
     fn a_page_heard_as_two_calls_is_one_page() {

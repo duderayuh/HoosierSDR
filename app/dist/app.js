@@ -2300,7 +2300,7 @@ if (TAURI) {
         <div class="machine">${esc(r.transcript || "—")}</div>
         <div class="k">Transcript · edit in place${r.transcript_edited ? " · edited" : ""} <span class="faint">(kept beside the machine text above, which is never changed)</span></div>
         <textarea id="detEdit" placeholder="Nothing transcribed yet — type what was said…">${esc(r.transcript_edited || r.transcript || "")}</textarea>
-        <div class="xport" style="margin-top:6px"><button class="btn primary sm" id="detSave">Save edit</button><button class="btn ghost sm" id="detClearEdit">Clear edit</button><span class="meta" id="detSaved">${r.edited_at ? "edited " + fmtT(r.edited_at) : ""}</span></div>
+        <div class="xport" style="margin-top:6px"><button class="btn primary sm" id="detSave">Save edit</button><button class="btn ghost sm" id="detRedo" title="Read this call again from the text as it stands: the dispatch map, the cases, and a hospital conversation still live">↻ Send correction through</button><button class="btn ghost sm" id="detClearEdit">Clear edit</button><span class="meta" id="detSaved">${r.edited_at ? "edited " + fmtT(r.edited_at) : ""}</span></div>
       </div>`;
       const play = $("detPlay"); if (play) play.onclick = () => invoke("library_play", { id }).catch((e) => alert(e));
       $("detCart").onclick = () => { cartToggle(r.id, `${fmtT(r.start)} ${r.tg_name} · ${r.secs.toFixed(1)}s`); libSelect(id); };
@@ -2310,10 +2310,22 @@ if (TAURI) {
       // one-word edit. Saving text identical to the machine transcript keeps
       // the call unedited rather than storing a copy.
       $("detSave").onclick = async () => { try { const v = $("detEdit").value; const text = v.trim() === (r.transcript || "").trim() ? "" : v; await invoke("library_set_edited", { id, text }); $("detSaved").textContent = text ? "saved" : "same as the machine text — no edit kept"; libSearchRefreshRow(id); } catch (e) { alert(e); } };
+      $("detRedo").onclick = async () => {
+        // Saving first: the correction on screen is what should be read.
+        const v = $("detEdit").value, text = v.trim() === (r.transcript || "").trim() ? "" : v;
+        $("detSaved").textContent = "reading it again…";
+        try {
+          await invoke("library_set_edited", { id, text });
+          $("detSaved").textContent = await invoke("call_redo", { id });
+          libSearchRefreshRow(id);
+        } catch (e) { $("detSaved").textContent = `${e}`; }
+      };
       $("detClearEdit").onclick = async () => { $("detEdit").value = r.transcript || ""; await invoke("library_set_edited", { id, text: "" }); $("detSaved").textContent = "edit cleared"; libSearchRefreshRow(id); };
     } catch (e) { alert(e); }
   }
   window.libRefreshRow = (id) => libSearchRefreshRow(id);
+  // Opening a call from outside this panel (and from the page check).
+  window.libShow = (id) => libSelect(id);
   // A rule fired about a call on screen: badge it without a reload.
   window.libMarkFired = (id, f) => {
     const r = libRows.find((x) => x.id === id); if (!r) return;
