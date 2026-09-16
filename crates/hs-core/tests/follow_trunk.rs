@@ -220,6 +220,43 @@ fn a_terminator_ends_the_call_without_waiting_for_silence() {
     );
 }
 
+/// The tail of an announcement, arriving in ones and twos after its
+/// terminator, is part of that announcement. Left on its own, each scrap
+/// became a call of its own — a row, a recording, and a transcript that for
+/// a fragment of speech is whatever the model invents for near silence.
+#[test]
+fn the_scraps_after_a_transmission_do_not_become_calls_of_their_own() {
+    let frames = voice_frames();
+    let mut traffic = traffic_dibits_n(6);
+    traffic.extend(build_tdu(0x293));
+    traffic.extend(preamble(40));
+    // Four scraps, each a single voice frame closed by its own terminator,
+    // as a channel losing and regaining sync produces them.
+    for _ in 0..4 {
+        traffic.extend(build_ldu1(0x293, &frames));
+        traffic.extend(build_tdu(0x293));
+        traffic.extend(preamble(40));
+    }
+    traffic.extend(preamble(7200));
+
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic, TRAFFIC + TUNER_ERROR);
+
+    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let block = (RATE as usize / 10) * 2;
+    let mut done = Vec::new();
+    for chunk in band.chunks(block) {
+        done.extend(f.process(chunk).completed);
+    }
+    let heard: Vec<usize> = done
+        .iter()
+        .filter(|c| c.talkgroup == TALKGROUP && !c.pcm.is_empty())
+        .map(|c| c.pcm.len())
+        .collect();
+    assert_eq!(heard.len(), 1, "one transmission came back as {} calls: {heard:?}", heard.len());
+}
+
 #[test]
 fn a_regrant_for_another_talkgroup_splits_the_calls() {
     // Two back-to-back transmissions on one traffic channel, granted to two
