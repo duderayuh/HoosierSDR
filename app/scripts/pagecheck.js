@@ -291,6 +291,17 @@ w.__exercise = async () => {
     w.applyUiState("hs.groups", [{ id: "g9", name: "Switched remotely", tgs: [1001], listen: true }], "far");
     if (!/Switched remotely/.test(w.document.getElementById("grpChips").textContent)) console.log("PAGE ERROR: a group switched on a remote page did not show here");
     if (uiSets.length !== n) console.log("PAGE ERROR: a change from a remote page was sent straight back");
+    // A timed avoid is shared too: without it, the other page's next
+    // lockout push would lift the avoids this machine is holding.
+    const until = Date.now() + 3600e3;
+    lockouts.length = 0;
+    w.applyUiState("hs.avoid", { 1002: until }, "far");
+    const held = lockouts.find((a) => (a.extra || []).includes(1002));
+    if (!held) console.log("PAGE ERROR: a timed avoid from the other page did not reach the radio: " + JSON.stringify(lockouts));
+    lockouts.length = 0;
+    w.document.getElementById("grpChips").querySelector(".chip") && w.applyUiState("hs.groups", [{ id: "g9", name: "Switched remotely", tgs: [1001], listen: false }], "far");
+    const still = lockouts.find((a) => a.playlist === null || a.playlist === undefined || a.playlist === "");
+    if (still && !(still.extra || []).includes(1002)) console.log("PAGE ERROR: another page's push lifted a timed avoid: " + JSON.stringify(still));
   }
   // A popup's Details button answers however many times the popup was
   // rebuilt after it opened — the route arriving rebuilds it, and a button
@@ -528,7 +539,15 @@ if (REMOTE_MODE) w.__exercise = async () => {
   if (sent.length) console.log("PAGE ERROR: a remote page sent its own settings to the radio as it opened: " + sent.join(" "));
   mutes.length = 0;
   const far = [{ id: "g1", name: "MESA ALL", tgs: [1001, 1002], listen: false }, { id: "g2", name: "Hospitals", tgs: [1002], listen: true }];
-  w.applyUiState("hs.groups", far, "far");
+  // Seeded the way the remote shim does it: everything at once, and
+  // nothing sent to the radio until it is all in place — an empty lockout
+  // pushed while the rest was still unknown is what this guards.
+  lockouts.length = 0;
+  w.seedUiState({ "hs.avoid": { 1003: Date.now() + 3600e3 }, "hs.groups": far, "hs.lockout": [1004] });
+  const partial = lockouts.filter((a) => !a.playlist).find((a) => !(a.tgs || []).includes(1004) || !(a.extra || []).includes(1003));
+  if (partial) console.log("PAGE ERROR: the radio was sent a half-seeded lockout: " + JSON.stringify(lockouts));
+  const full = lockouts.filter((a) => !a.playlist).pop();
+  if (!full || !full.tgs.includes(1004) || !(full.extra || []).includes(1003)) console.log("PAGE ERROR: the far machine's lockout and timed avoid did not reach its radio: " + JSON.stringify(full));
   const chips = w.document.getElementById("grpChips").textContent;
   if (!/MESA ALL/.test(chips) || !/Hospitals/.test(chips)) console.log("PAGE ERROR: the far machine's listen groups do not show: " + chips);
   const muted = mutes[mutes.length - 1];

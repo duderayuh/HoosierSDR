@@ -21,6 +21,15 @@ use crate::AppState;
 /// The page's storage keys that are shared (`app.js` keeps the same list).
 pub const SYNCED: &[&str] = &["hs.groups", "hs.grouprec", "hs.policy", "hs.lockout", "hs.prio", "hs.tgrules"];
 
+/// A timed avoid steers the radio like a lockout, and goes out with every
+/// lockout: a page that did not know the other's avoids would lift them.
+/// Its key names the playlist, so it is matched by its start.
+const AVOIDS: &str = "hs.avoid";
+
+fn shared(key: &str) -> bool {
+    SYNCED.contains(&key) || key == AVOIDS || key.starts_with("hs.avoid.")
+}
+
 /// A listen-group list is a few kilobytes; a value far past that is not one.
 const MAX_BYTES: usize = 512 * 1024;
 
@@ -45,7 +54,7 @@ fn with<R>(app: &AppHandle, state: &AppState, f: impl FnOnce(&mut BTreeMap<Strin
 /// Take one setting. `Ok(true)` when it changed; an unchanged value is not
 /// news, which is also what stops two pages answering each other forever.
 pub fn apply(map: &mut BTreeMap<String, Value>, key: &str, value: Value) -> Result<bool, String> {
-    if !SYNCED.contains(&key) {
+    if !shared(key) {
         return Err(format!("{key} is not a shared setting"));
     }
     if serde_json::to_string(&value).map(|s| s.len()).unwrap_or(usize::MAX) > MAX_BYTES {
@@ -68,14 +77,26 @@ pub fn ui_state_get(app: AppHandle, state: State<AppState>) -> BTreeMap<String, 
 #[tauri::command]
 pub fn ui_state_set(app: AppHandle, state: State<AppState>, key: String, value: Value, origin: String) -> Result<(), String> {
     let changed = with(&app, &state, |m| {
+        let kept = m.get(&key).cloned();
         let changed = apply(m, &key, value.clone())?;
         if changed {
             if let Some(p) = path(&app) {
                 if let Some(d) = p.parent() {
                     let _ = std::fs::create_dir_all(d);
                 }
-                std::fs::write(&p, serde_json::to_string_pretty(m).map_err(|e| e.to_string())?)
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
+                let written = serde_json::to_string_pretty(m)
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| std::fs::write(&p, t).map_err(|e| format!("{}: {e}", p.display())));
+                // Kept only if it was written. Otherwise no page is told,
+                // while this one quietly holds the new value — and sending
+                // it again would count as no change at all.
+                if let Err(e) = written {
+                    match kept {
+                        Some(v) => m.insert(key.clone(), v),
+                        None => m.remove(&key),
+                    };
+                    return Err(e);
+                }
             }
         }
         Ok::<_, String>(changed)
@@ -105,9 +126,10 @@ mod tests {
     fn only_what_steers_the_radio_is_shared() {
         let mut m = BTreeMap::new();
         assert!(apply(&mut m, "hs.theme", serde_json::json!("dark")).is_err());
+        assert_eq!(apply(&mut m, "hs.avoid.pl-1", serde_json::json!({ "10255": 1_780_000_000_i64 })), Ok(true), "a timed avoid steers the radio");
         assert!(apply(&mut m, "hs.volume", serde_json::json!(40)).is_err(), "a page's own volume stays with it");
         let huge = Value::String("x".repeat(MAX_BYTES + 1));
         assert!(apply(&mut m, "hs.policy", huge).is_err());
-        assert!(m.is_empty());
+        assert_eq!(m.len(), 1, "only the avoid was kept");
     }
 }
