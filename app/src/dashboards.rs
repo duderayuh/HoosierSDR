@@ -389,6 +389,28 @@ fn road_minutes(inc: &crate::dispatch::Incident, place_id: &str) -> Option<i64> 
         .map(|t| ((t.secs / 60.0).round() as i64).max(1))
 }
 
+/// One card per exchange on the air, however many rules summarised it.
+///
+/// A talkgroup watched by both a rule of its own and a rule covering every
+/// hospital is summarised twice, and a board showed the same report twice
+/// over — the same patient, worded slightly differently, which reads as two
+/// patients at a glance. The fullest telling is kept: the one that heard
+/// the most transmissions, and the latest of those.
+fn one_per_exchange(rows: Vec<&crate::conversations::Stored>) -> Vec<&crate::conversations::Stored> {
+    let mut best: Vec<&crate::conversations::Stored> = Vec::with_capacity(rows.len());
+    for r in rows {
+        match best.iter_mut().find(|k| k.tg == r.tg && k.first_at == r.first_at) {
+            Some(k) => {
+                if (r.calls, r.last_at, r.id) > (k.calls, k.last_at, k.id) {
+                    *k = r;
+                }
+            }
+            None => best.push(r),
+        }
+    }
+    best
+}
+
 fn place_by<'a>(places: &'a [crate::places::Place], id: &str) -> Option<&'a crate::places::Place> {
     places.iter().find(|p| p.id == id)
 }
@@ -699,8 +721,9 @@ pub fn render_with_cases(
                 let p = place_by(places, &pane.place);
                 let tgs: std::collections::HashSet<u16> =
                     p.map(|p| p.tgs.iter().copied().collect()).unwrap_or_default();
-                let mut rows: Vec<&crate::conversations::Stored> =
+                let rows: Vec<&crate::conversations::Stored> =
                     reports.iter().filter(|r| tgs.contains(&r.tg)).collect();
+                let mut rows = one_per_exchange(rows);
                 rows.sort_by_key(|r| std::cmp::Reverse(r.last_at));
                 let total = rows.len();
                 (
@@ -1549,10 +1572,18 @@ mod render_tests {
             place: "p-meth".into(),
             ..Pane::default()
         };
-        let out = render(&board(vec![p]), &[], &rows, &places(), 1_000);
+        let out = render(&board(vec![p.clone()]), &[], &rows, &places(), 1_000);
         let cards = &out.panes[0].cards;
         assert_eq!(cards.len(), 1, "only Methodist's talkgroup");
         assert_eq!(cards[0].id, 1);
+        // The same exchange summarised by a second rule is the same report.
+        let mut again = stored(3, 10256, "Inbound. The ETA is 15 minutes, said again.");
+        again.calls = 4;
+        let twice = vec![rows[0].clone(), rows[1].clone(), again];
+        let out2 = render(&board(vec![p.clone()]), &[], &twice, &places(), 1_000);
+        assert_eq!(out2.panes[0].cards.len(), 1, "one report, one card");
+        assert_eq!(out2.panes[0].cards[0].id, 3, "the telling that heard the most");
+        assert_eq!(out2.panes[0].total, 1, "and it is counted once");
         assert_eq!(cards[0].eta.as_deref(), Some("ETA is 15 minutes"));
         assert_eq!(out.panes[0].sub, "Methodist");
     }
