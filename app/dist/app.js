@@ -334,6 +334,10 @@ const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d;
 // same list): saved here, it is sent there, and a change from the other page
 // arrives as `ui_state` and is applied by `applyUiState`.
 const SYNCED = ["hs.groups", "hs.grouprec", "hs.policy", "hs.lockout", "hs.prio", "hs.tgrules"];
+// A timed avoid steers the radio as much as a lockout does, and it is sent
+// with every lockout push: a page that did not know about the other's
+// avoids would lift them the moment it pushed. Its key is per playlist.
+const isSynced = (k) => SYNCED.includes(k) || k === "hs.avoid" || k.startsWith("hs.avoid.");
 const UI_ORIGIN = Math.random().toString(36).slice(2);
 const REMOTE = !!window.__HS_REMOTE__;
 // Set while a change from the other page is applied, so applying it does not
@@ -341,12 +345,18 @@ const REMOTE = !!window.__HS_REMOTE__;
 // first come back to undo the second.
 let applyingUiState = false;
 const save = (k, v) => {
-  localStorage.setItem(k, JSON.stringify(v));
-  if (TAURI && SYNCED.includes(k) && !applyingUiState) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`));
+  const was = localStorage.getItem(k), now = JSON.stringify(v);
+  localStorage.setItem(k, now);
+  // Only a change is news: avoids are written out on every lockout push,
+  // and the sweeper touches them every few seconds.
+  if (TAURI && isSynced(k) && !applyingUiState && was !== now) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`));
 };
 // The window on this machine is where these settings have always lived:
 // it hands them over as it opens, so a remote page finds them.
-if (TAURI && !REMOTE) for (const k of SYNCED) { const v = store(k, null); if (v !== null) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`)); }
+if (TAURI && !REMOTE) {
+  const mine = [...SYNCED, ...Object.keys(localStorage).filter((k) => k === "hs.avoid" || k.startsWith("hs.avoid."))];
+  for (const k of mine) { const v = store(k, null); if (v !== null) invoke("ui_state_set", { key: k, value: v, origin: UI_ORIGIN }).catch((e) => log(`ui_state_set: ${e}`)); }
+}
 
 /* ---------- theme ---------- */
 // [id, label, swatch colour]. The seasonal ones are picked by hand, not by
@@ -3479,11 +3489,24 @@ $("help").onclick = obOpen;
 setTimeout(() => { if (!store("hs.onboarded", false)) obOpen(); }, 700);
 
 /* ---------- shared settings: a change made on the other page ---------- */
-window.applyUiState = (key, value, origin) => {
-  if (origin === UI_ORIGIN || !SYNCED.includes(key)) return;
+window.applyUiState = (key, value, origin, hold) => {
+  if (origin === UI_ORIGIN || !isSynced(key)) return;
   applyingUiState = true;
+  // Seeding a page takes every setting at once: nothing is sent to the
+  // radio until they are all in place, or the first would go with the rest
+  // still empty — and an empty lockout, landing last, is what this is for.
+  const push = hold ? () => {} : (f) => f();
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    if (key === "hs.avoid" || key.startsWith("hs.avoid.")) {
+      const pl = key === "hs.avoid" ? "" : key.slice("hs.avoid.".length);
+      const f = filtFor(pl);
+      f.avoid.clear();
+      for (const [tg, until] of Object.entries(value || {})) f.avoid.set(+tg, +until);
+      renderLockout();
+      push(() => pushLockout(pl));
+      return;
+    }
     // Each is put in place and sent to the radio again: for the page that
     // made the change that is a repeat, and for a remote page that has just
     // connected it is the first time its view and the radio agree.
@@ -3491,29 +3514,44 @@ window.applyUiState = (key, value, origin) => {
       case "hs.groups":
         groups.splice(0, groups.length, ...(Array.isArray(value) ? value : []));
         renderGroupChips(); if (typeof renderGroupList === "function") renderGroupList();
-        pushMuted(); pushLockout();
+        push(() => { pushMuted(); pushLockout(); });
         break;
       case "hs.grouprec":
         if ($("grpKeepRec")) $("grpKeepRec").checked = value === true;
-        renderGroupChips(); pushLockout(); pushMuted();
+        renderGroupChips(); push(() => { pushLockout(); pushMuted(); });
         break;
       case "hs.policy":
         for (const k of POLICIES) if (value && value[k]) policy[k] = value[k];
         POLICIES.forEach((k) => { const sel = $("pol" + k[0].toUpperCase() + k.slice(1)); if (sel) sel.value = policy[k].all ? "all" : "none"; });
-        pushPolicies();
+        push(() => { pushPolicies(); if (typeof alRender === "function") alRender(); });
         break;
       case "hs.lockout":
       case "hs.prio":
         filt.delete(""); filtFor(""); renderLockout();
-        pushLockout(""); pushPriorities("");
+        push(() => { pushLockout(""); pushPriorities(""); });
         break;
       case "hs.tgrules":
         tgRules.splice(0, tgRules.length, ...(Array.isArray(value) ? value : []));
         if (typeof renderRules === "function") renderRules();
-        pushRanges();
+        push(() => pushRanges());
         break;
     }
   } finally { applyingUiState = false; }
+};
+
+// Everything the other machine has, taken in one go: put in place first,
+// then sent to the radio once, so nothing goes with the rest still empty.
+window.seedUiState = (shared) => {
+  for (const [k, v] of Object.entries(shared || {})) {
+    try { window.applyUiState(k, v, "far", true); } catch (e) { log(`ui_state ${k}: ${e}`); }
+  }
+  // Sending them on is not a change of this page's own: pushing a lockout
+  // writes the avoids back out, and that must not travel as news.
+  applyingUiState = true;
+  try {
+    pushMuted(); pushLockout(); pushPriorities(); pushPolicies(); pushRanges();
+  } finally { applyingUiState = false; }
+  if (typeof alRender === "function") alRender();
 };
 if (listen) listen("ui_state", (e) => { const p = e.payload || {}; window.applyUiState(p.key, p.value, p.origin); });
 

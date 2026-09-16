@@ -118,20 +118,9 @@ fn overview(r: &Stored, incident: Option<&crate::dispatch::Incident>) -> String 
 
 /// Build the archive. `combine` joins the recordings into one clip (the
 /// app's own `combine_clips`); `None` from it leaves the joined clip out.
-pub fn build(
-    c: &Connection,
-    r: &Stored,
-    combine: &dyn Fn(&[String]) -> Option<(std::path::PathBuf, bool)>,
-) -> Result<Archive, String> {
-    let incident_id: Option<i64> = c
-        .query_row("SELECT incident FROM conversations WHERE id = ?1", [r.id], |row| row.get(0))
-        .optional()
-        .map_err(|e| e.to_string())?
-        .flatten();
-    let incident = match incident_id {
-        Some(id) => crate::dispatch::inc_get(c, id)?,
-        None => None,
-    };
+pub fn build(h: &Held, combine: &dyn Fn(&[String]) -> Option<(std::path::PathBuf, bool)>) -> Result<Archive, String> {
+    let (r, incident) = (&h.row, &h.incident);
+    let incident_id = incident.as_ref().map(|i| i.id);
 
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     // Every file dated when the conversation began, rather than 1980.
@@ -172,7 +161,7 @@ pub fn build(
     put(&mut zip, "prompt.txt", r.prompt.as_bytes(), text)?;
     let record = serde_json::to_vec_pretty(r).map_err(|e| e.to_string())?;
     put(&mut zip, "conversation.json", &record, text)?;
-    if let Some(i) = &incident {
+    if let Some(i) = incident {
         put(&mut zip, "incident.json", &serde_json::to_vec_pretty(i).map_err(|e| e.to_string())?, text)?;
     }
 
@@ -199,16 +188,41 @@ pub fn build(
     Ok(Archive { name: file_name(r), bytes })
 }
 
-/// The archive for a conversation in the library.
-pub fn archive(c: &Connection, id: i64) -> Result<Archive, String> {
-    let r = crate::conversations::stored_with_names(c, id)?;
-    build(c, &r, &|files| crate::alerts::combine_clips(files, &format!("conv_export_{id}")).ok())
+/// Everything the library holds about a conversation, read in one go. The
+/// archive is then put together — clips read, joined through ffmpeg, the
+/// whole thing deflated — with the library's lock let go, since every live
+/// path (dispatch, cases, tripwires) waits on it.
+pub struct Held {
+    pub row: Stored,
+    pub incident: Option<crate::dispatch::Incident>,
+}
+
+pub fn hold(c: &Connection, id: i64) -> Result<Held, String> {
+    let row = crate::conversations::stored_with_names(c, id)?;
+    let incident_id: Option<i64> = c
+        .query_row("SELECT incident FROM conversations WHERE id = ?1", [id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let incident = match incident_id {
+        Some(id) => crate::dispatch::inc_get(c, id)?,
+        None => None,
+    };
+    Ok(Held { row, incident })
+}
+
+/// The archive for a conversation in the library, with the clips joined by
+/// the app's own encoder.
+pub fn archive(held: &Held) -> Result<Archive, String> {
+    let id = held.row.id;
+    build(held, &|files| crate::alerts::combine_clips(files, &format!("conv_export_{id}")).ok())
 }
 
 /// Save a conversation's archive in the Downloads folder; the path it went to.
 #[tauri::command]
 pub fn conversation_export(state: tauri::State<crate::AppState>, id: i64) -> Result<String, String> {
-    let a = crate::with_db(&state, |c| archive(c, id))?;
+    let held = crate::with_db(&state, |c| hold(c, id))?;
+    let a = archive(&held)?;
     let dir = std::path::PathBuf::from(crate::shellexpand_home("~/Downloads"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut path = dir.join(&a.name);
@@ -286,7 +300,7 @@ mod tests {
     fn real_library() {
         let c = Connection::open(std::env::var("HS_EXPORT_DB").unwrap()).unwrap();
         let id: i64 = c.query_row("SELECT id FROM conversations WHERE calls > 2 ORDER BY last_at DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        let a = archive(&c, id).unwrap();
+        let a = archive(&hold(&c, id).unwrap()).unwrap();
         let out = std::path::PathBuf::from(std::env::var("HS_EXPORT_OUT").unwrap()).join(&a.name);
         std::fs::write(&out, &a.bytes).unwrap();
         println!("{} ({} bytes)", out.display(), a.bytes.len());
@@ -301,7 +315,8 @@ mod tests {
         let r = row(&dir);
         let joined = dir.join("joined.mp3");
         let asked = std::cell::RefCell::new(Vec::new());
-        let a = build(&c, &r, &|files| {
+        let held = Held { row: r.clone(), incident: None };
+        let a = build(&held, &|files| {
             asked.borrow_mut().extend(files.iter().cloned());
             std::fs::write(&joined, b"JOINED").unwrap();
             Some((joined.clone(), true))

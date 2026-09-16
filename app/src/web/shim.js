@@ -169,7 +169,9 @@
     // for it, rather than this browser's own empty storage.
     try {
       const shared = await post("ui_state_get", {});
-      if (typeof window.applyUiState === "function") for (const [k, v] of Object.entries(shared || {})) { try { window.applyUiState(k, v, "far"); } catch (e) { console.error("[hs] ui_state:", e); } }
+      // In one go: each setting is put in place before any of them is sent
+      // back, so the radio never hears this page's empty ones.
+      if (typeof window.seedUiState === "function") window.seedUiState(shared);
     } catch (e) { console.error("[hs] ui_state_get:", e); }
     // Catch up with the run in progress, then follow it live. The page's
     // own `applySnapshot` (app.js) sets the controls; the replayed frames

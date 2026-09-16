@@ -646,7 +646,10 @@ async fn conversation_export(State(st): State<Arc<WebState>>, _auth: Auth, Path(
     let app = st.app.clone();
     let built = tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        crate::with_db(&state, |c| crate::convexport::archive(c, id))
+        // The library is read under its lock; the archive is put together
+        // with the lock let go, since the live paths wait on it.
+        let held = crate::with_db(&state, |c| crate::convexport::hold(c, id))?;
+        crate::convexport::archive(&held)
     })
     .await;
     match built {
@@ -658,7 +661,9 @@ async fn conversation_export(State(st): State<Arc<WebState>>, _auth: Auth, Path(
             a.bytes,
         )
             .into_response(),
-        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        // Only a conversation that is not there is a 404; anything else
+        // went wrong here, and a caller should be able to tell them apart.
+        Ok(Err(e)) => (if e.contains("is gone") { StatusCode::NOT_FOUND } else { StatusCode::INTERNAL_SERVER_ERROR }, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
