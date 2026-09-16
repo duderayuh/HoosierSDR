@@ -218,6 +218,9 @@ impl Conditions {
 /// the tail of the one before it rather than one of its own: three voice
 /// frames, 180 ms each.
 const TRAILING_SECS: f64 = 0.6;
+/// How long after a transmission ends the channel goes on being announced,
+/// its updates opening calls that hear nothing.
+const HANGTIME_SECS: f64 = 5.0;
 /// How long after a transmission such a scrap still counts as its tail.
 const TRAILING_GAP_SECS: f64 = 1.0;
 
@@ -391,6 +394,13 @@ pub struct Call {
     /// transmission that happened either carries audio, or locked onto the
     /// channel and decoded it badly, or names the radio that keyed. An
     /// encrypted call carries no audio by design and is never marked.
+    ///
+    /// With one addition: a frame sync is not evidence of a transmission
+    /// when the channel carried one moments ago. The re-announcement opens
+    /// while the last transmission's own frames are still going by, so it
+    /// locks on, hears no voice, and looks like a transmission that decoded
+    /// badly. Nineteen calls in every hundred were these, and 95% of them
+    /// opened within five seconds of a call ending on that very frequency.
     pub announced_only: bool,
     /// Talkgroups patched to this one; audio may be shared with them.
     pub patched_with: Vec<u16>,
@@ -622,6 +632,9 @@ pub struct TrunkFollower {
     affiliations: hs_trunk::AffiliationTable,
     /// Seconds of IQ processed, the clock affiliations are stamped with.
     elapsed_secs: f64,
+    /// When the last call on each frequency was retired, on the follower's
+    /// own clock: what tells a re-announcement from a transmission.
+    last_end: std::collections::HashMap<u64, f64>,
     /// Channels last granted encrypted; see [`EncryptedChannels`].
     encrypted_channels: EncryptedChannels,
 }
@@ -748,6 +761,7 @@ impl TrunkFollower {
             priority_ranges: Vec::new(),
             affiliations: hs_trunk::AffiliationTable::new(),
             elapsed_secs: 0.0,
+            last_end: std::collections::HashMap::new(),
             encrypted_channels: EncryptedChannels::default(),
         }
     }
@@ -1196,6 +1210,15 @@ impl TrunkFollower {
         };
         let lc_c4 = &c.c4fm.diagnostics().link_control;
         let lc_cq = &c.cqpsk.diagnostics().link_control;
+        // Did this call open while the frequency was still finishing the
+        // one before it? Then a frame sync says nothing about anybody keying
+        // up, and silence here is the system talking to itself.
+        let opened_at = self.elapsed_secs - c.age;
+        let in_hangtime = self
+            .last_end
+            .get(&c.freq_hz)
+            .is_some_and(|end| (0.0..=HANGTIME_SECS).contains(&(opened_at - end)));
+        self.last_end.insert(c.freq_hz, self.elapsed_secs);
         let segments = core::mem::take(&mut c.done);
         let calls: Vec<Call> = segments
             .into_iter()
@@ -1279,9 +1302,8 @@ impl TrunkFollower {
                 Call {
                     announced_only: pcm.is_empty()
                         && !encrypted
-                        && s.syncs_c4fm == 0
-                        && s.syncs_cqpsk == 0
-                        && source_unit == 0,
+                        && source_unit == 0
+                        && (in_hangtime || s.syncs_c4fm == 0 && s.syncs_cqpsk == 0),
                     syncs_c4fm: s.syncs_c4fm,
                     syncs_cqpsk: s.syncs_cqpsk,
                     started_after_secs: s.start_age,
@@ -2307,6 +2329,41 @@ mod priority_tests {
         let silent = f.retire(c);
         assert_eq!(silent.len(), 1);
         assert!(silent[0].pcm.is_empty());
+    }
+
+    /// The channel goes on being announced for a few seconds after a
+    /// transmission ends, and each announcement opens a call that locks onto
+    /// the frames still going by and hears nothing. Nineteen rows in every
+    /// hundred were these — silent, nameless, and shown in a hospital
+    /// conversation as the hospital saying nothing at all.
+    #[test]
+    fn the_channel_still_ringing_is_not_a_transmission() {
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 4;
+        let c = f.band.active.remove(0);
+        let heard = f.retire(c);
+        assert!(!heard[0].announced_only, "somebody talked");
+
+        // A moment later the system announces the same channel again. It
+        // locks on — the last transmission's frames are still arriving — but
+        // nobody is keying.
+        f.elapsed_secs += 2.0;
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().syncs_c4fm = 3;
+        let c = f.band.active.remove(0);
+        let ghost = f.retire(c);
+        assert!(ghost[0].announced_only, "the system talking to itself is not a transmission");
+
+        // Half a minute on, the same silence is a transmission this receiver
+        // failed to decode, and is kept as the evidence it is.
+        f.elapsed_secs += 30.0;
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().syncs_c4fm = 3;
+        let c = f.band.active.remove(0);
+        let lost = f.retire(c);
+        assert!(!lost[0].announced_only, "a silence of its own is not the system's doing");
     }
 
     /// The reply's own Link Control names the radio that spoke, even when
