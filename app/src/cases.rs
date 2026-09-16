@@ -50,7 +50,12 @@ pub const LIVE_WINDOW_SECS: i64 = 6 * 3600;
 pub const PAIR_SECS: i64 = 20;
 /// A case is open to ops-channel events from a little before its dispatch
 /// until this long after, unless it ended.
-pub const OPEN_SECS: i64 = 90 * 60;
+///
+/// An hour, measured: across the library every event a crew or dispatcher
+/// actually said about an arrest — the upgrade, ROSC, transporting, efforts
+/// ceased — arrived within 34 minutes of the page. The two later than that
+/// were both misreads, an hour and more after a run that was long over.
+pub const OPEN_SECS: i64 = 60 * 60;
 /// A page that forked a run (a mis-heard house number) is the same case when
 /// it names the same street within this.
 pub const FORK_SECS: i64 = 20 * 60;
@@ -61,6 +66,8 @@ pub const INFER_SECS: i64 = 45 * 60;
 /// A readback is at most this many words, or this many without a time.
 const READBACK_WORDS: usize = 9;
 const READBACK_WORDS_UNTIMED: usize = 6;
+/// Words that make a transmission talk rather than a status: see `classify`.
+const TALKING: &[&str] = &["i", "im", "ive", "id", "ill", "you", "your", "youre", "we", "us", "our", "me", "my"];
 
 // ---------------------------------------------------------------------------
 // profiles
@@ -369,6 +376,15 @@ pub fn classify(text: &str, console: bool, call_minute: i64, p: &Profile) -> Opt
     let clock = spoken_clock(text, call_minute);
     let timed = clock.is_some() || ends_with_number(text);
     let readback_shape = console && (w.len() <= READBACK_WORDS && timed || w.len() <= READBACK_WORDS_UNTIMED);
+    // A status logged on the air is about a run, not about the people on it:
+    // "Working Arrest 1748", "rosc 1914", "Ceasing efforts 2326". A word
+    // like "working" inside a sentence with an *I* or a *you* in it is the
+    // dispatcher talking, and read as a status it has paged a working arrest
+    // off "I'm working on that" and off "There you are. Working for you.",
+    // each of them most of an hour into a run that was already over. Across
+    // the library every status a console logged was said without one of
+    // these; every transmission carrying one was talk.
+    let talking = w.iter().any(|x| TALKING.contains(&x.as_str()));
     if console && !readback_shape {
         // A console saying a long sentence is relaying or asking, not
         // logging a status.
@@ -378,7 +394,7 @@ pub fn classify(text: &str, console: bool, call_minute: i64, p: &Profile) -> Opt
         let said = r.phrases.iter().any(|ph| phrase_at(&w, ph).is_some());
         // A readback word carries its meaning by the shape alone, so it must
         // be the word: "clearing" is not "ceasing".
-        let shape = readback_shape && r.readback.iter().any(|ph| w.iter().any(|x| x == ph));
+        let shape = readback_shape && !talking && r.readback.iter().any(|ph| w.iter().any(|x| x == ph));
         if said || shape {
             return Some(Heard {
                 kind: r.kind.clone(),
@@ -607,10 +623,15 @@ pub fn place(e: &OpsEvent, runs: &[Run], open: &dyn Fn(&Run) -> bool, vocab: &Ha
     let crew = e.answers.as_ref().unwrap_or(&e.call);
     let near = |r: &&Run| r.at <= e.call.at + 5 * 60 && e.call.at - r.at <= OPEN_SECS;
 
-    // The dispatch map attached the call to a run.
+    // The dispatch map attached the call to a run — and that run is still
+    // open to what is said about it. The map goes on attaching traffic to a
+    // run for as long as a unit is on the air about it, which is right for a
+    // map; an hour on, it is no longer this arrest's story, and taken as one
+    // it has paged a working arrest 82 minutes after the page off a
+    // dispatcher saying "I'm working on that".
     for c in [&e.call, crew] {
         if let Some(id) = c.incident {
-            if runs.iter().any(|r| r.incident == id) {
+            if runs.iter().any(|r| r.incident == id && near(&r)) {
                 return Placed::Run { incident: id, how: "attached to this run by the dispatch map".into(), inferred: false };
             }
         }
@@ -1702,6 +1723,26 @@ mod tests {
         assert_eq!(kind("Not in arrest 12-04.", true, 12 * 60 + 4), Some(("downgrade".into(), Source::Readback, Some(12 * 60 + 4))));
     }
 
+    /// Every one of these paged a working arrest, or would have: the word
+    /// was there, the transmission was short, and the console said it — but
+    /// it was the dispatcher talking to somebody, not logging a status.
+    #[test]
+    fn a_console_talking_is_not_logging_a_status() {
+        assert_eq!(kind("I'm working on that.", true, 16 * 60 + 2), None);
+        assert_eq!(kind("There you are. Working for you.", true, 14 * 60 + 40), None);
+        assert_eq!(kind("Working our SMC7.", true, 9 * 60), None);
+        assert_eq!(kind("You can advise on the arrest.", true, 9 * 60), None);
+        // The status logs themselves are untouched, misheard or not.
+        assert_eq!(kind("Working Arrest 1748.", true, 17 * 60 + 48).map(|k| k.0), Some("working".into()));
+        assert_eq!(kind("rosc 1914", true, 19 * 60 + 14).map(|k| k.0), Some("rosc".into()));
+        assert_eq!(kind("Ceasing efforts 2326.", true, 23 * 60 + 26).map(|k| k.0), Some("terminated".into()));
+        assert_eq!(kind("Oregon arrest 1157.", true, 11 * 60 + 57).map(|k| k.0), Some("working".into()));
+        // And a crew speaks in the first person: "we have pulses" is ROSC
+        // however it is worded, because the words themselves say it.
+        assert_eq!(kind("Control, Medic 7, we have pulses.", false, 0).map(|k| k.0), Some("rosc".into()));
+        assert_eq!(kind("We are transporting to Example General.", false, 0).map(|k| k.0), Some("transporting".into()));
+    }
+
     #[test]
     fn talk_about_an_arrest_is_not_an_arrest_event() {
         assert_eq!(kind("Can you add us to that cardiac arrest with Ladder 27? Keep them on the run.", false, 0), None);
@@ -1967,9 +2008,52 @@ mod tests {
         let tactical: HashSet<u16> = [2].into();
         let prof = p();
         rebuild(&c, &Inputs { profile: &prof, tactical_tgs: &tactical }, t0 - 60, t0 + 3600).unwrap();
-        let v = list(&c, 0, &crate::places::Settings::default(), t0 + 3600);
+        let v = list(&c, 0, &crate::places::Settings::default(), t0 + 2 * 3600);
         let lines: Vec<(&str, &str)> = v.cases[0].lines.iter().map(|l| (l.kind.as_str(), l.label.as_str())).collect();
         assert_eq!(lines, vec![("dispatched", "Dispatched as a working arrest")], "the second half of a page is not a repage");
+    }
+
+    /// A run is closed to what is said about it after an hour. The dispatch
+    /// map keeps attaching later traffic to a run — a unit still on the air
+    /// about it — and that is right for the map, but an hour on it is no
+    /// longer this arrest's story: it paged a working arrest 82 minutes
+    /// after a page, off a dispatcher saying "I'm working on that".
+    #[test]
+    fn a_status_attached_an_hour_later_is_not_this_runs() {
+        let c = Connection::open_in_memory().unwrap();
+        crate::dispatch::ensure_schema(&c);
+        c.execute_batch(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER, tg_name TEXT, unit INTEGER, unit_name TEXT,
+               transcript TEXT, transcript_edited TEXT, system TEXT NOT NULL DEFAULT '');
+             CREATE TABLE conversations (id INTEGER PRIMARY KEY, incident INTEGER);",
+        )
+        .unwrap();
+        crate::radios::ensure_schema(&c);
+        ensure_schema(&c);
+        let t0 = 1_000_000;
+        let late = t0 + 70 * 60;
+        c.execute_batch(&format!(
+            "INSERT INTO incidents (id, created, updated, tg, call_type, address, address_key, units) VALUES
+               (1, {t0}, {late}, 1, 'Cardiac Arrest', '1200 Example St', '1200 example street', '[\"Engine 5\"]');
+             INSERT INTO calls (id, start, secs, tg, unit, transcript) VALUES
+               (1, {t0}, 5, 1, 900900, 'Engine 5, 1200 Example St, Cardiac Arrest. 1200 Hours, Location 1 North'),
+               (2, {late}, 2, 2, 900001, 'Working Arrest 1310');
+             INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 1, {t0}, 1, 'dispatch'), (1, 2, {late}, 2, 'tactical');
+             INSERT INTO radio_evidence (system, radio, callsign, role, how, call, at, weight) VALUES
+               ('', 900001, '', 'console', 'from_control', 101, 1, 1), ('', 900001, '', 'console', 'from_control', 102, 1, 1), ('', 900001, '', 'console', 'from_control', 103, 1, 1);",
+        ))
+        .unwrap();
+        let tactical: HashSet<u16> = [2].into();
+        let prof = p();
+        rebuild(&c, &Inputs { profile: &prof, tactical_tgs: &tactical }, t0 - 60, late + 3600).unwrap();
+        let v = list(&c, 0, &crate::places::Settings::default(), late + 3600);
+        assert_eq!(
+            v.cases[0].lines.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(),
+            vec!["dispatched"],
+            "the run had been quiet for over an hour: {:?}",
+            v.cases[0].lines.iter().map(|l| (l.at - t0, l.kind.clone())).collect::<Vec<_>>()
+        );
+        assert_eq!(v.unplaced.len(), 1, "it is kept as heard, not thrown away: {:?}", v.unplaced);
     }
 
     #[test]
@@ -2008,10 +2092,10 @@ mod tests {
         let tactical: HashSet<u16> = [2].into();
         let prof = p();
         let inp = Inputs { profile: &prof, tactical_tgs: &tactical };
-        let b = rebuild(&c, &inp, t0 - 60, t0 + 3600).unwrap();
+        let b = rebuild(&c, &inp, t0 - 60, t0 + 2 * 3600).unwrap();
         // One case: run 2 is run 1's street, repaged.
         assert_eq!(b.cases, 1, "{b:?}");
-        let again = rebuild(&c, &inp, t0 - 60, t0 + 3600).unwrap();
+        let again = rebuild(&c, &inp, t0 - 60, t0 + 2 * 3600).unwrap();
         assert_eq!(again, b, "a rebuild is repeatable");
         // A case left from an earlier build for a run that is not one now
         // goes, events and all.
@@ -2021,11 +2105,11 @@ mod tests {
             prof.id, prof.id
         ))
         .unwrap();
-        rebuild(&c, &inp, t0 - 60, t0 + 3600).unwrap();
+        rebuild(&c, &inp, t0 - 60, t0 + 2 * 3600).unwrap();
         let left: i64 = c.query_row("SELECT COUNT(*) FROM cases WHERE id = 99", [], |r| r.get(0)).unwrap();
         let events: i64 = c.query_row("SELECT COUNT(*) FROM case_events WHERE case_id = 99", [], |r| r.get(0)).unwrap();
         assert_eq!((left, events), (0, 0));
-        let v = list(&c, 0, &crate::places::Settings::default(), t0 + 3600);
+        let v = list(&c, 0, &crate::places::Settings::default(), t0 + 2 * 3600);
         assert_eq!(v.cases.len(), 1);
         let kinds: Vec<(&str, &str)> = v.cases[0].lines.iter().map(|l| (l.kind.as_str(), l.source.as_str())).collect();
         assert_eq!(
@@ -2036,6 +2120,9 @@ mod tests {
         assert_eq!(v.cases[0].state, "arrived");
         assert!(v.cases[0].lines[3].inferred);
         // A crew at a hospital naming no run is not listed as unplaced.
+        // The status logged an hour and a quarter on is: by then this run
+        // has been closed to what is said about it, so it is kept as heard
+        // rather than paged as an upgrade to a run that was over.
         assert_eq!(v.unplaced.len(), 1, "{:?}", v.unplaced);
         assert_eq!(v.unplaced[0].kind, "terminated");
     }
