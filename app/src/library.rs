@@ -50,6 +50,11 @@ pub struct CallRow {
     pub level_dbfs: Option<f32>,
     pub echo_frac: Option<f32>,
     pub echo_spread_us: Option<f32>,
+    /// When nothing named the radio: a link-control word that did, refused
+    /// because it named another talkgroup — and which one. On a regrouped
+    /// talkgroup that is the supergroup the channel is carrying.
+    pub lc_other_tg: Option<u16>,
+    pub lc_other_unit: Option<u32>,
     /// Radio-stream blocks dropped while the call was up (holes in it).
     pub dropped_blocks: u64,
     /// Tripwires that fired about this call (filled when rows are handed to
@@ -124,6 +129,8 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
         ("encrypted", "INTEGER NOT NULL DEFAULT 0"),
         ("poor_frames", "INTEGER NOT NULL DEFAULT 0"),
         ("level_dbfs", "REAL"),
+        ("lc_other_tg", "INTEGER"),
+        ("lc_other_unit", "INTEGER"),
         ("echo_frac", "REAL"),
         ("echo_spread_us", "REAL"),
         ("dropped_blocks", "INTEGER NOT NULL DEFAULT 0"),
@@ -169,8 +176,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
         None => None,
     };
     c.execute(
-        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             r.start,
             r.secs,
@@ -194,6 +201,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
             r.level_dbfs,
             r.echo_frac,
             r.echo_spread_us,
+            r.lc_other_tg,
+            r.lc_other_unit,
         ],
     )
     .map_err(|e| format!("insert call: {e}"))?;
@@ -217,7 +226,7 @@ pub struct Query {
     pub after_id: Option<i64>,
 }
 
-const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us";
+const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     let patched: String = r.get(10)?;
@@ -254,6 +263,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         level_dbfs: r.get(25)?,
         echo_frac: r.get(26)?,
         echo_spread_us: r.get(27)?,
+        lc_other_tg: r.get(28)?,
+        lc_other_unit: r.get(29)?,
         fired: Vec::new(),
         learned: None,
     })
@@ -730,6 +741,12 @@ mod tests {
         assert_eq!(back.level_dbfs, Some(-42.5));
         assert_eq!(back.echo_frac, Some(0.013));
         assert_eq!(back.echo_spread_us, Some(46.0));
+        let mut r = call(&d, 10204, "Ops", 2.0, 1_700_000_200);
+        r.lc_other_tg = Some(64100);
+        r.lc_other_unit = Some(4917041);
+        let id = insert(&c, &r).unwrap();
+        let back = get(&c, id).unwrap().unwrap();
+        assert_eq!((back.lc_other_tg, back.lc_other_unit), (Some(64100), Some(4917041)), "what the refused word named");
         // A call from a path with nothing to measure says so, rather than
         // reading as a perfectly quiet channel with no echo.
         let plain = insert(&c, &call(&d, 10204, "Ops", 1.0, 1_700_000_100)).unwrap();
