@@ -83,7 +83,13 @@ pub fn build_tdu(nac: u16) -> Vec<u8> {
 /// Build a complete LDU1 stream carrying the given nine IMBE frames.
 /// Link-control bits are zeroed (v1 does not decode LC).
 pub fn build_ldu1(nac: u16, imbe: &[ImbeFrame; 9]) -> Vec<u8> {
-    build_ldu(nac, 0x5, imbe, None)
+    build_ldu(nac, 0x5, imbe, None, None)
+}
+
+/// An LDU1 that also names its call, the way a radio does: a fully coded
+/// Link Control Word in the slots between the voice frames.
+pub fn build_ldu1_lc(nac: u16, imbe: &[ImbeFrame; 9], lcw: &crate::lc::Lcw) -> Vec<u8> {
+    build_ldu(nac, 0x5, imbe, None, Some(lcw.clone()))
 }
 
 /// An LDU2 carrying `imbe` and a fully coded Encryption Sync (`ess`, or a
@@ -94,10 +100,10 @@ pub fn build_ldu2(nac: u16, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::Ess>)
         algid: crate::ess::ALGID_CLEAR,
         kid: 0,
     });
-    build_ldu(nac, 0xA, imbe, Some(ess))
+    build_ldu(nac, 0xA, imbe, Some(ess), None)
 }
 
-fn build_ldu(nac: u16, duid: u8, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::Ess>) -> Vec<u8> {
+fn build_ldu(nac: u16, duid: u8, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::Ess>, lcw: Option<crate::lc::Lcw>) -> Vec<u8> {
     let codec = NidCodec::new();
     let mut frame = sync_dibits();
     let nid = codec.encode(nac, duid);
@@ -111,6 +117,9 @@ fn build_ldu(nac: u16, duid: u8, imbe: &[ImbeFrame; 9], ess: Option<crate::ess::
     }
     if let Some(e) = ess {
         crate::ess::write_ess(&mut payload, &e);
+    }
+    if let Some(l) = lcw {
+        crate::lc::write_lcw(&mut payload, &l);
     }
     frame.extend(bits_to_dibits(&payload));
     insert_status(&frame)

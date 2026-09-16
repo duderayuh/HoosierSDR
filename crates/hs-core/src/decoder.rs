@@ -579,10 +579,23 @@ impl ChannelDecoder {
                     self.diag.lc_raw.push(raw);
                 }
             }
-            FramerEvent::LinkControl { lcw, .. } => {
+            FramerEvent::LinkControl { lcw, checked, .. } => {
                 // A voice channel naming its own call: this is what lets a
                 // traffic channel be identified without the control channel.
-                if let Some((tg, src)) = self.lc_confirm.observe(&lcw) {
+                // A word its Reed–Solomon parity vouched for stands on the
+                // first hearing; anything else waits to be heard twice, which
+                // a two-second transmission may never manage.
+                if checked {
+                    self.diag.lc_checked += 1;
+                } else {
+                    self.diag.lc_unchecked += 1;
+                }
+                let confirmed = if checked {
+                    self.lc_confirm.observe_checked(&lcw)
+                } else {
+                    self.lc_confirm.observe(&lcw)
+                };
+                if let Some((tg, src)) = confirmed {
                     self.diag.link_control.push(crate::diag::LcStat {
                         talkgroup: tg,
                         source_unit: src,

@@ -66,6 +66,31 @@ fn tsdu_roundtrip_through_framer() {
     assert_eq!(grants, 1);
 }
 
+/// One LDU1 is 180 ms of speech. Before the Reed-Solomon layer was decoded
+/// a radio had to be heard in two of them to be named at all, so the short
+/// transmissions that make up most of a busy ops channel — an acknowledgement,
+/// a "thank you" — arrived anonymous.
+#[test]
+fn one_frame_is_enough_to_name_the_radio() {
+    let lcw = hs_p25::lc::Lcw {
+        protected: false,
+        lco: hs_p25::lc::Lcw::LCO_GROUP_VOICE_USER,
+        mfid: 0,
+        args: [0, 0, 0x27, 0xDC, 0x00, 0x2B, 0x0F],
+    };
+    let frames: [ImbeFrame; 9] = [[[1u8; 23]; 8]; 9];
+    let stream = hs_p25::synth::build_ldu1_lc(0x293, &frames, &lcw);
+    let events = run(&stream);
+    let named: Vec<(u16, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            FramerEvent::LinkControl { lcw, checked: true, .. } => lcw.group_voice_user(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named, vec![(0x27DC, 0x2B0F)], "one frame named nobody: {events:?}");
+}
+
 #[test]
 fn ldu1_voice_frames_roundtrip_through_framer() {
     // Distinct bit patterns per frame across the valid codeword positions.

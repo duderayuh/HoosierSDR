@@ -131,6 +131,9 @@ pub enum FramerEvent {
     LinkControl {
         nac: u16,
         lcw: crate::lc::Lcw,
+        /// The Reed–Solomon layer vouched for this reading, so it stands
+        /// without a second hearing.
+        checked: bool,
     },
     /// A packet data unit completed: header plus reassembled payload.
     PacketData {
@@ -535,8 +538,8 @@ impl Framer {
                             if let Some(raw) = crate::lc::raw_slots(&bits) {
                                 events.push(FramerEvent::LinkControlRaw { raw });
                             }
-                            if let Some(lcw) = crate::lc::extract_lcw(&bits) {
-                                events.push(FramerEvent::LinkControl { nac: nid.nac, lcw });
+                            if let Some(d) = crate::lc::decode_lc(&bits) {
+                                events.push(FramerEvent::LinkControl { nac: nid.nac, lcw: d.lcw, checked: d.checked });
                             }
                         }
                         if let Some(frames) = extract_imbe_frames(&bits) {
