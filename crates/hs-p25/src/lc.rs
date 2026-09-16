@@ -18,11 +18,15 @@
 //! RS(24,12,13) codeword over GF(64) whose first 12 symbols are the 72-bit
 //! LCW.
 //!
-//! The Hamming code **is** corrected here (see [`hamming`]); the outer
-//! Reed–Solomon layer is not yet, so the first 12 hexbits are still taken as
-//! the data symbols directly. On a real traffic channel that combination lifts
-//! the proportion of link-control words with all twelve data hexbits sound from
-//! 14-in-31 to 24-in-31.
+//! Both layers are decoded here: the Hamming tail on each hexbit (see
+//! [`hamming`]), and then the Reed–Solomon code across all 24 of them (see
+//! [`decode_lc`]). Hamming alone lifted the proportion of link-control words
+//! with all twelve data hexbits sound from 14-in-31 to 24-in-31 on real
+//! traffic; the Reed–Solomon layer repairs up to six hexbits beyond that,
+//! and — the part that matters most — *checks* the word. A word that passes
+//! twelve parity symbols can be believed the first time it is read, where an
+//! unchecked one has to be heard twice (see [`LcConfirmer`]) and a short
+//! transmission never gets a second chance.
 
 /// Hamming(10,6,3) as P25 applies it to each link-control hexbit.
 ///
@@ -171,6 +175,136 @@ pub fn raw_slots(payload_bits: &[u8]) -> Option<[u8; 30]> {
     Some(out)
 }
 
+/// Bit offset of each of the 24 link-control hexbits in an LDU1 payload, in
+/// transmission order: four 10-bit hexbits in each of the six slots.
+pub const LC_HEXBIT_OFFSETS: [usize; 24] = [
+    288, 298, 308, 318, 472, 482, 492, 502, 656, 666, 676, 686, 840, 850, 860, 870, 1024, 1034,
+    1044, 1054, 1208, 1218, 1228, 1238,
+];
+
+const LC_HEXBITS: usize = 24;
+const LC_DATA_HEXBITS: usize = 12;
+
+/// What one LDU1's link-control field yielded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcDecode {
+    /// The word, and whether the Reed–Solomon layer vouched for it. A
+    /// checked word stands on its own; an unchecked one is a reading that
+    /// still has to earn its place by repeating.
+    pub lcw: Lcw,
+    pub checked: bool,
+    /// Hexbits the Reed–Solomon layer put right, when it validated.
+    pub rs_corrected: u32,
+    /// Hexbits whose Hamming tail could not settle them (distance > 1).
+    pub hamming_doubtful: u32,
+}
+
+/// Read an LDU1's link control through both of its codes.
+///
+/// The inner Hamming code settles each hexbit; a hexbit it cannot repair is
+/// kept as its nearest codeword and left to the outer code, which is what
+/// the outer code is for. The Reed–Solomon layer then repairs up to six
+/// hexbits and validates the word. Failing that, the Hamming-only reading is
+/// handed back unchecked, as it was before this layer existed — it is often
+/// right, and the repetition check downstream is what decides.
+pub fn decode_lc(payload_bits: &[u8]) -> Option<LcDecode> {
+    if payload_bits.len() < crate::voice::LDU_PAYLOAD_BITS {
+        return None;
+    }
+    let mut hexbits = [0u8; LC_HEXBITS];
+    let mut doubtful = 0u32;
+    for (h, &off) in LC_HEXBIT_OFFSETS.iter().enumerate() {
+        let mut cw = 0u16;
+        for b in 0..10 {
+            cw = (cw << 1) | payload_bits[off + b] as u16;
+        }
+        let (data, dist) = hamming::decode_best(cw);
+        if dist > 1 {
+            doubtful += 1;
+        }
+        hexbits[h] = data;
+    }
+    // Transmission order is highest degree first, so hexbit h is the
+    // coefficient of x^(23−h) and the twelve parity hexbits land in
+    // positions 0..12 as the code expects.
+    let mut word = [0u8; LC_HEXBITS];
+    for (h, &v) in hexbits.iter().enumerate() {
+        word[LC_HEXBITS - 1 - h] = v;
+    }
+    let (data, checked, corrected) = match rs_24_12().decode(&mut word) {
+        crate::rs::RsResult::Corrected(n) => {
+            let mut fixed = [0u8; LC_DATA_HEXBITS];
+            for (h, f) in fixed.iter_mut().enumerate() {
+                *f = word[LC_HEXBITS - 1 - h];
+            }
+            (fixed, true, n as u32)
+        }
+        crate::rs::RsResult::Uncorrectable => {
+            // Beyond the outer code: fall back to what the Hamming pass read,
+            // unless too many hexbits were past its reach to be worth it.
+            if doubtful as usize > MAX_DOUBTFUL_HEXBITS {
+                return None;
+            }
+            let mut as_read = [0u8; LC_DATA_HEXBITS];
+            as_read.copy_from_slice(&hexbits[..LC_DATA_HEXBITS]);
+            (as_read, false, 0)
+        }
+    };
+    let lcw = word_from_hexbits(&data)?;
+    Some(LcDecode { lcw, checked, rs_corrected: corrected, hamming_doubtful: doubtful })
+}
+
+/// The 72-bit word the twelve data hexbits spell out. `None` for an all-zero
+/// word, which is idle padding rather than a call.
+fn word_from_hexbits(data: &[u8; LC_DATA_HEXBITS]) -> Option<Lcw> {
+    let mut octets = [0u8; 9];
+    for (h, &v) in data.iter().enumerate() {
+        for b in 0..6 {
+            let bit = (v >> (5 - b)) & 1;
+            let n = h * 6 + b;
+            octets[n / 8] |= bit << (7 - n % 8);
+        }
+    }
+    if octets.iter().all(|&o| o == 0) {
+        return None;
+    }
+    let mut args = [0u8; 7];
+    args.copy_from_slice(&octets[2..9]);
+    Some(Lcw { protected: octets[0] & 0x80 != 0, lco: octets[0] & 0x3F, mfid: octets[1], args })
+}
+
+/// Write a complete, correctly coded link control into an LDU1 payload (for
+/// the synthesizer and tests): Reed–Solomon parity over the twelve data
+/// hexbits, then a Hamming tail on every one of the 24.
+pub fn write_lcw(payload_bits: &mut [u8], lcw: &Lcw) {
+    assert!(payload_bits.len() >= crate::voice::LDU_PAYLOAD_BITS);
+    let mut octets = [0u8; 9];
+    octets[0] = (lcw.protected as u8) << 7 | (lcw.lco & 0x3F);
+    octets[1] = lcw.mfid;
+    octets[2..9].copy_from_slice(&lcw.args);
+    let mut word = [0u8; LC_HEXBITS];
+    for h in 0..LC_DATA_HEXBITS {
+        let mut v = 0u8;
+        for b in 0..6 {
+            let n = h * 6 + b;
+            v = (v << 1) | ((octets[n / 8] >> (7 - n % 8)) & 1);
+        }
+        word[LC_HEXBITS - 1 - h] = v;
+    }
+    rs_24_12().encode(&mut word);
+    for (h, &off) in LC_HEXBIT_OFFSETS.iter().enumerate() {
+        let cw = hamming::encode(word[LC_HEXBITS - 1 - h]);
+        for b in 0..10 {
+            payload_bits[off + b] = ((cw >> (9 - b)) & 1) as u8;
+        }
+    }
+}
+
+fn rs_24_12() -> &'static crate::rs::ReedSolomon {
+    static RS: std::sync::OnceLock<crate::rs::ReedSolomon> = std::sync::OnceLock::new();
+    RS.get_or_init(crate::rs::ReedSolomon::new_24_12)
+}
+
 /// Pull the Link Control Word out of an LDU1 payload.
 ///
 /// Returns None when the payload is too short or the word is self-evidently
@@ -266,6 +400,24 @@ pub struct LcConfirmer {
 impl LcConfirmer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Offer a word the Reed–Solomon layer has vouched for: twelve parity
+    /// hexbits are a better guarantee than a second reading, so it counts as
+    /// confirmed at once. Reported only the first time, like [`observe`].
+    pub fn observe_checked(&mut self, lcw: &Lcw) -> Option<(u16, u32)> {
+        let key = lcw.group_voice_user()?;
+        match self.seen.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, n)) => {
+                let first = *n < 2;
+                *n += 1;
+                first.then_some(key)
+            }
+            None => {
+                self.seen.push((key, 2));
+                Some(key)
+            }
+        }
     }
 
     /// Offer a decoded word; returns the call once it has been seen enough
@@ -399,6 +551,82 @@ mod tests {
         assert_eq!(lcw.mfid, 0x90);
         assert!(!lcw.is_standard());
         assert_eq!(lcw.group_voice_user(), None);
+    }
+
+    fn group_voice(tg: u16, src: u32) -> Lcw {
+        Lcw {
+            protected: false,
+            lco: Lcw::LCO_GROUP_VOICE_USER,
+            mfid: 0,
+            args: [0, 0, (tg >> 8) as u8, tg as u8, (src >> 16) as u8, (src >> 8) as u8, src as u8],
+        }
+    }
+
+    /// A payload carrying a properly coded link control, as a radio sends it.
+    fn ldu1(lcw: &Lcw) -> Vec<u8> {
+        let mut payload = vec![0u8; crate::voice::LDU_PAYLOAD_BITS];
+        write_lcw(&mut payload, lcw);
+        payload
+    }
+
+    #[test]
+    fn a_word_that_checks_out_is_named_as_checked() {
+        let want = group_voice(0x2F93, 0x0B_EEF1);
+        let d = decode_lc(&ldu1(&want)).expect("a word");
+        assert_eq!((d.lcw, d.checked, d.rs_corrected), (want, true, 0));
+    }
+
+    #[test]
+    fn the_outer_code_repairs_what_the_hamming_tails_could_not() {
+        let want = group_voice(0x2F93, 0x0B_EEF1);
+        // Six hexbits wrecked past the Hamming code's reach — the most the
+        // Reed–Solomon layer can put right, and enough to leave the talkgroup
+        // and the radio wrong without it.
+        let mut payload = ldu1(&want);
+        for h in 0..6 {
+            let off = LC_HEXBIT_OFFSETS[h * 3];
+            for b in [0, 2, 5, 7] {
+                payload[off + b] ^= 1;
+            }
+        }
+        let hamming_only = extract_lcw(&payload);
+        let d = decode_lc(&payload).expect("a word");
+        assert!(d.checked, "the word was not repaired: {d:?}");
+        assert_eq!(d.lcw, want);
+        assert!(d.rs_corrected >= 1);
+        assert_ne!(hamming_only.as_ref(), Some(&want), "this damage needs the outer code");
+    }
+
+    #[test]
+    fn a_wrecked_word_is_not_vouched_for() {
+        let want = group_voice(0x2F93, 0x0B_EEF1);
+        let mut payload = ldu1(&want);
+        // Half the field destroyed: far past what twelve parity hexbits can
+        // place. Whatever comes back must not claim to have been checked.
+        for h in 0..12 {
+            let off = LC_HEXBIT_OFFSETS[h * 2];
+            for b in 0..10 {
+                payload[off + b] ^= 1;
+            }
+        }
+        match decode_lc(&payload) {
+            None => {}
+            Some(d) => assert!(!d.checked, "a wrecked word was vouched for: {d:?}"),
+        }
+    }
+
+    #[test]
+    fn a_checked_word_needs_no_second_hearing() {
+        let mut c = LcConfirmer::new();
+        let word = group_voice(0x2F93, 0x0B_EEF1);
+        assert_eq!(c.observe_checked(&word), Some((0x2F93, 0x0B_EEF1)), "checked by its parity");
+        assert_eq!(c.observe_checked(&word), None, "and only said once");
+        assert_eq!(c.observe(&word), None);
+        assert_eq!(c.confirmed(), vec![((0x2F93, 0x0B_EEF1), 4)]);
+        // An unchecked reading of another call still has to repeat.
+        let other = group_voice(0x1111, 0x00_2222);
+        assert_eq!(c.observe(&other), None);
+        assert_eq!(c.observe(&other), Some((0x1111, 0x00_2222)));
     }
 
     #[test]

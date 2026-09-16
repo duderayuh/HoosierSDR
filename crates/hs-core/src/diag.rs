@@ -144,6 +144,11 @@ pub struct Diagnostics {
     /// Link Control words naming calls on a traffic channel.
     pub link_control: Vec<LcStat>,
     /// Vendor-defined Link Control opcodes, counted by (MFID, LCO).
+    /// Link-control words whose Reed–Solomon parity checked out, and those
+    /// it could not vouch for. The second number is what the repetition
+    /// check has to live on, and what a short transmission runs out of.
+    pub lc_checked: u32,
+    pub lc_unchecked: u32,
     pub vendor_lc: Vec<(u8, u8, u32)>,
     /// Raw arguments from vendor Link Control words, for offline analysis.
     pub vendor_lc_samples: Vec<(u8, u8, [u8; 7])>,
@@ -396,6 +401,10 @@ impl Diagnostics {
         }
         s.push_str("],\n");
 
+        s.push_str(&format!(
+            "  \"lc_checked\": {},\n  \"lc_unchecked\": {},\n",
+            self.lc_checked, self.lc_unchecked
+        ));
         s.push_str("  \"vendor_lc\": [");
         for (i, (m, o, n)) in self.vendor_lc.iter().enumerate() {
             if i > 0 {
