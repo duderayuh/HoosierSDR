@@ -2532,6 +2532,7 @@ fn main() {
             dispatch::incidents_list,
             dispatch::incident_get,
             dispatch::incident_delete,
+            dispatch::call_redo,
             dispatch::incident_locate,
             events::events_list,
             events::events_stats,
