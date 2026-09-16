@@ -531,6 +531,10 @@ pub struct TrunkFollower {
     /// Calls in a row whose winning modulation matched the control
     /// channel's; past `CONFIRM_CALLS`, new calls run one decoder.
     mod_confirmed: u32,
+    /// Link-control words read on traffic channels, checked by their parity
+    /// or not (see [`TrunkFollower::lc_counts`]).
+    lc_checked: u64,
+    lc_unchecked: u64,
     /// Calls started, for the periodic re-probe.
     calls_started: u32,
     /// Decode new calls with the site's modulation alone once confirmed.
@@ -698,6 +702,8 @@ impl TrunkFollower {
             band: Band::new(center_hz, sample_rate),
             extra: Vec::new(),
             mod_confirmed: 0,
+            lc_checked: 0,
+            lc_unchecked: 0,
             calls_started: 0,
             single_modulation: false,
             use_channelizer: true,
@@ -1107,7 +1113,18 @@ impl TrunkFollower {
     /// whose discriminator locks in one frame while CQPSK's acquisition is
     /// still blind — and each clip is attributed to and scored by its own
     /// frames. A grant that never produced audio is still reported once.
+    /// Link-control words heard on traffic channels so far: those whose
+    /// Reed-Solomon parity checked out, and those that were only read. The
+    /// second number is what the repetition check has to live on, and what
+    /// a short transmission runs out of. Counted as calls retire, since the
+    /// decoders that did the reading are dropped with them.
+    pub fn lc_counts(&self) -> (u64, u64) {
+        (self.lc_checked, self.lc_unchecked)
+    }
+
     fn retire(&mut self, mut c: ActiveCall) -> Vec<Call> {
+        self.lc_checked += (c.c4fm.diagnostics().lc_checked + c.cqpsk.diagnostics().lc_checked) as u64;
+        self.lc_unchecked += (c.c4fm.diagnostics().lc_unchecked + c.cqpsk.diagnostics().lc_unchecked) as u64;
         if c.has_audio() || c.done.is_empty() {
             cut(&mut c);
         }

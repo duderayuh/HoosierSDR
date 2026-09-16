@@ -234,6 +234,12 @@ pub enum FollowEvent {
         /// Mean voice-quality score 0..1 across in-flight traffic decoders —
         /// the live clean/degraded number that the scope-grade reads off.
         voice_quality: Option<f32>,
+        /// Link-control words heard on traffic channels: those whose
+        /// Reed-Solomon parity checked out, and those only read. A checked
+        /// word names its radio on the first hearing; an unchecked one has
+        /// to be heard twice, which a short transmission may never manage.
+        lc_checked: u64,
+        lc_unchecked: u64,
     },
     Spectrum {
         bins_db: Vec<f32>,
@@ -660,6 +666,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
                 f.control_echo(),
                 clip_pct,
                 f.mean_voice_quality(),
+                f.lc_counts(),
             ));
         }
     }
@@ -680,6 +687,7 @@ pub fn run_with_extras<S: SdrSource + Send + 'static>(
         None,
         0.0,
         None,
+        f.lc_counts(),
     ));
     Ok(())
 }
@@ -991,6 +999,7 @@ impl Reporter<'_> {
         echo: Option<hs_core::dsp::cqpsk::EchoProfile>,
         clip_pct: f32,
         voice_quality: Option<f32>,
+        lc: (u64, u64),
     ) -> FollowEvent {
         FollowEvent::Status {
             control_syncs: self.syncs,
@@ -1009,6 +1018,8 @@ impl Reporter<'_> {
             echo_spread_us: echo.map(|e| e.rms_spread_us()),
             clip_pct,
             voice_quality,
+            lc_checked: lc.0,
+            lc_unchecked: lc.1,
         }
     }
 

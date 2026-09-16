@@ -1137,6 +1137,12 @@ function handleFollow(ev) {
       break;
     case "status":
       $("r-syncs").textContent = ev.control_syncs;
+      // How often a voice channel's own word for who is talking can be
+      // trusted at once: checked by its parity, against read but unvouched
+      // for. Following a site, this is where it comes from.
+      if (ev.lc_checked != null && $("r-lc")) {
+        $("r-lc").textContent = ev.lc_checked + ev.lc_unchecked ? `${ev.lc_checked} checked · ${ev.lc_unchecked} not` : "—";
+      }
       if (ev.signal_dbfs != null) {
         $("r-signal").textContent = ev.signal_dbfs.toFixed(1) + " dBFS";
       } else {
