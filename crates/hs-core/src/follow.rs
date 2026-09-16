@@ -165,6 +165,55 @@ struct ActiveCall {
     seg_age: f64,
 }
 
+/// A transmission this short, from the radio that was already talking, is
+/// the tail of the one before it rather than one of its own: three voice
+/// frames, 180 ms each.
+const TRAILING_SECS: f64 = 0.6;
+/// How long after a transmission such a scrap still counts as its tail.
+const TRAILING_GAP_SECS: f64 = 1.0;
+
+/// Put the scraps back on the transmission they fell off.
+///
+/// A terminator closes a transmission and the call is held open for the
+/// hang, so voice decoded after it becomes a transmission of its own. At the
+/// end of an announcement that left a string of one- and two-frame calls —
+/// the tail of the same announcement, arriving as sync came and went — each
+/// with its own row, its own recording, and its own transcript, which for a
+/// fragment of speech is whatever the model invents for near silence.
+///
+/// Judged here, after the link control has named each transmission, because
+/// that is the first point at which a scrap of the dispatcher's own
+/// announcement can be told from a reply: a reply is somebody else, however
+/// short, and stays its own call.
+fn join_trailing(calls: Vec<Call>) -> Vec<Call> {
+    let mut out: Vec<Call> = Vec::with_capacity(calls.len());
+    for c in calls {
+        let secs = c.ended_after_secs - c.started_after_secs;
+        let trails = out.last().is_some_and(|p: &Call| {
+            (c.source_unit == 0 || c.source_unit == p.source_unit)
+                && c.talkgroup == p.talkgroup
+                && c.encrypted == p.encrypted
+                && secs <= TRAILING_SECS
+                && c.started_after_secs - p.ended_after_secs <= TRAILING_GAP_SECS
+                && !p.pcm.is_empty()
+        });
+        if !trails {
+            out.push(c);
+            continue;
+        }
+        let p = out.last_mut().expect("checked above");
+        p.pcm.extend_from_slice(&c.pcm);
+        p.ended_after_secs = c.ended_after_secs;
+        p.syncs_c4fm += c.syncs_c4fm;
+        p.syncs_cqpsk += c.syncs_cqpsk;
+        p.voice_frame_errors += c.voice_frame_errors;
+        p.voice_frames_poor += c.voice_frames_poor;
+        p.emergency |= c.emergency;
+        p.talker_alias = p.talker_alias.take().or(c.talker_alias);
+    }
+    out
+}
+
 /// One transmission cut from a call: its audio from both decoders, and the
 /// diagnostics range that belongs to it.
 struct Segment {
@@ -1059,7 +1108,7 @@ impl TrunkFollower {
         let lc_c4 = &c.c4fm.diagnostics().link_control;
         let lc_cq = &c.cqpsk.diagnostics().link_control;
         let segments = core::mem::take(&mut c.done);
-        segments
+        let calls: Vec<Call> = segments
             .into_iter()
             .map(|s| {
                 let (lc_lo, lc_hi, err_lo, err_hi, poor_lo, poor_hi) = if pick_c4fm {
@@ -1152,7 +1201,8 @@ impl TrunkFollower {
                     pcm,
                 }
             })
-            .collect()
+            .collect();
+        join_trailing(calls)
     }
 
     /// Feed wideband IQ; returns the calls that started and finished.
@@ -1932,6 +1982,88 @@ impl TrunkFollower {
     /// The transmission in progress on the only active call, for tests.
     fn only_call(&mut self) -> &mut ActiveCall {
         &mut self.band.active[0]
+    }
+}
+
+#[cfg(test)]
+mod trailing_tests {
+    use super::*;
+
+    fn call(from: f64, to: f64, unit: u32) -> Call {
+        // 8 kHz audio, so the sample count follows the seconds.
+        let n = ((to - from) * 8000.0) as usize;
+        Call {
+            talkgroup: 100,
+            source_unit: unit,
+            freq_hz: 851_100_000,
+            started_after_secs: from,
+            ended_after_secs: to,
+            modulation: Some(Modulation::Cqpsk),
+            syncs_c4fm: 0,
+            syncs_cqpsk: 1,
+            voice_frame_errors: 0,
+            voice_frames_poor: 0,
+            announced_only: false,
+            patched_with: Vec::new(),
+            emergency: false,
+            talker_alias: None,
+            encrypted: false,
+            pcm: vec![1; n],
+        }
+    }
+
+    fn shape(calls: &[Call]) -> Vec<(f64, u32)> {
+        calls
+            .iter()
+            .map(|c| (((c.ended_after_secs - c.started_after_secs) * 100.0).round() / 100.0, c.source_unit))
+            .collect()
+    }
+
+    #[test]
+    fn the_scraps_after_a_transmission_go_back_on_it() {
+        // A twelve-second announcement, then the tail of it arriving in ones
+        // and twos as sync came and went.
+        let parts = vec![
+            call(0.0, 11.88, 790039),
+            call(11.9, 12.08, 0),
+            call(12.1, 12.46, 0),
+            call(12.5, 12.86, 0),
+        ];
+        let audio: usize = parts.iter().map(|c| c.pcm.len()).sum();
+        let out = join_trailing(parts);
+        assert_eq!(shape(&out), vec![(12.86, 790039)], "the announcement and its tail are one transmission");
+        assert_eq!(out[0].pcm.len(), audio, "every scrap's audio is on it");
+    }
+
+    #[test]
+    fn a_scrap_from_the_radio_that_was_talking_goes_back_on_its_transmission() {
+        // A repeated grant re-names the radio on every transmission it
+        // opens, so the tail often arrives wearing the same radio.
+        let out = join_trailing(vec![call(0.0, 1.0, 782065), call(1.0, 1.2, 782065), call(1.2, 1.4, 782065)]);
+        assert_eq!(shape(&out), vec![(1.4, 782065)]);
+    }
+
+    #[test]
+    fn a_reply_is_not_a_scrap() {
+        // Named by its own radio, however short: that is somebody else.
+        let named = join_trailing(vec![call(0.0, 5.0, 790039), call(5.1, 5.5, 4917142)]);
+        assert_eq!(shape(&named), vec![(5.0, 790039), (0.4, 4917142)]);
+        // Long enough to be speech, even with nothing naming it.
+        let long = join_trailing(vec![call(0.0, 5.0, 790039), call(5.1, 7.0, 0)]);
+        assert_eq!(shape(&long), vec![(5.0, 790039), (1.9, 0)]);
+        // A quiet channel, and then someone keys up: too late to be a tail.
+        let later = join_trailing(vec![call(0.0, 5.0, 790039), call(9.0, 9.4, 0)]);
+        assert_eq!(shape(&later), vec![(5.0, 790039), (0.4, 0)]);
+        // With nothing before it, a scrap stands on its own rather than
+        // vanishing: it may be all there is of a call.
+        let alone = join_trailing(vec![call(0.0, 0.36, 0)]);
+        assert_eq!(shape(&alone), vec![(0.36, 0)]);
+        // Encrypted audio is dropped by design, so a clear scrap after it is
+        // not its tail.
+        let mut enc = call(0.0, 5.0, 790039);
+        enc.encrypted = true;
+        let after = join_trailing(vec![enc, call(5.1, 5.4, 790039)]);
+        assert_eq!(shape(&after), vec![(5.0, 790039), (0.3, 790039)]);
     }
 }
 
