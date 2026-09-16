@@ -305,6 +305,15 @@ w.__exercise = async () => {
     const still = lockouts.find((a) => a.playlist === null || a.playlist === undefined || a.playlist === "");
     if (still && !(still.extra || []).includes(1002)) console.log("PAGE ERROR: another page's push lifted a timed avoid: " + JSON.stringify(still));
   }
+  // Following a site, the receiver panel says how many link-control words
+  // the parity vouched for — the number that says whether a radio can be
+  // named on a short transmission at all.
+  {
+    const st = listeners["follow"] || [];
+    for (const cb of st) cb({ event: "follow", payload: { kind: "status", control_syncs: 12, calls: 2, out_of_band: 0, encrypted: 0, locked: 1, busy: 0, msps: 10, want_msps: 10, dropped: 0, elapsed_secs: 60, signal_dbfs: -18.9, lock: 0.9, echo_frac: 0.02, echo_spread_us: 40, clip_pct: 0, voice_quality: null, lc_checked: 900, lc_unchecked: 100 } });
+    const shown = w.document.getElementById("r-lc").textContent;
+    if (!/900 checked/.test(shown) || !/100 not/.test(shown)) console.log("PAGE ERROR: the radio-ID counter does not follow a site: " + shown);
+  }
   // A transcript put right by hand is read again on request: it is saved
   // first, and then sent through the dispatch map, the cases and any live
   // hospital conversation.
