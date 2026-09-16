@@ -163,6 +163,55 @@ struct ActiveCall {
     done: Vec<Segment>,
     /// `age` at the last cut: where the transmission in progress began.
     seg_age: f64,
+    /// How the air was while this transmission was being received, summed
+    /// over the blocks that carried voice so it can be averaged per clip.
+    conditions: Conditions,
+}
+
+/// The receiving conditions over one transmission: what the channel's own
+/// signal level and the equalizer's echo looked like while it was on the
+/// air. Summed per block of voice, averaged when the clip is closed, so a
+/// call that sounded wrong can be read against the air it arrived on
+/// rather than guessed about afterwards.
+#[derive(Clone, Copy, Default)]
+struct Conditions {
+    level_sum: f64,
+    level_n: u32,
+    echo_sum: f64,
+    spread_sum: f64,
+    echo_n: u32,
+}
+
+impl Conditions {
+    /// Take a reading from whichever decoders are running.
+    fn sample(&mut self, c4fm: &ChannelDecoder, cqpsk: &ChannelDecoder) {
+        if let Some(db) = cqpsk.power_dbfs().or_else(|| c4fm.power_dbfs()) {
+            if db.is_finite() {
+                self.level_sum += db as f64;
+                self.level_n += 1;
+            }
+        }
+        // Only the CQPSK path has an equalizer to read an echo from.
+        if let Some(e) = cqpsk.cqpsk_echo() {
+            if e.echo_frac.is_finite() && e.rms_spread_us().is_finite() {
+                self.echo_sum += e.echo_frac as f64;
+                self.spread_sum += e.rms_spread_us() as f64;
+                self.echo_n += 1;
+            }
+        }
+    }
+
+    fn level_dbfs(&self) -> Option<f32> {
+        (self.level_n > 0).then(|| (self.level_sum / self.level_n as f64) as f32)
+    }
+
+    fn echo_frac(&self) -> Option<f32> {
+        (self.echo_n > 0).then(|| (self.echo_sum / self.echo_n as f64) as f32)
+    }
+
+    fn echo_spread_us(&self) -> Option<f32> {
+        (self.echo_n > 0).then(|| (self.spread_sum / self.echo_n as f64) as f32)
+    }
 }
 
 /// A transmission this short, from the radio that was already talking, is
@@ -210,6 +259,10 @@ fn join_trailing(calls: Vec<Call>) -> Vec<Call> {
         p.voice_frames_poor += c.voice_frames_poor;
         p.emergency |= c.emergency;
         p.talker_alias = p.talker_alias.take().or(c.talker_alias);
+        // The scrap was received on the same air; keep the fuller reading.
+        p.level_dbfs = p.level_dbfs.or(c.level_dbfs);
+        p.echo_frac = p.echo_frac.or(c.echo_frac);
+        p.echo_spread_us = p.echo_spread_us.or(c.echo_spread_us);
     }
     out
 }
@@ -228,6 +281,8 @@ struct Segment {
     /// Seconds of IQ into the call when this transmission began and ended.
     start_age: f64,
     end_age: f64,
+    /// The air this transmission arrived on.
+    conditions: Conditions,
 }
 
 /// End the transmission in progress on `c`: keep what was decoded as its
@@ -245,6 +300,7 @@ fn cut(c: &mut ActiveCall) {
         end,
         start_age: c.seg_age,
         end_age: c.age,
+        conditions: core::mem::take(&mut c.conditions),
     });
     c.seg = end;
     c.seg_age = c.age;
@@ -346,6 +402,15 @@ pub struct Call {
     /// audio is dropped — `pcm` is empty — including the LDU1 that decoded
     /// before the verdict arrived, which is scrambled IMBE, not speech.
     pub encrypted: bool,
+    /// How the air was while this transmission was received, averaged over
+    /// the blocks that carried it: the channel's own signal level, the share
+    /// of equalizer tap energy away from the cursor (simulcast echo), and
+    /// the RMS spread of that echo in microseconds. `None` when the path
+    /// that measures it was not running — the echo figures come from the
+    /// CQPSK equalizer, so a C4FM channel has none.
+    pub level_dbfs: Option<f32>,
+    pub echo_frac: Option<f32>,
+    pub echo_spread_us: Option<f32>,
     /// 8 kHz mono audio.
     pub pcm: Vec<i16>,
 }
@@ -1198,6 +1263,9 @@ impl TrunkFollower {
                     emergency,
                     talker_alias: talker_alias.clone(),
                     encrypted,
+                    level_dbfs: s.conditions.level_dbfs(),
+                    echo_frac: s.conditions.echo_frac(),
+                    echo_spread_us: s.conditions.echo_spread_us(),
                     pcm,
                 }
             })
@@ -1332,6 +1400,7 @@ impl TrunkFollower {
                     || self.mod_confirmed < CONFIRM_CALLS
                     || self.calls_started.is_multiple_of(REPROBE_EVERY));
             let mut call = ActiveCall {
+                conditions: Conditions::default(),
                 freq_hz: g.freq_hz,
                 talkgroup: g.talkgroup,
                 source_unit: g.source_unit,
@@ -1952,6 +2021,7 @@ impl TrunkFollower {
     fn push_fake_call(&mut self, talkgroup: u16, freq_hz: u64) {
         let offset = freq_hz as f64 - self.center_hz;
         self.band.active.push(ActiveCall {
+            conditions: Conditions::default(),
             freq_hz,
             talkgroup,
             source_unit: 0,
@@ -2008,6 +2078,9 @@ mod trailing_tests {
             emergency: false,
             talker_alias: None,
             encrypted: false,
+            level_dbfs: None,
+            echo_frac: None,
+            echo_spread_us: None,
             pcm: vec![1; n],
         }
     }
@@ -2017,6 +2090,36 @@ mod trailing_tests {
             .iter()
             .map(|c| (((c.ended_after_secs - c.started_after_secs) * 100.0).round() / 100.0, c.source_unit))
             .collect()
+    }
+
+    #[test]
+    fn the_air_a_transmission_arrived_on_is_averaged_over_it() {
+        let mut c = Conditions::default();
+        assert_eq!((c.level_dbfs(), c.echo_frac(), c.echo_spread_us()), (None, None, None), "nothing measured yet");
+        // Readings as blocks arrive; the clip keeps their average, not the
+        // last one, so a moment of deep fade does not stand for the call.
+        for (lvl, echo, spread) in [(-40.0, 0.01, 40.0), (-44.0, 0.03, 60.0)] {
+            c.level_sum += lvl;
+            c.level_n += 1;
+            c.echo_sum += echo;
+            c.spread_sum += spread;
+            c.echo_n += 1;
+        }
+        assert_eq!(c.level_dbfs(), Some(-42.0));
+        assert_eq!(c.echo_frac(), Some(0.02));
+        assert_eq!(c.echo_spread_us(), Some(50.0));
+    }
+
+    #[test]
+    fn a_scrap_keeps_the_air_of_the_transmission_it_joins() {
+        let mut page = call(0.0, 5.0, 790039);
+        page.level_dbfs = Some(-41.0);
+        page.echo_frac = Some(0.02);
+        let mut scrap = call(5.1, 5.3, 0);
+        scrap.level_dbfs = Some(-60.0);
+        let out = join_trailing(vec![page, scrap]);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].level_dbfs, out[0].echo_frac), (Some(-41.0), Some(0.02)));
     }
 
     #[test]

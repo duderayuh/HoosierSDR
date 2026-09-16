@@ -42,6 +42,14 @@ pub struct CallRow {
     pub starred: bool,
     /// Voice frames the concealer patched or muted (audible chops).
     pub poor_frames: u64,
+    /// The air this call arrived on, as the receiver measured it while the
+    /// transmission was up: the channel's signal level, the share of
+    /// equalizer energy off the cursor (simulcast echo) and its RMS spread
+    /// in microseconds. `None` on a call recorded before this was kept, or
+    /// on a path with no equalizer to read.
+    pub level_dbfs: Option<f32>,
+    pub echo_frac: Option<f32>,
+    pub echo_spread_us: Option<f32>,
     /// Radio-stream blocks dropped while the call was up (holes in it).
     pub dropped_blocks: u64,
     /// Tripwires that fired about this call (filled when rows are handed to
@@ -115,6 +123,9 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
         ("category", "TEXT NOT NULL DEFAULT ''"),
         ("encrypted", "INTEGER NOT NULL DEFAULT 0"),
         ("poor_frames", "INTEGER NOT NULL DEFAULT 0"),
+        ("level_dbfs", "REAL"),
+        ("echo_frac", "REAL"),
+        ("echo_spread_us", "REAL"),
         ("dropped_blocks", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !column_exists(&c, "calls", col)? {
@@ -158,8 +169,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
         None => None,
     };
     c.execute(
-        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             r.start,
             r.secs,
@@ -180,6 +191,9 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
             sha,
             r.poor_frames as i64,
             r.dropped_blocks as i64,
+            r.level_dbfs,
+            r.echo_frac,
+            r.echo_spread_us,
         ],
     )
     .map_err(|e| format!("insert call: {e}"))?;
@@ -203,7 +217,7 @@ pub struct Query {
     pub after_id: Option<i64>,
 }
 
-const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks";
+const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     let patched: String = r.get(10)?;
@@ -237,6 +251,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         encrypted: r.get::<_, i64>(22)? != 0,
         poor_frames: r.get::<_, i64>(23)? as u64,
         dropped_blocks: r.get::<_, i64>(24)? as u64,
+        level_dbfs: r.get(25)?,
+        echo_frac: r.get(26)?,
+        echo_spread_us: r.get(27)?,
         fired: Vec::new(),
         learned: None,
     })
@@ -667,7 +684,13 @@ mod tests {
     }
 
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("hs_lib_{}", std::process::id()));
+        tmp_named("lib")
+    }
+
+    /// Its own directory per test: they run side by side, and two of them
+    /// opening one database is a lock, not a test failure.
+    fn tmp_named(what: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hs_{what}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -692,6 +715,26 @@ mod tests {
             audio: Some(audio.to_string_lossy().into_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_call_keeps_the_air_it_arrived_on() {
+        let d = tmp_named("air");
+        let c = open(&d).unwrap();
+        let mut r = call(&d, 10202, "Dispatch", 2.0, 1_700_000_000);
+        r.level_dbfs = Some(-42.5);
+        r.echo_frac = Some(0.013);
+        r.echo_spread_us = Some(46.0);
+        let id = insert(&c, &r).unwrap();
+        let back = get(&c, id).unwrap().unwrap();
+        assert_eq!(back.level_dbfs, Some(-42.5));
+        assert_eq!(back.echo_frac, Some(0.013));
+        assert_eq!(back.echo_spread_us, Some(46.0));
+        // A call from a path with nothing to measure says so, rather than
+        // reading as a perfectly quiet channel with no echo.
+        let plain = insert(&c, &call(&d, 10204, "Ops", 1.0, 1_700_000_100)).unwrap();
+        let back = get(&c, plain).unwrap().unwrap();
+        assert_eq!((back.level_dbfs, back.echo_frac, back.echo_spread_us), (None, None, None));
     }
 
     #[test]
