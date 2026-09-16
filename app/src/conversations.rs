@@ -141,6 +141,13 @@ pub struct Piece {
     pub transcript: Option<String>,
 }
 
+/// One chat a conversation's summary was sent to, and the messages it left.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SentTo {
+    pub chat: String,
+    pub ids: Vec<i64>,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Conversation {
     pub key: u64,
@@ -160,8 +167,10 @@ pub struct Conversation {
     pub first_at: i64,
     pub last_at: i64,
     /// Telegram message ids of the summary sent so far (to delete on revision).
-    pub sent_ids: Vec<i64>,
-    pub sent_chat: String,
+    /// Where the summary went and the messages it left there, per chat, so
+    /// a revision can edit or replace each of them.
+    #[serde(default)]
+    pub sent_to: Vec<SentTo>,
     pub sent_at: Option<i64>,
     /// Transmissions added since the last send.
     pub dirty: bool,
@@ -388,11 +397,44 @@ fn attach_index(
 }
 
 /// A completed transmission: attach it to a conversation, or open one.
+/// Whether two rules ask the model the same thing of a talkgroup, and so
+/// can share one summary.
+fn same_question(a: &Rule, b: &Rule) -> bool {
+    a.summary_prompt.trim() == b.summary_prompt.trim()
+}
+
+/// The rules that will each keep a conversation: one per distinct question,
+/// the most particular rule asking it (fewest talkgroups, then the oldest
+/// id, so the choice does not wander between calls).
+fn one_per_question(rules: Vec<Rule>) -> Vec<Rule> {
+    let mut kept: Vec<Rule> = Vec::new();
+    for r in rules {
+        match kept.iter_mut().find(|k| same_question(k, &r)) {
+            Some(k) => {
+                if (r.tgs.len(), r.id.clone()) < (k.tgs.len(), k.id.clone()) {
+                    *k = r;
+                }
+            }
+            None => kept.push(r),
+        }
+    }
+    kept
+}
+
 pub fn on_call(app: &AppHandle, f: &CallFacts) {
     let state = app.state::<AppState>();
-    let mut st = state.conversations.lock().unwrap();
-    let rules: Vec<Rule> = st
-        .settings
+    {
+        let mut st = state.conversations.lock().unwrap();
+        take_call(&mut st, f);
+    }
+    let _ = app.emit("conversations", ());
+}
+
+/// Put one transmission where it belongs: into the conversation it
+/// continues, or a new one. Everything that decides that is here, over the
+/// state alone, so it can be tested without a window.
+fn take_call(st: &mut ConvState, f: &CallFacts) {
+    let rules: Vec<Rule> = st.settings
         .rules
         .iter()
         .filter(|r| r.enabled && r.tgs.contains(&f.tg))
@@ -402,6 +444,12 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
         return;
     }
     let now = f.start;
+    // One exchange on the air is one conversation, however many rules watch
+    // the talkgroup: the most particular of them keeps it (fewest
+    // talkgroups), and at send time it goes to every one of their chats.
+    // A rule that asks the model a different question keeps its own, since
+    // its answer is a different report.
+    let rules = one_per_question(rules);
     for r in rules {
         let fixed = f.unit == 0 || is_fixed(&st.settings, &r, f.tg, f.unit);
         let piece = Piece {
@@ -451,8 +499,7 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
                     pieces: vec![piece],
                     first_at: now,
                     last_at: now,
-                    sent_ids: Vec::new(),
-                    sent_chat: String::new(),
+                    sent_to: Vec::new(),
                     sent_at: None,
                     dirty: false,
                     revision: 0,
@@ -465,7 +512,6 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
             }
         }
     }
-    let _ = app.emit("conversations", ());
 }
 
 /// A transcript arrived for a library call: fill it into any conversation.
@@ -988,7 +1034,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
             Err(e) => {
                 // A test send has no live conversation to retry on.
                 let attempts = if c.key == 0 { MAX_ATTEMPTS } else { c.attempts };
-                match after_failed_summary(!c.sent_ids.is_empty(), attempts) {
+                match after_failed_summary(!c.sent_to.is_empty(), attempts) {
                     AfterFailedSummary::Hold => {
                         finish(&app, c.key, n_pieces, |cc| {
                             cc.attempts += 1;
@@ -1025,155 +1071,239 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
         (String::new(), "(no transcript — audio only)".to_string(), Vec::new())
     };
     let facts = if facts.is_empty() { String::new() } else { serde_json::to_string(&facts).unwrap_or_default() };
-    let message = render(&r, &c, &headline, &summary);
+    let facts_json = facts;
     let files: Vec<String> = c.pieces.iter().filter_map(|p| p.audio.clone()).collect();
-    let text_only = !r.attach_audio || files.is_empty();
+
+    // Where this exchange goes: every enabled rule that watches the
+    // talkgroup and asks the model the same thing. One exchange on the air
+    // is one report, however many rules are listening for it, so it is
+    // summarised once and sent to each of their chats — the hospital's own
+    // and the one that follows them all.
+    let dests = destinations(&state, &r, &c, &headline, &summary);
     let mut detail = String::new();
-    let mut reused_id: Option<i64> = None;
-
-    // 2. Revise in place when we can (a single earlier message and a text-only
-    // send); otherwise delete the old and send fresh. Audio can't be edited in
-    // place, so those keep the delete + re-send behaviour.
-    if text_only && c.sent_ids.len() == 1 {
-        let id = c.sent_ids[0];
-        match crate::alerts::edit_message(&c.sent_chat, id, &message) {
-            Ok(()) => {
-                reused_id = Some(id);
-                detail.push_str("edited in place; ");
-            }
-            Err(e) => {
-                detail.push_str(&format!("edit failed ({e}); "));
-                if let Err(de) = crate::alerts::delete_message(&c.sent_chat, id) {
-                    detail.push_str(&format!("could not delete earlier message {id}: {de}; "));
-                }
-            }
-        }
-    } else if !c.sent_ids.is_empty() {
-        for id in &c.sent_ids {
-            if let Err(e) = crate::alerts::delete_message(&c.sent_chat, *id) {
-                detail.push_str(&format!("could not delete earlier message {id}: {e}; "));
-            }
-        }
-    }
-
-    // 3. Send (or reuse the edited message), with the combined audio.
-    let sent = if let Some(id) = reused_id {
-        Ok(vec![id])
-    } else if r.attach_audio && !files.is_empty() {
+    let mut sent_to: Vec<SentTo> = Vec::new();
+    let mut any_ok = false;
+    let mut last_err: Option<String> = None;
+    // Built once, however many chats it goes to.
+    let clip = if dests.iter().any(|d| d.attach_audio) && !files.is_empty() {
         match crate::alerts::combine_clips(&files, &format!("conv_{}", c.tg)) {
-            Ok((path, mp3)) => {
-                let res = crate::alerts::send_audio_id(
-                    &chat,
-                    &path,
-                    mp3,
-                    &message,
-                    &format!("{} · {}", r.name, c.tg_name),
-                    &c.pieces
-                        .iter()
-                        .find(|p| !p.fixed)
-                        .and_then(|p| p.unit_name.clone())
-                        .unwrap_or_else(|| c.tg_name.clone()),
-                );
-                let _ = std::fs::remove_file(&path);
-                res
-            }
+            Ok(clip) => Some(clip),
             Err(e) => {
                 detail.push_str(&format!("audio: {e}; "));
-                crate::alerts::send_text_id(&chat, &message).map(|i| vec![i])
+                None
             }
         }
     } else {
-        crate::alerts::send_text_id(&chat, &message).map(|i| vec![i])
+        None
     };
+    let performer = c
+        .pieces
+        .iter()
+        .find(|p| !p.fixed)
+        .and_then(|p| p.unit_name.clone())
+        .unwrap_or_else(|| c.tg_name.clone());
+
+    for d in &dests {
+        let before: Vec<i64> = c
+            .sent_to
+            .iter()
+            .find(|s| s.chat == d.chat)
+            .map(|s| s.ids.clone())
+            .unwrap_or_default();
+        let text_only = !d.attach_audio || clip.is_none();
+        let mut reused_id: Option<i64> = None;
+        // Revise in place when we can (a single earlier message and a
+        // text-only send); otherwise delete the old and send fresh. Audio
+        // cannot be edited in place.
+        if text_only && before.len() == 1 {
+            let id = before[0];
+            match crate::alerts::edit_message(&d.chat, id, &d.message) {
+                Ok(()) => {
+                    reused_id = Some(id);
+                    detail.push_str("edited in place; ");
+                }
+                Err(e) => {
+                    detail.push_str(&format!("edit failed ({e}); "));
+                    if let Err(de) = crate::alerts::delete_message(&d.chat, id) {
+                        detail.push_str(&format!("could not delete earlier message {id}: {de}; "));
+                    }
+                }
+            }
+        } else if !before.is_empty() {
+            for id in &before {
+                if let Err(e) = crate::alerts::delete_message(&d.chat, *id) {
+                    detail.push_str(&format!("could not delete earlier message {id}: {e}; "));
+                }
+            }
+        }
+        let sent = match (reused_id, &clip) {
+            (Some(id), _) => Ok(vec![id]),
+            (None, Some((path, mp3))) if d.attach_audio => crate::alerts::send_audio_id(
+                &d.chat,
+                path,
+                *mp3,
+                &d.message,
+                &format!("{} · {}", d.rule_name, c.tg_name),
+                &performer,
+            ),
+            _ => crate::alerts::send_text_id(&d.chat, &d.message).map(|i| vec![i]),
+        };
+        match sent {
+            Ok(ids) => {
+                any_ok = true;
+                sent_to.push(SentTo { chat: d.chat.clone(), ids });
+            }
+            Err(e) => {
+                detail.push_str(&format!("{}: {e}; ", d.rule_name));
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some((path, _)) = &clip {
+        let _ = std::fs::remove_file(path);
+    }
+    let message = dests.first().map(|d| d.message.clone()).unwrap_or_default();
+    let chats = dests.iter().map(|d| d.chat.as_str()).collect::<Vec<_>>().join(" ");
+    let ids: Vec<i64> = sent_to.iter().flat_map(|s| s.ids.clone()).collect();
     let _ = app.emit(
         "alert",
         serde_json::json!({ "name": r.name, "tg": c.tg, "message": message, "tone": false }),
     );
-    match sent {
-        Ok(ids) => {
-            detail.push_str(&format!("sent ({} pieces)", c.pieces.len()));
-            let revision = if c.sent_at.is_some() {
-                c.revision + 1
-            } else {
-                0
-            };
-            log_it(
-                &app,
-                &r,
-                &Conversation {
-                    revision,
-                    ..c.clone()
-                },
-                true,
-                detail.clone(),
-                summary.clone(),
-            );
-            store_outcome(
-                &app,
-                &r,
-                &c,
-                &Outcome {
-                    status: "sent",
-                    detail: &detail,
-                    headline: &headline,
-                    summary: &summary,
-                    facts: &facts,
-                    message: &message,
-                    prompt: &prompt,
-                    chat: &chat,
-                    revision,
-                    message_ids: &ids,
-                },
-            );
-            finish(&app, c.key, n_pieces, |cc| {
-                cc.sent_ids = ids;
-                cc.sent_chat = chat;
+    if any_ok {
+        let where_to = if dests.len() > 1 {
+            format!(" to {} chats", dests.len())
+        } else {
+            String::new()
+        };
+        detail.push_str(&format!("sent ({} pieces){where_to}", c.pieces.len()));
+        let revision = if c.sent_at.is_some() { c.revision + 1 } else { 0 };
+        log_it(
+            &app,
+            &r,
+            &Conversation {
+                revision,
+                ..c.clone()
+            },
+            true,
+            detail.clone(),
+            summary.clone(),
+        );
+        store_outcome(
+            &app,
+            &r,
+            &c,
+            &Outcome {
+                status: "sent",
+                detail: &detail,
+                headline: &headline,
+                summary: &summary,
+                facts: &facts_json,
+                message: &message,
+                prompt: &prompt,
+                chat: &chats,
+                revision,
+                message_ids: &ids,
+            },
+        );
+        finish(&app, c.key, n_pieces, |cc| {
+            cc.sent_to = sent_to;
+            cc.sent_at = Some(crate::library::now());
+            cc.revision = revision;
+            cc.dirty = false;
+            cc.last_summary = Some(summary);
+            cc.last_error = None;
+            cc.attempts = 0;
+        });
+    } else {
+        let e = last_err.unwrap_or_else(|| "nowhere to send it".to_string());
+        log_it(&app, &r, &c, false, format!("{detail}{e}"), summary.clone());
+        store_outcome(
+            &app,
+            &r,
+            &c,
+            &Outcome {
+                status: "failed",
+                detail: &format!("{detail}{e}"),
+                headline: &headline,
+                summary: &summary,
+                facts: &facts_json,
+                message: &message,
+                prompt: &prompt,
+                chat: &chats,
+                revision: c.revision,
+                message_ids: &[],
+            },
+        );
+        finish(&app, c.key, n_pieces, |cc| {
+            cc.attempts += 1;
+            cc.last_summary = Some(summary);
+            if cc.attempts >= MAX_ATTEMPTS {
+                // Give up: mark as sent-and-clean so it closes after the
+                // late window instead of re-running the model every tick.
+                cc.last_error = Some(format!("gave up after {} attempts: {e}", cc.attempts));
                 cc.sent_at = Some(crate::library::now());
-                cc.revision = revision;
                 cc.dirty = false;
-                cc.last_summary = Some(summary);
-                cc.last_error = None;
-                cc.attempts = 0;
-            });
-        }
-        Err(e) => {
-            log_it(&app, &r, &c, false, format!("{detail}{e}"), summary.clone());
-            store_outcome(
-                &app,
-                &r,
-                &c,
-                &Outcome {
-                    status: "failed",
-                    detail: &format!("{detail}{e}"),
-                    headline: &headline,
-                    summary: &summary,
-                    facts: &facts,
-                    message: &message,
-                    prompt: &prompt,
-                    chat: &chat,
-                    revision: c.revision,
-                    message_ids: &[],
-                },
-            );
-            finish(&app, c.key, n_pieces, |cc| {
-                cc.attempts += 1;
-                cc.last_summary = Some(summary);
-                if cc.attempts >= MAX_ATTEMPTS {
-                    // Give up: mark as sent-and-clean so it closes after the
-                    // late window instead of re-running the model every tick.
-                    cc.last_error = Some(format!("gave up after {} attempts: {e}", cc.attempts));
-                    cc.sent_at = Some(crate::library::now());
-                    cc.dirty = false;
-                } else {
-                    cc.last_error = Some(e);
-                    // Try again next tick, with a delay that grows.
-                    cc.dirty = true;
-                    cc.sent_at = cc.sent_at.or(Some(0));
-                    cc.retry_after = crate::library::now() + 30 * cc.attempts as i64;
-                }
-            });
-        }
+            } else {
+                cc.last_error = Some(e);
+                // Try again next tick, with a delay that grows.
+                cc.dirty = true;
+                cc.sent_at = cc.sent_at.or(Some(0));
+                cc.retry_after = crate::library::now() + 30 * cc.attempts as i64;
+            }
+        });
     }
+}
+
+/// One chat this exchange is owed, and the message as that rule words it.
+struct Dest {
+    rule_name: String,
+    chat: String,
+    attach_audio: bool,
+    message: String,
+}
+
+/// Every chat one exchange goes to: the rule that kept it, and any other
+/// enabled rule watching the same talkgroup that asks the model the same
+/// thing. A rule wording its question differently gets its own conversation
+/// upstream, so it is not represented here.
+fn destinations(
+    state: &State<AppState>,
+    primary: &Rule,
+    c: &Conversation,
+    headline: &str,
+    summary: &str,
+) -> Vec<Dest> {
+    let (tg, _) = crate::alerts::shared_settings(state);
+    let fallback = tg.destination();
+    let all: Vec<Rule> = state.conversations.lock().unwrap().settings.rules.clone();
+    sharers(&all, primary, c.tg, &fallback)
+        .into_iter()
+        .map(|(r, chat)| Dest {
+            message: render(&r, c, headline, summary),
+            rule_name: r.name.clone(),
+            attach_audio: r.attach_audio,
+            chat,
+        })
+        .collect()
+}
+
+/// The rules one exchange is owed a message from, with the chat each wants
+/// it in: the rule that kept the conversation, then every other enabled
+/// rule watching that talkgroup with the same question. A chat named twice
+/// hears it once; a rule with no chat and no fallback hears nothing.
+fn sharers(all: &[Rule], primary: &Rule, tg: u16, fallback: &str) -> Vec<(Rule, String)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    std::iter::once(primary.clone())
+        .chain(
+            all.iter()
+                .filter(|r| r.enabled && r.id != primary.id && r.tgs.contains(&tg) && same_question(r, primary))
+                .cloned(),
+        )
+        .filter_map(|r| {
+            let chat = if r.chat_id.trim().is_empty() { fallback.to_string() } else { r.chat_id.clone() };
+            (!chat.trim().is_empty() && seen.insert(chat.clone())).then_some((r, chat))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,8 +1509,7 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
             first_at: pieces.first().map(|p| p.at).unwrap_or(0),
             last_at: pieces.last().map(|p| p.at).unwrap_or(0),
             pieces,
-            sent_ids: Vec::new(),
-            sent_chat: String::new(),
+            sent_to: Vec::new(),
             sent_at: None,
             dirty: false,
             revision: 0,
@@ -1962,6 +2091,131 @@ mod tests {
         }
     }
 
+    fn hospital_rules() -> Vec<Rule> {
+        // As a listener builds them: one rule following every hospital
+        // talkgroup, and rules for the two hospitals with a chat of their
+        // own, all asking the model the same thing.
+        let all = Rule {
+            id: "c1".into(),
+            name: "All Hospitals".into(),
+            tgs: vec![10255, 10256, 10257],
+            chat_id: "-100:all".into(),
+            summary_prompt: "Summarise this report".into(),
+            ..Default::default()
+        };
+        let meth = Rule {
+            id: "t2".into(),
+            name: "MED03 - Methodist".into(),
+            tgs: vec![10256],
+            chat_id: "-100:meth".into(),
+            ..all.clone()
+        };
+        let east = Rule {
+            id: "t3".into(),
+            name: "MED04 - CommEast".into(),
+            tgs: vec![10257],
+            chat_id: "-100:east".into(),
+            ..all.clone()
+        };
+        vec![all, meth, east]
+    }
+
+    #[test]
+    fn one_exchange_is_one_conversation_however_many_rules_watch_it() {
+        let rules = hospital_rules();
+        let for_tg = |tg: u16| -> Vec<Rule> {
+            rules.iter().filter(|r| r.tgs.contains(&tg)).cloned().collect()
+        };
+        // Methodist's talkgroup: the hospital's own rule keeps it, not the
+        // one that follows every hospital.
+        let kept = one_per_question(for_tg(10256));
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["t2"]);
+        // A talkgroup only the wide rule watches is still kept by it.
+        let kept = one_per_question(for_tg(10255));
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["c1"]);
+        // A rule that asks the model something else wants its own answer,
+        // so it keeps a conversation of its own.
+        let mut other = rules[0].clone();
+        other.id = "x9".into();
+        other.summary_prompt = "List the vital signs only".into();
+        let mut with_other = for_tg(10256);
+        with_other.push(other);
+        let kept = one_per_question(with_other);
+        assert_eq!(kept.len(), 2, "{:?}", kept.iter().map(|r| &r.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_transmission_watched_by_two_rules_lands_in_one_conversation() {
+        let mut st = ConvState { settings: Settings { rules: hospital_rules(), ..Default::default() }, ..Default::default() };
+        let call = |unit: u32, at: i64| crate::alerts::CallFacts {
+            id: Some(at),
+            start: at,
+            tg: 10256,
+            tg_name: "MED03".into(),
+            unit,
+            secs: 4.0,
+            transcript: Some("medic 21 inbound".into()),
+            ..Default::default()
+        };
+        take_call(&mut st, &call(4917123, 1_700_000_000));
+        take_call(&mut st, &call(31709, 1_700_000_010));
+        assert_eq!(st.open.len(), 1, "two rules watch this talkgroup, but it is one exchange");
+        assert_eq!(st.open[0].rule_id, "t2", "the hospital's own rule keeps it");
+        assert_eq!(st.open[0].pieces.len(), 2);
+        // A talkgroup only the wide rule watches still opens one.
+        take_call(&mut st, &crate::alerts::CallFacts { tg: 10255, ..call(4911391, 1_700_000_100) });
+        assert_eq!(st.open.len(), 2);
+        assert_eq!(st.open[1].rule_id, "c1");
+    }
+
+    #[test]
+    fn one_summary_goes_to_every_chat_that_asked_for_it() {
+        let rules = hospital_rules();
+        let meth = rules[1].clone();
+        let to: Vec<(String, String)> = sharers(&rules, &meth, 10256, "-100:fallback")
+            .into_iter()
+            .map(|(r, chat)| (r.name, chat))
+            .collect();
+        assert_eq!(
+            to,
+            vec![
+                ("MED03 - Methodist".to_string(), "-100:meth".to_string()),
+                ("All Hospitals".to_string(), "-100:all".to_string())
+            ],
+            "the hospital's own chat and the one that follows them all"
+        );
+        // Another hospital's rule is not asked: it does not watch this one.
+        assert!(!to.iter().any(|(n, _)| n.contains("CommEast")));
+        // A rule that asks the model something else is not a destination
+        // here: it keeps its own conversation, with its own answer.
+        let mut asks_else = rules.clone();
+        let mut other = rules[0].clone();
+        other.id = "x9".into();
+        other.name = "Vitals only".into();
+        other.chat_id = "-100:vitals".into();
+        other.summary_prompt = "List the vital signs only".into();
+        asks_else.push(other);
+        assert_eq!(
+            sharers(&asks_else, &meth, 10256, "-100:fallback").len(),
+            2,
+            "a different question is a different report"
+        );
+        // A rule switched off is not a destination.
+        let mut off = rules.clone();
+        off[0].enabled = false;
+        assert_eq!(sharers(&off, &meth, 10256, "-100:fallback").len(), 1);
+        // Two rules pointed at one chat send one message, not two.
+        let mut same = rules.clone();
+        same[0].chat_id = "-100:meth".into();
+        assert_eq!(sharers(&same, &meth, 10256, "").len(), 1);
+        // With no chat of its own a rule falls back to the shared one; with
+        // no fallback either, it has nowhere to send and is left out.
+        let mut blank = rules.clone();
+        blank[0].chat_id = String::new();
+        assert_eq!(sharers(&blank, &meth, 10256, "-100:fallback").len(), 2);
+        assert_eq!(sharers(&blank, &meth, 10256, "").len(), 1);
+    }
+
     /// A sent conversation is stored with everything that went into the
     /// message; a revision updates the same row; the tab's list, search,
     /// filter, stats and delete all read it back.
@@ -2171,8 +2425,7 @@ mod tests {
             pieces: Vec::new(),
             first_at: last_at,
             last_at,
-            sent_ids: Vec::new(),
-            sent_chat: String::new(),
+            sent_to: Vec::new(),
             sent_at: sent.then_some(last_at),
             dirty: false,
             revision: 0,
@@ -2385,8 +2638,7 @@ mod tests {
             ],
             first_at: 100,
             last_at: 130,
-            sent_ids: vec![],
-            sent_chat: String::new(),
+            sent_to: Vec::new(),
             sent_at: None,
             dirty: false,
             revision: 1,
@@ -2615,8 +2867,7 @@ mod visibility_tests {
             pieces,
             first_at: 100,
             last_at: 200,
-            sent_ids: Vec::new(),
-            sent_chat: String::new(),
+            sent_to: Vec::new(),
             sent_at: None,
             dirty: false,
             revision: 0,
@@ -2913,8 +3164,7 @@ fn assemble(
         first_at: pieces.first().map(|p| p.at).unwrap_or(0),
         last_at: pieces.last().map(|p| p.at).unwrap_or(0),
         pieces,
-        sent_ids: Vec::new(),
-        sent_chat: String::new(),
+        sent_to: Vec::new(),
         sent_at: None,
         dirty: false,
         revision: 0,
