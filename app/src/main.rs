@@ -833,6 +833,12 @@ struct StatusMsg {
     sync_err: f64,
     /// Samples/blocks lost between the radio and the decoder so far.
     dropped: u64,
+    /// Link-control words whose Reed-Solomon parity checked out, and those
+    /// it could not vouch for. A word that checks out names its radio on the
+    /// first hearing; an unchecked one has to be heard twice, which a short
+    /// transmission may never manage.
+    lc_checked: u32,
+    lc_unchecked: u32,
     /// Composite voice quality (0..1, see `hs_core::decoder::VoiceQuality`)
     /// of the most recently decoded voice frame — combines FEC error count,
     /// demodulator confidence, and (CQPSK) carrier lock into the one number
@@ -1788,6 +1794,8 @@ fn capture_loop(
                     echo_spread_us: echo.map(|e| e.rms_spread_us()).unwrap_or(-1.0),
                     clip_pct,
                     sync_err: dec.diagnostics().mean_sync_errors(),
+                    lc_checked: dec.diagnostics().lc_checked,
+                    lc_unchecked: dec.diagnostics().lc_unchecked,
                     dropped: src.dropped(),
                     voice_quality: dec.last_voice_quality().map(|q| q.score()).unwrap_or(-1.0),
                 },
@@ -2073,6 +2081,8 @@ async fn decode_file(
                 // detection would be meaningless.
                 clip_pct: 0.0,
                 sync_err: dec.diagnostics().mean_sync_errors(),
+                lc_checked: dec.diagnostics().lc_checked,
+                lc_unchecked: dec.diagnostics().lc_unchecked,
                 dropped: 0,
                 voice_quality: dec.last_voice_quality().map(|q| q.score()).unwrap_or(-1.0),
             },

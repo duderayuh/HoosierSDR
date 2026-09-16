@@ -213,6 +213,9 @@ pub fn decode_lc(payload_bits: &[u8]) -> Option<LcDecode> {
     }
     let mut hexbits = [0u8; LC_HEXBITS];
     let mut doubtful = 0u32;
+    // Kept apart, because the fallback below only reads the data hexbits: a
+    // parity hexbit past the Hamming code's reach says nothing about them.
+    let mut doubtful_data = 0u32;
     for (h, &off) in LC_HEXBIT_OFFSETS.iter().enumerate() {
         let mut cw = 0u16;
         for b in 0..10 {
@@ -221,6 +224,9 @@ pub fn decode_lc(payload_bits: &[u8]) -> Option<LcDecode> {
         let (data, dist) = hamming::decode_best(cw);
         if dist > 1 {
             doubtful += 1;
+            if h < LC_DATA_HEXBITS {
+                doubtful_data += 1;
+            }
         }
         hexbits[h] = data;
     }
@@ -242,7 +248,7 @@ pub fn decode_lc(payload_bits: &[u8]) -> Option<LcDecode> {
         crate::rs::RsResult::Uncorrectable => {
             // Beyond the outer code: fall back to what the Hamming pass read,
             // unless too many hexbits were past its reach to be worth it.
-            if doubtful as usize > MAX_DOUBTFUL_HEXBITS {
+            if doubtful_data as usize > MAX_DOUBTFUL_HEXBITS {
                 return None;
             }
             let mut as_read = [0u8; LC_DATA_HEXBITS];
@@ -595,6 +601,24 @@ mod tests {
         assert_eq!(d.lcw, want);
         assert!(d.rs_corrected >= 1);
         assert_ne!(hamming_only.as_ref(), Some(&want), "this damage needs the outer code");
+    }
+
+    #[test]
+    fn damaged_parity_does_not_cost_a_readable_word() {
+        // The parity hexbits are the outer code's own, and were not even
+        // read before it was decoded. Wrecking them must leave the word as
+        // readable as it was — unchecked, but there.
+        let want = group_voice(0x2F93, 0x0B_EEF1);
+        let mut payload = ldu1(&want);
+        for h in LC_DATA_HEXBITS..LC_HEXBITS {
+            for b in 0..10 {
+                payload[LC_HEXBIT_OFFSETS[h] + b] ^= 1;
+            }
+        }
+        let d = decode_lc(&payload).expect("the word still reads");
+        assert_eq!(d.lcw, want);
+        assert!(!d.checked, "its parity is gone, so nothing vouches for it");
+        assert_eq!(extract_lcw(&payload).as_ref(), Some(&want), "the older path read it too");
     }
 
     #[test]

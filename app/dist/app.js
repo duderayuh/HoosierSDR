@@ -1009,6 +1009,12 @@ function setStatus(s) {
   if (s.modulation) $("tunedSub").textContent = s.modulation.toUpperCase();
   setDspHealth(s.lock, s.echo_frac, s.echo_spread_us, s.clip_pct, s.voice_quality);
   if (s.dropped != null) $("r-syncerr").textContent = s.dropped ? `${s.dropped}` : "0";
+  // How often the voice channel's own word for who is talking can be
+  // trusted at once: checked by its parity, against read but unvouched-for.
+  if (s.lc_checked != null && $("r-lc")) {
+    const all = s.lc_checked + (s.lc_unchecked || 0);
+    $("r-lc").textContent = all ? `${s.lc_checked} checked · ${s.lc_unchecked || 0} not` : "—";
+  }
 }
 
 /* ---------- follow events (backend or demo) ---------- */
