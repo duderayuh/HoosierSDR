@@ -260,6 +260,8 @@ fn join_trailing(calls: Vec<Call>) -> Vec<Call> {
         p.emergency |= c.emergency;
         p.talker_alias = p.talker_alias.take().or(c.talker_alias);
         // The scrap was received on the same air; keep the fuller reading.
+        p.lc_other_tg = p.lc_other_tg.or(c.lc_other_tg);
+        p.lc_other_unit = p.lc_other_unit.or(c.lc_other_unit);
         p.level_dbfs = p.level_dbfs.or(c.level_dbfs);
         p.echo_frac = p.echo_frac.or(c.echo_frac);
         p.echo_spread_us = p.echo_spread_us.or(c.echo_spread_us);
@@ -411,6 +413,11 @@ pub struct Call {
     pub level_dbfs: Option<f32>,
     pub echo_frac: Option<f32>,
     pub echo_spread_us: Option<f32>,
+    /// A link-control word that named a radio but was refused because it
+    /// named another talkgroup, with the talkgroup it named. `None` when the
+    /// channel's own word was used, or when none named a radio at all.
+    pub lc_other_tg: Option<u16>,
+    pub lc_other_unit: Option<u32>,
     /// 8 kHz mono audio.
     pub pcm: Vec<i16>,
 }
@@ -1254,6 +1261,15 @@ impl TrunkFollower {
                     Some(l) => l.source_unit,
                     None => s.source_unit,
                 };
+                // A word that named a radio but was refused because it named
+                // another talkgroup. On a regrouped talkgroup that is what
+                // the voice channel says — the supergroup, not the talkgroup
+                // the channel was granted to — so the radio it names is
+                // thrown away. Kept here, unused, to find out how often that
+                // happens and which talkgroup it names.
+                let refused = (lc.is_none() && lc_lo < lc_hi)
+                    .then(|| lc_all[lc_lo..lc_hi.min(lc_all.len())].iter().find(|l| l.source_unit != 0))
+                    .flatten();
                 let emergency = lc_c4[s.start.lc_c4.min(lc_c4.len())..s.end.lc_c4.min(lc_c4.len())]
                     .iter()
                     .chain(
@@ -1280,6 +1296,8 @@ impl TrunkFollower {
                     emergency,
                     talker_alias: talker_alias.clone(),
                     encrypted,
+                    lc_other_tg: refused.map(|l| l.talkgroup),
+                    lc_other_unit: refused.map(|l| l.source_unit),
                     level_dbfs: s.conditions.level_dbfs(),
                     echo_frac: s.conditions.echo_frac(),
                     echo_spread_us: s.conditions.echo_spread_us(),
@@ -2095,6 +2113,8 @@ mod trailing_tests {
             emergency: false,
             talker_alias: None,
             encrypted: false,
+            lc_other_tg: None,
+            lc_other_unit: None,
             level_dbfs: None,
             echo_frac: None,
             echo_spread_us: None,
@@ -2341,6 +2361,38 @@ mod priority_tests {
         let c = f.band.active.remove(0);
         let calls = f.retire(c);
         assert_eq!(calls[0].source_unit, 4917041);
+        assert_eq!((calls[0].lc_other_tg, calls[0].lc_other_unit), (None, None), "its own word was used");
+    }
+
+    /// A word naming another talkgroup is still refused — but which
+    /// talkgroup, and the radio it named, are kept. On a regrouped
+    /// talkgroup the voice channel names the supergroup, so this is how
+    /// often a radio is thrown away and what it was filed under.
+    #[test]
+    fn a_refused_link_control_word_says_what_it_named() {
+        let lc = |tg: u16, src: u32| crate::diag::LcStat { talkgroup: tg, source_unit: src, emergency: false };
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(64100, 4917041));
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!(calls[0].source_unit, 0, "a word for another talkgroup does not name this call");
+        assert_eq!(
+            (calls[0].lc_other_tg, calls[0].lc_other_unit),
+            (Some(64100), Some(4917041)),
+            "but what it said is kept"
+        );
+        // A word naming no radio says nothing worth keeping.
+        let mut f = follower();
+        f.push_fake_call(100, 851_100_000);
+        f.only_call().pcm_c4fm.extend_from_slice(&[1, 2]);
+        f.only_call().syncs_c4fm = 3;
+        f.only_call().c4fm.diagnostics_mut().link_control.push(lc(64100, 0));
+        let c = f.band.active.remove(0);
+        let calls = f.retire(c);
+        assert_eq!((calls[0].lc_other_tg, calls[0].lc_other_unit), (None, None));
     }
 
     /// A call with no sync is retired after the quiet time in *seconds*,

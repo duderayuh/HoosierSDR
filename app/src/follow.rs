@@ -1338,6 +1338,8 @@ impl Reporter<'_> {
                     audio: wav.clone(),
                     poor_frames: c.voice_frames_poor,
                     dropped_blocks,
+                    lc_other_tg: c.lc_other_tg,
+                    lc_other_unit: c.lc_other_unit,
                     level_dbfs: c.level_dbfs,
                     echo_frac: c.echo_frac,
                     echo_spread_us: c.echo_spread_us,
