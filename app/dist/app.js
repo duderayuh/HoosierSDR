@@ -2291,6 +2291,21 @@ if (TAURI) {
   listen("transcribe_error", (e) => logEvent(`transcription: ${e.payload}`, "warn"));
   listen("transcribe_ready", (e) => logEvent(`transcriber ready: ${e.payload}`));
 
+  // The air a call arrived on, as the receiver measured it while the
+  // transmission was up. Written beside the call so a clip that sounds wrong
+  // can be read against the conditions instead of guessed about.
+  function airLine(r) {
+    if (r.level_dbfs == null && r.echo_frac == null) return "";
+    const bits = [];
+    if (r.level_dbfs != null) bits.push(`${r.level_dbfs.toFixed(1)} dBFS`);
+    if (r.echo_frac != null) {
+      const echo = `${(r.echo_frac * 100).toFixed(1)}% echo` + (r.echo_spread_us != null ? ` · ${r.echo_spread_us.toFixed(0)} µs` : "");
+      bits.push(r.echo_frac >= 0.06 ? `<b>${echo}</b>` : echo);
+    }
+    if (r.poor_frames) bits.push(`${r.poor_frames} frame${r.poor_frames === 1 ? "" : "s"} concealed`);
+    return `<div class="faint" title="Signal level on this channel, simulcast echo the equalizer had to undo, and how spread out it was. Heavy echo (6% and up) is where a call can decode cleanly and still sound wrong.">📶 ${bits.join(" · ")}</div>`;
+  }
+
   async function libSelect(id) {
     libSel = id;
     $("libBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.id === id));
@@ -2300,6 +2315,7 @@ if (TAURI) {
       $("detBody").innerHTML = `<div class="det">
         <div><b>${esc(r.tg_name)}</b> <span class="faint">TG ${r.tg}</span>${r.service ? ` · <span class="svc">${esc(r.service)}</span>` : ""}${r.category ? ` · <span class="cat">${esc(r.category)}</span>` : ""}${r.encrypted ? ' · <span class="badge enc">Encrypted</span>' : ""} · unit ${r.unit_name ? esc(r.unit_name) + " (" + r.unit + ")" : r.learned ? esc(r.learned) + " (" + r.unit + ", learned)" : r.unit} · ${(r.freq_hz / 1e6).toFixed(4)} MHz · ${r.modulation} · ${r.secs.toFixed(1)}s${r.emergency ? ' · <span class="badge emg">EMERGENCY</span>' : ""}</div>
         <div class="faint">${fmtT(r.start)} · ${esc([r.system, r.site].filter(Boolean).join(" · "))} ${r.patched_with.length ? "· patched " + r.patched_with.join(",") : ""}</div>
+        ${airLine(r)}
         ${(r.fired || []).length ? `<div class="k">Tripwires</div><div class="twlist">${r.fired.map((f) => `<div>${firedBadges([f])} <span class="faint">${esc(f.status === "quiet" ? "looked, stayed quiet" : f.status)} · ${esc(fmtT(f.at))}</span></div>`).join("")}</div>` : ""}
         <div class="xport" style="margin:8px 0">${r.audio ? `<button class="btn sm" id="detPlay">▶ Play</button>` : ""}<button class="btn sm" id="detCart">${cart.has(r.id) ? "Remove from cart" : "Add to cart"}</button><button class="btn sm" id="detTr">Transcribe${r.transcript ? " again" : ""}</button>${r.audio ? `<button class="btn sm" id="detUp" title="Send to the enabled sharing services">Upload</button>` : ""}</div>
         <div class="k">Machine transcript ${r.transcript_model ? "· " + r.transcript_model : ""}</div>

@@ -1327,6 +1327,9 @@ impl Reporter<'_> {
                     audio: wav.clone(),
                     poor_frames: c.voice_frames_poor,
                     dropped_blocks,
+                    level_dbfs: c.level_dbfs,
+                    echo_frac: c.echo_frac,
+                    echo_spread_us: c.echo_spread_us,
                     ..Default::default()
                 };
                 match crate::library::insert(&*db.lock().ok()?, &row) {
