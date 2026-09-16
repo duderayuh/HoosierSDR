@@ -1403,6 +1403,39 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
     .map_err(|e| e.to_string())?
 }
 
+/// A listener's correction to one transmission, put into the conversation
+/// that transmission is part of: the words the model reads are the
+/// corrected ones, and the summary already sent is replaced by a revision.
+/// Only a conversation still live can be revised — one whose late window
+/// has passed has been let go, and its message stands as sent.
+pub fn redo_call(app: &AppHandle, call: i64) -> Option<String> {
+    let state = app.state::<AppState>();
+    let text = {
+        let db = state.db.lock().unwrap().clone()?;
+        let c = db.lock().unwrap();
+        let row = crate::library::get(&c, call).ok()??;
+        row.transcript_edited.or(row.transcript)?
+    };
+    let mut again = None;
+    {
+        let mut st = state.conversations.lock().unwrap();
+        for c in st.open.iter_mut() {
+            let Some(p) = c.pieces.iter_mut().find(|p| p.id == Some(call)) else { continue };
+            p.transcript = Some(text.clone());
+            c.dirty = true;
+            if !c.busy {
+                c.busy = true;
+                again = Some(c.clone());
+            }
+        }
+    }
+    let c = again?;
+    let key = c.key;
+    let app = app.clone();
+    std::thread::spawn(move || summarise_and_send(app, c));
+    Some(format!("conversation {key} is being summarised again"))
+}
+
 /// Re-send a conversation's summary now (revision), e.g. after fixing the prompt.
 #[tauri::command]
 pub fn conversation_resend(app: AppHandle, state: State<AppState>, key: u64) -> Result<(), String> {
