@@ -676,6 +676,54 @@ fn call_attached(c: &Connection, call: i64) -> bool {
     .is_some()
 }
 
+/// A page longer than the system lets one transmission run arrives as two
+/// calls: the second half starts the moment the first ends, and comes with
+/// no radio ID. Read apart, the halves made two runs — one with the units
+/// and a clipped address, one with the rest of the address and no units.
+/// Across the library every second half that started within this of the
+/// first one's end read on from it mid-sentence; a new page a few seconds
+/// later carried its own radio ID and units.
+const SPLIT_GAP_SECS: f64 = 2.5;
+
+/// The other half of a page split in two, and whether that half came first.
+/// Only on a dispatch channel, where one voice talks: on a tactical channel
+/// an answer a second later is somebody else.
+pub(crate) fn split_partner(c: &Connection, call: i64) -> Option<(i64, bool)> {
+    let (start, secs, tg, unit): (i64, f64, i64, i64) = c
+        .query_row("SELECT start, secs, tg, unit FROM calls WHERE id = ?1", [call], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .ok()?;
+    let reads_on = |head_end: f64, tail_start: i64| (-1.5..=SPLIT_GAP_SECS).contains(&(tail_start as f64 - head_end));
+    if unit == 0 {
+        let before: Option<(i64, i64, f64)> = c
+            .query_row(
+                "SELECT id, start, secs FROM calls WHERE tg = ?1 AND id <> ?2 AND secs > 0 AND start <= ?3 ORDER BY start DESC, id DESC LIMIT 1",
+                params![tg, call, start],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some((id, s, d)) = before {
+            if reads_on(s as f64 + d, start) {
+                return Some((id, true));
+            }
+        }
+    }
+    let after: Option<(i64, i64, i64)> = c
+        .query_row(
+            "SELECT id, start, unit FROM calls WHERE tg = ?1 AND id <> ?2 AND secs > 0 AND start >= ?3 ORDER BY start, id LIMIT 1",
+            params![tg, call, start],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    match after {
+        Some((id, s, 0)) if reads_on(start as f64 + secs, s) => Some((id, false)),
+        _ => None,
+    }
+}
+
 fn prune(c: &Connection, retention_days: u32) {
     let cutoff = crate::library::now() - retention_days as i64 * 86_400;
     let _ = c.execute(
@@ -1674,6 +1722,34 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
             return Ok(("already attached".into(), None));
         }
     }
+    // Half of a page: read it whole, and file it with the run the other
+    // half is already on.
+    let split = match (f.id, ch.role.as_str()) {
+        (Some(id), "dispatch") => {
+            let c = db.lock().unwrap();
+            split_partner(&c, id).and_then(|(other, first)| {
+                let (text, incident): (Option<String>, Option<i64>) = c
+                    .query_row(
+                        "SELECT COALESCE(transcript_edited, transcript), (SELECT incident FROM incident_calls WHERE call = ?1 LIMIT 1) FROM calls WHERE id = ?1",
+                        [other],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .ok()?;
+                Some((text.unwrap_or_default(), first, incident))
+            })
+        }
+        _ => None,
+    };
+    let whole;
+    let f = match &split {
+        Some((other, first, _)) if !other.trim().is_empty() => {
+            let own = f.transcript.as_deref().unwrap_or("").trim();
+            let (a, b) = if *first { (other.trim(), own) } else { (own, other.trim()) };
+            whole = CallFacts { transcript: Some(format!("{a} {b}")), secs: f.secs.max(crate::transcribe::UNPROMPTED_SECS), ..f.clone() };
+            &whole
+        }
+        _ => f,
+    };
     let text = f.transcript.as_deref().unwrap_or("").trim();
     if !worth_extracting(&ch.role, f.secs, text) {
         return Ok(("transcript too short".into(), None));
@@ -1728,7 +1804,11 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
     let c = db.lock().unwrap();
     let open = inc_open(&c, settings.group_window_secs)?;
     let unit_keys: Vec<String> = x.units.iter().map(|u| unit_key(u)).collect();
-    let (target, how) = pick_target(
+    let joined = split.as_ref().and_then(|(_, _, inc)| *inc).and_then(|id| inc_get(&c, id).ok().flatten());
+    let whole_page = joined.is_some();
+    let (target, how) = match joined {
+        Some(i) => (Some(i), "the rest of the same page"),
+        None => pick_target(
         &open,
         &ch.role,
         &key,
@@ -1738,7 +1818,8 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
         &unit_keys,
         settings.group_radius_m as f64,
         now,
-    );
+        ),
+    };
     let role = ch.role.clone();
     match target {
         Some(mut i) => {
@@ -1778,6 +1859,21 @@ pub fn process(app: &AppHandle, f: &CallFacts) -> Result<(String, Option<Inciden
                 } else {
                     i.geocode = status.into();
                 }
+            } else if whole_page
+                && lat.is_some()
+                && i.geocode != "manual"
+                && !x.address.is_empty()
+                && !(matches!(i.geocode.as_str(), "ok" | "corrected") && status != "ok")
+            {
+                // The whole page read together says where better than
+                // either half did on its own — unless a half already placed
+                // exactly and the whole only comes out approximate.
+                i.address = x.address.clone();
+                ikey = key.clone();
+                i.lat = lat;
+                i.lon = lon;
+                i.validated = validated.clone();
+                i.geocode = status.into();
             } else if i.lat.is_none() && lat.is_some() && (i.geocode != "manual") {
                 i.lat = lat;
                 i.lon = lon;
@@ -2507,6 +2603,29 @@ mod short_clip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_heard_as_two_calls_is_one_page() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER, unit INTEGER);
+             INSERT INTO calls VALUES
+               (1, 1000, 10.3, 100, 700001),  -- the page, cut off mid-address
+               (2, 1011,  8.6, 100, 0),       -- the rest of it, no radio ID
+               (3, 1011,  4.0, 200, 0),       -- the same moment on another channel
+               (4, 1031,  9.0, 100, 0),       -- eleven seconds later: a new page
+               (5, 1060, 10.0, 100, 700001),
+               (6, 1070,  6.0, 100, 700001), -- straight after, but with its own ID
+               (7, 1090,  0.0, 100, 0);       -- a silent row, not a page",
+        )
+        .unwrap();
+        assert_eq!(split_partner(&c, 2), Some((1, true)));
+        assert_eq!(split_partner(&c, 1), Some((2, false)));
+        assert_eq!(split_partner(&c, 3), None, "another channel is another voice");
+        assert_eq!(split_partner(&c, 4), None, "a gap is a new page");
+        assert_eq!(split_partner(&c, 5), None, "a call with its own radio ID is its own");
+        assert_eq!(split_partner(&c, 6), None);
+    }
 
     #[test]
     fn address_keys_merge_abbreviations() {

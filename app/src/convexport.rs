@@ -39,8 +39,10 @@ fn slug(s: &str) -> String {
     out.trim_end_matches('-').chars().take(48).collect()
 }
 
-/// The archive's file name: when, where, and which conversation.
-pub fn file_name(r: &Stored) -> String {
+/// The archive's file name: when, the incident number of the run it was
+/// joined to (the one its case messages carry), where, and which
+/// conversation.
+pub fn file_name(r: &Stored, incident: Option<i64>) -> String {
     use chrono::TimeZone;
     let at = chrono::Local
         .timestamp_opt(r.first_at, 0)
@@ -48,7 +50,8 @@ pub fn file_name(r: &Stored) -> String {
         .map(|t| t.format("%Y-%m-%d_%H%M").to_string())
         .unwrap_or_default();
     let place = slug(if r.tg_desc.is_empty() { &r.tg_name } else { &r.tg_desc });
-    [at, place, slug(&r.conv_id)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_") + ".zip"
+    let number = incident.map(|i| format!("incident-{i}")).unwrap_or_default();
+    [at, number, place, slug(&r.conv_id)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_") + ".zip"
 }
 
 /// Who spoke a transmission, for its file name and the overview.
@@ -81,6 +84,7 @@ fn overview(r: &Stored, incident: Option<&crate::dispatch::Incident>) -> String 
     }
     if let Some(i) = incident {
         o.push_str("\nThe run it was joined to\n");
+        line(&mut o, "Incident", &format!("#{}", i.id));
         line(&mut o, "Call type", &i.call_type);
         line(&mut o, "Address", &i.address);
         line(&mut o, "Units", &i.units.join(", "));
@@ -196,7 +200,7 @@ pub fn build(
     }
 
     let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();
-    Ok(Archive { name: file_name(r), bytes })
+    Ok(Archive { name: file_name(r, incident_id), bytes })
 }
 
 /// The archive for a conversation in the library.
@@ -308,6 +312,7 @@ mod tests {
         })
         .unwrap();
         assert!(a.name.ends_with("_Example-General-ER_CONV-10256-1000000.zip"), "{}", a.name);
+        assert!(file_name(&r, Some(11)).ends_with("_incident-11_Example-General-ER_CONV-10256-1000000.zip"), "joined to a run, it carries the run's number");
 
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(a.bytes)).unwrap();
         let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
