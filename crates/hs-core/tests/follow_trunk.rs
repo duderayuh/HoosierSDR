@@ -257,6 +257,35 @@ fn the_scraps_after_a_transmission_do_not_become_calls_of_their_own() {
     assert_eq!(heard.len(), 1, "one transmission came back as {} calls: {heard:?}", heard.len());
 }
 
+/// Every call carries the air it arrived on. The numbers only mean anything
+/// if they are actually taken while the channel is being received — the
+/// first cut of this shipped with the reading never taken, and 185 calls
+/// went into the library with the columns empty before anyone noticed.
+#[test]
+fn a_call_comes_back_with_the_air_it_arrived_on() {
+    let mut band = Vec::new();
+    add_to_band(&mut band, &control_dibits(PLAN_BASE), CONTROL + TUNER_ERROR);
+    add_to_band(&mut band, &traffic_dibits(), TRAFFIC + TUNER_ERROR);
+
+    let mut f = TrunkFollower::new(RATE, CENTER, CONTROL, CONTROL + TUNER_ERROR, Modulation::Cqpsk);
+    let block = (RATE as usize / 10) * 2;
+    let mut done = Vec::new();
+    for chunk in band.chunks(block) {
+        done.extend(f.process(chunk).completed);
+    }
+    done.extend(f.finish());
+    let heard: Vec<&hs_core::follow::Call> = done.iter().filter(|c| !c.pcm.is_empty()).collect();
+    assert!(!heard.is_empty(), "nothing decoded: {:?}", done.len());
+    for c in heard {
+        assert!(c.level_dbfs.is_some(), "a call with no signal level: {:?}", c.talkgroup);
+        assert!(
+            c.level_dbfs.is_some_and(|d| d.is_finite() && d < 0.0),
+            "a signal level that says nothing: {:?}",
+            c.level_dbfs
+        );
+    }
+}
+
 #[test]
 fn a_regrant_for_another_talkgroup_splits_the_calls() {
     // Two back-to-back transmissions on one traffic channel, granted to two

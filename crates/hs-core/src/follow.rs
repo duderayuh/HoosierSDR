@@ -1658,6 +1658,11 @@ impl TrunkFollower {
                 call.quiet += secs;
             } else {
                 call.quiet = 0.0;
+                // Read the air only while the channel is being received:
+                // between transmissions there is nothing to judge.
+                let mut air = core::mem::take(&mut call.conditions);
+                air.sample(&call.c4fm, &call.cqpsk);
+                call.conditions = air;
             }
             // A terminator ends the transmission explicitly: close its
             // audio as its own clip, then hold the call open for a short
