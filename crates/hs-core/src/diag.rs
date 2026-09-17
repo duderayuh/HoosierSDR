@@ -183,6 +183,15 @@ pub struct Diagnostics {
     /// entirely when low confidence didn't happen to produce a correctable
     /// error this particular frame.
     pub voice_frames_low_quality: u64,
+    /// Of those, the ones that only just failed: a score in the top third of
+    /// the concealment band. They are blended mostly from the frame that was
+    /// actually decoded, so they are the frames a higher bar would hand back
+    /// to the listener — and the measure of whether the bar is costing
+    /// audio that would have sounded fine.
+    pub voice_frames_marginal: u64,
+    /// And the ones at or under the floor, replaced outright by the held
+    /// buffer because nothing usable came out of the decoder.
+    pub voice_frames_ruined: u64,
     /// Voice frames whose LDU had its sync word or NID lost and was decoded
     /// on the LDU1/LDU2 cadence instead (`hs_p25::framer` coasting).
     pub voice_frames_inferred: u64,
@@ -242,8 +251,14 @@ impl Diagnostics {
     pub fn record_voice_quality(&mut self, q: crate::decoder::VoiceQuality) {
         let score = q.score();
         self.voice_quality_sum += score as f64;
-        if score < 0.5 {
+        if score < crate::concealment::CONCEAL_BELOW {
             self.voice_frames_low_quality += 1;
+            let band = crate::concealment::CONCEAL_BELOW - crate::concealment::CONCEAL_FLOOR;
+            if score >= crate::concealment::CONCEAL_BELOW - band / 3.0 {
+                self.voice_frames_marginal += 1;
+            } else if score <= crate::concealment::CONCEAL_FLOOR {
+                self.voice_frames_ruined += 1;
+            }
         }
     }
 
@@ -297,8 +312,8 @@ impl Diagnostics {
             self.mean_voice_quality()
         ));
         s.push_str(&format!(
-            "  \"voice_frames_low_quality\": {},\n",
-            self.voice_frames_low_quality
+            "  \"voice_frames_low_quality\": {},\n  \"voice_frames_marginal\": {},\n  \"voice_frames_ruined\": {},\n",
+            self.voice_frames_low_quality, self.voice_frames_marginal, self.voice_frames_ruined
         ));
         s.push_str(&format!(
             "  \"voice_frames_inferred\": {},\n  \"voice_frames_concealed\": {},\n  \"ess_valid\": {},\n  \"ess_invalid\": {},\n  \"voice_ldus_encrypted\": {},\n",
@@ -510,5 +525,57 @@ impl Diagnostics {
         }
         s.push_str("]\n}\n");
         s
+    }
+}
+
+#[cfg(test)]
+mod conceal_band_tests {
+    use super::*;
+    use crate::decoder::VoiceQuality;
+
+    /// Both halves of the score — demodulator confidence and the FEC error
+    /// count — set to the same fraction, with no carrier lock, so the
+    /// composite comes out as the number asked for.
+    fn at(score: f32) -> VoiceQuality {
+        VoiceQuality {
+            confidence: score,
+            fec_errors: ((1.0 - score) * VoiceQuality::FEC_ERROR_SATURATION).round() as u32,
+            lock: None,
+        }
+    }
+
+    #[test]
+    fn the_helper_makes_the_score_it_claims() {
+        // The FEC half moves in whole errors out of ten, so a score lands
+        // within a twentieth of the number asked for, not exactly on it.
+        for want in [0.10, 0.30, 0.45, 0.80] {
+            assert!((at(want).score() - want).abs() <= 0.05, "at({want}) scored {}", at(want).score());
+        }
+    }
+
+    #[test]
+    fn a_concealed_frame_is_counted_by_how_bad_it_was() {
+        let mut d = Diagnostics::default();
+        d.record_voice_quality(at(0.80)); // sound: nothing to count
+        d.record_voice_quality(at(0.45)); // only just under the bar
+        d.record_voice_quality(at(0.30)); // well under, not hopeless
+        d.record_voice_quality(at(0.10)); // at the floor: replaced outright
+        assert_eq!(
+            (d.voice_frames_low_quality, d.voice_frames_marginal, d.voice_frames_ruined),
+            (3, 1, 1),
+            "three concealed, one barely, one ruined"
+        );
+    }
+
+    #[test]
+    fn the_bands_follow_the_thresholds_they_describe() {
+        let (top, floor) = (crate::concealment::CONCEAL_BELOW, crate::concealment::CONCEAL_FLOOR);
+        let third = (top - floor) / 3.0;
+        let mut d = Diagnostics::default();
+        d.record_voice_quality(at(top - third / 2.0));
+        assert_eq!(d.voice_frames_marginal, 1, "the top third of the band is marginal");
+        let mut d = Diagnostics::default();
+        d.record_voice_quality(at(top - third * 1.5));
+        assert_eq!((d.voice_frames_marginal, d.voice_frames_ruined), (0, 0), "the middle is neither");
     }
 }

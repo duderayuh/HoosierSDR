@@ -2308,7 +2308,14 @@ if (TAURI) {
       const echo = `${(r.echo_frac * 100).toFixed(1)}% echo` + (r.echo_spread_us != null ? ` · ${r.echo_spread_us.toFixed(0)} µs` : "");
       bits.push(r.echo_frac >= 0.06 ? `<b>${echo}</b>` : echo);
     }
-    if (r.poor_frames) bits.push(`${r.poor_frames} frame${r.poor_frames === 1 ? "" : "s"} concealed`);
+    if (r.poor_frames) {
+      // How bad they were, not just how many: frames that only just failed
+      // are the ones a higher bar would have let through.
+      const how = [];
+      if (r.marginal_frames) how.push(`${r.marginal_frames} barely`);
+      if (r.ruined_frames) how.push(`${r.ruined_frames} ruined`);
+      bits.push(`${r.poor_frames} frame${r.poor_frames === 1 ? "" : "s"} concealed${how.length ? ` (${how.join(", ")})` : ""}`);
+    }
     return `<div class="faint" title="Signal level on this channel, simulcast echo the equalizer had to undo, and how spread out it was. Heavy echo (6% and up) is where a call can decode cleanly and still sound wrong.">📶 ${bits.join(" · ")}</div>`;
   }
 

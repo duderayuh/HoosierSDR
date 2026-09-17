@@ -110,7 +110,7 @@ impl VoiceQuality {
     /// Above this many FEC corrections a frame is graded as if it had none
     /// left to spend — matches the FEC-only threshold `voice_frames_holding`
     /// used before this existed, so the two signals agree at the edges.
-    const FEC_ERROR_SATURATION: f32 = 10.0;
+    pub(crate) const FEC_ERROR_SATURATION: f32 = 10.0;
 
     /// Combine the three signals into one 0.0 (drop it) .. 1.0 (solid) score.
     /// Weighted 40% confidence / 40% FEC / 20% lock when lock is available;
