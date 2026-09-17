@@ -22,10 +22,10 @@ use hs_decoders::frontend::AudioAgc;
 
 /// Below this composite score a frame is blended toward the held (last
 /// good) buffer instead of being played as decoded.
-const CONCEAL_BELOW: f32 = 0.5;
+pub(crate) const CONCEAL_BELOW: f32 = 0.5;
 /// At or below this score a frame is treated as fully unusable: blended in
 /// almost entirely from the held buffer rather than partially.
-const CONCEAL_FLOOR: f32 = 0.15;
+pub(crate) const CONCEAL_FLOOR: f32 = 0.15;
 /// After this many consecutive concealed frames (1.6 s at 20 ms/frame), stop
 /// repeating the held buffer and fade its contribution toward silence
 /// instead — looping the same 20 ms of audio indefinitely reads to a

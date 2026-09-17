@@ -260,6 +260,8 @@ fn join_trailing(calls: Vec<Call>) -> Vec<Call> {
         p.syncs_cqpsk += c.syncs_cqpsk;
         p.voice_frame_errors += c.voice_frame_errors;
         p.voice_frames_poor += c.voice_frames_poor;
+        p.voice_frames_marginal += c.voice_frames_marginal;
+        p.voice_frames_ruined += c.voice_frames_ruined;
         p.emergency |= c.emergency;
         p.talker_alias = p.talker_alias.take().or(c.talker_alias);
         // The scrap was received on the same air; keep the fuller reading.
@@ -322,6 +324,10 @@ struct SegmentBase {
     err_cq: u64,
     poor_c4: u64,
     poor_cq: u64,
+    marginal_c4: u64,
+    marginal_cq: u64,
+    ruined_c4: u64,
+    ruined_cq: u64,
     enc_c4: u64,
     enc_cq: u64,
 }
@@ -336,6 +342,10 @@ impl SegmentBase {
             err_cq: b.voice_frame_errors,
             poor_c4: a.voice_frames_low_quality,
             poor_cq: b.voice_frames_low_quality,
+            marginal_c4: a.voice_frames_marginal,
+            marginal_cq: b.voice_frames_marginal,
+            ruined_c4: a.voice_frames_ruined,
+            ruined_cq: b.voice_frames_ruined,
             enc_c4: a.voice_ldus_encrypted,
             enc_cq: b.voice_ldus_encrypted,
         }
@@ -374,6 +384,12 @@ pub struct Call {
     /// which is what a listener hears as a chop. From the decoder whose
     /// audio was kept.
     pub voice_frames_poor: u64,
+    /// Of those, how many only just failed — blended mostly from the frame
+    /// that was decoded — and how many were replaced outright. Together they
+    /// say whether the concealment bar is costing audio that would have
+    /// sounded fine, or catching frames that were truly ruined.
+    pub voice_frames_marginal: u64,
+    pub voice_frames_ruined: u64,
     /// The control channel announced this call, but nothing was ever received
     /// on the channel: no audio, no frame sync, and no radio named.
     ///
@@ -1310,6 +1326,16 @@ impl TrunkFollower {
                     ended_after_secs: s.end_age,
                     voice_frame_errors: err_hi.saturating_sub(err_lo),
                     voice_frames_poor: poor_hi.saturating_sub(poor_lo),
+                    voice_frames_marginal: if pick_c4fm {
+                        s.end.marginal_c4.saturating_sub(s.start.marginal_c4)
+                    } else {
+                        s.end.marginal_cq.saturating_sub(s.start.marginal_cq)
+                    },
+                    voice_frames_ruined: if pick_c4fm {
+                        s.end.ruined_c4.saturating_sub(s.start.ruined_c4)
+                    } else {
+                        s.end.ruined_cq.saturating_sub(s.start.ruined_cq)
+                    },
                     talkgroup: c.talkgroup,
                     source_unit,
                     freq_hz: c.freq_hz,
@@ -2135,6 +2161,8 @@ mod trailing_tests {
             syncs_cqpsk: 1,
             voice_frame_errors: 0,
             voice_frames_poor: 0,
+            voice_frames_marginal: 0,
+            voice_frames_ruined: 0,
             announced_only: false,
             patched_with: Vec::new(),
             emergency: false,
