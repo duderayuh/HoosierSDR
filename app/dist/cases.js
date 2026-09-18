@@ -130,7 +130,6 @@
   }
 
   /* ---------- Telegram ---------- */
-  const NOTIFY = [["working", "Working arrest"], ["rosc", "ROSC"], ["rearrest", "Lost pulses"], ["report", "Hospital report, or its ETA moving 3 min"], ["downgrade", "Not an arrest"], ["terminated", "Efforts ceased"]];
   let profile = null, dests = [];
 
   async function loadSend() {
@@ -152,7 +151,6 @@
     $("csSendHosp").checked = t.hospitals !== false;
     $("csSendMap").checked = t.map !== false;
     $("csSendAudio").checked = t.audio !== false;
-    $("csNotify").innerHTML = NOTIFY.map(([k, label]) => `<label class="check"><input type="checkbox" data-notify="${k}" ${(t.notify || []).includes(k) ? "checked" : ""} /> ${esc(label)}</label>`).join("");
     $("csSendMeta").textContent = t.enabled ? "on" : "off";
   }
 
@@ -163,7 +161,6 @@
       hospitals: $("csSendHosp").checked,
       map: $("csSendMap").checked,
       audio: $("csSendAudio").checked,
-      notify: [...$("csNotify").querySelectorAll("[data-notify]")].filter((i) => i.checked).map((i) => i.dataset.notify),
     };
   }
 
@@ -190,9 +187,9 @@
       if (!p) return;
       const rows = (p.days || []).map((d) => `<tr><td class="mono">${esc(d.date)}</td><td>${esc(d.dest)}</td><td class="mono">${d.threads}</td><td class="mono">${d.replies}</td></tr>`).join("");
       const sample = (p.cases || []).filter((k) => k.chats.length).slice(0, 5).map((k) =>
-        `<details class="cs-sample"><summary>${esc(k.title)} · ${esc(k.address || "address not heard")} · ${esc(when(k.opened))} → ${esc(k.chats.join(", "))}</summary><pre>${esc(k.timeline)}</pre>${k.replies.length ? `<div class="lab small">Replies</div><pre>${esc(k.replies.join("\n"))}</pre>` : ""}</details>`).join("");
+        `<details class="cs-sample"><summary>${esc(k.title)} · ${esc(k.address || "address not heard")} · ${esc(when(k.opened))} → ${esc(k.chats.join(", "))}</summary><pre>${esc(k.timeline)}</pre>${k.replies.length ? `<div class="lab small">Reports heard, under it</div><pre>${esc(k.replies.join("\n"))}</pre>` : ""}</details>`).join("");
       $("csPreview").innerHTML = (p.warnings || []).map((w) => `<div class="cs-warn">${esc(w)}</div>`).join("")
-        + (rows ? `<table class="cs-count"><thead><tr><th>Day</th><th>Chat</th><th>Cases</th><th>Replies</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty small">Nothing would have been sent.</div>')
+        + (rows ? `<table class="cs-count"><thead><tr><th>Day</th><th>Chat</th><th>Cases</th><th>Reports heard</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty small">Nothing would have been sent.</div>')
         + sample;
     } catch (e) { uiToast(`${e}`, "err"); }
   }

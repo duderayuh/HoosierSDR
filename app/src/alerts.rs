@@ -835,7 +835,10 @@ pub(crate) fn send_audio_reply(
     } else {
         ("sendDocument", "document", "audio/wav")
     };
-    let linked = cap_html.filter(|h| h.chars().count() <= 1000);
+    // Telegram's cap is on the caption after its markup is parsed, so the
+    // formatted form goes whenever the plain one fits, and is sent plain
+    // only if Telegram refuses it.
+    let linked = cap_html;
     let send = |as_html: Option<&String>| -> Result<(u16, String), String> {
         let mut m = multipart_for(chat_id)
             .text("caption", as_html.unwrap_or(&cap))
@@ -970,6 +973,29 @@ pub(crate) fn edit_message_html(chat_id: &str, id: i64, text: &str, html: Option
     // strip the link the message already has.
     if html.is_some() && !(200..300).contains(&status) && !out.contains("not modified") {
         eprintln!("[alerts] Telegram refused the linked edit ({status}), sending it plain");
+        (status, out) = send(None)?;
+    }
+    check(status, &out).map(|_| ())
+}
+
+/// Edit the caption under an audio, document or photo the bot sent, in
+/// place. A caption is capped at 1024 characters after Telegram parses the
+/// markup, so the caller keeps the plain text under that; the markup itself
+/// is free. Refused markup falls back to the plain text, as for a message.
+pub(crate) fn edit_message_caption_html(chat_id: &str, id: i64, caption: &str, html: Option<&str>) -> Result<(), String> {
+    if chat_id.trim().is_empty() {
+        return Err("no Telegram chat id".into());
+    }
+    let send = |as_html: Option<&str>| -> Result<(u16, String), String> {
+        let mut body = serde_json::json!({ "chat_id": chat_parts(chat_id).0, "message_id": id, "caption": as_html.unwrap_or(caption) });
+        if as_html.is_some() {
+            body["parse_mode"] = "HTML".into();
+        }
+        crate::upload::post(&telegram_api("editMessageCaption")?, "application/json", body.to_string().into_bytes())
+    };
+    let (mut status, mut out) = send(html)?;
+    if html.is_some() && !(200..300).contains(&status) && !out.contains("not modified") {
+        eprintln!("[alerts] Telegram refused the formatted caption edit ({status}), sending it plain");
         (status, out) = send(None)?;
     }
     check(status, &out).map(|_| ())
