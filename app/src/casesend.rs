@@ -259,7 +259,9 @@ fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
 
     let facts = facts_of(k);
     let mut tail = Vec::new();
-    if let Some(a) = &k.arrival {
+    // Once the case has ended nobody is expected anywhere; the line would
+    // only mislead.
+    if let Some(a) = k.arrival.as_ref().filter(|_| !concluded(k)) {
         let window = match (a.from, a.to) {
             (Some(f), Some(t)) if f == t => format!("about {}", hm(f)),
             (Some(f), Some(t)) => format!("{}–{}", hm(f), hm(t)),
@@ -1394,7 +1396,7 @@ mod tests {
         later.state = "terminated".into();
         later.open = false;
         let steps = plan(&later, &t, &Send::default(), Some(&had), now + 90);
-        assert!(matches!(&steps[0], Step::Edit { root_id: 77, text } if text.contains("⚫ EFFORTS CEASED") && text.contains("Efforts ceased · dispatcher")), "{steps:?}");
+        assert!(matches!(&steps[0], Step::Edit { root_id: 77, text } if text.contains("⚫ EFFORTS CEASED") && text.contains("Efforts ceased · dispatcher") && !text.contains("Expected at")), "nobody is expected anywhere once it is over: {steps:?}");
         assert_eq!(steps[1], Step::DropMap { map_id: 78 });
         assert_eq!(steps.len(), 2);
         // Once down, it stays down; a thread that never had a map has
