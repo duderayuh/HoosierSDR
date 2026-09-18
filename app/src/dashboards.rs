@@ -576,6 +576,11 @@ fn case_card(row: &CaseRow) -> Card {
     }
     let mut body = Vec::new();
     let mut note = String::new();
+    // A board is glanced at: if the crew's own report named no arrest, that
+    // belongs at the top of the card, above the ETA.
+    if let Some(said) = &k.contested {
+        body.push(format!("⚠️ {said}"));
+    }
     if let Some(a) = &k.arrival {
         let window = match (a.from, a.to) {
             (Some(f), Some(t)) if f == t => Some(format!("about {}", hm(f))),
@@ -1301,6 +1306,7 @@ mod render_tests {
         report.facts = vec![crate::conversations::Fact { key: "witnessed".into(), value: "yes".into() }];
         CaseRow {
             view: crate::cases::CaseView {
+                contested: None,
                 id,
                 profile: "cardiac-arrest".into(),
                 incident: id * 10,

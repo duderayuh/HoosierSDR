@@ -1338,6 +1338,9 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .cs-state.amber { color: var(--amber); background: color-mix(in srgb, var(--amber) 15%, transparent); }
 .cs-state.signal { color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, transparent); }
 .cs-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+/* The crew's report says something other than an arrest: the one thing a
+   reader must see before the timeline talks about a cardiac arrest. */
+.cs-contested { border-left: 3px solid var(--amber); background: color-mix(in srgb, var(--amber) 10%, transparent); padding: 7px 10px; border-radius: 4px; margin-bottom: 8px; font-size: 13px; }
 .cs-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 14px; padding: 8px 0 12px; border-bottom: 1px solid var(--line-soft); margin-bottom: 6px; }
 .cs-facts > div { display: flex; flex-direction: column; min-width: 0; }
 .cs-facts .k { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }

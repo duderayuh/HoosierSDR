@@ -1304,6 +1304,11 @@ pub struct CaseView {
     /// only stable while the case is.
     pub incident: i64,
     pub title: String,
+    /// The latest report that named no arrest at all: what it said, and
+    /// where it went. The case still reads as an arrest — the dispatcher
+    /// paged one and a crew may yet say otherwise — but a reader is told
+    /// that the crew's own report describes something else.
+    pub contested: Option<String>,
     pub call_type: String,
     pub address: String,
     pub lat: Option<f64>,
@@ -1368,6 +1373,34 @@ fn lines_for(c: &Connection, case: i64) -> Vec<Line> {
 
 /// Hospital reports joined to any run of the case, as timeline lines, with
 /// the arrival each predicts (latest report last).
+/// Words a crew uses when the patient arrested, anywhere in the report they
+/// give the hospital. A report that names none of them is describing some
+/// other emergency.
+const ARREST_WORDS: &[&str] = &[
+    "arrest", "cpr", "rosc", "pulse", "compression", "defib", "aed", "asystole",
+    "fibrillation", "vfib", "v-fib", "pea", "agonal", "resuscitat", "downtime",
+    "return of spontaneous", "lucas", "bvm", "intubat",
+];
+
+/// Does this report describe something other than an arrest?
+///
+/// A run is dispatched on what the caller said — someone seizing and
+/// unresponsive is toned out as a cardiac arrest, and the dispatcher pages
+/// it as one — and the first person to know better is the crew, who say so
+/// to the hospital rather than on the dispatch channel. Both facts were
+/// already in the library and never met: an arrest case went on saying
+/// CARDIAC ARREST on the board and in every chat while the report attached
+/// to it described a seizure.
+///
+/// The test is deliberately one-sided. A report naming any of the words a
+/// crew uses about an arrest — including the ones that follow one, since a
+/// patient with pulses back can present seizing — is not contradicting
+/// anything. Only a report with none of them at all is.
+pub fn contradicts_arrest(report: &str) -> bool {
+    let text = report.to_lowercase();
+    !text.trim().is_empty() && !ARREST_WORDS.iter().any(|w| text.contains(w))
+}
+
 fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Settings, scene: Option<(f64, f64)>) -> (Vec<Line>, Vec<Arrival>) {
     let mut out = Vec::new();
     let mut arrivals = Vec::new();
@@ -1460,11 +1493,28 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
         _ if profile == "cardiac-arrest" => "Cardiac arrest".to_string(),
         _ => inc.call_type.clone(),
     };
+    // The crew's own account of the patient, when it names no arrest at
+    // all. Only for a profile about arrests: the words it looks for are
+    // theirs.
+    let contested = (profile == "cardiac-arrest" && state != "downgraded")
+        .then(|| {
+            lines
+                .iter()
+                .rev()
+                .find(|l| l.kind == "report" && contradicts_arrest(&l.detail))
+                .map(|l| {
+                    let said = l.detail.split(" — ").next().unwrap_or(&l.detail).trim();
+                    let place = l.label.trim_start_matches("Report to ").split(" · ").next().unwrap_or("the hospital");
+                    format!("Reported to {place} as: {said}")
+                })
+        })
+        .flatten();
     Some(CaseView {
         id,
         profile: profile.to_string(),
         incident: primary,
         title,
+        contested,
         call_type: inc.call_type.clone(),
         address: inc.address.clone(),
         lat: inc.lat,
@@ -2018,6 +2068,32 @@ mod tests {
     /// about it — and that is right for the map, but an hour on it is no
     /// longer this arrest's story: it paged a working arrest 82 minutes
     /// after a page, off a dispatcher saying "I'm working on that".
+    /// A run dispatched on what the caller said, and a crew who knew better
+    /// telling the hospital rather than the dispatcher.
+    #[test]
+    fn a_report_that_names_no_arrest_contradicts_the_page() {
+        // The report that prompted this: paged as a working cardiac arrest,
+        // transported as a seizure.
+        assert!(contradicts_arrest(
+            "Seizure, Hypotension, Dementia History — Medic 38 is transporting a 48-year-old female              patient who was actively seizing for approximately 15 minutes and received 10 mg of Versed."
+        ));
+        // A report about an arrest, however it is worded, contradicts
+        // nothing — including the ones that follow one, since a patient with
+        // pulses back can present seizing.
+        for said in [
+            "Cardiac Arrest, Bystander CPR — Medic 7 inbound with a 61-year-old male.",
+            "Post-arrest, Hypothermia — ROSC after twelve minutes, seizing en route.",
+            "Unresponsive — compressions in progress, LUCAS on the patient.",
+            "Overdose — pulses regained after naloxone.",
+            "Respiratory Failure — intubated on scene.",
+        ] {
+            assert!(!contradicts_arrest(said), "{said}");
+        }
+        // Nothing said is not a contradiction.
+        assert!(!contradicts_arrest(""));
+        assert!(!contradicts_arrest("   "));
+    }
+
     #[test]
     fn a_status_attached_an_hour_later_is_not_this_runs() {
         let c = Connection::open_in_memory().unwrap();
