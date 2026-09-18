@@ -96,7 +96,8 @@
     if (!k) { $("csTimeline").innerHTML = ""; $("csTitle").textContent = "Timeline"; $("csSub").textContent = ""; return; }
     $("csTitle").textContent = k.title;
     $("csSub").textContent = `Incident #${k.incident} · ${k.address || "address not heard"}${k.call_type && k.call_type !== k.title ? ` · dispatched as ${k.call_type}` : ""}`;
-    $("csTimeline").innerHTML = `<div class="cs-head">${stateChip(k.state)}<span class="faint small">${esc(k.units.join(", "))}</span></div>`
+    $("csTimeline").innerHTML = (k.contested ? `<div class="cs-contested">⚠️ ${esc(k.contested)}</div>` : "")
+      + `<div class="cs-head">${stateChip(k.state)}<span class="faint small">${esc(k.units.join(", "))}</span></div>`
       + `<div class="cs-facts">${facts(k)}</div>`
       + arrival(k)
       + (patient(k).length ? `<div class="cs-patient"><span class="cs-cap">From the hospital report</span><span class="cs-chips">${chips(patient(k))}</span></div>` : "")

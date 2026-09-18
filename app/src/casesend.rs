@@ -202,6 +202,12 @@ fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
         let units = k.units.join(", ");
         head.push(Row::new(format!("🚒 {units}"), format!("🚒 {}", esc(&units))));
     }
+    // The crew's own account, when it names no arrest at all. Said here
+    // rather than left to the timeline, because the line at the top of this
+    // message is what a clinician reads before anything else.
+    if let Some(said) = &k.contested {
+        head.push(Row::new(format!("⚠️ {said}"), format!("⚠️ <b>{}</b>", esc(said))));
+    }
     // An address that never placed is only what the transcript heard, and
     // may be misheard: it must not read as a checked one.
     if !k.address.is_empty() && k.lat.is_none() {
@@ -1043,6 +1049,7 @@ mod tests {
 
     fn case(lines: Vec<Line>, arrivals: Vec<Arrival>) -> CaseView {
         CaseView {
+            contested: None,
             id: 1,
             profile: "cardiac-arrest".into(),
             incident: 11,
@@ -1120,6 +1127,26 @@ mod tests {
         assert!(!render(&early).contains("Witnessed") && !render(&early).contains("Not stated"));
         let unheard = CaseView { address: String::new(), ..early };
         assert!(render(&unheard).starts_with("🫀 Cardiac arrest · address not heard\n🔴 WORKING ARREST\n"), "{}", render(&unheard));
+    }
+
+    /// The board and the chat both led with CARDIAC ARREST while the report
+    /// attached to the case described a seizure. Whatever else the timeline
+    /// says, that has to be said before it.
+    #[test]
+    fn a_report_that_names_no_arrest_is_said_at_the_top() {
+        let mut k = arrest();
+        k.contested = Some("Reported to Community North as: Seizure, Hypotension".into());
+        let text = render(&k);
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            rows[3], "⚠️ Reported to Community North as: Seizure, Hypotension",
+            "above the timeline, under the units: {text}"
+        );
+        let h = html(&k, "");
+        assert!(h.contains("⚠️ <b>Reported to Community North as: Seizure, Hypotension</b>"), "{h}");
+        // A case whose report is about an arrest says nothing extra.
+        k.contested = None;
+        assert!(!render(&k).contains("⚠️ Reported"));
     }
 
     #[test]

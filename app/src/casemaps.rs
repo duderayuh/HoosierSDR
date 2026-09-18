@@ -138,6 +138,7 @@ mod tests {
 
     fn case(lat: Option<f64>, arrivals: Vec<crate::cases::Arrival>) -> CaseView {
         CaseView {
+            contested: None,
             id: 1,
             profile: "cardiac-arrest".into(),
             incident: 11,
