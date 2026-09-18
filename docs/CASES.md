@@ -643,3 +643,48 @@ stays half an hour. It works on shared boards like any other pane.
   make another machine's screen fetch an address.
 - Maps are drawn for cases open now; a rebuild over past days does not draw
   pictures for them.
+
+## Research statistics (2026-09-18)
+
+`app/src/research.rs`, `app/dist/research.js`, a Research tab. An ED usually
+has two clocks for a critical patient: the crew's phone call and the
+patient's arrival. The radio adds earlier ones — the page, the moment the
+page's transcript landed (the earliest the app could have spoken), and the
+moment something was actually sent — and the tab lines them up for every
+case in a window, with a five-number summary of each interval and one row
+per case. Every number is worked out in Rust; the page draws.
+
+- **The lead.** *Alert → crew's call* is the crew's call minus the first
+  message sent about the run: the earliest of a tripwire that named the run
+  or fired on one of its calls (`tripwire_events`, `status = 'sent'`), the
+  case timeline (`case_sends`) and a case reply (`case_notices`). *App knew →
+  crew's call* is the same from `calls.transcribed_at` of the page, which
+  covers every case whether or not anything was sent. A negative lead is a
+  message that went out after the crew had already called, and is counted.
+- **The crew's call** is the first transmission of the first hospital
+  report joined to the run. What the radio cannot hear is typed in on the
+  row and kept apart: the ED's logged phone call and the arrival from the
+  chart (`research_records`). When present they are used, and each row says
+  which clock it used.
+- **Arrival** is the chart's time, else a crew saying "at the hospital",
+  else the middle of the stated ETA window. Crews mostly mark arrival on the
+  MDT, so the last two are thin, and the tab says so.
+- **Also counted**: dispatch → working, working → ROSC, dispatch → ROSC, the
+  said arrival against the ETA window (inside / early / late), how many
+  cases had ROSC, lost pulses, efforts ceased, a downgrade, a stated ETA;
+  which facts the report stated (witnessed, bystander CPR, rhythm …) over
+  the cases that had a report; and the pipeline over *every* call in the
+  window — call ended → transcript landed, call ended → tripwire sent, event
+  heard → case reply sent — since the lead is only as good as those.
+- **Kept.** Each computation files a snapshot per case (`research_snapshots`,
+  keyed on the run, never `cases.id`), so a case keeps its numbers after
+  retention removes its calls; a snapshot row is marked on the tab. *Export
+  CSV* writes one row per case to `~/Downloads`, every moment as epoch
+  seconds and local time, every interval in minutes.
+
+Honest limits: the alert clock is the wall clock after the Telegram send
+returned, so it includes the round trip; the "phone call" the ED receives
+may not be the radio report the app hears (some crews call by phone after
+the radio report, some instead of it), which is exactly why the ED's own
+time can be typed in; and the cases are the arrest profile only, so trauma
+or STEMI numbers wait on a second profile.

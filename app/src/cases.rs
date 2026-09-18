@@ -1531,6 +1531,16 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
     })
 }
 
+/// Every case opened between `from` and `to`, oldest first, with no cap:
+/// a study wants all of them, where the tab wants the latest two hundred.
+pub fn list_between(c: &Connection, from: i64, to: i64, places: &crate::places::Settings, now: i64) -> Vec<CaseView> {
+    let rows: Vec<(i64, String, i64, i64)> = c
+        .prepare("SELECT id, profile, incident, opened FROM cases WHERE opened BETWEEN ?1 AND ?2 ORDER BY opened")
+        .and_then(|mut q| q.query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    rows.into_iter().filter_map(|(id, p, inc, opened)| view(c, id, &p, inc, opened, places, now)).collect()
+}
+
 pub fn list(c: &Connection, since: i64, places: &crate::places::Settings, now: i64) -> CasesView {
     let rows: Vec<(i64, String, i64, i64)> = c
         .prepare("SELECT id, profile, incident, opened FROM cases WHERE opened >= ?1 ORDER BY opened DESC LIMIT 200")
