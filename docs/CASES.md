@@ -592,28 +592,45 @@ each place. **Off until switched on.**
   far. Nothing goes to a hospital on a prediction of where the patient is
   going; that mirrors the listener's tripwires, which announce dispatch to one
   chat and the report to the hospital's.
-- **The timeline message** is plain text (edits are sent without markup),
-  edited when it changes, never re-sent. Plain repages are left out, and so is
-  a second "at the hospital". A long one keeps its first line and its latest.
-- **Replies** go only for the ticked kinds: working (once), ROSC and lost
-  pulses as episodes (the crew's "pulses back" and the dispatcher's "rosc 1914"
-  are one), a report (the first, then only when the arrival it gives moves
-  three minutes or more), not an arrest, efforts ceased. Keys are built from
-  the event, never a row id, so a rebuild does not resend.
-- **Cutoffs.** A reply older than twenty minutes is recorded and not sent. A
-  new thread does not reply for anything already in its first message. A case
-  quiet for two hours, or one that ended over twenty minutes ago, gets no new
-  thread, so switching this on mid-shift or restarting does not replay a
-  shift.
-- **State** is in `case_sends` (per case, per chat: the message id and the text
-  it last showed) and `case_notices`, keyed on the case's run rather than its
-  row id. A thread stays in the chat it started in.
-- **Map**: once, under the first message in a hospital's chat, scene to that
-  hospital only.
+- **Three messages, no more.** The first is the page heard, with the
+  timeline as its caption, edited in place whenever it changes and never
+  re-sent; every word about the case is in it — where, how it stands, who is
+  on it, what happened line by line, what the crew told the hospital (the
+  report's summary sits under the line that says they called) and when to
+  expect them. The second is the map, under it. The third is the crew's
+  report to the hospital, heard: the clip of that call with one line to say
+  what it is. Working, ROSC, lost pulses, a downgrade and efforts ceased are
+  lines in the timeline, not replies: nothing buzzes for them. A later
+  report is heard only when the arrival it gives moves three minutes or
+  more. With the radio switched off, the timeline is a plain message and
+  only the map follows it.
+- **A caption is a quarter of a message** (1024 characters after markup,
+  against 4096), so a timeline under the page heard gives up the least
+  first: earlier reports' summaries, then the list of what the report did
+  not say, then the tail of the latest summary down to its headline and
+  first sentence, and only then the oldest lines after the first. Plain
+  repages are left out, and so is a second "at the hospital". A page with
+  no recording, or a thread from before this, is a text message with a
+  message's room.
+- **Efforts ceased, or not an arrest, concludes the thread**: the timeline
+  is edited to say so and the map is deleted, so what is left in the chat
+  is the page and the report.
+- **Cutoffs.** A clip older than twenty minutes is recorded and not sent. A
+  new thread does not send a clip for anything already in its first
+  message. A case quiet for two hours, or one that ended over twenty minutes
+  ago, gets no new thread, so switching this on mid-shift or restarting does
+  not replay a shift.
+- **State** is in `case_sends` (per case, per chat: the message id, whether
+  it is the page heard or a text message, the text it last showed and the
+  map's message id while it is up) and `case_notices`, keyed on the case's
+  run rather than its row id. A thread stays in the chat it started in.
+- **Map**: once, under the first message: the run and its routes to where
+  its pathway says to go in the chat for every case, scene to that hospital
+  only in a hospital's chat. Taken down when the case ends.
 - **Preview** counts, per day and per chat, what the built cases would have
   sent, with each timeline as it would read at the end. On a copy of the live
   library, with every ECMO hospital given a chat: the chat for every case
-  would have had 16 timelines and 13 replies on its busiest day.
+  would have had 16 timelines on its busiest day.
 - A rebuild now removes a case whose run is no longer a case of its own, so no
   thread is left pointing at a timeline nothing updates.
 
