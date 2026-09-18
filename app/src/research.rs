@@ -1,0 +1,1099 @@
+//! Research statistics: the intervals a study asks for, read off the library.
+//!
+//! An emergency department usually has two clocks for a critical patient:
+//! the phone call from the crew and the patient's arrival. The radio gives
+//! an earlier one, the moment this app could have said something, and an
+//! earlier one still, the page. This module lines those clocks up for every
+//! case and keeps the numbers a paper would need: how far ahead of the crew's
+//! call the alert came, how long from page to call, from CPR first reported to
+//! ROSC, and how the stated time to arrival compared with what was said on
+//! arrival.
+//!
+//! Three rules shape it:
+//!
+//! - **Every number is computed here, not on the page**, so the definitions
+//!   have one home and the tests check the same arithmetic the tab shows.
+//! - **The radio's clock is the trustworthy part.** A moment is the start of
+//!   the transmission it was said in. What the crew *meant* is not inferred:
+//!   "not stated" stays a gap, and a downtime is quoted as theirs.
+//! - **What the radio cannot hear is typed in, and kept apart.** The phone
+//!   call the ED logged and the arrival time from the chart are the ED's
+//!   record; the tab says which clock each interval used.
+//!
+//! Rows are keyed on the case's run (`cases.incident`), never on `cases.id`,
+//! which a rebuild renumbers. Each computation also files a snapshot, so a
+//! run whose calls retention has since removed keeps its numbers.
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use tauri::{AppHandle, Manager, State};
+
+use crate::AppState;
+
+/// The facts a report is asked for, in the order a clinician reads them.
+const FACT_KEYS: &[&str] = crate::conversations::FACT_KEYS;
+
+pub fn ensure_schema(c: &Connection) {
+    let _ = c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS research_records (
+            profile TEXT NOT NULL,
+            incident INTEGER NOT NULL,
+            phone_at INTEGER,
+            ed_arrived_at INTEGER,
+            note TEXT NOT NULL DEFAULT '',
+            updated INTEGER NOT NULL,
+            PRIMARY KEY (profile, incident)
+         );
+         CREATE TABLE IF NOT EXISTS research_snapshots (
+            profile TEXT NOT NULL,
+            incident INTEGER NOT NULL,
+            opened INTEGER NOT NULL,
+            computed INTEGER NOT NULL,
+            row TEXT NOT NULL,
+            PRIMARY KEY (profile, incident)
+         );
+         CREATE INDEX IF NOT EXISTS research_snapshots_opened ON research_snapshots(opened);",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// one case, as moments and the intervals between them
+// ---------------------------------------------------------------------------
+
+/// Everything a study wants to know about one case. Moments are epoch
+/// seconds; intervals are seconds and may be negative when the later clock
+/// came first (an alert after the crew's call is a negative lead).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct CaseRow {
+    pub profile: String,
+    pub incident: i64,
+    pub title: String,
+    pub address: String,
+    pub state: String,
+    pub units: u32,
+    /// The case was read from a snapshot: its calls or its case are gone.
+    #[serde(default)]
+    pub recorded: bool,
+
+    // -- what the radio said, by the transmission it was said in --
+    pub dispatched: Option<i64>,
+    /// The page's transcript landed: the earliest this app could have spoken.
+    pub known: Option<i64>,
+    /// The earliest message actually sent about this run, and by what.
+    pub alerted: Option<i64>,
+    pub alerted_how: String,
+    pub working: Option<i64>,
+    pub rosc: Option<i64>,
+    pub rearrest: Option<i64>,
+    pub transporting: Option<i64>,
+    pub terminated: Option<i64>,
+    pub downgraded: Option<i64>,
+    /// The crew's report to the hospital: the first transmission of the
+    /// first report joined to this run.
+    pub report: Option<i64>,
+    pub report_place: String,
+    pub reports: u32,
+    pub eta_said: Option<String>,
+    pub eta_from: Option<i64>,
+    pub eta_to: Option<i64>,
+    pub drive_min: Option<i64>,
+    pub drive_how: String,
+    /// A crew said they were at the hospital.
+    pub arrived_said: Option<i64>,
+    /// Minutes the said arrival fell outside the ETA window; 0 is inside.
+    pub off_by_min: Option<i64>,
+    /// The facts the report stated, by key.
+    pub facts: Vec<String>,
+
+    // -- the ED's record, typed in --
+    pub phone_at: Option<i64>,
+    pub ed_arrived_at: Option<i64>,
+    pub note: String,
+
+    // -- the pipeline --
+    /// Page transcript landed minus the page ended.
+    pub transcribe_secs: Option<i64>,
+    /// Alert sent minus the page transcript landed.
+    pub alert_secs: Option<i64>,
+
+    // -- intervals, seconds --
+    /// The crew's call minus the alert: how far ahead the alert came.
+    pub alert_to_call: Option<i64>,
+    /// The crew's call minus the moment the app knew: the lead an alert
+    /// could have had, whether or not one was sent.
+    pub known_to_call: Option<i64>,
+    pub dispatch_to_call: Option<i64>,
+    pub dispatch_to_working: Option<i64>,
+    pub working_to_rosc: Option<i64>,
+    pub dispatch_to_rosc: Option<i64>,
+    pub call_to_arrival: Option<i64>,
+    pub alert_to_arrival: Option<i64>,
+    pub dispatch_to_arrival: Option<i64>,
+    /// Which clock `call` used: `ED record` or `radio report`.
+    pub call_how: String,
+    /// Which clock `arrival` used: `ED record`, `said on air` or `stated ETA`.
+    pub arrival_how: String,
+}
+
+impl CaseRow {
+    /// The crew's call: the ED's logged phone call when typed in, else the
+    /// radio report.
+    pub fn call(&self) -> (Option<i64>, &'static str) {
+        match (self.phone_at, self.report) {
+            (Some(t), _) => (Some(t), "ED record"),
+            (None, Some(t)) => (Some(t), "radio report"),
+            _ => (None, ""),
+        }
+    }
+
+    /// The arrival: the chart's time when typed in, else what a crew said on
+    /// air, else the middle of the stated ETA window.
+    pub fn arrival(&self) -> (Option<i64>, &'static str) {
+        if let Some(t) = self.ed_arrived_at {
+            return (Some(t), "ED record");
+        }
+        if let Some(t) = self.arrived_said {
+            return (Some(t), "said on air");
+        }
+        match (self.eta_from, self.eta_to) {
+            (Some(a), Some(b)) => (Some((a + b) / 2), "stated ETA"),
+            _ => (None, ""),
+        }
+    }
+
+    /// Fill every interval from the moments. Idempotent.
+    pub fn derive(&mut self) {
+        let (call, call_how) = self.call();
+        let (arrival, arrival_how) = self.arrival();
+        self.call_how = call_how.into();
+        self.arrival_how = arrival_how.into();
+        let diff = |later: Option<i64>, earlier: Option<i64>| Some(later? - earlier?);
+        self.alert_secs = diff(self.alerted, self.known);
+        self.alert_to_call = diff(call, self.alerted);
+        self.known_to_call = diff(call, self.known);
+        self.dispatch_to_call = diff(call, self.dispatched);
+        self.dispatch_to_working = diff(self.working, self.dispatched);
+        self.working_to_rosc = diff(self.rosc, self.working);
+        self.dispatch_to_rosc = diff(self.rosc, self.dispatched);
+        self.call_to_arrival = diff(arrival, call);
+        self.alert_to_arrival = diff(arrival, self.alerted);
+        self.dispatch_to_arrival = diff(arrival, self.dispatched);
+    }
+}
+
+/// One case from the case builder, with the alert ledger and the ED record
+/// looked up.
+pub fn row_for(c: &Connection, k: &crate::cases::CaseView) -> CaseRow {
+    let first = |kind: &str| k.lines.iter().find(|l| l.kind == kind);
+    let mut r = CaseRow {
+        profile: k.profile.clone(),
+        incident: k.incident,
+        title: k.title.clone(),
+        address: k.address.clone(),
+        state: k.state.clone(),
+        units: k.units.len() as u32,
+        dispatched: first("dispatched").map(|l| l.at).or(Some(k.opened)),
+        // The page itself saying "working" is labelled on the dispatched line,
+        // not given a line of its own, so working is at dispatch then.
+        working: first("working")
+            .map(|l| l.at)
+            .or_else(|| first("dispatched").filter(|l| l.label.to_ascii_lowercase().contains("working")).map(|l| l.at)),
+        rosc: first("rosc").map(|l| l.at),
+        rearrest: first("rearrest").map(|l| l.at),
+        transporting: first("transporting").map(|l| l.at),
+        terminated: first("terminated").map(|l| l.at),
+        downgraded: first("downgrade").map(|l| l.at),
+        ..Default::default()
+    };
+    // The page: when its transcript landed is when the app knew.
+    if let Some(call) = first("dispatched").and_then(|l| l.call) {
+        if let Ok(Some((start, secs, landed))) = c
+            .query_row("SELECT start, secs, transcribed_at FROM calls WHERE id = ?1", [call], |x| {
+                Ok((x.get::<_, i64>(0)?, x.get::<_, f64>(1)?, x.get::<_, Option<i64>>(2)?))
+            })
+            .optional()
+        {
+            r.known = landed.filter(|t| *t > 0);
+            r.transcribe_secs = r.known.map(|t| t - (start + secs.round() as i64));
+        }
+    }
+    // The reports, oldest first; the first is the crew's call.
+    let reports: Vec<_> = k.lines.iter().filter(|l| l.kind == "report").collect();
+    r.reports = reports.len() as u32;
+    if let Some(first_report) = reports.first() {
+        r.report = Some(first_report.at);
+        r.report_place = first_report
+            .label
+            .trim_start_matches("Report to ")
+            .split(" · ")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    }
+    let mut facts: Vec<String> = Vec::new();
+    for l in &reports {
+        for f in &l.facts {
+            if !facts.contains(&f.key) {
+                facts.push(f.key.clone());
+            }
+        }
+    }
+    r.facts = facts;
+    if let Some(a) = &k.arrival {
+        r.eta_said = a.said.clone();
+        r.eta_from = a.from;
+        r.eta_to = a.to;
+        r.drive_min = a.drive_min;
+        r.drive_how = a.drive_how.clone();
+        r.arrived_said = a.arrived;
+        r.off_by_min = a.off_by_min;
+        if r.report_place.is_empty() {
+            r.report_place = a.place.clone();
+        }
+    }
+    if r.arrived_said.is_none() {
+        r.arrived_said = first(crate::cases::ARRIVED).map(|l| l.at);
+    }
+    let (alerted, how) = first_alert(c, &k.profile, &k.incidents);
+    r.alerted = alerted;
+    r.alerted_how = how;
+    if let Some((phone, arrived, note)) = record(c, &k.profile, k.incident) {
+        r.phone_at = phone;
+        r.ed_arrived_at = arrived;
+        r.note = note;
+    }
+    r.derive();
+    r
+}
+
+fn id_list(ids: &[i64]) -> String {
+    ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// The earliest message sent about any of a case's runs: a tripwire that
+/// named the run or fired on one of its calls, the case timeline, or a case
+/// reply. Tables that are not there yet (an older library) count as silence.
+pub fn first_alert(c: &Connection, profile: &str, incidents: &[i64]) -> (Option<i64>, String) {
+    if incidents.is_empty() {
+        return (None, String::new());
+    }
+    let ids = id_list(incidents);
+    let mut best: Option<(i64, String)> = None;
+    let mut offer = |at: Option<i64>, how: String| {
+        if let Some(t) = at.filter(|t| *t > 0) {
+            if best.as_ref().map_or(true, |(b, _)| t < *b) {
+                best = Some((t, how));
+            }
+        }
+    };
+    let tw: Option<(i64, String, String)> = c
+        .query_row(
+            &format!(
+                "SELECT at, source, rule_name FROM tripwire_events
+                  WHERE status = 'sent' AND (incident_id IN ({ids})
+                     OR id IN (SELECT event FROM tripwire_event_calls
+                                WHERE call IN (SELECT call FROM incident_calls WHERE incident IN ({ids}))))
+                  ORDER BY at LIMIT 1"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    if let Some((at, source, name)) = tw {
+        let how = if name.is_empty() { source } else { format!("{source}: {name}") };
+        offer(Some(at), how);
+    }
+    let sends: Option<i64> = c
+        .query_row(
+            &format!("SELECT MIN(sent_at) FROM case_sends WHERE profile = ?1 AND incident IN ({ids}) AND error = ''"),
+            [profile],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    offer(sends, "case timeline".into());
+    let notices: Option<i64> = c
+        .query_row(
+            &format!("SELECT MIN(sent_at) FROM case_notices WHERE profile = ?1 AND incident IN ({ids})"),
+            [profile],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    offer(notices, "case reply".into());
+    match best {
+        Some((t, how)) => (Some(t), how),
+        None => (None, String::new()),
+    }
+}
+
+fn record(c: &Connection, profile: &str, incident: i64) -> Option<(Option<i64>, Option<i64>, String)> {
+    c.query_row(
+        "SELECT phone_at, ed_arrived_at, note FROM research_records WHERE profile = ?1 AND incident = ?2",
+        params![profile, incident],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+// ---------------------------------------------------------------------------
+// summaries
+// ---------------------------------------------------------------------------
+
+/// Five-number summary of one interval, in minutes.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Measure {
+    pub key: String,
+    pub label: String,
+    /// Which clocks it runs between, for the methods section.
+    pub definition: String,
+    pub n: usize,
+    pub median: f64,
+    pub p25: f64,
+    pub p75: f64,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    /// Cases where the later clock came first.
+    pub negative: usize,
+}
+
+/// A count out of a denominator.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Count {
+    pub key: String,
+    pub label: String,
+    pub n: usize,
+    pub of: usize,
+}
+
+/// Linear-interpolated quantile of a sorted slice; `q` in 0..=1.
+pub fn quantile(sorted: &[f64], q: f64) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        1 => sorted[0],
+        n => {
+            let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+        }
+    }
+}
+
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
+}
+
+/// Summarise seconds as minutes.
+pub fn measure(key: &str, label: &str, definition: &str, secs: impl Iterator<Item = i64>) -> Measure {
+    let mut v: Vec<f64> = secs.map(|s| s as f64 / 60.0).collect();
+    let negative = v.iter().filter(|x| **x < 0.0).count();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Measure {
+        key: key.into(),
+        label: label.into(),
+        definition: definition.into(),
+        n,
+        median: round1(quantile(&v, 0.5)),
+        p25: round1(quantile(&v, 0.25)),
+        p75: round1(quantile(&v, 0.75)),
+        min: round1(v.first().copied().unwrap_or(0.0)),
+        max: round1(v.last().copied().unwrap_or(0.0)),
+        mean: round1(if n == 0 { 0.0 } else { v.iter().sum::<f64>() / n as f64 }),
+        negative,
+    }
+}
+
+/// What the library held over the window, for the denominators.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Slice {
+    pub calls: i64,
+    pub hours: f64,
+    pub transcribed: i64,
+    pub incidents: i64,
+    pub reports: i64,
+    pub reports_joined: i64,
+    pub reports_joined_by_radio: i64,
+    pub reports_with_facts: i64,
+    pub alerts_sent: i64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct Stats {
+    pub from: i64,
+    pub to: i64,
+    pub days: u32,
+    pub library: Slice,
+    /// Case intervals, in the order a reader wants them.
+    pub measures: Vec<Measure>,
+    /// Pipeline latencies over every call and alert in the window, not only
+    /// the cases.
+    pub pipeline: Vec<Measure>,
+    pub counts: Vec<Count>,
+    pub rows: Vec<CaseRow>,
+    pub notes: Vec<String>,
+}
+
+/// Sum up a set of rows. Pure, so the tests can feed it rows by hand.
+pub fn summarise(rows: &[CaseRow]) -> (Vec<Measure>, Vec<Count>) {
+    let pick = |f: fn(&CaseRow) -> Option<i64>| rows.iter().filter_map(f);
+    let measures = vec![
+        measure("alert_to_call", "Alert → crew's call", "the crew's call (the ED's logged phone call, else the first radio report joined to the run) minus the first message sent about the run", pick(|r| r.alert_to_call)),
+        measure("known_to_call", "App knew → crew's call", "the crew's call minus the moment the page's transcript landed; the lead an alert could have had", pick(|r| r.known_to_call)),
+        measure("dispatch_to_call", "Dispatch → crew's call", "the crew's call minus the page", pick(|r| r.dispatch_to_call)),
+        measure("call_to_arrival", "Crew's call → arrival", "arrival (the chart, else a crew saying they are at the hospital, else the middle of the stated ETA) minus the crew's call", pick(|r| r.call_to_arrival)),
+        measure("alert_to_arrival", "Alert → arrival", "arrival minus the first message sent", pick(|r| r.alert_to_arrival)),
+        measure("dispatch_to_arrival", "Dispatch → arrival", "arrival minus the page", pick(|r| r.dispatch_to_arrival)),
+        measure("dispatch_to_working", "Dispatch → working arrest", "the first 'working' said on air minus the page; 0 when the page itself said working", pick(|r| r.dispatch_to_working)),
+        measure("working_to_rosc", "Working → ROSC", "ROSC first said minus working first said", pick(|r| r.working_to_rosc)),
+        measure("dispatch_to_rosc", "Dispatch → ROSC", "ROSC first said minus the page", pick(|r| r.dispatch_to_rosc)),
+        measure("eta_off", "Said arrival vs stated ETA", "minutes a crew's 'at the hospital' fell outside the window their stated ETA gave; 0 is inside, negative is early", rows.iter().filter_map(|r| r.off_by_min.map(|m| m * 60))),
+        measure("transcribe", "Page ended → transcript landed", "for the case's page only", pick(|r| r.transcribe_secs)),
+        measure("alert_lag", "Transcript landed → alert sent", "for the case's page only", pick(|r| r.alert_secs)),
+    ];
+    let n = rows.len();
+    let count = |key: &str, label: &str, f: fn(&CaseRow) -> bool| Count { key: key.into(), label: label.into(), n: rows.iter().filter(|r| f(r)).count(), of: n };
+    let mut counts = vec![
+        count("cases", "Cases", |_| true),
+        count("alerted", "A message was sent", |r| r.alerted.is_some()),
+        count("reported", "A crew reported to a hospital", |r| r.report.is_some()),
+        count("working", "Working arrest said", |r| r.working.is_some()),
+        count("rosc", "ROSC said", |r| r.rosc.is_some()),
+        count("rearrest", "Lost pulses said", |r| r.rearrest.is_some()),
+        count("transporting", "Transporting said", |r| r.transporting.is_some()),
+        count("terminated", "Efforts ceased", |r| r.terminated.is_some()),
+        count("downgraded", "Not an arrest", |r| r.downgraded.is_some()),
+        count("eta_said", "An ETA was stated", |r| r.eta_from.is_some()),
+        count("arrived_said", "At the hospital said on air", |r| r.arrived_said.is_some()),
+        count("eta_inside", "Said arrival inside the ETA window", |r| r.off_by_min == Some(0)),
+        count("eta_early", "Said arrival before the window", |r| r.off_by_min.map_or(false, |m| m < 0)),
+        count("eta_late", "Said arrival after the window", |r| r.off_by_min.map_or(false, |m| m > 0)),
+        count("ed_phone", "ED phone call typed in", |r| r.phone_at.is_some()),
+        count("ed_arrived", "ED arrival typed in", |r| r.ed_arrived_at.is_some()),
+    ];
+    let reported = rows.iter().filter(|r| r.report.is_some()).count();
+    for key in FACT_KEYS {
+        let label = match *key {
+            "bystander cpr" => "Bystander CPR stated".to_string(),
+            "rosc" => "ROSC stated in the report".to_string(),
+            "eta" => "ETA stated in the report".to_string(),
+            k => {
+                let mut s = k.to_string();
+                if let Some(f) = s.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                format!("{s} stated")
+            }
+        };
+        counts.push(Count {
+            key: format!("fact_{}", key.replace(' ', "_")),
+            label,
+            n: rows.iter().filter(|r| r.facts.iter().any(|f| f == key)).count(),
+            of: reported,
+        });
+    }
+    (measures, counts)
+}
+
+/// Pipeline latency over the whole window, not only the cases: transcript
+/// landing and alert sending, per call and per alert.
+pub fn pipeline(c: &Connection, from: i64, to: i64) -> Vec<Measure> {
+    let announced = crate::rxhealth::ANNOUNCED_ONLY;
+    let transcribe: Vec<i64> = c
+        .prepare(&format!(
+            "SELECT transcribed_at - (start + CAST(ROUND(secs) AS INTEGER)) FROM calls
+              WHERE start BETWEEN ?1 AND ?2 AND transcribed_at > 0 AND secs > 0 AND NOT {announced}
+                AND transcript IS NOT NULL AND transcript <> ''"
+        ))
+        .and_then(|mut q| q.query_map(params![from, to], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    let alerts: Vec<i64> = c
+        .prepare(
+            "SELECT e.at - MAX(c.start + CAST(ROUND(c.secs) AS INTEGER)) FROM tripwire_events e
+               JOIN tripwire_event_calls l ON l.event = e.id JOIN calls c ON c.id = l.call
+              WHERE e.status = 'sent' AND e.at BETWEEN ?1 AND ?2 GROUP BY e.id",
+        )
+        .and_then(|mut q| q.query_map(params![from, to], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    let replies: Vec<i64> = c
+        .prepare("SELECT sent_at - at FROM case_notices WHERE sent_at BETWEEN ?1 AND ?2")
+        .and_then(|mut q| q.query_map(params![from, to], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    vec![
+        measure("all_transcribe", "Call ended → transcript landed", "every transcribed call in the window", transcribe.into_iter()),
+        measure("all_alert", "Call ended → tripwire sent", "every tripwire sent in the window, from the end of the last call it fired on", alerts.into_iter()),
+        measure("all_reply", "Event heard → case reply sent", "every case reply sent in the window, from the transmission it answered", replies.into_iter()),
+    ]
+}
+
+pub fn slice(c: &Connection, from: i64, to: i64) -> Slice {
+    let announced = crate::rxhealth::ANNOUNCED_ONLY;
+    let (calls, secs, transcribed): (i64, f64, i64) = c
+        .query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(secs), 0), COALESCE(SUM(transcript IS NOT NULL AND transcript <> ''), 0)
+                   FROM calls WHERE start BETWEEN ?1 AND ?2 AND NOT {announced}"
+            ),
+            params![from, to],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or((0, 0.0, 0));
+    let incidents: i64 = c
+        .query_row("SELECT COUNT(*) FROM incidents WHERE created BETWEEN ?1 AND ?2", params![from, to], |r| r.get(0))
+        .unwrap_or(0);
+    let (reports, joined, by_radio, with_facts): (i64, i64, i64, i64) = c
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(incident IS NOT NULL), 0),
+                    COALESCE(SUM(incident IS NOT NULL AND link_how LIKE '%learned as%'), 0),
+                    COALESCE(SUM(facts IS NOT NULL AND facts <> '' AND facts <> '[]'), 0)
+               FROM conversations WHERE first_at BETWEEN ?1 AND ?2 AND source = 'live'",
+            params![from, to],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap_or((0, 0, 0, 0));
+    let alerts_sent: i64 = c
+        .query_row("SELECT COUNT(*) FROM tripwire_events WHERE status = 'sent' AND at BETWEEN ?1 AND ?2", params![from, to], |r| r.get(0))
+        .unwrap_or(0);
+    Slice {
+        calls,
+        hours: (secs / 3600.0 * 10.0).round() / 10.0,
+        transcribed,
+        incidents,
+        reports,
+        reports_joined: joined,
+        reports_joined_by_radio: by_radio,
+        reports_with_facts: with_facts,
+        alerts_sent,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// keeping the numbers
+// ---------------------------------------------------------------------------
+
+fn snapshot(c: &Connection, rows: &[CaseRow], now: i64) {
+    for r in rows {
+        if let Ok(json) = serde_json::to_string(r) {
+            let _ = c.execute(
+                "INSERT OR REPLACE INTO research_snapshots (profile, incident, opened, computed, row) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![r.profile, r.incident, r.dispatched.unwrap_or(0), now, json],
+            );
+        }
+    }
+}
+
+/// Snapshots of cases in the window that the live build no longer has.
+fn recorded(c: &Connection, from: i64, to: i64, live: &[CaseRow]) -> Vec<CaseRow> {
+    let have: std::collections::HashSet<(String, i64)> = live.iter().map(|r| (r.profile.clone(), r.incident)).collect();
+    c.prepare("SELECT row FROM research_snapshots WHERE opened BETWEEN ?1 AND ?2")
+        .and_then(|mut q| {
+            q.query_map(params![from, to], |r| r.get::<_, String>(0)).map(|rows| {
+                rows.flatten()
+                    .filter_map(|j| serde_json::from_str::<CaseRow>(&j).ok())
+                    .filter(|r| !have.contains(&(r.profile.clone(), r.incident)))
+                    .map(|mut r| {
+                        r.recorded = true;
+                        // The ED's record may have been typed in since.
+                        if let Some((phone, arrived, note)) = record(c, &r.profile, r.incident) {
+                            r.phone_at = phone;
+                            r.ed_arrived_at = arrived;
+                            r.note = note;
+                        }
+                        r.derive();
+                        r
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// The whole picture over the last `days`.
+pub fn compute(c: &Connection, days: u32, places: &crate::places::Settings, now: i64) -> Stats {
+    let days = days.clamp(1, 3650);
+    let from = now - days as i64 * 86_400;
+    let mut rows: Vec<CaseRow> = crate::cases::list_between(c, from, now, places, now).iter().map(|k| row_for(c, k)).collect();
+    snapshot(c, &rows, now);
+    rows.extend(recorded(c, from, now, &rows));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.dispatched.unwrap_or(0)));
+    let (measures, counts) = summarise(&rows);
+    let mut notes = vec![
+        "A moment is the start of the transmission it was said in, on this machine's clock.".to_string(),
+        "The crew's call is the radio report joined to the run, unless the ED's phone call has been typed in for that case.".to_string(),
+        "Arrival is the chart's time when typed in, else a crew saying they are at the hospital, else the middle of the stated ETA. Crews mostly mark arrival on the MDT, so the last two are thin.".to_string(),
+        "A negative lead means the message went out after the crew had already called.".to_string(),
+    ];
+    let unsent = rows.iter().filter(|r| r.alerted.is_none()).count();
+    if unsent > 0 {
+        notes.push(format!("{unsent} of {} cases had no message sent, so 'Alert → crew's call' covers only the rest; 'App knew → crew's call' covers every case with a transcribed page.", rows.len()));
+    }
+    let by_hand: BTreeMap<&str, usize> = rows.iter().fold(BTreeMap::new(), |mut m, r| {
+        *m.entry(r.call_how.as_str()).or_default() += 1;
+        m
+    });
+    if by_hand.get("ED record").copied().unwrap_or(0) > 0 {
+        notes.push(format!(
+            "The crew's call is the ED's logged phone call for {} cases and the radio report for {}.",
+            by_hand.get("ED record").copied().unwrap_or(0),
+            by_hand.get("radio report").copied().unwrap_or(0)
+        ));
+    }
+    Stats {
+        from,
+        to: now,
+        days,
+        library: slice(c, from, now),
+        measures,
+        pipeline: pipeline(c, from, now),
+        counts,
+        rows,
+        notes,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// export
+// ---------------------------------------------------------------------------
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn min1(secs: Option<i64>) -> String {
+    secs.map(|s| format!("{:.1}", s as f64 / 60.0)).unwrap_or_default()
+}
+
+fn when(t: Option<i64>) -> String {
+    t.map(|t| crate::library::local_fmt(t, "%Y-%m-%d %H:%M:%S")).unwrap_or_default()
+}
+
+/// One row per case, one column per moment and interval. Moments are given
+/// twice, as epoch seconds for software and local time for people.
+pub fn csv(rows: &[CaseRow]) -> String {
+    let moments: &[(&str, fn(&CaseRow) -> Option<i64>)] = &[
+        ("dispatched", |r| r.dispatched),
+        ("app_knew", |r| r.known),
+        ("alerted", |r| r.alerted),
+        ("working", |r| r.working),
+        ("rosc", |r| r.rosc),
+        ("rearrest", |r| r.rearrest),
+        ("transporting", |r| r.transporting),
+        ("terminated", |r| r.terminated),
+        ("downgraded", |r| r.downgraded),
+        ("radio_report", |r| r.report),
+        ("eta_from", |r| r.eta_from),
+        ("eta_to", |r| r.eta_to),
+        ("arrived_said", |r| r.arrived_said),
+        ("ed_phone", |r| r.phone_at),
+        ("ed_arrived", |r| r.ed_arrived_at),
+    ];
+    let intervals: &[(&str, fn(&CaseRow) -> Option<i64>)] = &[
+        ("alert_to_call_min", |r| r.alert_to_call),
+        ("known_to_call_min", |r| r.known_to_call),
+        ("dispatch_to_call_min", |r| r.dispatch_to_call),
+        ("call_to_arrival_min", |r| r.call_to_arrival),
+        ("alert_to_arrival_min", |r| r.alert_to_arrival),
+        ("dispatch_to_arrival_min", |r| r.dispatch_to_arrival),
+        ("dispatch_to_working_min", |r| r.dispatch_to_working),
+        ("working_to_rosc_min", |r| r.working_to_rosc),
+        ("dispatch_to_rosc_min", |r| r.dispatch_to_rosc),
+        ("transcribe_min", |r| r.transcribe_secs),
+        ("alert_lag_min", |r| r.alert_secs),
+    ];
+    let mut head: Vec<String> = vec!["profile", "incident", "title", "state", "address", "units", "recorded"].into_iter().map(String::from).collect();
+    for (k, _) in moments {
+        head.push(format!("{k}_epoch"));
+        head.push(format!("{k}_local"));
+    }
+    head.extend(["alerted_how", "report_place", "reports", "eta_said", "drive_min", "drive_how", "eta_off_by_min", "call_clock", "arrival_clock"].map(String::from));
+    for (k, _) in intervals {
+        head.push(k.to_string());
+    }
+    head.extend(FACT_KEYS.iter().map(|k| format!("fact_{}", k.replace(' ', "_"))));
+    head.push("note".into());
+    let mut out = head.join(",") + "\n";
+    for r in rows {
+        let mut f: Vec<String> = vec![
+            csv_field(&r.profile),
+            r.incident.to_string(),
+            csv_field(&r.title),
+            csv_field(&r.state),
+            csv_field(&r.address),
+            r.units.to_string(),
+            (r.recorded as u8).to_string(),
+        ];
+        for (_, g) in moments {
+            let t = g(r);
+            f.push(t.map(|t| t.to_string()).unwrap_or_default());
+            f.push(when(t));
+        }
+        f.push(csv_field(&r.alerted_how));
+        f.push(csv_field(&r.report_place));
+        f.push(r.reports.to_string());
+        f.push(csv_field(r.eta_said.as_deref().unwrap_or_default()));
+        f.push(r.drive_min.map(|m| m.to_string()).unwrap_or_default());
+        f.push(csv_field(&r.drive_how));
+        f.push(r.off_by_min.map(|m| m.to_string()).unwrap_or_default());
+        f.push(csv_field(&r.call_how));
+        f.push(csv_field(&r.arrival_how));
+        for (_, g) in intervals {
+            f.push(min1(g(r)));
+        }
+        for k in FACT_KEYS {
+            f.push(if r.facts.iter().any(|x| x == k) { "1".into() } else { "0".into() });
+        }
+        f.push(csv_field(&r.note));
+        out.push_str(&f.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// commands
+// ---------------------------------------------------------------------------
+
+fn db(state: &AppState) -> Result<std::sync::Arc<std::sync::Mutex<Connection>>, String> {
+    state.db.lock().unwrap().clone().ok_or_else(|| "the call library is not open".to_string())
+}
+
+/// The statistics over the last `days`. Read in a blocking task: it walks
+/// every case in the window and every call for the pipeline numbers.
+#[tauri::command]
+pub async fn research_stats(app: AppHandle, days: u32) -> Result<Stats, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let places = crate::places::load(&app).settings;
+        let db = db(&state)?;
+        let c = db.lock().unwrap();
+        Ok(compute(&c, days, &places, crate::library::now()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The ED's record for one case: the phone call as logged and the arrival
+/// from the chart, epoch seconds, either or both empty, and a note.
+#[tauri::command]
+pub fn research_set_record(
+    state: State<AppState>,
+    profile: String,
+    incident: i64,
+    phone_at: Option<i64>,
+    ed_arrived_at: Option<i64>,
+    note: Option<String>,
+) -> Result<(), String> {
+    let db = db(&state)?;
+    let c = db.lock().unwrap();
+    let note = note.unwrap_or_default();
+    if phone_at.is_none() && ed_arrived_at.is_none() && note.trim().is_empty() {
+        c.execute("DELETE FROM research_records WHERE profile = ?1 AND incident = ?2", params![profile, incident])
+            .map_err(|e| format!("research record: {e}"))?;
+        return Ok(());
+    }
+    c.execute(
+        "INSERT INTO research_records (profile, incident, phone_at, ed_arrived_at, note, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(profile, incident) DO UPDATE SET phone_at = excluded.phone_at, ed_arrived_at = excluded.ed_arrived_at,
+            note = excluded.note, updated = excluded.updated",
+        params![profile, incident, phone_at, ed_arrived_at, note.trim(), crate::library::now()],
+    )
+    .map_err(|e| format!("research record: {e}"))?;
+    Ok(())
+}
+
+/// Write the per-case table as CSV to ~/Downloads and say where.
+#[tauri::command]
+pub async fn research_export(app: AppHandle, days: u32) -> Result<String, String> {
+    let stats = research_stats(app, days).await?;
+    let text = csv(&stats.rows);
+    let dir = std::path::PathBuf::from(crate::shellexpand_home("~/Downloads"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let stem = format!("research-cases-{}", crate::library::local_fmt(stats.to, "%Y%m%d-%H%M"));
+    let mut path = dir.join(format!("{stem}.csv"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.csv"));
+        n += 1;
+    }
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(dispatched: i64) -> CaseRow {
+        CaseRow { profile: "cardiac-arrest".into(), incident: 1, dispatched: Some(dispatched), ..Default::default() }
+    }
+
+    #[test]
+    fn quantiles_interpolate() {
+        let v = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(quantile(&v, 0.5), 2.5);
+        assert_eq!(quantile(&v, 0.25), 1.75);
+        assert_eq!(quantile(&v, 0.0), 1.0);
+        assert_eq!(quantile(&v, 1.0), 4.0);
+        assert_eq!(quantile(&[], 0.5), 0.0);
+        assert_eq!(quantile(&[7.0], 0.9), 7.0);
+    }
+
+    #[test]
+    fn the_lead_runs_from_the_alert_to_the_crews_call() {
+        let mut r = row(1000);
+        r.known = Some(1030);
+        r.alerted = Some(1045);
+        r.report = Some(1000 + 14 * 60);
+        r.derive();
+        assert_eq!(r.call_how, "radio report");
+        assert_eq!(r.alert_to_call, Some(14 * 60 - 45));
+        assert_eq!(r.known_to_call, Some(14 * 60 - 30));
+        assert_eq!(r.dispatch_to_call, Some(14 * 60));
+        assert_eq!(r.alert_secs, Some(15));
+        // No arrival of any kind: nothing to say.
+        assert_eq!(r.call_to_arrival, None);
+        assert_eq!(r.arrival_how, "");
+    }
+
+    #[test]
+    fn the_eds_record_wins_over_the_radio() {
+        let mut r = row(1000);
+        r.alerted = Some(1100);
+        r.report = Some(1600);
+        r.phone_at = Some(1900);
+        r.eta_from = Some(2200);
+        r.eta_to = Some(2400);
+        r.derive();
+        assert_eq!(r.call_how, "ED record");
+        assert_eq!(r.alert_to_call, Some(800));
+        assert_eq!(r.arrival_how, "stated ETA");
+        assert_eq!(r.call_to_arrival, Some(2300 - 1900));
+        r.arrived_said = Some(2500);
+        r.derive();
+        assert_eq!(r.arrival_how, "said on air");
+        r.ed_arrived_at = Some(2600);
+        r.derive();
+        assert_eq!(r.arrival_how, "ED record");
+        assert_eq!(r.alert_to_arrival, Some(1500));
+    }
+
+    #[test]
+    fn a_late_alert_is_a_negative_lead_and_is_counted() {
+        let mut a = row(0);
+        a.alerted = Some(600);
+        a.report = Some(300);
+        a.derive();
+        let mut b = row(0);
+        b.alerted = Some(60);
+        b.report = Some(660);
+        b.derive();
+        let (m, counts) = summarise(&[a, b]);
+        let lead = m.iter().find(|m| m.key == "alert_to_call").unwrap();
+        assert_eq!(lead.n, 2);
+        assert_eq!(lead.negative, 1);
+        assert_eq!(lead.min, -5.0);
+        assert_eq!(lead.max, 10.0);
+        assert_eq!(lead.median, 2.5);
+        let alerted = counts.iter().find(|c| c.key == "alerted").unwrap();
+        assert_eq!((alerted.n, alerted.of), (2, 2));
+    }
+
+    #[test]
+    fn facts_are_counted_over_reported_cases_only() {
+        let mut a = row(0);
+        a.report = Some(10);
+        a.facts = vec!["witnessed".into(), "bystander cpr".into()];
+        let b = row(0);
+        let (_, counts) = summarise(&[a, b]);
+        let w = counts.iter().find(|c| c.key == "fact_witnessed").unwrap();
+        assert_eq!((w.n, w.of), (1, 1));
+        let cpr = counts.iter().find(|c| c.key == "fact_bystander_cpr").unwrap();
+        assert_eq!(cpr.label, "Bystander CPR stated");
+    }
+
+    fn library() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE calls (id INTEGER PRIMARY KEY, start INTEGER, secs REAL, tg INTEGER, tg_name TEXT, unit INTEGER, unit_name TEXT,
+               transcript TEXT, transcript_edited TEXT, transcribed_at INTEGER, system TEXT NOT NULL DEFAULT '');",
+        )
+        .unwrap();
+        crate::dispatch::ensure_schema(&c);
+        crate::events::ensure_schema(&c);
+        crate::casesend::ensure_schema(&c);
+        ensure_schema(&c);
+        c
+    }
+
+    #[test]
+    fn the_first_alert_is_the_earliest_of_tripwires_and_case_sends() {
+        let c = library();
+        c.execute_batch(
+            "INSERT INTO incidents (id, created, updated, tg) VALUES (7, 1000, 1000, 1), (8, 1010, 1010, 1);
+             INSERT INTO incident_calls (incident, call, at, tg) VALUES (7, 100, 1000, 1);
+             INSERT INTO tripwire_events (id, at, source, rule_id, rule_name, status) VALUES
+               (1, 1200, 'tripwire', 'a', 'Working arrest', 'sent'),
+               (2, 1100, 'tripwire', 'b', 'Arrest chatter', 'quiet'),
+               (3, 1150, 'tripwire', 'c', 'On the page', 'sent');
+             INSERT INTO tripwire_event_calls (event, call) VALUES (1, 100), (2, 100);
+             UPDATE tripwire_events SET incident_id = 8 WHERE id = 3;
+             INSERT INTO case_sends (profile, incident, dest, target, root_id, rendered, since, sent_at, updated_at)
+               VALUES ('cardiac-arrest', 7, 'd', 't', 1, '', 1000, 1300, 1300);",
+        )
+        .unwrap();
+        // The quiet verdict does not count; the sent one on the merged run does.
+        assert_eq!(first_alert(&c, "cardiac-arrest", &[7, 8]), (Some(1150), "tripwire: On the page".into()));
+        assert_eq!(first_alert(&c, "cardiac-arrest", &[7]), (Some(1200), "tripwire: Working arrest".into()));
+        assert_eq!(first_alert(&c, "cardiac-arrest", &[9]), (None, String::new()));
+        c.execute("DELETE FROM tripwire_events", []).unwrap();
+        assert_eq!(first_alert(&c, "cardiac-arrest", &[7]), (Some(1300), "case timeline".into()));
+    }
+
+    #[test]
+    fn pipeline_latency_comes_from_every_call() {
+        let c = library();
+        c.execute_batch(
+            "INSERT INTO calls (id, start, secs, tg, unit, transcript, transcribed_at) VALUES
+               (1, 1000, 10, 1, 5, 'hello', 1040),
+               (2, 2000, 4.6, 1, 5, 'there', 2035),
+               (3, 3000, 0, 1, 0, NULL, NULL);
+             INSERT INTO tripwire_events (id, at, source, rule_id, status) VALUES (1, 1100, 'tripwire', 'a', 'sent');
+             INSERT INTO tripwire_event_calls (event, call) VALUES (1, 1);",
+        )
+        .unwrap();
+        let p = pipeline(&c, 0, 10_000);
+        let t = &p[0];
+        assert_eq!(t.n, 2);
+        assert_eq!(t.median, 0.5); // 30 s and 30 s
+        assert_eq!(p[1].n, 1);
+        assert_eq!(p[1].median, 1.5); // 1100 - 1010
+        let s = slice(&c, 0, 10_000);
+        assert_eq!((s.calls, s.transcribed, s.alerts_sent), (2, 2, 1));
+    }
+
+    #[test]
+    fn a_record_is_kept_and_cleared() {
+        let c = library();
+        c.execute(
+            "INSERT INTO research_records (profile, incident, phone_at, ed_arrived_at, note, updated) VALUES ('p', 1, 5, NULL, 'n', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(record(&c, "p", 1), Some((Some(5), None, "n".into())));
+        assert_eq!(record(&c, "p", 2), None);
+    }
+
+    /// The whole path: a page, its transcript landing, a tripwire that fired
+    /// on it, the crew's report joined to the run, the ED's record typed in.
+    #[test]
+    fn a_case_built_from_the_library_yields_its_row() {
+        let c = library();
+        crate::conversations::ensure_schema(&c);
+        crate::link::ensure_schema(&c);
+        crate::radios::ensure_schema(&c);
+        crate::cases::ensure_schema(&c);
+        let t0 = 1_700_000_000_i64;
+        let report = t0 + 14 * 60;
+        c.execute_batch(&format!(
+            "INSERT INTO incidents (id, created, updated, tg, call_type, address, address_key, units) VALUES
+               (1, {t0}, {t0}, 1, 'Cardiac Arrest', '1200 Example St', '1200 example street', '[\"Engine 5\",\"Medic 7\"]');
+             INSERT INTO calls (id, start, secs, tg, unit, transcript, transcribed_at) VALUES
+               (1, {t0}, 6, 1, 900900, 'Engine 5, Medic 7, 1200 Example St, Cardiac Arrest Working. 1200 Hours', {known}),
+               (2, {rosc}, 3, 2, 900001, 'Medic 7, we have ROSC', {rosc_known});
+             INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 1, {t0}, 1, 'dispatch');
+             INSERT INTO tripwire_events (id, at, source, rule_id, rule_name, status, incident_id) VALUES
+               (1, {alert}, 'tripwire', 'w', 'Working arrest', 'sent', 1);
+             INSERT INTO conversations (id, rule_id, tg, first_at, last_at, summary, pieces, incident, link_how, facts) VALUES
+               (5, 'r', 9, {report}, {report_end}, 'Medic 7 with a 60 year old male in arrest, ROSC, ETA of 5 to 7 minutes.',
+                '[{{\"id\":3,\"unit\":900001,\"fixed\":false,\"at\":{report},\"secs\":20.0}}]', 1, 'Medic 7 was sent to this run',
+                '[{{\"key\":\"witnessed\",\"value\":\"yes\"}},{{\"key\":\"eta\",\"value\":\"5 to 7 minutes\"}}]');",
+            known = t0 + 20,
+            rosc = t0 + 9 * 60,
+            rosc_known = t0 + 9 * 60 + 15,
+            alert = t0 + 35,
+            report_end = report + 20,
+        ))
+        .unwrap();
+        let prof = crate::cases::arrest_profile();
+        let tactical: std::collections::HashSet<u16> = [2].into();
+        crate::cases::rebuild(&c, &crate::cases::Inputs { profile: &prof, tactical_tgs: &tactical }, t0 - 60, t0 + 3600).unwrap();
+        let places = crate::places::Settings::default();
+        let s = compute(&c, 30, &places, t0 + 2 * 3600);
+        assert_eq!(s.rows.len(), 1, "{:?}", s.rows);
+        let r = &s.rows[0];
+        assert_eq!(r.incident, 1);
+        assert_eq!((r.dispatched, r.known, r.alerted), (Some(t0), Some(t0 + 20), Some(t0 + 35)));
+        assert_eq!(r.alerted_how, "tripwire: Working arrest");
+        assert_eq!(r.transcribe_secs, Some(14));
+        assert_eq!(r.alert_secs, Some(15));
+        assert_eq!(r.working, Some(t0), "the page itself said working");
+        assert_eq!(r.rosc, Some(t0 + 9 * 60));
+        assert_eq!(r.report, Some(report));
+        assert_eq!(r.call_how, "radio report");
+        assert_eq!(r.alert_to_call, Some(14 * 60 - 35));
+        assert_eq!(r.known_to_call, Some(14 * 60 - 20));
+        assert_eq!(r.eta_said.as_deref(), Some("5 to 7 minutes"));
+        assert_eq!((r.eta_from, r.eta_to), (Some(report + 5 * 60), Some(report + 7 * 60)));
+        assert_eq!(r.arrival_how, "stated ETA");
+        assert_eq!(r.call_to_arrival, Some(6 * 60));
+        assert_eq!(r.facts, vec!["witnessed".to_string(), "eta".to_string()]);
+        let lead = s.measures.iter().find(|m| m.key == "alert_to_call").unwrap();
+        assert_eq!((lead.n, lead.median), (1, 13.4));
+        assert_eq!(s.library.reports_joined, 1);
+        assert_eq!(s.library.alerts_sent, 1);
+        // The snapshot was filed, and the ED's record changes the clock.
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM research_snapshots", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        c.execute(
+            "INSERT INTO research_records (profile, incident, phone_at, ed_arrived_at, note, updated) VALUES ('cardiac-arrest', 1, ?1, ?2, 'from the chart', 1)",
+            params![report + 120, report + 11 * 60],
+        )
+        .unwrap();
+        let s = compute(&c, 30, &places, t0 + 2 * 3600);
+        let r = &s.rows[0];
+        assert_eq!(r.call_how, "ED record");
+        assert_eq!(r.alert_to_call, Some(14 * 60 + 120 - 35));
+        assert_eq!(r.arrival_how, "ED record");
+        assert_eq!(r.call_to_arrival, Some(9 * 60));
+        // A case gone from the build survives as a snapshot, with the record applied.
+        c.execute_batch("DELETE FROM cases; DELETE FROM case_incidents; DELETE FROM case_events;").unwrap();
+        let s = compute(&c, 30, &places, t0 + 2 * 3600);
+        assert_eq!(s.rows.len(), 1);
+        assert!(s.rows[0].recorded);
+        assert_eq!(s.rows[0].call_how, "ED record");
+        let text = csv(&s.rows);
+        assert!(text.lines().nth(1).unwrap().contains("from the chart"));
+    }
+
+    #[test]
+    fn csv_has_one_column_per_moment_and_quotes_commas() {
+        let mut r = row(1000);
+        r.address = "1200 Main St, Apt 3".into();
+        r.report = Some(1600);
+        r.facts = vec!["witnessed".into()];
+        r.derive();
+        let text = csv(&[r]);
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let body = lines.next().unwrap();
+        assert!(head.contains(&"dispatched_epoch"));
+        assert!(head.contains(&"alert_to_call_min"));
+        assert!(head.contains(&"fact_bystander_cpr"));
+        assert!(body.contains("\"1200 Main St, Apt 3\""));
+        assert!(body.contains(",10.0,"), "{body}");
+        // The header and the row have the same number of fields.
+        let n = body.split(',').count() - 1; // the quoted comma in the address
+        assert_eq!(n, head.len());
+    }
+}

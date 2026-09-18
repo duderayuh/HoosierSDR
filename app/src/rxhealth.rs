@@ -101,7 +101,7 @@ pub fn verdict(pct: f64) -> &'static str {
 /// `follow` no longer writes them, but the ones already recorded have to age
 /// out, so they are excluded on the way in as well. A row with no audio, no
 /// radio named and nothing decoded is not evidence that anything was said.
-const ANNOUNCED_ONLY: &str = "(secs <= 0 AND COALESCE(unit, 0) = 0)";
+pub const ANNOUNCED_ONLY: &str = "(secs <= 0 AND COALESCE(unit, 0) = 0)";
 
 pub fn read(c: &rusqlite::Connection, hours: u32, now: i64) -> Result<Health, String> {
     let hours = hours.clamp(1, 24 * 14);

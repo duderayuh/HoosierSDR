@@ -512,7 +512,7 @@ pub fn local_hm(epoch: i64) -> String {
     local_fmt(epoch, "%H:%M")
 }
 
-fn local_fmt(epoch: i64, f: &str) -> String {
+pub fn local_fmt(epoch: i64, f: &str) -> String {
     use chrono::TimeZone;
     match chrono::Local.timestamp_opt(epoch, 0) {
         chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {

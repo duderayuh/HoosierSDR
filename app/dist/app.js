@@ -98,7 +98,7 @@ function wireSeg(el, onPick) {
 function setSeg(el, v) { el.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === v))); }
 
 /* ---------- views ---------- */
-const VIEWS = ["monitor", "library", "tripwires", "conversations", "cases", "dispatch", "dashboard", "settings"];
+const VIEWS = ["monitor", "library", "tripwires", "conversations", "cases", "research", "dispatch", "dashboard", "settings"];
 function showView(v) {
   VIEWS.forEach((n) => { $("view-" + n).style.display = n === v ? "" : "none"; });
   if (v === "dispatch" && typeof dispatchOnShow === "function") dispatchOnShow();
@@ -107,6 +107,7 @@ function showView(v) {
   if (v === "tripwires" && typeof window.tripwiresOnShow === "function") window.tripwiresOnShow();
   if (v === "dashboard" && typeof window.dashboardsOnShow === "function") window.dashboardsOnShow();
   if (v === "cases" && typeof window.casesOnShow === "function") window.casesOnShow();
+  if (v === "research" && typeof window.researchOnShow === "function") window.researchOnShow();
   // Coming back to Settings refreshes whichever page was left open.
   if (v === "settings") setPage(curPage);
   setSeg($("navSeg"), v);

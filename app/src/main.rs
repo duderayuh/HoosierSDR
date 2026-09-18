@@ -34,6 +34,7 @@ mod library;
 mod link;
 mod radios;
 mod cases;
+mod research;
 mod casesend;
 mod casemaps;
 mod mapshot;
@@ -1606,7 +1607,7 @@ fn join_previous(prev: Option<std::thread::JoinHandle<()>>) {
 }
 
 /// `~/x` → `$HOME/x`.
-fn shellexpand_home(p: &str) -> String {
+pub fn shellexpand_home(p: &str) -> String {
     match (p.strip_prefix("~/"), std::env::var("HOME")) {
         (Some(rest), Ok(home)) => format!("{home}/{rest}"),
         _ => p.to_string(),
@@ -2385,6 +2386,7 @@ fn main() {
                         link::ensure_schema(&c);
                         radios::ensure_schema(&c);
                         cases::ensure_schema(&c);
+                        research::ensure_schema(&c);
                         casesend::ensure_schema(&c);
                         casemaps::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
@@ -2509,6 +2511,9 @@ fn main() {
             cases::cases_profiles,
             cases::cases_set_telegram,
             cases::cases_preview,
+            research::research_stats,
+            research::research_set_record,
+            research::research_export,
             radios::radios_list,
             radios::radio_identity,
             radios::radio_evidence,

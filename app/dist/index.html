@@ -20,6 +20,7 @@
       <button data-v="tripwires" aria-pressed="false">Tripwires</button>
       <button data-v="conversations" aria-pressed="false">Conversations</button>
       <button data-v="cases" aria-pressed="false">Cases</button>
+      <button data-v="research" aria-pressed="false">Research</button>
       <button data-v="dispatch" aria-pressed="false">Dispatch</button>
       <button data-v="dashboard" aria-pressed="false">Dashboards</button>
       <button data-v="settings" aria-pressed="false">Settings</button>
@@ -648,6 +649,36 @@
               <div class="inline"><button class="btn primary sm" id="csSendSave">Save</button><button class="btn ghost sm" id="csPreviewBtn" title="What the cases already built would have sent. Nothing is sent.">Preview…</button></div>
               <div id="csPreview"></div>
             </div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="view" id="view-research" style="display:none">
+      <section class="stack">
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Research statistics</span><span class="meta" id="rsMeta"></span>
+            <select id="rsDays" title="How far back"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="3650">Everything</option></select>
+            <button class="btn ghost sm" id="rsRefresh" title="Read the library again">Refresh</button>
+            <button class="btn ghost sm" id="rsExport" title="One row per case, every moment and interval, to ~/Downloads">Export CSV</button></div>
+          <div class="body tight">
+            <p class="help">An ED usually has two clocks for a critical patient: the crew's phone call and the patient's arrival. The radio adds earlier ones — the page, the moment this app knew, and the moment it said something — and this tab lines them up for every case. Minutes throughout; a negative lead means the message went out after the crew had already called. Each refresh files a snapshot, so a case keeps its numbers after its calls age out of the library.</p>
+            <div class="cs-facts" id="rsLibrary"></div>
+            <div class="lab small">Case intervals</div>
+            <div id="rsMeasures"></div>
+            <div class="lab small" style="margin-top:10px">Counts</div>
+            <div id="rsCounts"></div>
+            <div class="lab small" style="margin-top:10px">Pipeline, over every call in the window</div>
+            <div id="rsPipeline"></div>
+            <ul class="rs-notes" id="rsNotes"></ul>
+            <details class="cs-sample"><summary>Definitions, for a methods section</summary><ul class="rs-notes" id="rsMethods"></ul></details>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="head"><span class="eyebrow">Cases</span><span class="meta" id="rsCasesMeta"></span></div>
+          <div class="body tight">
+            <p class="help">One row per case, newest first. The ED's own record — the phone call as logged and the arrival from the chart — is typed in here and kept apart from what the radio said; when it is present, the intervals use it and say so. A row marked ◌ is from a snapshot.</p>
+            <div class="rs-scroll" id="rsCases"></div>
+            <div class="empty small" id="rsCasesEmpty">No cases in this window. Cases are built on the Cases tab; “Rebuild…” there builds them from calls already stored.</div>
           </div>
         </div>
       </section>
@@ -1518,5 +1549,6 @@
   <script src="board-render.js"></script>
   <script src="dashboards.js"></script>
   <script src="cases.js"></script>
+  <script src="research.js"></script>
 </body>
 </html>
