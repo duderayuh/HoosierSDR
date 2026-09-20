@@ -52,6 +52,11 @@ pub struct CallRow {
     /// bar is costing audio that would have sounded fine.
     pub marginal_frames: u64,
     pub ruined_frames: u64,
+    /// Slots the channel was on the air for that decoded to nothing, filled
+    /// with held audio, and frames decoded on the voice cadence after their
+    /// sync was lost. Neither is judged by the quality bar.
+    pub filled_frames: u64,
+    pub coasted_frames: u64,
     pub level_dbfs: Option<f32>,
     pub echo_frac: Option<f32>,
     pub echo_spread_us: Option<f32>,
@@ -135,6 +140,8 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
         ("poor_frames", "INTEGER NOT NULL DEFAULT 0"),
         ("level_dbfs", "REAL"),
         ("marginal_frames", "INTEGER NOT NULL DEFAULT 0"),
+        ("filled_frames", "INTEGER NOT NULL DEFAULT 0"),
+        ("coasted_frames", "INTEGER NOT NULL DEFAULT 0"),
         ("ruined_frames", "INTEGER NOT NULL DEFAULT 0"),
         ("lc_other_tg", "INTEGER"),
         ("lc_other_unit", "INTEGER"),
@@ -183,8 +190,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
         None => None,
     };
     c.execute(
-        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit, marginal_frames, ruined_frames)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+        "INSERT INTO calls (start, secs, tg, tg_name, service, category, unit, unit_name, freq_hz, modulation, emergency, encrypted, patched_with, system, site, audio, sha256, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit, marginal_frames, ruined_frames, filled_frames, coasted_frames)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         params![
             r.start,
             r.secs,
@@ -212,6 +219,8 @@ pub fn insert(c: &Connection, r: &CallRow) -> Result<i64, String> {
             r.lc_other_unit,
             r.marginal_frames as i64,
             r.ruined_frames as i64,
+            r.filled_frames as i64,
+            r.coasted_frames as i64,
         ],
     )
     .map_err(|e| format!("insert call: {e}"))?;
@@ -235,7 +244,7 @@ pub struct Query {
     pub after_id: Option<i64>,
 }
 
-const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit, marginal_frames, ruined_frames";
+const COLS: &str = "id, start, secs, tg, tg_name, unit, unit_name, freq_hz, modulation, emergency, patched_with, system, site, audio, sha256, transcript, transcript_model, transcript_edited, edited_at, starred, service, category, encrypted, poor_frames, dropped_blocks, level_dbfs, echo_frac, echo_spread_us, lc_other_tg, lc_other_unit, marginal_frames, ruined_frames, filled_frames, coasted_frames";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     let patched: String = r.get(10)?;
@@ -276,6 +285,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         lc_other_unit: r.get(29)?,
         marginal_frames: r.get::<_, i64>(30)? as u64,
         ruined_frames: r.get::<_, i64>(31)? as u64,
+        filled_frames: r.get::<_, i64>(32)? as u64,
+        coasted_frames: r.get::<_, i64>(33)? as u64,
         fired: Vec::new(),
         learned: None,
     })
@@ -762,9 +773,12 @@ mod tests {
         r.poor_frames = 9;
         r.marginal_frames = 7;
         r.ruined_frames = 1;
+        r.filled_frames = 4;
+        r.coasted_frames = 2;
         let id = insert(&c, &r).unwrap();
         let back = get(&c, id).unwrap().unwrap();
         assert_eq!((back.poor_frames, back.marginal_frames, back.ruined_frames), (9, 7, 1), "how bad the concealed frames were");
+        assert_eq!((back.filled_frames, back.coasted_frames), (4, 2), "and the frames that never arrived to be judged");
         // A call from a path with nothing to measure says so, rather than
         // reading as a perfectly quiet channel with no echo.
         let plain = insert(&c, &call(&d, 10204, "Ops", 1.0, 1_700_000_100)).unwrap();

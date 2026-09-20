@@ -2317,6 +2317,15 @@ if (TAURI) {
       if (r.ruined_frames) how.push(`${r.ruined_frames} ruined`);
       bits.push(`${r.poor_frames} frame${r.poor_frames === 1 ? "" : "s"} concealed${how.length ? ` (${how.join(", ")})` : ""}`);
     }
+    // Frames that never arrived to be judged: the channel was on the air and
+    // nothing decoded, or sync was lost and the frame was taken on cadence.
+    // Neither passes the quality bar, so neither is above.
+    if (r.filled_frames || r.coasted_frames) {
+      const gaps = [];
+      if (r.filled_frames) gaps.push(`${r.filled_frames} filled`);
+      if (r.coasted_frames) gaps.push(`${r.coasted_frames} coasted`);
+      bits.push(gaps.join(" · "));
+    }
     return `<div class="faint" title="Signal level on this channel, simulcast echo the equalizer had to undo, and how spread out it was. Heavy echo (6% and up) is where a call can decode cleanly and still sound wrong.">📶 ${bits.join(" · ")}</div>`;
   }
 
