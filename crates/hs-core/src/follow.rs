@@ -262,6 +262,8 @@ fn join_trailing(calls: Vec<Call>) -> Vec<Call> {
         p.voice_frames_poor += c.voice_frames_poor;
         p.voice_frames_marginal += c.voice_frames_marginal;
         p.voice_frames_ruined += c.voice_frames_ruined;
+        p.voice_frames_filled += c.voice_frames_filled;
+        p.voice_frames_coasted += c.voice_frames_coasted;
         p.emergency |= c.emergency;
         p.talker_alias = p.talker_alias.take().or(c.talker_alias);
         // The scrap was received on the same air; keep the fuller reading.
@@ -326,6 +328,10 @@ struct SegmentBase {
     poor_cq: u64,
     marginal_c4: u64,
     marginal_cq: u64,
+    filled_c4: u64,
+    filled_cq: u64,
+    coasted_c4: u64,
+    coasted_cq: u64,
     ruined_c4: u64,
     ruined_cq: u64,
     enc_c4: u64,
@@ -344,6 +350,10 @@ impl SegmentBase {
             poor_cq: b.voice_frames_low_quality,
             marginal_c4: a.voice_frames_marginal,
             marginal_cq: b.voice_frames_marginal,
+            filled_c4: a.voice_frames_concealed,
+            filled_cq: b.voice_frames_concealed,
+            coasted_c4: a.voice_frames_inferred,
+            coasted_cq: b.voice_frames_inferred,
             ruined_c4: a.voice_frames_ruined,
             ruined_cq: b.voice_frames_ruined,
             enc_c4: a.voice_ldus_encrypted,
@@ -390,6 +400,13 @@ pub struct Call {
     /// sounded fine, or catching frames that were truly ruined.
     pub voice_frames_marginal: u64,
     pub voice_frames_ruined: u64,
+    /// Slots the channel was on the air for that decoded to nothing at all,
+    /// filled with held audio fading out, and frames whose sync was lost and
+    /// were decoded on the voice cadence instead. Neither goes through the
+    /// quality bar — they are what is left when no frame arrived to judge —
+    /// so they are counted apart from it.
+    pub voice_frames_filled: u64,
+    pub voice_frames_coasted: u64,
     /// The control channel announced this call, but nothing was ever received
     /// on the channel: no audio, no frame sync, and no radio named.
     ///
@@ -1336,6 +1353,16 @@ impl TrunkFollower {
                     } else {
                         s.end.ruined_cq.saturating_sub(s.start.ruined_cq)
                     },
+                    voice_frames_filled: if pick_c4fm {
+                        s.end.filled_c4.saturating_sub(s.start.filled_c4)
+                    } else {
+                        s.end.filled_cq.saturating_sub(s.start.filled_cq)
+                    },
+                    voice_frames_coasted: if pick_c4fm {
+                        s.end.coasted_c4.saturating_sub(s.start.coasted_c4)
+                    } else {
+                        s.end.coasted_cq.saturating_sub(s.start.coasted_cq)
+                    },
                     talkgroup: c.talkgroup,
                     source_unit,
                     freq_hz: c.freq_hz,
@@ -2163,6 +2190,8 @@ mod trailing_tests {
             voice_frames_poor: 0,
             voice_frames_marginal: 0,
             voice_frames_ruined: 0,
+            voice_frames_filled: 0,
+            voice_frames_coasted: 0,
             announced_only: false,
             patched_with: Vec::new(),
             emergency: false,

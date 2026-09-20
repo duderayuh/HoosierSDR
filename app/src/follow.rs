@@ -1339,6 +1339,8 @@ impl Reporter<'_> {
                     poor_frames: c.voice_frames_poor,
                     marginal_frames: c.voice_frames_marginal,
                     ruined_frames: c.voice_frames_ruined,
+                    filled_frames: c.voice_frames_filled,
+                    coasted_frames: c.voice_frames_coasted,
                     dropped_blocks,
                     lc_other_tg: c.lc_other_tg,
                     lc_other_unit: c.lc_other_unit,
