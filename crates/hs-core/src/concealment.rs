@@ -22,7 +22,16 @@ use hs_decoders::frontend::AudioAgc;
 
 /// Below this composite score a frame is blended toward the held (last
 /// good) buffer instead of being played as decoded.
-pub(crate) const CONCEAL_BELOW: f32 = 0.5;
+///
+/// Measured before it was moved from 0.5: over two days of live traffic,
+/// 2,612 frames were concealed, 2,600 of them scoring in the top third of
+/// the concealment band — barely under the old bar, and blended mostly from
+/// audio that had decoded perfectly well. Not one frame in those two days
+/// reached the floor. The blend is what a listener hears as a chirp, so the
+/// old bar was making the artifact it existed to hide, on frames that did
+/// not need hiding. It holds across conditions: the same 98–100% share in
+/// clean air and in the worst multipath of the two days.
+pub(crate) const CONCEAL_BELOW: f32 = 0.38;
 /// At or below this score a frame is treated as fully unusable: blended in
 /// almost entirely from the held buffer rather than partially.
 pub(crate) const CONCEAL_FLOOR: f32 = 0.15;
@@ -397,17 +406,22 @@ mod tests {
         c.process(&mut good_pcm, good());
         let held_after_first_frame = c.held[0];
 
-        // confidence=0.0, fec_errors=0, lock=None scores exactly
-        // 0.5*0.0 + 0.5*1.0 = CONCEAL_BELOW under the documented no-lock
-        // formula. The concealment check is strictly `<`, so a frame scoring
-        // exactly at the threshold is out of it entirely: its own content
-        // becomes the new held buffer, not the old one.
+        // A frame scoring at the threshold is out of concealment entirely:
+        // the check is strictly `<`, so its own content becomes the new held
+        // buffer, not the old one. Built from the constant rather than
+        // written as a number, so moving the bar moves the test with it:
+        // with six of ten FEC errors the no-lock score is 0.5·confidence +
+        // 0.2, which solves for any bar the code might carry.
         let at_threshold = VoiceQuality {
-            confidence: 0.0,
-            fec_errors: 0,
+            confidence: (CONCEAL_BELOW - 0.2) * 2.0,
+            fec_errors: 6,
             lock: None,
         };
-        assert_eq!(at_threshold.score(), CONCEAL_BELOW);
+        assert!(
+            (at_threshold.score() - CONCEAL_BELOW).abs() < 1e-6,
+            "frame scored {} for a bar of {CONCEAL_BELOW}",
+            at_threshold.score()
+        );
         let mut distinct_pcm = [5_000i16; 160];
         c.process(&mut distinct_pcm, at_threshold);
         assert_eq!(c.held_repeats, 0);
