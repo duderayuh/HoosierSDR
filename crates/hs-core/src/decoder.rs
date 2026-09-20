@@ -1115,11 +1115,15 @@ mod voice_quality_tests {
         assert_eq!(diag.voice_frames_low_quality, 0);
 
         // Frame 2: bad enough to count as low-quality even though FEC alone
-        // (fec_errors: 1, barely nonzero) would call this frame nearly clean.
+        // (a barely nonzero error count) would call this frame nearly clean.
+        // Scored against the concealment bar rather than a number written
+        // here, so moving the bar moves this with it.
         diag.voice_frames = 2;
         diag.record_voice_quality(VoiceQuality {
             confidence: 0.0,
-            fec_errors: 1,
+            fec_errors: ((1.0 - (crate::concealment::CONCEAL_BELOW - 0.05) * 2.0)
+                * VoiceQuality::FEC_ERROR_SATURATION)
+                .round() as u32,
             lock: None,
         });
         assert_eq!(diag.voice_frames_low_quality, 1);

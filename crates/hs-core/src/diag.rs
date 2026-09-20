@@ -555,11 +555,17 @@ mod conceal_band_tests {
 
     #[test]
     fn a_concealed_frame_is_counted_by_how_bad_it_was() {
+        // Written against the thresholds, not as numbers: the bar has moved
+        // once already on what these counters measured, and a test pinned to
+        // the old one would have been the thing that failed rather than the
+        // thing that checked.
+        let (top, floor) = (crate::concealment::CONCEAL_BELOW, crate::concealment::CONCEAL_FLOOR);
+        let band = top - floor;
         let mut d = Diagnostics::default();
-        d.record_voice_quality(at(0.80)); // sound: nothing to count
-        d.record_voice_quality(at(0.45)); // only just under the bar
-        d.record_voice_quality(at(0.30)); // well under, not hopeless
-        d.record_voice_quality(at(0.10)); // at the floor: replaced outright
+        d.record_voice_quality(at(top + 0.1)); // sound: nothing to count
+        d.record_voice_quality(at(top - band / 6.0)); // only just under the bar
+        d.record_voice_quality(at(floor + band / 2.0)); // well under, not hopeless
+        d.record_voice_quality(at(floor - 0.03)); // under the floor: replaced
         assert_eq!(
             (d.voice_frames_low_quality, d.voice_frames_marginal, d.voice_frames_ruined),
             (3, 1, 1),
