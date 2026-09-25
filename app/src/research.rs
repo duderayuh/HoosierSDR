@@ -134,6 +134,15 @@ pub struct CaseRow {
     pub call_how: String,
     /// Which clock `arrival` used: `ED record`, `said on air` or `stated ETA`.
     pub arrival_how: String,
+
+    // -- for slicing on the page --
+    /// The keys of every count this case is in, so the page can filter on
+    /// "ROSC said" without restating what it means.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Each interval this case has, in minutes, by measure key.
+    #[serde(default)]
+    pub minutes: BTreeMap<String, f64>,
 }
 
 impl CaseRow {
@@ -179,6 +188,9 @@ impl CaseRow {
         self.call_to_arrival = diff(arrival, call);
         self.alert_to_arrival = diff(arrival, self.alerted);
         self.dispatch_to_arrival = diff(arrival, self.dispatched);
+        self.tags = COUNTS.iter().filter(|c| (c.is)(self)).map(|c| c.key.to_string()).collect();
+        self.tags.extend(FACT_KEYS.iter().filter(|k| self.facts.iter().any(|f| f == *k)).map(|k| fact_key(k)));
+        self.minutes = MEASURES.iter().filter_map(|m| (m.secs)(self).map(|s| (m.key.to_string(), round1(s as f64 / 60.0)))).collect();
     }
 }
 
@@ -441,60 +453,86 @@ pub struct Stats {
     pub notes: Vec<String>,
 }
 
-/// Sum up a set of rows. Pure, so the tests can feed it rows by hand.
+/// One interval a study reports: which clocks it runs between, and how to
+/// read it off a case, in seconds.
+pub struct MeasureDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub definition: &'static str,
+    pub secs: fn(&CaseRow) -> Option<i64>,
+}
+
+pub const MEASURES: &[MeasureDef] = &[
+    MeasureDef { key: "alert_to_call", label: "Alert → crew's call", definition: "the crew's call (the ED's logged phone call, else the first radio report joined to the run) minus the first message sent about the run", secs: |r| r.alert_to_call },
+    MeasureDef { key: "known_to_call", label: "App knew → crew's call", definition: "the crew's call minus the moment the page's transcript landed; the lead an alert could have had", secs: |r| r.known_to_call },
+    MeasureDef { key: "dispatch_to_call", label: "Dispatch → crew's call", definition: "the crew's call minus the page", secs: |r| r.dispatch_to_call },
+    MeasureDef { key: "call_to_arrival", label: "Crew's call → arrival", definition: "arrival (the chart, else a crew saying they are at the hospital, else the middle of the stated ETA) minus the crew's call", secs: |r| r.call_to_arrival },
+    MeasureDef { key: "alert_to_arrival", label: "Alert → arrival", definition: "arrival minus the first message sent", secs: |r| r.alert_to_arrival },
+    MeasureDef { key: "dispatch_to_arrival", label: "Dispatch → arrival", definition: "arrival minus the page", secs: |r| r.dispatch_to_arrival },
+    MeasureDef { key: "dispatch_to_working", label: "Dispatch → working arrest", definition: "the first 'working' said on air minus the page; 0 when the page itself said working", secs: |r| r.dispatch_to_working },
+    MeasureDef { key: "working_to_rosc", label: "Working → ROSC", definition: "ROSC first said minus working first said", secs: |r| r.working_to_rosc },
+    MeasureDef { key: "dispatch_to_rosc", label: "Dispatch → ROSC", definition: "ROSC first said minus the page", secs: |r| r.dispatch_to_rosc },
+    MeasureDef { key: "eta_off", label: "Said arrival vs stated ETA", definition: "minutes a crew's 'at the hospital' fell outside the window their stated ETA gave; 0 is inside, negative is early", secs: |r| r.off_by_min.map(|m| m * 60) },
+    MeasureDef { key: "transcribe", label: "Page ended → transcript landed", definition: "for the case's page only", secs: |r| r.transcribe_secs },
+    MeasureDef { key: "alert_lag", label: "Transcript landed → alert sent", definition: "for the case's page only", secs: |r| r.alert_secs },
+];
+
+/// A yes-or-no about a case, counted over every case.
+pub struct CountDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub is: fn(&CaseRow) -> bool,
+}
+
+pub const COUNTS: &[CountDef] = &[
+    CountDef { key: "alerted", label: "A message was sent", is: |r| r.alerted.is_some() },
+    CountDef { key: "reported", label: "A crew reported to a hospital", is: |r| r.report.is_some() },
+    CountDef { key: "working", label: "Working arrest said", is: |r| r.working.is_some() },
+    CountDef { key: "rosc", label: "ROSC said", is: |r| r.rosc.is_some() },
+    CountDef { key: "rearrest", label: "Lost pulses said", is: |r| r.rearrest.is_some() },
+    CountDef { key: "transporting", label: "Transporting said", is: |r| r.transporting.is_some() },
+    CountDef { key: "terminated", label: "Efforts ceased", is: |r| r.terminated.is_some() },
+    CountDef { key: "downgraded", label: "Not an arrest", is: |r| r.downgraded.is_some() },
+    CountDef { key: "eta_said", label: "An ETA was stated", is: |r| r.eta_from.is_some() },
+    CountDef { key: "arrived_said", label: "At the hospital said on air", is: |r| r.arrived_said.is_some() },
+    CountDef { key: "eta_inside", label: "Said arrival inside the ETA window", is: |r| r.off_by_min == Some(0) },
+    CountDef { key: "eta_early", label: "Said arrival before the window", is: |r| r.off_by_min.map_or(false, |m| m < 0) },
+    CountDef { key: "eta_late", label: "Said arrival after the window", is: |r| r.off_by_min.map_or(false, |m| m > 0) },
+    CountDef { key: "ed_phone", label: "ED phone call typed in", is: |r| r.phone_at.is_some() },
+    CountDef { key: "ed_arrived", label: "ED arrival typed in", is: |r| r.ed_arrived_at.is_some() },
+];
+
+fn fact_key(k: &str) -> String {
+    format!("fact_{}", k.replace(' ', "_"))
+}
+
+fn fact_label(k: &str) -> String {
+    match k {
+        "bystander cpr" => "Bystander CPR stated".to_string(),
+        "rosc" => "ROSC stated in the report".to_string(),
+        "eta" => "ETA stated in the report".to_string(),
+        k => {
+            let mut s = k.to_string();
+            if let Some(f) = s.get_mut(0..1) {
+                f.make_ascii_uppercase();
+            }
+            format!("{s} stated")
+        }
+    }
+}
+
+/// Sum up a set of rows. Pure, so the tests can feed it rows by hand, and
+/// the page can hand back any slice of the cases it was given.
 pub fn summarise(rows: &[CaseRow]) -> (Vec<Measure>, Vec<Count>) {
-    let pick = |f: fn(&CaseRow) -> Option<i64>| rows.iter().filter_map(f);
-    let measures = vec![
-        measure("alert_to_call", "Alert → crew's call", "the crew's call (the ED's logged phone call, else the first radio report joined to the run) minus the first message sent about the run", pick(|r| r.alert_to_call)),
-        measure("known_to_call", "App knew → crew's call", "the crew's call minus the moment the page's transcript landed; the lead an alert could have had", pick(|r| r.known_to_call)),
-        measure("dispatch_to_call", "Dispatch → crew's call", "the crew's call minus the page", pick(|r| r.dispatch_to_call)),
-        measure("call_to_arrival", "Crew's call → arrival", "arrival (the chart, else a crew saying they are at the hospital, else the middle of the stated ETA) minus the crew's call", pick(|r| r.call_to_arrival)),
-        measure("alert_to_arrival", "Alert → arrival", "arrival minus the first message sent", pick(|r| r.alert_to_arrival)),
-        measure("dispatch_to_arrival", "Dispatch → arrival", "arrival minus the page", pick(|r| r.dispatch_to_arrival)),
-        measure("dispatch_to_working", "Dispatch → working arrest", "the first 'working' said on air minus the page; 0 when the page itself said working", pick(|r| r.dispatch_to_working)),
-        measure("working_to_rosc", "Working → ROSC", "ROSC first said minus working first said", pick(|r| r.working_to_rosc)),
-        measure("dispatch_to_rosc", "Dispatch → ROSC", "ROSC first said minus the page", pick(|r| r.dispatch_to_rosc)),
-        measure("eta_off", "Said arrival vs stated ETA", "minutes a crew's 'at the hospital' fell outside the window their stated ETA gave; 0 is inside, negative is early", rows.iter().filter_map(|r| r.off_by_min.map(|m| m * 60))),
-        measure("transcribe", "Page ended → transcript landed", "for the case's page only", pick(|r| r.transcribe_secs)),
-        measure("alert_lag", "Transcript landed → alert sent", "for the case's page only", pick(|r| r.alert_secs)),
-    ];
+    let measures = MEASURES.iter().map(|m| measure(m.key, m.label, m.definition, rows.iter().filter_map(m.secs))).collect();
     let n = rows.len();
-    let count = |key: &str, label: &str, f: fn(&CaseRow) -> bool| Count { key: key.into(), label: label.into(), n: rows.iter().filter(|r| f(r)).count(), of: n };
-    let mut counts = vec![
-        count("cases", "Cases", |_| true),
-        count("alerted", "A message was sent", |r| r.alerted.is_some()),
-        count("reported", "A crew reported to a hospital", |r| r.report.is_some()),
-        count("working", "Working arrest said", |r| r.working.is_some()),
-        count("rosc", "ROSC said", |r| r.rosc.is_some()),
-        count("rearrest", "Lost pulses said", |r| r.rearrest.is_some()),
-        count("transporting", "Transporting said", |r| r.transporting.is_some()),
-        count("terminated", "Efforts ceased", |r| r.terminated.is_some()),
-        count("downgraded", "Not an arrest", |r| r.downgraded.is_some()),
-        count("eta_said", "An ETA was stated", |r| r.eta_from.is_some()),
-        count("arrived_said", "At the hospital said on air", |r| r.arrived_said.is_some()),
-        count("eta_inside", "Said arrival inside the ETA window", |r| r.off_by_min == Some(0)),
-        count("eta_early", "Said arrival before the window", |r| r.off_by_min.map_or(false, |m| m < 0)),
-        count("eta_late", "Said arrival after the window", |r| r.off_by_min.map_or(false, |m| m > 0)),
-        count("ed_phone", "ED phone call typed in", |r| r.phone_at.is_some()),
-        count("ed_arrived", "ED arrival typed in", |r| r.ed_arrived_at.is_some()),
-    ];
+    let mut counts = vec![Count { key: "cases".into(), label: "Cases".into(), n, of: n }];
+    counts.extend(COUNTS.iter().map(|c| Count { key: c.key.into(), label: c.label.into(), n: rows.iter().filter(|r| (c.is)(r)).count(), of: n }));
     let reported = rows.iter().filter(|r| r.report.is_some()).count();
     for key in FACT_KEYS {
-        let label = match *key {
-            "bystander cpr" => "Bystander CPR stated".to_string(),
-            "rosc" => "ROSC stated in the report".to_string(),
-            "eta" => "ETA stated in the report".to_string(),
-            k => {
-                let mut s = k.to_string();
-                if let Some(f) = s.get_mut(0..1) {
-                    f.make_ascii_uppercase();
-                }
-                format!("{s} stated")
-            }
-        };
         counts.push(Count {
-            key: format!("fact_{}", key.replace(' ', "_")),
-            label,
+            key: fact_key(key),
+            label: fact_label(key),
             n: rows.iter().filter(|r| r.facts.iter().any(|f| f == key)).count(),
             of: reported,
         });
@@ -720,7 +758,7 @@ pub fn csv(rows: &[CaseRow]) -> String {
     for (k, _) in intervals {
         head.push(k.to_string());
     }
-    head.extend(FACT_KEYS.iter().map(|k| format!("fact_{}", k.replace(' ', "_"))));
+    head.extend(FACT_KEYS.iter().map(|k| fact_key(k)));
     head.push("note".into());
     let mut out = head.join(",") + "\n";
     for r in rows {
@@ -812,14 +850,35 @@ pub fn research_set_record(
     Ok(())
 }
 
-/// Write the per-case table as CSV to ~/Downloads and say where.
+/// The intervals and counts over each slice of cases the page hands back:
+/// a filter, or one group of a breakdown. The arithmetic stays here.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct Summary {
+    pub measures: Vec<Measure>,
+    pub counts: Vec<Count>,
+}
+
 #[tauri::command]
-pub async fn research_export(app: AppHandle, days: u32) -> Result<String, String> {
-    let stats = research_stats(app, days).await?;
-    let text = csv(&stats.rows);
+pub fn research_summary(groups: Vec<Vec<CaseRow>>) -> Vec<Summary> {
+    groups
+        .into_iter()
+        .map(|mut rows| {
+            rows.iter_mut().for_each(CaseRow::derive);
+            let (measures, counts) = summarise(&rows);
+            Summary { measures, counts }
+        })
+        .collect()
+}
+
+/// Write the cases the page is showing — filtered and sorted as they are
+/// there — as CSV to ~/Downloads and say where.
+#[tauri::command]
+pub fn research_export(mut rows: Vec<CaseRow>) -> Result<String, String> {
+    rows.iter_mut().for_each(CaseRow::derive);
+    let text = csv(&rows);
     let dir = std::path::PathBuf::from(crate::shellexpand_home("~/Downloads"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let stem = format!("research-cases-{}", crate::library::local_fmt(stats.to, "%Y%m%d-%H%M"));
+    let stem = format!("research-cases-{}", crate::library::local_fmt(crate::library::now(), "%Y%m%d-%H%M"));
     let mut path = dir.join(format!("{stem}.csv"));
     let mut n = 2;
     while path.exists() {
@@ -920,6 +979,49 @@ mod tests {
         assert_eq!((w.n, w.of), (1, 1));
         let cpr = counts.iter().find(|c| c.key == "fact_bystander_cpr").unwrap();
         assert_eq!(cpr.label, "Bystander CPR stated");
+    }
+
+    #[test]
+    fn a_case_carries_its_tags_and_minutes_for_the_page() {
+        let mut r = row(0);
+        r.working = Some(60);
+        r.rosc = Some(60 + 9 * 60);
+        r.report = Some(900);
+        r.facts = vec!["bystander cpr".into()];
+        r.derive();
+        assert!(r.tags.contains(&"rosc".to_string()));
+        assert!(r.tags.contains(&"working".to_string()));
+        assert!(r.tags.contains(&"fact_bystander_cpr".to_string()));
+        assert!(!r.tags.contains(&"alerted".to_string()));
+        assert_eq!(r.minutes.get("working_to_rosc"), Some(&9.0));
+        assert_eq!(r.minutes.get("dispatch_to_rosc"), Some(&10.0));
+        assert_eq!(r.minutes.get("alert_to_call"), None);
+        // Every count key a case can carry is one the summary counts.
+        let (_, counts) = summarise(&[r.clone()]);
+        for t in &r.tags {
+            assert!(counts.iter().any(|c| &c.key == t), "{t}");
+        }
+    }
+
+    #[test]
+    fn each_slice_the_page_sends_is_summed_on_its_own() {
+        let mut a = row(0);
+        a.working = Some(0);
+        a.rosc = Some(300);
+        let mut b = row(0);
+        b.working = Some(0);
+        b.rosc = Some(900);
+        let c = row(0);
+        // Rows as the page hands them back: derived fields may be stale.
+        a.tags.clear();
+        let s = research_summary(vec![vec![a.clone(), b.clone(), c.clone()], vec![a], vec![]]);
+        assert_eq!(s.len(), 3);
+        let rosc = |i: usize| s[i].counts.iter().find(|c| c.key == "rosc").map(|c| (c.n, c.of)).unwrap();
+        assert_eq!(rosc(0), (2, 3));
+        assert_eq!(rosc(1), (1, 1));
+        assert_eq!(rosc(2), (0, 0));
+        let w2r = s[0].measures.iter().find(|m| m.key == "working_to_rosc").unwrap();
+        assert_eq!((w2r.n, w2r.median), (2, 10.0));
     }
 
     fn library() -> Connection {

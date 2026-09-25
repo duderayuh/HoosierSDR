@@ -657,11 +657,18 @@
           <div class="head"><span class="eyebrow">Research statistics</span><span class="meta" id="rsMeta"></span>
             <select id="rsDays" title="How far back"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="3650">Everything</option></select>
             <button class="btn ghost sm" id="rsRefresh" title="Read the library again">Refresh</button>
-            <button class="btn ghost sm" id="rsExport" title="One row per case, every moment and interval, to ~/Downloads">Export CSV</button></div>
+            <button class="btn ghost sm" id="rsExport" title="The cases shown, as filtered and sorted: one row per case, every moment and interval, to ~/Downloads">Export CSV</button></div>
           <div class="body tight">
             <p class="help">An ED usually has two clocks for a critical patient: the crew's phone call and the patient's arrival. The radio adds earlier ones — the page, the moment this app knew, and the moment it said something — and this tab lines them up for every case. Minutes throughout; a negative lead means the message went out after the crew had already called. Each refresh files a snapshot, so a case keeps its numbers after its calls age out of the library.</p>
             <div class="cs-facts" id="rsLibrary"></div>
-            <div class="lab small">Case intervals</div>
+            <div class="rs-slice">
+              <input type="search" id="rsQ" placeholder="Search case, address, hospital, note" />
+              <select id="rsAdd" class="rs-pick" title="Keep only the cases that match"><option value="">+ Filter…</option></select>
+              <span class="chips" id="rsChips"></span>
+              <button class="btn ghost sm" id="rsClear" style="display:none" title="Remove every filter">Clear</button>
+            </div>
+            <p class="help small">Filters apply to the intervals, the counts, Explore and the case list. Click a count to keep only those cases; click an interval to chart it in Explore. Click a filter to invert it.</p>
+            <div class="lab small">Case intervals <span class="faint">— click one to chart it</span></div>
             <div id="rsMeasures"></div>
             <div class="lab small" style="margin-top:10px">Counts</div>
             <div id="rsCounts"></div>
@@ -671,10 +678,26 @@
             <details class="cs-sample"><summary>Definitions, for a methods section</summary><ul class="rs-notes" id="rsMethods"></ul></details>
           </div>
         </div>
+        <div class="panel" id="rsExplore">
+          <div class="head"><span class="eyebrow">Explore</span><span class="meta" id="rsExMeta"></span>
+            <select id="rsFocus" class="rs-pick" title="Which interval to chart"></select>
+            <select id="rsGroup" class="rs-pick" title="Break the cases down by"></select></div>
+          <div class="body tight">
+            <div class="faint small rs-def" id="rsExDef"></div>
+            <div class="cs-facts" id="rsKpi"></div>
+            <button class="btn ghost sm" id="rsOnly" style="display:none" title="Filter to the cases that have this interval"></button>
+            <div class="lab small">Distribution <span class="faint">— shaded is the middle half, the dashed line the median; click a bar to keep only those cases</span></div>
+            <div class="rs-chart" id="rsHist"></div>
+            <div class="lab small" style="margin-top:10px"><span>By <span id="rsGroupLab"></span></span> <span class="faint">— click a row to keep only that group</span></div>
+            <div class="rs-scroll" id="rsGroups"></div>
+            <div class="lab small" style="margin-top:10px" id="rsTimeLab">Cases over time</div>
+            <div class="rs-chart" id="rsTime"></div>
+          </div>
+        </div>
         <div class="panel">
           <div class="head"><span class="eyebrow">Cases</span><span class="meta" id="rsCasesMeta"></span></div>
           <div class="body tight">
-            <p class="help">One row per case, newest first. The ED's own record — the phone call as logged and the arrival from the chart — is typed in here and kept apart from what the radio said; when it is present, the intervals use it and say so. A row marked ◌ is from a snapshot.</p>
+            <p class="help">One row per case, newest first; click a column heading to sort. The ED's own record — the phone call as logged and the arrival from the chart — is typed in here and kept apart from what the radio said; when it is present, the intervals use it and say so. A row marked ◌ is from a snapshot.</p>
             <div class="rs-scroll" id="rsCases"></div>
             <div class="empty small" id="rsCasesEmpty">No cases in this window. Cases are built on the Cases tab; “Rebuild…” there builds them from calls already stored.</div>
           </div>

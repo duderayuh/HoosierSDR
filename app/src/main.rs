@@ -2514,6 +2514,7 @@ fn main() {
             research::research_stats,
             research::research_set_record,
             research::research_export,
+            research::research_summary,
             radios::radios_list,
             radios::radio_identity,
             radios::radio_evidence,
