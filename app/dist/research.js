@@ -127,6 +127,7 @@
     alerted: (r) => r.alerted,
     call: (r) => (r.phone_at != null ? r.phone_at : r.report),
     place: (r) => (r.report_place || "").toLowerCase(),
+    score: (r) => (r.score && r.score.hi_pct != null ? r.score.hi_pct * 1000 + r.score.lo_pct : null),
   };
   const sortVal = (by) => (by.startsWith("m:") ? (r) => minutes(r, by.slice(2)) : SORTS[by] || SORTS.dispatched);
 
@@ -383,11 +384,22 @@
       + `<td class="mono${focus === "call_to_arrival" ? " rs-focus" : ""}" title="${esc(r.arrival_how ? `From the ${r.arrival_how}` : "")}">${min(r.call_to_arrival) || "—"}</td>`
       + (extra ? `<td class="mono rs-focus">${minutes(r, focus) != null ? minutes(r, focus).toFixed(1) : "—"}</td>` : "")
       + `<td class="small">${esc(r.report_place || "")}${r.eta_said ? `<br><span class="faint">said “${esc(r.eta_said)}”</span>` : ""}</td>`
+      + scoreCell(r)
       + `<td><input type="datetime-local" class="rs-in" data-k="phone" value="${toLocal(r.phone_at)}" title="The phone call as the ED logged it" /></td>`
       + `<td><input type="datetime-local" class="rs-in" data-k="arrived" value="${toLocal(r.ed_arrived_at)}" title="Arrival from the chart" /></td>`
       + `<td><input type="text" class="rs-in rs-note" data-k="note" value="${esc(r.note || "")}" placeholder="note" /></td>`
       + `<td><button class="btn ghost sm" data-rssave title="Keep the ED's record for this case">Save</button></td>`
       + `</tr>`;
+  }
+
+  // The score as worked out, each criterion and what it rests on in the
+  // tooltip, and the screen's own guess beside it when one ran.
+  function scoreCell(r) {
+    const s = r.score;
+    if (!s) return `<td class="small faint" title="No crew report joined, so nothing to score">—</td>`;
+    const lines = [`${s.name}`].concat((s.criteria || []).map((c) => `${c.label}: ${c.verdict} — ${c.why}`));
+    if (r.screen) lines.push(`Screen “${r.screen.rule}” said ${r.screen.candidate || "?"}${r.screen.likelihood_pct ? `, ${r.screen.likelihood_pct}%` : ""}`);
+    return `<td class="small${s.complete ? "" : " faint"}" title="${esc(lines.join("\n"))}">${esc(s.estimate)}</td>`;
   }
 
   function th(by, label, title) {
@@ -407,7 +419,8 @@
       + th("m:alert_to_call", "Lead", "Crew's call minus alert, minutes") + th("m:known_to_call", "Could have led", "Crew's call minus the moment the page's transcript landed")
       + th("m:dispatch_to_call", "From page", "Crew's call minus the page") + th("m:call_to_arrival", "Call → arr.", "Arrival minus the crew's call")
       + (!SHOWN.includes(focus) && fm ? th(`m:${focus}`, esc(fm.label), fm.definition) : "")
-      + th("place", "Hospital") + `<th>ED phone call</th><th>ED arrival</th><th>Note</th><th></th></tr></thead><tbody>`
+      + th("place", "Hospital") + th("score", "Score", "Worked out from the report's stated facts; hover a value for each criterion")
+      + `<th>ED phone call</th><th>ED arrival</th><th>Note</th><th></th></tr></thead><tbody>`
       + rows.map(caseRow).join("") + `</tbody></table>` : "";
     $("rsCases").querySelectorAll("th[data-sort]").forEach((h) => h.onclick = () => {
       const by = h.dataset.sort;
@@ -463,6 +476,29 @@
       uiToast(`Saved ${slice.length} cases to ${where}`);
     } catch (e) { uiToast(`${e}`, "err"); }
     b.disabled = false; b.textContent = was;
+  };
+  // The reference standard: a packet out, sheets back, a comparison out.
+  const busyButton = async (id, label, work) => {
+    const b = $(id), was = b.textContent; b.disabled = true; b.textContent = label;
+    try { await work(); } catch (e) { uiToast(`${e}`, "err"); }
+    b.disabled = false; b.textContent = was;
+  };
+  $("rsPacket").onclick = () => {
+    if (!slice.length) { uiToast("No cases shown to review", "err"); return; }
+    return busyButton("rsPacket", "Writing…", async () => uiToast(`Review packet: ${await invoke("study_packet", { rows: slice })}`));
+  };
+  $("rsImport").onclick = () => $("rsImportFile").click();
+  $("rsImportFile").onchange = () => {
+    const files = Array.from($("rsImportFile").files || []);
+    $("rsImportFile").value = "";
+    if (!files.length) return;
+    return busyButton("rsImport", "Reading…", async () => {
+      for (const f of files) uiToast(`${f.name}: ${await invoke("study_import", { text: await f.text() })}`);
+    });
+  };
+  $("rsCompare").onclick = () => {
+    if (!slice.length) { uiToast("No cases shown to compare", "err"); return; }
+    return busyButton("rsCompare", "Writing…", async () => uiToast(`Comparison: ${await invoke("study_compare", { rows: slice })}`));
   };
   $("rsAdd").onchange = () => {
     const v = $("rsAdd").value; $("rsAdd").value = "";

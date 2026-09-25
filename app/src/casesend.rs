@@ -289,6 +289,10 @@ fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
                 format!("🩺 {}", stated.iter().map(|(l, v)| format!("{}: <b>{}</b>", esc(l), esc(v))).collect::<Vec<_>>().join(" · ")),
             ));
         }
+        // The score, worked out from what was stated: a range while any of
+        // its inputs is missing, never a guess.
+        let score = crate::study::score(&facts.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        tail.push(Row::new(format!("📈 {}: {}", score.name, score.estimate), format!("📈 {}: <b>{}</b>", esc(&score.name), esc(&score.estimate))));
         let unstated: Vec<&str> = FACTS_SHOWN.iter().filter(|(key, _, _)| !facts.contains_key(*key)).map(|(_, _, name)| *name).collect();
         if !unstated.is_empty() {
             let s = format!("Not stated: {}", unstated.join(", "));
@@ -1191,6 +1195,7 @@ mod tests {
         assert!(text.contains("🏥 Expected at Example General: about"));
         assert!(text.contains("🩺 Witnessed: yes · Rhythm: VF"), "only what was said is a fact: {text}");
         assert!(text.contains("Not stated: bystander CPR, downtime, history"), "{text}");
+        assert!(text.contains("📈 ED-ECPR 4-criterion screen: 0–46% (2 of 4 not stated)"), "the score, as a range while inputs are missing: {text}");
         assert!(text.ends_with("\n\nIncident #11"), "the number it goes by closes it: {text}");
         assert!(!text.contains("Updated"), "the last line's own time says when: {text}");
         // Placed, the warning goes; before any report there are no facts.
@@ -1305,6 +1310,7 @@ mod tests {
         assert!(text.contains("Dispatched as Unconscious") && text.contains("Lost pulses") && text.contains("Working arrest"), "{text}");
         assert!(!text.contains("earlier lines"), "{text}");
         assert!(text.contains("🩺 Witnessed"), "what was said stays: {text}");
+        assert!(text.contains("📈 "), "the score stays: {text}");
         // Twice as long again, the summary is cut to its opening rather
         // than the ROSC being dropped; only past that do older lines go.
         k.lines[9].detail = long(5).repeat(3);

@@ -695,9 +695,13 @@
           </div>
         </div>
         <div class="panel">
-          <div class="head"><span class="eyebrow">Cases</span><span class="meta" id="rsCasesMeta"></span></div>
+          <div class="head"><span class="eyebrow">Cases</span><span class="meta" id="rsCasesMeta"></span>
+            <button class="btn ghost sm" id="rsPacket" title="The cases shown, as a blinded review packet: their audio and blank abstraction and transcript sheets, with nothing the app made of them, to ~/Downloads">Review packet</button>
+            <button class="btn ghost sm" id="rsImport" title="Bring back a filled abstraction or transcript sheet. Kept apart from the library: it never changes a transcript or a case">Import sheet…</button>
+            <input type="file" id="rsImportFile" accept=".csv,text/csv" multiple style="display:none" />
+            <button class="btn ghost sm" id="rsCompare" title="The cases shown: the app's values against the reference standard, per variable, with word error rates, to ~/Downloads">Compare to reference</button></div>
           <div class="body tight">
-            <p class="help">One row per case, newest first; click a column heading to sort. The ED's own record — the phone call as logged and the arrival from the chart — is typed in here and kept apart from what the radio said; when it is present, the intervals use it and say so. A row marked ◌ is from a snapshot.</p>
+            <p class="help">One row per case, newest first; click a column heading to sort. The ED's own record — the phone call as logged and the arrival from the chart — is typed in here and kept apart from what the radio said; when it is present, the intervals use it and say so. A row marked ◌ is from a snapshot. The score is worked out from what the crew's report stated; a criterion nobody stated widens it to a range rather than being guessed.</p>
             <div class="rs-scroll" id="rsCases"></div>
             <div class="empty small" id="rsCasesEmpty">No cases in this window. Cases are built on the Cases tab; “Rebuild…” there builds them from calls already stored.</div>
           </div>
