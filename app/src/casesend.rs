@@ -490,6 +490,12 @@ pub struct Thread {
 
 /// The chats a case goes to: the profile's own from the start, and each
 /// hospital's once a crew calls it.
+///
+/// A hospital's chat is for the patient coming to it. When the crew's report
+/// to that hospital names no arrest — a seizure paged as a cardiac arrest —
+/// the case is not that hospital's business: its chat is often the team that
+/// answers an arrest, and it would be paged for a patient the crew never
+/// said was one. The chat for every case still hears it, with the warning.
 pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<Thread> {
     let mut out = Vec::new();
     if !s.dest.is_empty() {
@@ -497,6 +503,9 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
     }
     if s.hospitals {
         for a in &k.arrivals {
+            if no_arrest_reported(k, a.conversation) {
+                continue;
+            }
             let Some(p) = places.places.iter().find(|p| p.enabled && !a.place_id.is_empty() && p.id == a.place_id) else { continue };
             if p.dest.is_empty() || out.iter().any(|t| t.dest == p.dest) {
                 continue;
@@ -505,6 +514,16 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
         }
     }
     out
+}
+
+/// The crew's report to a hospital, on an arrest case, names no arrest.
+/// Read the same way as the case's own warning, so the two agree.
+fn no_arrest_reported(k: &CaseView, conversation: i64) -> bool {
+    k.profile == "cardiac-arrest"
+        && k.state != "downgraded"
+        && k.lines
+            .iter()
+            .any(|l| l.kind == "report" && l.conversation == Some(conversation) && crate::cases::contradicts_arrest(&l.detail))
 }
 
 /// What a thread opens with, heard: the page that opened the case, in the
@@ -1369,7 +1388,22 @@ mod tests {
         let hosp = notices_for(&t[1], &notices(&k));
         assert_eq!(hosp.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), vec!["report:5"]);
         // Hospitals' chats can be left out.
-        assert_eq!(threads(&k, &Send { hospitals: false, ..s }, &places()).len(), 1);
+        assert_eq!(threads(&k, &Send { hospitals: false, ..s.clone() }, &places()).len(), 1);
+    }
+
+    #[test]
+    fn a_hospital_is_not_paged_for_a_report_that_names_no_arrest() {
+        let s = Send { dest: "d-all".into(), ..Send::default() };
+        let mut k = arrest();
+        // Dispatched as a cardiac arrest; the crew calls the hospital with a seizure.
+        for l in k.lines.iter_mut().filter(|l| l.kind == "report") {
+            l.detail = "Seizure, Altered Mental Status — Medic 7 inbound with a 48-year-old male, witnessed seizure, remains altered.".into();
+        }
+        let t = threads(&k, &s, &places());
+        assert_eq!(t.iter().map(|x| x.dest.as_str()).collect::<Vec<_>>(), vec!["d-all"], "only the chat for every case");
+        // Another profile is not read for arrest words.
+        k.profile = "stroke".into();
+        assert_eq!(threads(&k, &s, &places()).len(), 2);
     }
 
     #[test]
