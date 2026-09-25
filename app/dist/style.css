@@ -1388,3 +1388,9 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .rs-note { width: 9em; }
 .rs-notes { margin: 8px 0 0; padding-left: 18px; color: var(--ink-dim); font-size: 12px; }
 .rs-notes li { margin: 2px 0; }
+
+/* Tripwire email */
+.tw-email { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+#twEmailBox { margin-top: 6px; }
+.tw-mail .tw-mailhead { font-size: 12px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+.cs-email { margin: 8px 0; padding-top: 8px; border-top: 1px solid var(--line-soft); }

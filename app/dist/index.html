@@ -363,6 +363,7 @@
                   <label class="field"><span class="lab">System <span class="mono faint">two systems can use the same numbers; blank means any</span></span><input id="plSystem" type="text" spellcheck="false" /></label>
                 </div>
                 <label class="field"><span class="lab">Telegram chat <span class="mono faint">a cardiac arrest reported here is sent to it; set up chats in Connections</span></span><select id="plDest"></select></label>
+                <label class="field"><span class="lab">Email <span class="mono faint">a cardiac arrest reported here is emailed to these addresses, separated by commas</span></span><input id="plEmail" type="text" placeholder="ed-charge@example.org" spellcheck="false" /></label>
                 <label class="field"><span class="lab">Notes</span><input id="plNotes" type="text" spellcheck="false" /></label>
                 <div class="inline"><button class="btn primary sm" id="plSave">Save</button><span class="spacer"></span><button class="btn ghost sm danger" id="plDelete">Delete</button></div>
               </div>
@@ -564,9 +565,9 @@
                     <label class="field"><span class="lab">To</span><select id="twDest"></select><span id="twChatWrap" style="display:none"><input id="twChat" type="text" placeholder="chat id, or chat:topic" spellcheck="false" style="margin-top:4px" /></span></label>
                     <label class="field" id="twQuietField"><span class="lab">At most</span><select id="twQuiet"></select></label>
                   </div>
-                  <label class="field"><span class="lab">Message</span><textarea id="twMessage" rows="4" spellcheck="false"></textarea></label>
+                  <label class="field"><span class="lab">Message</span><textarea id="twMessage" class="tw-tpl" rows="4" spellcheck="false"></textarea></label>
                   <div class="tw-tokens" id="twTokens"></div>
-                  <div class="tw-tokens" id="twFormat" title="Select some text, then pick a style — Telegram shows it formatted">
+                  <div class="tw-tokens" id="twFormat" title="Select some text, then pick a style — Telegram and email show it formatted">
                     <button class="tw-token" data-tag="b"><b>B</b></button>
                     <button class="tw-token" data-tag="i"><i>I</i></button>
                     <button class="tw-token" data-tag="u"><u>U</u></button>
@@ -587,7 +588,16 @@
                     <span class="lab" style="margin:0">Follow-ups</span>
                     <select id="twFollow"><option value="off">off</option><option value="radio">what that radio says next</option><option value="channel">everything on the talkgroup</option><option value="repeats">only this tripwire again</option></select>
                     <span id="twFollowFor" class="inline">for <select id="twFollowMins"></select></span>
-                    <p class="help">Follow-ups go out as Telegram replies to the first message, so an incident reads as one thread — at most 10 replies. <b>What that radio says next</b> follows the unit that tripped it onto any talkgroup (a medic calling the hospital); <b>everything on the talkgroup</b> is for quiet channels.</p>
+                    <p class="help">Follow-ups go out as Telegram replies to the first message, so an incident reads as one thread — at most 10 replies. <b>What that radio says next</b> follows the unit that tripped it onto any talkgroup (a medic calling the hospital); <b>everything on the talkgroup</b> is for quiet channels. By email they are replies in the first email's thread.</p>
+                  </div>
+                  <div class="tw-email">
+                    <label class="check" style="margin:0" title="Also, or instead, by email — through the account on Settings → Connections"><input id="twEmail" type="checkbox" /> Email</label>
+                    <div id="twEmailBox">
+                      <label class="field"><span class="lab">Email to <span class="mono faint">addresses, separated by commas</span></span><input id="twEmailTo" type="text" placeholder="ed-charge@example.org, ecpr-team@example.org" spellcheck="false" /></label>
+                      <label class="field"><span class="lab">Subject</span><input id="twEmailSubject" class="tw-tpl" type="text" spellcheck="false" /></label>
+                      <label class="field"><span class="lab">Body <span class="mono faint">blank sends the Telegram message</span></span><textarea id="twEmailBody" class="tw-tpl" rows="4" spellcheck="false" placeholder="Blank: the same as the message above"></textarea></label>
+                      <div class="tw-msgprev" id="twEmailPrev"></div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -636,7 +646,7 @@
             </div>
           </div>
           <div class="panel">
-            <div class="head"><span class="eyebrow">On Telegram</span><span class="meta" id="csSendMeta"></span></div>
+            <div class="head"><span class="eyebrow">On Telegram and by email</span><span class="meta" id="csSendMeta"></span></div>
             <div class="body tight cs-send">
               <p class="help">Each case is one message per chat: its timeline, edited as the case grows, which buzzes nobody. A reply, which does, goes out only for the events ticked below. A hospital's chat hears a case once a crew calls that hospital, never on a guess. Read the preview before switching it on, and turn off the tripwires that already announce arrests, or both will.</p>
               <label class="check"><input type="checkbox" id="csSendOn" /> Send cases to Telegram</label>
@@ -644,6 +654,11 @@
               <label class="check"><input type="checkbox" id="csSendHosp" /> And to a hospital's own chat once a crew calls it <span class="faint small">(set the chat on the place, in Dispatch setup → Places)</span></label>
               <label class="check"><input type="checkbox" id="csSendMap" /> With a map under it: the run and its routes to where its care pathway says to go (scene to hospital in a hospital's chat), taken down when the case ends</label>
               <label class="check"><input type="checkbox" id="csSendAudio" /> With the radio: the thread opens with the page heard and the timeline under it (in a hospital's chat, the report), and a crew's report to a hospital follows as the clip of that call</label>
+              <div class="cs-email">
+                <label class="check"><input type="checkbox" id="csSendEmail" /> Also by email, through the account on Settings → Connections</label>
+                <label class="field"><span class="lab">Every case is emailed to <span class="mono faint">addresses, separated by commas</span></span><input id="csSendEmailTo" type="text" placeholder="ed-charge@example.org" spellcheck="false" /></label>
+                <p class="help">Email cannot be edited, so a case by email is a thread: the first email is the timeline so far, and each piece of news — working, ROSC, lost pulses, transporting, efforts ceased, not an arrest, a report to a hospital — follows as a reply with the timeline as it then stands. With “a hospital's own chat” ticked, a hospital's own email addresses (on the place) hear it the same way. The map and the radio are attached when ticked above.</p>
+              </div>
               <div class="inline"><button class="btn primary sm" id="csSendSave">Save</button><button class="btn ghost sm" id="csPreviewBtn" title="What the cases already built would have sent. Nothing is sent.">Preview…</button></div>
               <div id="csPreview"></div>
             </div>
@@ -1422,6 +1437,28 @@
             </div>
           </div>
           <div class="panel">
+            <div class="head"><span class="eyebrow">Email</span><span class="meta" id="emMeta"></span></div>
+            <div class="body">
+              <p class="help">One mail account sends every email. Tripwires, hospital reports, digests and cases each choose their own recipients, alongside or instead of Telegram. For Gmail or Google Workspace use smtp.gmail.com, port 587, STARTTLS, and an app password (Google Account → Security → App passwords), not your usual one.</p>
+              <label class="check"><input id="emOn" type="checkbox" /> Send email</label>
+              <div class="row3">
+                <label class="field"><span class="lab">Mail server</span><input id="emHost" type="text" placeholder="smtp.gmail.com" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Port</span><input id="emPort" type="text" inputmode="numeric" placeholder="587" /></label>
+                <label class="field"><span class="lab">Security</span><select id="emSec"><option value="starttls">STARTTLS (587)</option><option value="tls">TLS (465)</option><option value="none">None (a relay inside the network)</option></select></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Username</span><input id="emUser" type="text" placeholder="alerts@example.org" spellcheck="false" autocomplete="off" /></label>
+                <label class="field"><span class="lab">Password <span class="mono faint" id="emPwState"></span></span><input id="emPass" type="password" placeholder="blank keeps the saved one" autocomplete="new-password" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">From name</span><input id="emFromName" type="text" placeholder="HoosierSDR" /></label>
+                <label class="field"><span class="lab">From address <span class="mono faint">blank is the username</span></span><input id="emFrom" type="text" placeholder="alerts@example.org" spellcheck="false" /></label>
+              </div>
+              <div class="inline"><button class="btn primary" id="emSave">Save</button><input id="emTestTo" type="text" placeholder="send a test to…" spellcheck="false" /><button class="btn ghost" id="emTest">Send test</button></div>
+              <div class="small faint" id="emSaid"></div>
+            </div>
+          </div>
+          <div class="panel">
             <div class="head"><span class="eyebrow">AI · local model (Ollama)</span><span class="meta" id="olMeta"></span></div>
             <div class="body">
               <div class="row3">
@@ -1540,6 +1577,7 @@
   <script src="picker.js"></script>
   <script src="retention.js"></script>
   <script src="connections.js"></script>
+  <script src="email.js"></script>
   <script src="tripwires.js"></script>
   <script src="places.js"></script>
   <script src="pathways.js"></script>

@@ -68,11 +68,15 @@ pub struct Send {
     /// crew's report to a hospital follows as the clip of that call. Off,
     /// the timeline is a plain message and nothing follows it but the map.
     pub audio: bool,
+    /// Also by email: every case to `email_to`, and with `hospitals`, each
+    /// hospital's own addresses once a report to it is heard.
+    pub email: bool,
+    pub email_to: String,
 }
 
 impl Default for Send {
     fn default() -> Self {
-        Send { enabled: false, dest: String::new(), hospitals: true, map: true, audio: true }
+        Send { enabled: false, dest: String::new(), hospitals: true, map: true, audio: true, email: false, email_to: String::new() }
     }
 }
 
@@ -502,11 +506,7 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
         out.push(Thread { dest: s.dest.clone(), since: k.opened, place_id: None, conversation: None });
     }
     if s.hospitals {
-        for a in &k.arrivals {
-            if no_arrest_reported(k, a.conversation) {
-                continue;
-            }
-            let Some(p) = places.places.iter().find(|p| p.enabled && !a.place_id.is_empty() && p.id == a.place_id) else { continue };
+        for (a, p) in hospitals(k, places) {
             if p.dest.is_empty() || out.iter().any(|t| t.dest == p.dest) {
                 continue;
             }
@@ -514,6 +514,15 @@ pub fn threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<
         }
     }
     out
+}
+
+/// The hospitals a case has been reported to, each with the report that
+/// brought it in — leaving out any the crew told of something other than
+/// an arrest.
+fn hospitals<'a>(k: &'a CaseView, places: &'a crate::places::Settings) -> impl Iterator<Item = (&'a crate::cases::Arrival, &'a crate::places::Place)> {
+    k.arrivals.iter().filter(|a| !no_arrest_reported(k, a.conversation)).filter_map(|a| {
+        places.places.iter().find(|p| p.enabled && !a.place_id.is_empty() && p.id == a.place_id).map(|p| (a, p))
+    })
 }
 
 /// The crew's report to a hospital, on an arrest case, names no arrest.
@@ -596,6 +605,7 @@ pub fn ensure_schema(c: &Connection) {
     // which is what the defaults say.
     let _ = c.execute("ALTER TABLE case_sends ADD COLUMN root_audio INTEGER NOT NULL DEFAULT 0", []);
     let _ = c.execute("ALTER TABLE case_sends ADD COLUMN map_id INTEGER", []);
+    ensure_email_schema(c);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -735,7 +745,8 @@ fn back_off(key: &str, now: i64) {
 /// the Rebuild button, which replays days.
 pub fn tick(app: &AppHandle) {
     let settings = crate::cases::load(app);
-    if !settings.profiles.iter().any(|p| p.enabled && p.telegram.enabled) {
+    let on = |p: &crate::cases::Profile| p.enabled && (p.telegram.enabled || p.telegram.email);
+    if !settings.profiles.iter().any(on) {
         return;
     }
     let state = app.state::<AppState>();
@@ -748,8 +759,12 @@ pub fn tick(app: &AppHandle) {
         crate::cases::list(&c, now - START_WITHIN_SECS - crate::cases::LIVE_WINDOW_SECS, &places, now)
     };
     let view = crate::cases::with_roads(&state, view);
-    for p in settings.profiles.iter().filter(|p| p.enabled && p.telegram.enabled) {
+    for p in settings.profiles.iter().filter(|p| on(p)) {
         for k in view.cases.iter().filter(|k| k.profile == p.id) {
+            send_case_emails(app, &db, p, k, &places, now);
+            if !p.telegram.enabled {
+                continue;
+            }
             for t in threads(k, &p.telegram, &places) {
                 let key = format!("{}:{}:{}", p.id, k.incident, t.dest);
                 if waiting(&key, now) {
@@ -1020,6 +1035,276 @@ fn record_notice(
 }
 
 // ---------------------------------------------------------------------------
+// by email
+// ---------------------------------------------------------------------------
+//
+// Email cannot be edited, so a case by email is a thread of its own: the
+// first email is the timeline so far, and each thing worth hearing about —
+// the arrest confirmed working, ROSC, lost pulses, transport, efforts
+// ceased, not an arrest after all, a report to a hospital — follows as a
+// reply carrying the timeline as it then stands. Routine changes (a unit
+// added, an ETA moved) wait for the next of those. The same hospitals
+// that would hear it on Telegram hear it by email, from the same report.
+
+/// One set of addresses a case goes to by email.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmailThread {
+    /// `all`, or `place:<id>` for a hospital's addresses.
+    pub key: String,
+    pub to: Vec<String>,
+    pub since: i64,
+    pub conversation: Option<i64>,
+}
+
+pub fn email_threads(k: &CaseView, s: &Send, places: &crate::places::Settings) -> Vec<EmailThread> {
+    let mut out = Vec::new();
+    if !s.email {
+        return out;
+    }
+    let all = crate::email::recipients(&s.email_to);
+    if !all.is_empty() {
+        out.push(EmailThread { key: "all".into(), to: all, since: k.opened, conversation: None });
+    }
+    if s.hospitals {
+        for (a, p) in hospitals(k, places) {
+            let to = crate::email::recipients(&p.email);
+            if to.is_empty() || out.iter().any(|t| t.key == format!("place:{}", p.id)) {
+                continue;
+            }
+            out.push(EmailThread { key: format!("place:{}", p.id), to, since: a.anchor, conversation: Some(a.conversation) });
+        }
+    }
+    out
+}
+
+/// An email has no length limit worth the name; this only stops a runaway.
+const EMAIL_CHARS: usize = 100_000;
+
+/// The kinds of line that are news by email.
+const EMAIL_EVENTS: &[&str] = &["working", "rosc", "rearrest", "transporting", "terminated", "downgrade", crate::cases::ARRIVED];
+
+/// Something that earns a case its next email.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Update {
+    pub key: String,
+    pub at: i64,
+    pub text: String,
+    pub html: String,
+    pub conversation: Option<i64>,
+    pub call: Option<i64>,
+    pub name: String,
+}
+
+/// Every update in a case, in order: each event the first time it is said
+/// (a readback of it is the same news), and each report heard.
+pub fn updates(k: &CaseView) -> Vec<Update> {
+    let mut out: Vec<Update> = Vec::new();
+    let mut last_kind = "";
+    for l in &k.lines {
+        if !EMAIL_EVENTS.contains(&l.kind.as_str()) || l.kind == last_kind {
+            continue;
+        }
+        last_kind = l.kind.as_str();
+        let when = l.clock.clone().unwrap_or_else(|| hm(l.at));
+        let (text, html) = event_text("•", &l.label, &when);
+        out.push(Update { key: format!("{}:{}", l.kind, l.at), at: l.at, text, html, conversation: None, call: l.call, name: l.label.clone() });
+    }
+    for n in notices(k) {
+        out.push(Update { key: n.key, at: n.at, text: n.text, html: n.html, conversation: n.conversation, call: n.call, name: n.name });
+    }
+    out.sort_by_key(|u| u.at);
+    out
+}
+
+/// What one set of addresses has had of a case.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EmailSent {
+    pub root: String,
+    pub subject: String,
+    pub keys: HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmailStep {
+    /// The first email: the timeline so far, with the page (or, for a
+    /// hospital, its report) heard.
+    Open { subject: String },
+    /// An update, as a reply carrying the timeline as it now stands.
+    Follow { update: Update },
+    /// Already in an email that was sent, or too old to be news.
+    Stale { key: String },
+}
+
+pub fn plan_email(k: &CaseView, t: &EmailThread, had: Option<&EmailSent>, now: i64) -> Vec<EmailStep> {
+    let mut steps = Vec::new();
+    let mine: Vec<Update> = updates(k)
+        .into_iter()
+        .filter(|u| match t.conversation {
+            None => true,
+            Some(c) => u.at > t.since && u.conversation != Some(c),
+        })
+        .collect();
+    match had {
+        None => {
+            let last = k.lines.last().map(|l| l.at).unwrap_or(k.opened);
+            if now - last > START_WITHIN_SECS || (concluded(k) && now - last > NOTIFY_WITHIN_SECS) {
+                return steps;
+            }
+            let subject = render(k, TEXT_CHARS).lines().next().unwrap_or("Case").to_string();
+            steps.push(EmailStep::Open { subject });
+            // The first email tells everything so far.
+            steps.extend(mine.into_iter().map(|u| EmailStep::Stale { key: u.key }));
+        }
+        Some(h) => {
+            for u in mine.into_iter().filter(|u| !h.keys.contains(&u.key)) {
+                if now - u.at > NOTIFY_WITHIN_SECS {
+                    steps.push(EmailStep::Stale { key: u.key });
+                } else {
+                    steps.push(EmailStep::Follow { update: u });
+                }
+            }
+        }
+    }
+    steps
+}
+
+pub fn ensure_email_schema(c: &Connection) {
+    let _ = c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS case_emails (
+            profile TEXT NOT NULL,
+            incident INTEGER NOT NULL,
+            thread TEXT NOT NULL,
+            root TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            sent_at INTEGER NOT NULL,
+            PRIMARY KEY (profile, incident, thread)
+         );
+         CREATE TABLE IF NOT EXISTS case_email_updates (
+            profile TEXT NOT NULL,
+            incident INTEGER NOT NULL,
+            thread TEXT NOT NULL,
+            key TEXT NOT NULL,
+            sent_at INTEGER NOT NULL,
+            PRIMARY KEY (profile, incident, thread, key)
+         );",
+    );
+}
+
+pub fn email_sent(c: &Connection, profile: &str, incident: i64, thread: &str) -> Option<EmailSent> {
+    let (root, subject): (String, String) = c
+        .query_row(
+            "SELECT root, subject FROM case_emails WHERE profile = ?1 AND incident = ?2 AND thread = ?3",
+            params![profile, incident, thread],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let keys = c
+        .prepare("SELECT key FROM case_email_updates WHERE profile = ?1 AND incident = ?2 AND thread = ?3")
+        .and_then(|mut q| q.query_map(params![profile, incident, thread], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    Some(EmailSent { root, subject, keys })
+}
+
+/// The recording that goes with an email: the page, or the report that
+/// brought a hospital in; for an update, that report's clip.
+fn email_clip(db: &Db, k: &CaseView, t: &EmailThread, update: Option<&Update>) -> Option<crate::email::Attachment> {
+    let n = match update {
+        Some(u) if u.conversation.is_some() => Notice { key: u.key.clone(), at: u.at, text: String::new(), html: String::new(), name: u.name.clone(), conversation: u.conversation, call: u.call },
+        Some(_) => return None,
+        None => intro(k, &Thread { dest: String::new(), since: t.since, place_id: None, conversation: t.conversation })?,
+    };
+    let (path, _) = clip_of(db, k, &n)?;
+    let a = crate::email::Attachment::file(&path);
+    let _ = std::fs::remove_file(&path);
+    a
+}
+
+fn send_case_emails(app: &AppHandle, db: &Db, p: &crate::cases::Profile, k: &CaseView, places: &crate::places::Settings, now: i64) {
+    let state = app.state::<AppState>();
+    let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
+    for t in email_threads(k, &p.telegram, places) {
+        let key = format!("{}:{}:email:{}", p.id, k.incident, t.key);
+        if waiting(&key, now) {
+            continue;
+        }
+        let had = {
+            let c = db.lock().unwrap();
+            email_sent(&c, &p.id, k.incident, &t.key)
+        };
+        let steps = plan_email(k, &t, had.as_ref(), now);
+        let mut root = had.as_ref().map(|h| (h.root.clone(), h.subject.clone()));
+        for step in steps {
+            let res: Result<(), String> = match step {
+                EmailStep::Open { subject } => {
+                    let id = crate::email::thread_id(&["case", &p.id, &k.incident.to_string(), &t.key]);
+                    let mut attachments: Vec<crate::email::Attachment> = Vec::new();
+                    if p.telegram.audio {
+                        attachments.extend(email_clip(db, k, &t, None));
+                    }
+                    if p.telegram.map && t.conversation.is_none() {
+                        if let Ok((png, _, _)) = crate::tripwires::draw_map(app, &state, k.incident) {
+                            attachments.push(crate::email::Attachment { name: "map.png".into(), mime: "image/png".into(), bytes: png });
+                        }
+                    }
+                    let mail = crate::email::Mail {
+                        to: t.to.clone(),
+                        subject: subject.clone(),
+                        text: render(k, EMAIL_CHARS),
+                        html: Some(crate::email::html_body(&html(k, &region, EMAIL_CHARS))),
+                        attachments,
+                        message_id: Some(id.clone()),
+                        in_reply_to: None,
+                    };
+                    crate::email::send(&mail).and_then(|_| {
+                        let c = db.lock().unwrap();
+                        c.execute(
+                            "INSERT OR REPLACE INTO case_emails (profile, incident, thread, root, subject, sent_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![p.id, k.incident, t.key, id, subject, now],
+                        )
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                    })
+                    .map(|_| root = Some((id, subject)))
+                }
+                EmailStep::Follow { update } => match &root {
+                    None => Ok(()),
+                    Some((id, subject)) => {
+                        let mail = crate::email::Mail {
+                            to: t.to.clone(),
+                            subject: format!("Re: {subject}"),
+                            text: format!("{}\n\n{}", update.text, render(k, EMAIL_CHARS)),
+                            html: Some(crate::email::html_body(&format!("{}\n\n{}", update.html, html(k, &region, EMAIL_CHARS)))),
+                            attachments: if p.telegram.audio { email_clip(db, k, &t, Some(&update)).into_iter().collect() } else { Vec::new() },
+                            message_id: None,
+                            in_reply_to: Some(id.clone()),
+                        };
+                        crate::email::send(&mail).and_then(|_| record_email_update(db, p, k, &t, &update.key, now))
+                    }
+                },
+                EmailStep::Stale { key } => record_email_update(db, p, k, &t, &key, now),
+            };
+            if let Err(e) = res {
+                eprintln!("cases: emailing case {} to {}: {e}", k.id, t.to.join(", "));
+                back_off(&key, now);
+                break;
+            }
+        }
+    }
+}
+
+fn record_email_update(db: &Db, p: &crate::cases::Profile, k: &CaseView, t: &EmailThread, key: &str, now: i64) -> Result<(), String> {
+    let c = db.lock().unwrap();
+    c.execute(
+        "INSERT OR IGNORE INTO case_email_updates (profile, incident, thread, key, sent_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![p.id, k.incident, t.key, key, now],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // the preview
 // ---------------------------------------------------------------------------
 
@@ -1177,6 +1462,55 @@ mod tests {
             ],
             vec![arrival(3, t0 + 1190, Some("10 minutes")), arrival(4, t0 + 1550, Some("4 minutes")), arrival(5, t0 + 1790, Some("5 minutes"))],
         )
+    }
+
+    #[test]
+    fn a_case_is_emailed_to_its_list_and_each_hospital_reported_to() {
+        let mut pl = places();
+        pl.places[0].email = "ed@general.example.org".into();
+        let s = Send { email: true, email_to: "team@example.org, charge@example.org".into(), ..Send::default() };
+        let k = arrest();
+        let t = email_threads(&k, &s, &pl);
+        assert_eq!(t.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), vec!["all", "place:p-general"]);
+        assert_eq!(t[0].to, vec!["team@example.org", "charge@example.org"]);
+        assert_eq!(t[1].to, vec!["ed@general.example.org"]);
+        // Email off, or no hospitals: as on Telegram.
+        assert!(email_threads(&k, &Send { email: false, ..s.clone() }, &pl).is_empty());
+        assert_eq!(email_threads(&k, &Send { hospitals: false, ..s.clone() }, &pl).len(), 1);
+        // A hospital told of a seizure is not emailed an arrest.
+        let mut seizure = arrest();
+        for l in seizure.lines.iter_mut().filter(|l| l.kind == "report") {
+            l.detail = "Seizure, Altered Mental Status — Medic 7 inbound, witnessed seizure, remains altered.".into();
+        }
+        assert_eq!(email_threads(&seizure, &s, &pl).len(), 1);
+    }
+
+    #[test]
+    fn an_emailed_case_opens_with_the_story_so_far_and_follows_with_news() {
+        let k = arrest();
+        let t0 = k.opened;
+        let all = EmailThread { key: "all".into(), to: vec!["a@example.org".into()], since: t0, conversation: None };
+        // Each event once, a readback being the same news; reports as heard.
+        let keys: Vec<String> = updates(&k).into_iter().map(|u| u.key).collect();
+        assert_eq!(keys, vec![format!("working:{}", t0 + 400), format!("rosc:{}", t0 + 900), "report:3".into(), format!("rearrest:{}", t0 + 1500), "report:5".into()]);
+        // First email: everything so far is in it, so nothing follows.
+        let first = plan_email(&k, &all, None, t0 + 1850);
+        assert!(matches!(&first[0], EmailStep::Open { subject } if subject.starts_with("🫀")), "{first:?}");
+        assert!(first[1..].iter().all(|s| matches!(s, EmailStep::Stale { .. })));
+        // Already open: news within the window follows, older news is stale.
+        let had = EmailSent { root: "<r@x>".into(), subject: "s".into(), keys: HashSet::new() };
+        let later = plan_email(&k, &all, Some(&had), t0 + 1850);
+        let follows: Vec<&str> = later.iter().filter_map(|s| match s { EmailStep::Follow { update } => Some(update.key.as_str()), _ => None }).collect();
+        assert_eq!(follows.len(), 4, "{later:?}");
+        assert!(matches!(&later[0], EmailStep::Stale { key } if key.starts_with("working:")));
+        // Once recorded, nothing more.
+        let done = EmailSent { keys: updates(&k).into_iter().map(|u| u.key).collect(), ..had };
+        assert!(plan_email(&k, &all, Some(&done), t0 + 1850).is_empty());
+        // A hospital hears what came after the report that brought it in.
+        let hosp = EmailThread { key: "place:p".into(), to: vec!["ed@x.org".into()], since: t0 + 1190, conversation: Some(3) };
+        let empty = EmailSent { keys: HashSet::new(), ..done };
+        let h: Vec<String> = plan_email(&k, &hosp, Some(&empty), t0 + 1850).into_iter().filter_map(|s| match s { EmailStep::Follow { update } => Some(update.key), _ => None }).collect();
+        assert_eq!(h, vec![format!("rearrest:{}", t0 + 1500), "report:5".to_string()]);
     }
 
     fn thread_for_all(k: &CaseView) -> Thread {

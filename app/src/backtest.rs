@@ -644,6 +644,17 @@ fn setup_warnings(state: &AppState, t: &Tripwire) -> Vec<String> {
             w.push(format!("Send to: {e}."));
         }
     }
+    if t.send.email {
+        if let Some(why) = crate::email::settings().problem() {
+            w.push(format!("Email cannot go out: {why}."));
+        }
+        let bad = crate::email::bad_recipients(&t.send.email_to);
+        if !bad.is_empty() {
+            w.push(format!("Not an email address: {}.", bad.join(", ")));
+        } else if crate::email::recipients(&t.send.email_to).is_empty() {
+            w.push("Email is on but has no one to send to.".into());
+        }
+    }
     w
 }
 

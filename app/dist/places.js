@@ -67,6 +67,7 @@
     $("plFeatures").innerHTML = features.map(([k, lab]) =>
       `<label class="check"><input type="checkbox" data-feat="${esc(k)}" ${(p.features || []).includes(k) ? "checked" : ""} /> ${esc(lab)}</label>`).join("");
     $("plOwnFeatures").value = own.join(", ");
+    if ($("plEmail")) $("plEmail").value = p.email || "";
     if ($("plDest")) {
       $("plDest").innerHTML = `<option value="">— none —</option>` + dests.map((d) => `<option value="${esc(d.id)}" ${d.id === p.dest ? "selected" : ""}>${esc(d.name)}</option>`).join("")
         + (p.dest && !dests.some((d) => d.id === p.dest) ? `<option value="${esc(p.dest)}" selected>a destination that was removed</option>` : "");
@@ -86,6 +87,7 @@
     const own = $("plOwnFeatures").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     p.features = [...new Set([...ticked, ...own])];
     if ($("plDest")) p.dest = $("plDest").value;
+    if ($("plEmail")) p.email = $("plEmail").value.trim();
     return p;
   }
 
