@@ -85,7 +85,22 @@ pub struct Rule {
     /// three unrelated reasons and none of them used to be visible from here.
     #[serde(default)]
     pub off_reason: String,
+    /// Send the summary to Telegram; off leaves only the email.
+    #[serde(default = "t")]
+    pub telegram: bool,
+    /// Email recipients, and the subject and body templates (same tokens as
+    /// `message`; a blank body is `message`). A revision follows the first
+    /// email in its thread.
+    #[serde(default)]
+    pub email_to: String,
+    #[serde(default)]
+    pub email_subject: String,
+    #[serde(default)]
+    pub email_body: String,
 }
+
+/// The subject a report's email gets when its tripwire names none.
+pub const EMAIL_SUBJECT: &str = "🏥 {rule} · {tgname} · {headline}";
 
 fn t() -> bool {
     true
@@ -114,6 +129,10 @@ impl Default for Rule {
             attach_audio: true,
             send_without_transcript: false,
             off_reason: String::new(),
+            telegram: true,
+            email_to: String::new(),
+            email_subject: String::new(),
+            email_body: String::new(),
         }
     }
 }
@@ -1085,7 +1104,7 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let mut any_ok = false;
     let mut last_err: Option<String> = None;
     // Built once, however many chats it goes to.
-    let clip = if dests.iter().any(|d| d.attach_audio) && !files.is_empty() {
+    let clip = if (dests.iter().any(|d| d.attach_audio) || (r.attach_audio && !crate::email::recipients(&r.email_to).is_empty())) && !files.is_empty() {
         match crate::alerts::combine_clips(&files, &format!("conv_{}", c.tg)) {
             Ok(clip) => Some(clip),
             Err(e) => {
@@ -1159,10 +1178,32 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
             }
         }
     }
+    // The same report by email, to each rule that asks for it. A revision
+    // cannot change what was sent, so it follows as a reply.
+    let revised = c.sent_at.is_some();
+    let all: Vec<Rule> = state.conversations.lock().unwrap().settings.rules.clone();
+    let mut first_email: Option<String> = None;
+    for (er, to) in email_sharers(&all, &r, c.tg) {
+        let mut mail = email_for(&er, to, &c, &headline, &summary, revised);
+        if er.attach_audio {
+            mail.attachments.extend(clip.as_ref().and_then(|(p, _)| crate::email::Attachment::file(p)));
+        }
+        first_email.get_or_insert_with(|| mail.text.clone());
+        match crate::email::send(&mail) {
+            Ok(_) => {
+                any_ok = true;
+                detail.push_str(&format!("emailed {}; ", mail.to.join(", ")));
+            }
+            Err(e) => {
+                detail.push_str(&format!("{} email: {e}; ", er.name));
+                last_err = Some(e);
+            }
+        }
+    }
     if let Some((path, _)) = &clip {
         let _ = std::fs::remove_file(path);
     }
-    let message = dests.first().map(|d| d.message.clone()).unwrap_or_default();
+    let message = dests.first().map(|d| d.message.clone()).or(first_email).unwrap_or_default();
     let chats = dests.iter().map(|d| d.chat.as_str()).collect::<Vec<_>>().join(" ");
     let ids: Vec<i64> = sent_to.iter().flat_map(|s| s.ids.clone()).collect();
     let _ = app.emit(
@@ -1299,11 +1340,52 @@ fn sharers(all: &[Rule], primary: &Rule, tg: u16, fallback: &str) -> Vec<(Rule, 
                 .filter(|r| r.enabled && r.id != primary.id && r.tgs.contains(&tg) && same_question(r, primary))
                 .cloned(),
         )
+        .filter(|r| r.telegram)
         .filter_map(|r| {
             let chat = if r.chat_id.trim().is_empty() { fallback.to_string() } else { r.chat_id.clone() };
             (!chat.trim().is_empty() && seen.insert(chat.clone())).then_some((r, chat))
         })
         .collect()
+}
+
+/// The rules one exchange is owed an email from: the same rules as
+/// `sharers`, each with its own recipients. The same recipients named by
+/// two rules hear it once.
+fn email_sharers(all: &[Rule], primary: &Rule, tg: u16) -> Vec<(Rule, Vec<String>)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    std::iter::once(primary.clone())
+        .chain(
+            all.iter()
+                .filter(|r| r.enabled && r.id != primary.id && r.tgs.contains(&tg) && same_question(r, primary))
+                .cloned(),
+        )
+        .filter_map(|r| {
+            let to = crate::email::recipients(&r.email_to);
+            let mut key: Vec<String> = to.iter().map(|a| a.to_lowercase()).collect();
+            key.sort();
+            (!to.is_empty() && seen.insert(key.join(","))).then_some((r, to))
+        })
+        .collect()
+}
+
+/// One report's email for one rule: its own subject and body, and on a
+/// revision a reply to the first, so the thread reads as the report grew.
+fn email_for(r: &Rule, to: Vec<String>, c: &Conversation, headline: &str, summary: &str, revised: bool) -> crate::email::Mail {
+    let with = |tpl: &str| render(&Rule { message: tpl.to_string(), ..r.clone() }, c, headline, summary);
+    let subject_tpl = if r.email_subject.trim().is_empty() { EMAIL_SUBJECT } else { r.email_subject.as_str() };
+    let subject = with(subject_tpl).trim().trim_end_matches(['·', ' ']).to_string();
+    let subject = if subject.is_empty() { r.name.clone() } else { subject };
+    let text = with(if r.email_body.trim().is_empty() { &r.message } else { &r.email_body });
+    let root = crate::email::thread_id(&["conversation", &r.id, &c.tg.to_string(), &c.first_at.to_string()]);
+    crate::email::Mail {
+        to,
+        subject: if revised { format!("Re: {subject}") } else { subject },
+        html: Some(crate::email::html_body(&crate::alerts::html_escape(text.trim()))),
+        text,
+        attachments: Vec::new(),
+        message_id: (!revised).then(|| root.clone()),
+        in_reply_to: revised.then_some(root),
+    }
 }
 
 // ---------------------------------------------------------------------------

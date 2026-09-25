@@ -26,6 +26,7 @@ mod devices;
 mod digest;
 mod dispatch;
 mod dual;
+mod email;
 mod encode;
 mod events;
 mod follow;
@@ -2301,6 +2302,7 @@ fn main() {
             // beside the live ones and is waiting to be swapped in.
             crate::backup::apply_pending(app.handle());
             crate::secrets::init(app.handle());
+            crate::email::init(app.handle());
             crate::web::spawn(app.handle().clone());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
@@ -2516,6 +2518,10 @@ fn main() {
             research::research_stats,
             research::research_set_record,
             research::research_export,
+            email::email_get,
+            email::email_set,
+            email::email_save_password,
+            email::email_test,
             research::research_summary,
             study::study_packet,
             study::study_import,

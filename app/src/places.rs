@@ -57,6 +57,10 @@ pub struct Place {
     /// a case reported to it is sent there. Blank is none.
     #[serde(default)]
     pub dest: String,
+    /// Addresses a case reported to it is emailed to, as its chat is sent
+    /// it. Blank is none.
+    #[serde(default)]
+    pub email: String,
 }
 
 fn other() -> String {
