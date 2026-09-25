@@ -1722,6 +1722,10 @@ pub fn ensure_schema(c: &Connection) {
     // Added with case timelines: the facts the summary call lifts out of a
     // report (witnessed, rhythm, ETA …), as JSON. NULL on older rows.
     let _ = c.execute("ALTER TABLE conversations ADD COLUMN facts TEXT", []);
+    // Added for the research study: when the first summary of a report was
+    // stored, which a revision leaves alone (`sent_at` moves with each one).
+    // NULL on older rows; a row never revised has it in `sent_at`.
+    let _ = c.execute("ALTER TABLE conversations ADD COLUMN summarized_at INTEGER", []);
     // Rows written with a placeholder talkgroup name — early backfills and
     // rule tests said "TG 10256" — take the real name from a call on that
     // talkgroup, and the description from a sibling row that has one. Only
@@ -1837,6 +1841,8 @@ fn store_row(
     let pieces = serde_json::to_string(&c.pieces).unwrap_or_else(|_| "[]".into());
     let transcript = stitched_transcript(c);
     let now = crate::library::now();
+    // The AI report exists once there is a summary; a failed call has none.
+    let summarized = (!o.summary.trim().is_empty()).then_some(now);
     let existing: Option<i64> = db
         .query_row(
             "SELECT id FROM conversations WHERE rule_id = ?1 AND tg = ?2 AND first_at = ?3",
@@ -1849,21 +1855,23 @@ fn store_row(
         Some(id) => db.execute(
             "UPDATE conversations SET rule_name = ?1, tg_name = ?2, tg_desc = ?3, last_at = ?4, sent_at = ?5, revision = ?6,
              status = ?7, detail = ?8, summary = ?9, message = ?10, prompt = ?11, transcript = ?12, chat = ?13,
-             participants = ?14, pieces = ?15, calls = ?16, headline = ?17, facts = ?18 WHERE id = ?19",
+             participants = ?14, pieces = ?15, calls = ?16, headline = ?17, facts = ?18,
+             summarized_at = COALESCE(summarized_at, ?20) WHERE id = ?19",
             params![
                 r.name, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, o.headline, facts_column(o.facts), id
+                participants, pieces, c.pieces.len() as i64, o.headline, facts_column(o.facts), id, summarized
             ],
         ),
         None => db.execute(
             "INSERT INTO conversations (rule_id, rule_name, tg, tg_name, tg_desc, first_at, last_at, sent_at, revision,
-             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline, facts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+             status, detail, summary, message, prompt, transcript, chat, participants, pieces, calls, source, headline, facts,
+             summarized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 r.id, r.name, c.tg, c.tg_name, c.tg_desc.clone().unwrap_or_default(), c.first_at, c.last_at, now, o.revision,
                 o.status, o.detail, o.summary, o.message, o.prompt, transcript, o.chat,
-                participants, pieces, c.pieces.len() as i64, source, o.headline, facts_column(o.facts)
+                participants, pieces, c.pieces.len() as i64, source, o.headline, facts_column(o.facts), summarized
             ],
         ),
     };

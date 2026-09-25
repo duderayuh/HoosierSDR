@@ -1394,3 +1394,38 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 #twEmailBox { margin-top: 6px; }
 .tw-mail .tw-mailhead { font-size: 12px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
 .cs-email { margin: 8px 0; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+/* Research: slicing and Explore */
+.rs-slice { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 0 2px; }
+.rs-slice input[type="search"] { flex: 1 1 220px; width: auto; padding: 4px 9px; font-size: 12px; }
+.rs-pick { width: auto; flex: none; padding: 4px 26px 4px 8px; font-size: 12px; }
+.rs-slice .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.rs-slice .chip { display: inline-flex; align-items: center; gap: 4px; }
+.rs-slice .chip.rs-not { border-color: var(--amber); color: var(--amber); background: color-mix(in srgb, var(--amber) 10%, transparent); }
+.rs-x { background: none; border: 0; padding: 0 2px; color: inherit; font: inherit; font-size: 13px; line-height: 1; cursor: pointer; opacity: .7; }
+.rs-x:hover { opacity: 1; }
+.rs-table.rs-click tbody tr[data-mk], .rs-table.rs-click tbody tr[data-ck], .rs-table.rs-click tbody tr[data-gv] { cursor: pointer; }
+.rs-table.rs-click tbody tr[data-mk]:hover td, .rs-table.rs-click tbody tr[data-ck]:hover td, .rs-table.rs-click tbody tr[data-gv]:hover td { background: color-mix(in srgb, var(--signal) 6%, transparent); }
+.rs-table tr.on td { background: color-mix(in srgb, var(--signal) 12%, transparent); }
+.rs-table tr.on td:first-child { box-shadow: inset 2px 0 var(--signal); }
+.rs-table th[data-sort] { cursor: pointer; user-select: none; }
+.rs-table th[data-sort]:hover { color: var(--ink); }
+.rs-table th.sorted { color: var(--signal); }
+.rs-cases td.rs-focus { background: color-mix(in srgb, var(--signal) 7%, transparent); }
+.rs-bar { display: inline-block; height: 8px; border-radius: 0 4px 4px 0; background: var(--signal); vertical-align: middle; }
+.rs-bar.alt { background: var(--ink-faint); }
+#rsOnly { margin: 0 0 8px; }
+.rs-chart { overflow: hidden; }
+.rs-chart svg { display: block; max-width: 100%; height: auto; }
+.rs-chart text { fill: var(--ink-faint); font: 10px var(--mono); }
+.rs-chart .grid { stroke: var(--line-soft); stroke-width: 1; }
+.rs-chart .base { stroke: var(--line); stroke-width: 1; }
+.rs-chart .bar { fill: var(--signal); }
+.rs-chart .hit { fill: transparent; cursor: pointer; }
+.rs-chart .bin.rs-still .hit { cursor: default; }
+.rs-chart .bin:hover .hit { fill: color-mix(in srgb, var(--signal) 8%, transparent); }
+.rs-chart .bin:hover .bar { fill: var(--signal-2); }
+.rs-chart .iqr { fill: color-mix(in srgb, var(--signal) 12%, transparent); }
+.rs-chart .med { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 4 3; }
+.rs-chart .zero { stroke: var(--ink-faint); stroke-width: 1; }
+.rs-def { margin: 0 0 4px; }
+

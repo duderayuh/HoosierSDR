@@ -36,6 +36,7 @@ mod link;
 mod radios;
 mod cases;
 mod research;
+mod study;
 mod casesend;
 mod casemaps;
 mod mapshot;
@@ -2389,6 +2390,7 @@ fn main() {
                         radios::ensure_schema(&c);
                         cases::ensure_schema(&c);
                         research::ensure_schema(&c);
+                        study::ensure_schema(&c);
                         casesend::ensure_schema(&c);
                         casemaps::ensure_schema(&c);
                         *state.db.lock().unwrap() = Some(Arc::new(Mutex::new(c)));
@@ -2520,6 +2522,10 @@ fn main() {
             email::email_set,
             email::email_save_password,
             email::email_test,
+            research::research_summary,
+            study::study_packet,
+            study::study_import,
+            study::study_compare,
             radios::radios_list,
             radios::radio_identity,
             radios::radio_evidence,
