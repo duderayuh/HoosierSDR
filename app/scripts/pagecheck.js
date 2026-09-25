@@ -75,11 +75,15 @@ const calls = [];
 // Research: three cases, two with ROSC said. The summary is faked from what
 // the page sends back, so the checks see which cases it sliced.
 const rsExports = [];
+const studyAsks = [];
 const RSM = (key, label) => ({ key, label, definition: "d", n: 0, median: 0, p25: 0, p75: 0, min: 0, max: 0, mean: 0, negative: 0 });
 const RSROW = (incident, title, place, tags, minutes) => ({ profile: "cardiac-arrest", incident, title, address: "1 <b>Example</b> St", state: "closed", units: 2, recorded: false, dispatched: 1000 + incident * 3600, known: null, alerted: null, alerted_how: "", working: null, rosc: null, rearrest: null, transporting: null, terminated: null, downgraded: null, report: null, report_place: place, reports: 0, eta_said: null, eta_from: null, eta_to: null, drive_min: null, drive_how: "", arrived_said: null, off_by_min: null, facts: [], phone_at: null, ed_arrived_at: null, note: "", transcribe_secs: null, alert_secs: null, alert_to_call: minutes.alert_to_call != null ? minutes.alert_to_call * 60 : null, known_to_call: null, dispatch_to_call: null, dispatch_to_working: null, working_to_rosc: null, dispatch_to_rosc: null, call_to_arrival: null, alert_to_arrival: null, dispatch_to_arrival: null, call_how: "", arrival_how: "", tags, minutes });
 const RSROWS = [
   RSROW(1, "Cardiac Arrest", "Example General", ["working", "rosc"], { working_to_rosc: 6, alert_to_call: 4 }),
-  RSROW(2, "Cardiac Arrest", "Example Heart", ["working", "rosc"], { working_to_rosc: 14 }),
+  Object.assign(RSROW(2, "Cardiac Arrest", "Example Heart", ["working", "rosc"], { working_to_rosc: 14 }), {
+    score: { name: "ED-ECPR 4-criterion screen", estimate: "12–46% (1 of 4 not stated)", lo_pct: 12, hi_pct: 46, met: 3, unknown: 1, assumed: 0, excluded: "", complete: false,
+      criteria: [{ key: "time", label: "Age + low-flow minutes < 100", verdict: "unknown", why: "downtime <b>not</b> stated" }] },
+    screen: { rule: "ECPR <img src=x>", at: 1, status: "sent", candidate: "maybe", criteria_met: "3", likelihood_pct: "12", reason: "", fields: "{}" } }),
   RSROW(3, "Unconscious <img src=x>", "", ["working"], {}),
 ];
 const rsSummary = (a) => (a.groups || []).map((g) => ({
@@ -94,7 +98,7 @@ const routeAsks = [];
 const sentTelegram = [];
 const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "conversation_export") exportAsks.push(args || {}); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "library_set_edited") edited.push(args || {}); if (cmd === "call_redo") redone.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd === "research_export") rsExports.push(args || {}); if (cmd === "research_summary") return rsSummary(args); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "conversation_export") exportAsks.push(args || {}); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "library_set_edited") edited.push(args || {}); if (cmd === "call_redo") redone.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd === "research_export") rsExports.push(args || {}); if (cmd.startsWith("study_")) { studyAsks.push([cmd, args || {}]); return "done"; } if (cmd === "research_summary") return rsSummary(args); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -602,6 +606,13 @@ w.__exercise = async () => {
       if (caseRows() !== 1) console.log("PAGE ERROR: a group kept " + caseRows() + " cases, wanted 1");
     }
     await d.getElementById("rsExport").onclick();
+    const scored = d.querySelector('#rsCases tr[data-rs="cardiac-arrest|2"]');
+    if (!scored || !/12–46%/.test(scored.textContent)) console.log("PAGE ERROR: the score is not in its case's row");
+    if (d.querySelector("#rsCases img, #rsCases td b b")) console.log("PAGE ERROR: a score's or screen's markup reached the page");
+    await d.getElementById("rsPacket").onclick();
+    await d.getElementById("rsCompare").onclick();
+    const asked = studyAsks.map((a) => a[0] + ":" + (a[1].rows || []).map((r) => r.incident).join(","));
+    if (asked.join(" ") !== "study_packet:2 study_compare:2") console.log("PAGE ERROR: the packet and comparison did not send only the cases shown: " + asked.join(" "));
     const sent = rsExports[rsExports.length - 1];
     if (!sent || !sent.rows || sent.rows.length !== 1 || sent.rows[0].incident !== 2) console.log("PAGE ERROR: Export did not send only the cases shown: " + JSON.stringify(sent && sent.rows && sent.rows.map((r) => r.incident)));
     d.getElementById("rsClear").onclick();

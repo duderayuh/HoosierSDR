@@ -105,6 +105,26 @@ pub struct CaseRow {
     pub off_by_min: Option<i64>,
     /// The facts the report stated, by key.
     pub facts: Vec<String>,
+    /// What each stated fact said, by key: the latest report that stated
+    /// it, which is the value the case message shows.
+    #[serde(default)]
+    pub fact_values: BTreeMap<String, String>,
+    /// When the first report joined to the run was summarised: the moment
+    /// the AI report existed.
+    #[serde(default)]
+    pub report_generated: Option<i64>,
+    /// The first extraction screen (the ECPR tripwire) run on this run's
+    /// calls, as the model answered it.
+    #[serde(default)]
+    pub screen: Option<Screen>,
+    /// The survival score over `fact_values`, worked out in code. Only once
+    /// there is a report to work it from.
+    #[serde(default)]
+    pub score: Option<crate::study::Score>,
+    /// Every call the case rests on: the run's calls, the timeline's and the
+    /// reports' transmissions. For the review packet.
+    #[serde(default)]
+    pub calls: Vec<i64>,
 
     // -- the ED's record, typed in --
     pub phone_at: Option<i64>,
@@ -116,6 +136,12 @@ pub struct CaseRow {
     pub transcribe_secs: Option<i64>,
     /// Alert sent minus the page transcript landed.
     pub alert_secs: Option<i64>,
+    /// AI report minus the page: the study's end-to-end latency.
+    #[serde(default)]
+    pub dispatch_to_ai_report: Option<i64>,
+    /// AI report minus the start of the crew's report transmission.
+    #[serde(default)]
+    pub report_to_ai_report: Option<i64>,
 
     // -- intervals, seconds --
     /// The crew's call minus the alert: how far ahead the alert came.
@@ -188,10 +214,30 @@ impl CaseRow {
         self.call_to_arrival = diff(arrival, call);
         self.alert_to_arrival = diff(arrival, self.alerted);
         self.dispatch_to_arrival = diff(arrival, self.dispatched);
+        self.dispatch_to_ai_report = diff(self.report_generated, self.dispatched);
+        self.report_to_ai_report = diff(self.report_generated, self.report);
+        self.score = self.report.map(|_| crate::study::score(&self.fact_values));
         self.tags = COUNTS.iter().filter(|c| (c.is)(self)).map(|c| c.key.to_string()).collect();
         self.tags.extend(FACT_KEYS.iter().filter(|k| self.facts.iter().any(|f| f == *k)).map(|k| fact_key(k)));
         self.minutes = MEASURES.iter().filter_map(|m| (m.secs)(self).map(|s| (m.key.to_string(), round1(s as f64 / 60.0)))).collect();
     }
+}
+
+/// What an extraction screen answered about a run: the first one with
+/// fields. Kept as the model gave it, beside the score worked out in code,
+/// so the two can be compared.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Screen {
+    pub rule: String,
+    pub at: i64,
+    /// sent | quiet | failed | held …
+    pub status: String,
+    pub candidate: String,
+    pub criteria_met: String,
+    pub likelihood_pct: String,
+    pub reason: String,
+    /// Every field, as JSON.
+    pub fields: String,
 }
 
 /// One case from the case builder, with the alert ledger and the ED record
@@ -249,9 +295,14 @@ pub fn row_for(c: &Connection, k: &crate::cases::CaseView) -> CaseRow {
             if !facts.contains(&f.key) {
                 facts.push(f.key.clone());
             }
+            // The latest report's word, as the case message shows it.
+            r.fact_values.insert(f.key.clone(), f.value.clone());
         }
     }
     r.facts = facts;
+    r.report_generated = reports.first().and_then(|l| l.conversation).and_then(|id| summarized_at(c, id));
+    r.calls = case_calls(c, k);
+    r.screen = first_screen(c, &k.incidents, &r.calls);
     if let Some(a) = &k.arrival {
         r.eta_said = a.said.clone();
         r.eta_from = a.from;
@@ -277,6 +328,89 @@ pub fn row_for(c: &Connection, k: &crate::cases::CaseView) -> CaseRow {
     }
     r.derive();
     r
+}
+
+/// When a report was first summarised. Rows stored before that was kept
+/// fall back to their send time if they were never revised, since then it
+/// is the same moment.
+fn summarized_at(c: &Connection, conversation: i64) -> Option<i64> {
+    c.query_row(
+        "SELECT COALESCE(summarized_at, CASE WHEN revision = 0 AND summary <> '' AND sent_at > 0 THEN sent_at END)
+           FROM conversations WHERE id = ?1",
+        [conversation],
+        |r| r.get(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// The calls a case rests on, oldest first: the run's own, each timeline
+/// line's, and every transmission of the reports joined to it.
+fn case_calls(c: &Connection, k: &crate::cases::CaseView) -> Vec<i64> {
+    let mut ids: std::collections::BTreeSet<i64> = k.lines.iter().filter_map(|l| l.call).collect();
+    if !k.incidents.is_empty() {
+        if let Ok(mut q) = c.prepare(&format!("SELECT call FROM incident_calls WHERE incident IN ({})", id_list(&k.incidents))) {
+            if let Ok(rows) = q.query_map([], |r| r.get::<_, i64>(0)) {
+                ids.extend(rows.flatten());
+            }
+        }
+    }
+    for conv in k.lines.iter().filter_map(|l| l.conversation) {
+        let pieces: String = c.query_row("SELECT pieces FROM conversations WHERE id = ?1", [conv], |r| r.get(0)).unwrap_or_default();
+        let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&pieces).unwrap_or_default();
+        ids.extend(pieces.iter().filter_map(|p| p.id));
+    }
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    c.prepare(&format!("SELECT id FROM calls WHERE id IN ({list}) ORDER BY start, id"))
+        .and_then(|mut q| q.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default()
+}
+
+/// The first tripwire that extracted fields about this run or any of its
+/// calls. One naming a candidate (the ECPR screen's shape) wins over any
+/// other extraction.
+fn first_screen(c: &Connection, incidents: &[i64], calls: &[i64]) -> Option<Screen> {
+    if incidents.is_empty() && calls.is_empty() {
+        return None;
+    }
+    let inc = if incidents.is_empty() { "NULL".to_string() } else { id_list(incidents) };
+    let cl = if calls.is_empty() { "NULL".to_string() } else { id_list(calls) };
+    let rows: Vec<(i64, String, String, String)> = c
+        .prepare(&format!(
+            "SELECT at, rule_name, status, data FROM tripwire_events
+              WHERE source = 'tripwire' AND data LIKE '%\"fields\":{{%'
+                AND (incident_id IN ({inc}) OR id IN (SELECT event FROM tripwire_event_calls WHERE call IN ({cl})))
+              ORDER BY at"
+        ))
+        .and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    let parsed: Vec<(i64, String, String, serde_json::Map<String, serde_json::Value>)> = rows
+        .into_iter()
+        .filter_map(|(at, rule, status, data)| {
+            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+            Some((at, rule, status, v.get("fields")?.as_object()?.clone()))
+        })
+        .collect();
+    let pick = parsed.iter().find(|(.., f)| f.contains_key("candidate")).or_else(|| parsed.first())?;
+    let (at, rule, status, f) = pick;
+    let text = |k: &str| match f.get(k) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(v) => v.to_string(),
+    };
+    Some(Screen {
+        rule: rule.clone(),
+        at: *at,
+        status: status.clone(),
+        candidate: text("candidate"),
+        criteria_met: text("criteriaMet"),
+        likelihood_pct: text("likelihoodPct"),
+        reason: text("reason"),
+        fields: serde_json::Value::Object(f.clone()).to_string(),
+    })
 }
 
 fn id_list(ids: &[i64]) -> String {
@@ -473,6 +607,8 @@ pub const MEASURES: &[MeasureDef] = &[
     MeasureDef { key: "working_to_rosc", label: "Working → ROSC", definition: "ROSC first said minus working first said", secs: |r| r.working_to_rosc },
     MeasureDef { key: "dispatch_to_rosc", label: "Dispatch → ROSC", definition: "ROSC first said minus the page", secs: |r| r.dispatch_to_rosc },
     MeasureDef { key: "eta_off", label: "Said arrival vs stated ETA", definition: "minutes a crew's 'at the hospital' fell outside the window their stated ETA gave; 0 is inside, negative is early", secs: |r| r.off_by_min.map(|m| m * 60) },
+    MeasureDef { key: "dispatch_to_ai_report", label: "Arrest page → AI report", definition: "the first summary of the first crew report joined to the run, stored, minus the page", secs: |r| r.dispatch_to_ai_report },
+    MeasureDef { key: "report_to_ai_report", label: "Crew's report → AI report", definition: "the first summary of that report, stored, minus the start of its first transmission", secs: |r| r.report_to_ai_report },
     MeasureDef { key: "transcribe", label: "Page ended → transcript landed", definition: "for the case's page only", secs: |r| r.transcribe_secs },
     MeasureDef { key: "alert_lag", label: "Transcript landed → alert sent", definition: "for the case's page only", secs: |r| r.alert_secs },
 ];
@@ -498,6 +634,9 @@ pub const COUNTS: &[CountDef] = &[
     CountDef { key: "eta_inside", label: "Said arrival inside the ETA window", is: |r| r.off_by_min == Some(0) },
     CountDef { key: "eta_early", label: "Said arrival before the window", is: |r| r.off_by_min.map_or(false, |m| m < 0) },
     CountDef { key: "eta_late", label: "Said arrival after the window", is: |r| r.off_by_min.map_or(false, |m| m > 0) },
+    CountDef { key: "ai_report", label: "An AI report was generated", is: |r| r.report_generated.is_some() },
+    CountDef { key: "score_complete", label: "Score had every input stated", is: |r| r.score.as_ref().map_or(false, |s| s.complete) },
+    CountDef { key: "screened", label: "An extraction screen ran", is: |r| r.screen.is_some() },
     CountDef { key: "ed_phone", label: "ED phone call typed in", is: |r| r.phone_at.is_some() },
     CountDef { key: "ed_arrived", label: "ED arrival typed in", is: |r| r.ed_arrived_at.is_some() },
 ];
@@ -730,6 +869,7 @@ pub fn csv(rows: &[CaseRow]) -> String {
         ("terminated", |r| r.terminated),
         ("downgraded", |r| r.downgraded),
         ("radio_report", |r| r.report),
+        ("ai_report", |r| r.report_generated),
         ("eta_from", |r| r.eta_from),
         ("eta_to", |r| r.eta_to),
         ("arrived_said", |r| r.arrived_said),
@@ -748,6 +888,8 @@ pub fn csv(rows: &[CaseRow]) -> String {
         ("dispatch_to_rosc_min", |r| r.dispatch_to_rosc),
         ("transcribe_min", |r| r.transcribe_secs),
         ("alert_lag_min", |r| r.alert_secs),
+        ("dispatch_to_ai_report_min", |r| r.dispatch_to_ai_report),
+        ("report_to_ai_report_min", |r| r.report_to_ai_report),
     ];
     let mut head: Vec<String> = vec!["profile", "incident", "title", "state", "address", "units", "recorded"].into_iter().map(String::from).collect();
     for (k, _) in moments {
@@ -759,6 +901,10 @@ pub fn csv(rows: &[CaseRow]) -> String {
         head.push(k.to_string());
     }
     head.extend(FACT_KEYS.iter().map(|k| fact_key(k)));
+    head.extend(FACT_KEYS.iter().map(|k| format!("value_{}", k.replace(' ', "_"))));
+    head.extend(["score_name", "score_estimate", "score_lo_pct", "score_hi_pct", "score_met", "score_unknown", "score_assumed", "score_excluded"].map(String::from));
+    head.extend(["time", "witnessed", "bystander", "disease"].map(|k| format!("score_{k}")));
+    head.extend(["screen_rule", "screen_at_epoch", "screen_at_local", "screen_status", "screen_candidate", "screen_criteria_met", "screen_likelihood_pct", "screen_reason", "screen_fields"].map(String::from));
     head.push("note".into());
     let mut out = head.join(",") + "\n";
     for r in rows {
@@ -790,6 +936,31 @@ pub fn csv(rows: &[CaseRow]) -> String {
         }
         for k in FACT_KEYS {
             f.push(if r.facts.iter().any(|x| x == k) { "1".into() } else { "0".into() });
+        }
+        for k in FACT_KEYS {
+            f.push(csv_field(r.fact_values.get(*k).map(String::as_str).unwrap_or_default()));
+        }
+        let pct = |x: Option<f64>| x.map(|x| x.to_string()).unwrap_or_default();
+        match &r.score {
+            Some(s) => {
+                f.extend([csv_field(&s.name), csv_field(&s.estimate), pct(s.lo_pct), pct(s.hi_pct), s.met.to_string(), s.unknown.to_string(), s.assumed.to_string(), csv_field(&s.excluded)]);
+                f.extend(s.criteria.iter().map(|c| csv_field(&c.verdict)));
+            }
+            None => f.extend(std::iter::repeat(String::new()).take(12)),
+        }
+        match &r.screen {
+            Some(s) => f.extend([
+                csv_field(&s.rule),
+                s.at.to_string(),
+                when(Some(s.at)),
+                csv_field(&s.status),
+                csv_field(&s.candidate),
+                csv_field(&s.criteria_met),
+                csv_field(&s.likelihood_pct),
+                csv_field(&s.reason),
+                csv_field(&s.fields),
+            ]),
+            None => f.extend(std::iter::repeat(String::new()).take(9)),
         }
         f.push(csv_field(&r.note));
         out.push_str(&f.join(","));
@@ -1024,6 +1195,10 @@ mod tests {
         assert_eq!((w2r.n, w2r.median), (2, 10.0));
     }
 
+    fn parse(line: &str) -> Vec<String> {
+        crate::study::parse_csv(line).into_iter().next().unwrap_or_default()
+    }
+
     fn library() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
@@ -1112,10 +1287,14 @@ mod tests {
                (1, {t0}, {t0}, 1, 'Cardiac Arrest', '1200 Example St', '1200 example street', '[\"Engine 5\",\"Medic 7\"]');
              INSERT INTO calls (id, start, secs, tg, unit, transcript, transcribed_at) VALUES
                (1, {t0}, 6, 1, 900900, 'Engine 5, Medic 7, 1200 Example St, Cardiac Arrest Working. 1200 Hours', {known}),
-               (2, {rosc}, 3, 2, 900001, 'Medic 7, we have ROSC', {rosc_known});
+               (2, {rosc}, 3, 2, 900001, 'Medic 7, we have ROSC', {rosc_known}),
+               (3, {report}, 20, 9, 900001, 'Medic 7 inbound with a 60 year old male', {report_end});
              INSERT INTO incident_calls (incident, call, at, tg, role) VALUES (1, 1, {t0}, 1, 'dispatch');
-             INSERT INTO tripwire_events (id, at, source, rule_id, rule_name, status, incident_id) VALUES
-               (1, {alert}, 'tripwire', 'w', 'Working arrest', 'sent', 1);
+             INSERT INTO tripwire_events (id, at, source, rule_id, rule_name, status, incident_id, data) VALUES
+               (1, {alert}, 'tripwire', 'w', 'Working arrest', 'sent', 1, '{{\"keywords\":[],\"fields\":null}}'),
+               (2, {screened}, 'tripwire', 'e', 'ECPR candidate', 'quiet', NULL,
+                '{{\"keywords\":[],\"fields\":{{\"candidate\":\"maybe\",\"criteriaMet\":2,\"likelihoodPct\":5,\"reason\":\"witnessed\"}}}}');
+             INSERT INTO tripwire_event_calls (event, call) VALUES (2, 3);
              INSERT INTO conversations (id, rule_id, tg, first_at, last_at, summary, pieces, incident, link_how, facts) VALUES
                (5, 'r', 9, {report}, {report_end}, 'Medic 7 with a 60 year old male in arrest, ROSC, ETA of 5 to 7 minutes.',
                 '[{{\"id\":3,\"unit\":900001,\"fixed\":false,\"at\":{report},\"secs\":20.0}}]', 1, 'Medic 7 was sent to this run',
@@ -1125,8 +1304,10 @@ mod tests {
             rosc_known = t0 + 9 * 60 + 15,
             alert = t0 + 35,
             report_end = report + 20,
+            screened = report + 30,
         ))
         .unwrap();
+        c.execute("UPDATE conversations SET summarized_at = ?1, sent_at = ?2, revision = 1 WHERE id = 5", params![report + 28, report + 90]).unwrap();
         let prof = crate::cases::arrest_profile();
         let tactical: std::collections::HashSet<u16> = [2].into();
         crate::cases::rebuild(&c, &crate::cases::Inputs { profile: &prof, tactical_tgs: &tactical }, t0 - 60, t0 + 3600).unwrap();
@@ -1150,6 +1331,18 @@ mod tests {
         assert_eq!(r.arrival_how, "stated ETA");
         assert_eq!(r.call_to_arrival, Some(6 * 60));
         assert_eq!(r.facts, vec!["witnessed".to_string(), "eta".to_string()]);
+        // The values travel with the keys, and the score is worked from them.
+        assert_eq!(r.fact_values.get("witnessed").map(String::as_str), Some("yes"));
+        let score = r.score.as_ref().expect("a report, so a score");
+        assert_eq!(score.estimate, "0–46% (2 of 4 not stated)");
+        // The AI report is the first summary, not the revision's send.
+        assert_eq!(r.report_generated, Some(report + 28));
+        assert_eq!(r.dispatch_to_ai_report, Some(14 * 60 + 28));
+        assert_eq!(r.report_to_ai_report, Some(28));
+        // The screen ran on the report's call, not the run's, and is found.
+        let screen = r.screen.as_ref().expect("the ECPR screen");
+        assert_eq!((screen.rule.as_str(), screen.candidate.as_str(), screen.likelihood_pct.as_str()), ("ECPR candidate", "maybe", "5"));
+        assert_eq!(r.calls, vec![1, 2, 3]);
         let lead = s.measures.iter().find(|m| m.key == "alert_to_call").unwrap();
         assert_eq!((lead.n, lead.median), (1, 13.4));
         assert_eq!(s.library.reports_joined, 1);
@@ -1176,6 +1369,13 @@ mod tests {
         assert_eq!(s.rows[0].call_how, "ED record");
         let text = csv(&s.rows);
         assert!(text.lines().nth(1).unwrap().contains("from the chart"));
+        assert!(text.lines().nth(1).unwrap().contains("0–46% (2 of 4 not stated)"), "the snapshot keeps the score");
+        let (head, row) = (parse(text.lines().next().unwrap()), parse(text.lines().nth(1).unwrap()));
+        assert_eq!(head.len(), row.len(), "one value per column");
+        let col = |k: &str| row[head.iter().position(|h| h == k).unwrap()].clone();
+        assert_eq!(col("value_witnessed"), "yes");
+        assert_eq!(col("screen_candidate"), "maybe");
+        assert_eq!(col("ai_report_epoch"), (report + 28).to_string());
     }
 
     #[test]
