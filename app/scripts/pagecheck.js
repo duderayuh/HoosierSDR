@@ -72,6 +72,21 @@ Object.assign(canned, {
 // an empty browser storage, as a computer connecting over the tailnet has.
 const REMOTE_MODE = process.env.PAGECHECK_REMOTE === "1";
 const calls = [];
+// Research: three cases, two with ROSC said. The summary is faked from what
+// the page sends back, so the checks see which cases it sliced.
+const rsExports = [];
+const RSM = (key, label) => ({ key, label, definition: "d", n: 0, median: 0, p25: 0, p75: 0, min: 0, max: 0, mean: 0, negative: 0 });
+const RSROW = (incident, title, place, tags, minutes) => ({ profile: "cardiac-arrest", incident, title, address: "1 <b>Example</b> St", state: "closed", units: 2, recorded: false, dispatched: 1000 + incident * 3600, known: null, alerted: null, alerted_how: "", working: null, rosc: null, rearrest: null, transporting: null, terminated: null, downgraded: null, report: null, report_place: place, reports: 0, eta_said: null, eta_from: null, eta_to: null, drive_min: null, drive_how: "", arrived_said: null, off_by_min: null, facts: [], phone_at: null, ed_arrived_at: null, note: "", transcribe_secs: null, alert_secs: null, alert_to_call: minutes.alert_to_call != null ? minutes.alert_to_call * 60 : null, known_to_call: null, dispatch_to_call: null, dispatch_to_working: null, working_to_rosc: null, dispatch_to_rosc: null, call_to_arrival: null, alert_to_arrival: null, dispatch_to_arrival: null, call_how: "", arrival_how: "", tags, minutes });
+const RSROWS = [
+  RSROW(1, "Cardiac Arrest", "Example General", ["working", "rosc"], { working_to_rosc: 6, alert_to_call: 4 }),
+  RSROW(2, "Cardiac Arrest", "Example Heart", ["working", "rosc"], { working_to_rosc: 14 }),
+  RSROW(3, "Unconscious <img src=x>", "", ["working"], {}),
+];
+const rsSummary = (a) => (a.groups || []).map((g) => ({
+  measures: [Object.assign(RSM("alert_to_call", "Alert → crew's call"), { n: g.filter((r) => r.minutes.alert_to_call != null).length, median: 4 }),
+    Object.assign(RSM("working_to_rosc", "Working → ROSC"), { n: g.filter((r) => r.minutes.working_to_rosc != null).length, median: 10, p25: 8, p75: 12, min: 6, max: 14, mean: 10 })],
+  counts: [{ key: "cases", label: "Cases", n: g.length, of: g.length }, { key: "rosc", label: "ROSC said", n: g.filter((r) => r.tags.includes("rosc")).length, of: g.length }],
+}));
 const uiSets = [];
 const edited = [], redone = [];
 const exportAsks = [];
@@ -79,7 +94,7 @@ const routeAsks = [];
 const sentTelegram = [];
 const savedPlaces = [];
 const listeners = {};
-w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "conversation_export") exportAsks.push(args || {}); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "library_set_edited") edited.push(args || {}); if (cmd === "call_redo") redone.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
+w.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push(cmd); if (cmd === "conversation_export") exportAsks.push(args || {}); if (cmd === "ui_state_set") uiSets.push(args || {}); if (cmd === "library_set_edited") edited.push(args || {}); if (cmd === "call_redo") redone.push(args || {}); if (cmd === "incident_route") routeAsks.push(args || {}); if (cmd === "set_lockout") lockouts.push(args || {}); if (cmd === "cases_set_telegram") sentTelegram.push(args || {}); if (cmd === "places_set") savedPlaces.push(args || {}); if (cmd === "set_muted") mutes.push(args || {}); if (cmd === "research_export") rsExports.push(args || {}); if (cmd === "research_summary") return rsSummary(args); if (cmd in canned) return canned[cmd]; return null; } }, event: { listen: async (name, cb) => { (listeners[name] = listeners[name] || []).push(cb); return () => {}; } } };
 w.__exercise = async () => {
   // Dialogs answer themselves. This has to happen before anything is
   // driven: a real uiConfirm waits for a click that will never come, and a
@@ -540,6 +555,58 @@ w.__exercise = async () => {
     }
     const un = w.document.getElementById("csUnplaced");
     if (!un || !/nothing named the run/.test(un.innerHTML)) console.log("PAGE ERROR: the unplaced event does not say why");
+    w.showView("monitor");
+  }
+
+  // Research: a count keeps only its cases, an interval charts, a bar and a
+  // group slice further, the list sorts, and Export sends only what is shown.
+  {
+    canned.research_stats = { from: 0, to: 20000, days: 30, library: { calls: 1, hours: 0, transcribed: 1, incidents: 3, reports: 0, reports_joined: 0, reports_joined_by_radio: 0, reports_with_facts: 0, alerts_sent: 0 },
+      measures: rsSummary({ groups: [RSROWS] })[0].measures, pipeline: [], counts: rsSummary({ groups: [RSROWS] })[0].counts, rows: RSROWS, notes: [] };
+    w.showView("research");
+    await new Promise((r) => setTimeout(r, 100));
+    const d = w.document;
+    const caseRows = () => d.querySelectorAll("#rsCases tr[data-rs]").length;
+    if (caseRows() !== 3) console.log("PAGE ERROR: research drew " + caseRows() + " cases, wanted 3");
+    if (d.querySelector("#rsCases img, #rsCases b b")) console.log("PAGE ERROR: a research case's markup reached the page");
+    const rosc = d.querySelector('#rsCounts tr[data-ck="rosc"]');
+    if (!rosc) console.log("PAGE ERROR: a count cannot be clicked to filter");
+    else {
+      rosc.onclick();
+      await new Promise((r) => setTimeout(r, 50));
+      if (caseRows() !== 2) console.log("PAGE ERROR: ROSC said kept " + caseRows() + " cases, wanted 2");
+      if (!/ROSC said/.test(d.getElementById("rsChips").textContent)) console.log("PAGE ERROR: the filter is not shown as a chip");
+      if (!/2 of 3/.test(d.getElementById("rsMeta").textContent)) console.log("PAGE ERROR: the slice does not say how many of the window it holds: " + d.getElementById("rsMeta").textContent);
+    }
+    const m = d.querySelector('#rsMeasures tr[data-mk="working_to_rosc"]');
+    if (!m) console.log("PAGE ERROR: an interval cannot be clicked to chart");
+    else {
+      m.onclick();
+      await new Promise((r) => setTimeout(r, 50));
+      if (d.getElementById("rsFocus").value !== "working_to_rosc") console.log("PAGE ERROR: clicking an interval did not chart it");
+      const bars = d.querySelectorAll("#rsHist path.bar").length;
+      if (bars !== 2) console.log("PAGE ERROR: the histogram drew " + bars + " bars, wanted 2");
+      if (!d.querySelector("#rsCases th.sorted") && !d.querySelector('#rsCases th[data-sort="m:working_to_rosc"]')) console.log("PAGE ERROR: the charted interval has no column in the case list");
+    }
+    const sortBy = d.querySelector('#rsCases th[data-sort="m:working_to_rosc"]');
+    if (sortBy) {
+      sortBy.onclick();
+      const first = d.querySelector("#rsCases tr[data-rs]");
+      if (!first || first.dataset.rs !== "cardiac-arrest|2") console.log("PAGE ERROR: sorting by the interval did not put the longest first: " + (first && first.dataset.rs));
+    }
+    const g = d.querySelector('#rsGroups tr[data-gv="Example Heart"]');
+    if (!g) console.log("PAGE ERROR: the breakdown by hospital has no row to click");
+    else {
+      g.onclick();
+      await new Promise((r) => setTimeout(r, 50));
+      if (caseRows() !== 1) console.log("PAGE ERROR: a group kept " + caseRows() + " cases, wanted 1");
+    }
+    await d.getElementById("rsExport").onclick();
+    const sent = rsExports[rsExports.length - 1];
+    if (!sent || !sent.rows || sent.rows.length !== 1 || sent.rows[0].incident !== 2) console.log("PAGE ERROR: Export did not send only the cases shown: " + JSON.stringify(sent && sent.rows && sent.rows.map((r) => r.incident)));
+    d.getElementById("rsClear").onclick();
+    await new Promise((r) => setTimeout(r, 50));
+    if (caseRows() !== 3) console.log("PAGE ERROR: Clear did not bring every case back");
     w.showView("monitor");
   }
 
