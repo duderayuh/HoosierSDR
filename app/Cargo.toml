@@ -21,6 +21,7 @@ hs-core = { path = "../crates/hs-core" }
 hs-decoders = { path = "../crates/hs-decoders" }
 hs-source = { path = "../crates/hs-source", features = ["rtlsdr", "airspy", "soapy"] }
 hs-catalog = { path = "../crates/hs-catalog", features = ["radioreference"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "hostname", "rustls", "ring", "webpki-roots"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"

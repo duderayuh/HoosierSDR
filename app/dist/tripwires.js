@@ -20,6 +20,10 @@
     digest: ["{name}", "{summary}", "{count}", "{window}", "{time}", "{transcript}"],
     incident: ["{name}", "{calltype}", "{address}", "{units}", "{summary}", "{transcript}", "{where}", "{pathway}", "{maps}", "{place}", "{nearest}", "{km}", "{mins}", "{hospital}", "{report}", "{time}", "{ai}"],
   };
+  // The subject each kind's email gets when it is left blank.
+  const SUBJECTS = { call: "{name} · {tgname} · {time}", incident: "{name} · {tgname} · {time}", conversation: "🏥 {rule} · {tgname} · {headline}", digest: "📡 {name} · {time}" };
+  // Tokens and styles go into whichever template was last in focus.
+  let lastTpl = "twMessage";
   let list = [], folders = [], stats = {}, view = null, recipes = null;
   // Which folders are rolled up, per listener rather than per install.
   let shut = new Set(store("hs.twfolders", []));
@@ -413,6 +417,9 @@
     fillDest();
     $("twQuiet").innerHTML = QUIET.map(([v, l]) => `<option value="${v}">${l}</option>`).join("") + (QUIET.some(([v]) => v === s.quiet_secs) ? "" : `<option value="${s.quiet_secs}">once per ${s.quiet_secs} s per talkgroup</option>`);
     $("twQuiet").value = String(s.quiet_secs);
+    $("twEmail").checked = !!s.email; $("twEmailTo").value = s.email_to || ""; $("twEmailBody").value = s.email_body || "";
+    // The call subject is the stored default; a report or digest has its own.
+    $("twEmailSubject").value = s.email_subject == null ? SUBJECTS.call : (s.email_subject === SUBJECTS.call && !["call", "incident"].includes(w.kind) ? "" : s.email_subject);
     $("twMessage").value = s.message; $("twAudio").checked = s.audio; $("twMap").checked = !!s.map; $("twTone").checked = s.tone; $("twTelegram").checked = s.telegram;
     $("twEarlier").innerHTML = EARLIER.map(([v, l]) => `<option value="${v}">${l}</option>`).join("") + (s.earlier_calls > 3 ? `<option value="${s.earlier_calls}">+ ${s.earlier_calls} calls before</option>` : "");
     $("twEarlier").value = String(s.earlier_calls);
@@ -476,6 +483,8 @@
     s.audio = $("twAudio").checked; s.map = $("twMap").checked; s.tone = $("twTone").checked; s.telegram = $("twTelegram").checked;
     s.earlier_calls = int($("twEarlier").value, 0);
     s.follow = $("twFollow").value; s.follow_mins = int($("twFollowMins").value, 30);
+    s.email = $("twEmail").checked; s.email_to = $("twEmailTo").value.trim();
+    s.email_subject = $("twEmailSubject").value; s.email_body = $("twEmailBody").value;
     return t;
   }
   function kindUi() {
@@ -513,11 +522,13 @@
     $("twChatWrap").style.display = $("twDest").value === "custom" ? "" : "none";
     const toks = [...TOKENS[kind] || TOKENS.call, ...(asksModel && check === "extract" ? draft.check.fields.filter((f) => f.key).map((f) => `{${f.key}}`) : [])];
     $("twTokens").innerHTML = toks.map((x) => `<button class="tw-token" data-tok="${esc(x)}" title="Insert">${esc(x)}</button>`).join("");
-    $("twTokens").querySelectorAll("[data-tok]").forEach((b) => b.onclick = () => { const ta = $("twMessage"); const at = ta.selectionStart ?? ta.value.length; ta.value = ta.value.slice(0, at) + b.dataset.tok + ta.value.slice(ta.selectionEnd ?? at); ta.focus(); ta.selectionStart = ta.selectionEnd = at + b.dataset.tok.length; changed(); });
+    $("twEmailBox").style.display = $("twEmail").checked ? "" : "none";
+    $("twEmailSubject").placeholder = SUBJECTS[kind] || SUBJECTS.call;
+    $("twTokens").querySelectorAll("[data-tok]").forEach((b) => b.onclick = () => { const ta = $(lastTpl); const at = ta.selectionStart ?? ta.value.length; ta.value = ta.value.slice(0, at) + b.dataset.tok + ta.value.slice(ta.selectionEnd ?? at); ta.focus(); ta.selectionStart = ta.selectionEnd = at + b.dataset.tok.length; changed(); });
     // Wrap whatever is selected in a Telegram tag. With nothing selected
     // the pair is dropped in and the cursor put between them.
     $("twFormat").querySelectorAll("[data-tag]").forEach((b) => b.onclick = () => {
-      const ta = $("twMessage"), tag = b.dataset.tag;
+      const ta = $(lastTpl === "twEmailSubject" ? "twEmailBody" : lastTpl), tag = b.dataset.tag;
       const a = ta.selectionStart ?? ta.value.length, z = ta.selectionEnd ?? a;
       const open = `<${tag}>`, close = `</${tag}>`;
       ta.value = ta.value.slice(0, a) + open + ta.value.slice(a, z) + close + ta.value.slice(z);
@@ -599,6 +610,7 @@
 
   /* any change: dirty marker, dependent UI, preview */
   function changed() { if (!draft) return; read(); kindUi(); markDirty(); schedulePreview(); }
+  $("twEdit").addEventListener("focusin", (e) => { if (e.target.classList && e.target.classList.contains("tw-tpl")) lastTpl = e.target.id; });
   $("twEdit").addEventListener("input", (e) => { if (e.target.closest(".tw-preview")) return; if (e.target.id === "twPhrases") renderWords(); changed(); });
   $("twEdit").addEventListener("change", (e) => { if (e.target.closest(".tw-preview")) return; changed(); });
 
@@ -712,37 +724,59 @@
     tag === "tg-spoiler" ? (slash ? "</span>" : '<span class="spoil">') : `<${slash}${tag}>`);
 
   /* what the message will look like, filled from the newest match */
-  function renderMsgPreview() {
-    if (!draft) return;
-    const t = draft, tpl = $("twMessage").value;
-    const s = preview && preview.samples[0];
-    const kind = t.when.kind;
-    if ((kind !== "call" && kind !== "incident") || !tpl.trim()) { $("twMsgPrev").innerHTML = ""; return; }
-    // A run message is worth previewing too: it is the one with the
-    // hospitals in it, and {where} is hard to picture from the token alone.
-    // The run itself is made up — a tripwire is usually written before the
-    // kind of run it waits for has happened.
+  // A template filled the way the message will be: from the newest match
+  // for a call, from a made-up run for a run (a tripwire is usually written
+  // before the kind of run it waits for has happened). Null for kinds whose
+  // message is written by the model.
+  function fillSample(tpl) {
+    const t = draft, kind = t.when.kind;
     if (kind === "incident") {
       const ct = (t.when.incident && t.when.incident.call_types || [])[0] || "Cardiac Arrest";
-      const out = tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{calltype}", ct)
+      return tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{calltype}", ct)
         .replaceAll("{address}", "1400 block of Example Street").replaceAll("{units}", "Medic 21, Engine 9")
         .replaceAll("{summary}", "…what the dispatcher said…")
         .replaceAll("{transcript}", "Dispatch: Medic 21 respond cardiac arrest…\nMedic 21: en route").replaceAll("{time}", "12:34:56")
+        .replaceAll("{tgname}", "Dispatch")
         .replaceAll("{pathway}", "‹the pathway that matched›")
         .replaceAll("{maps}", "https://www.google.com/maps/search/?api=1&query=…")
         .replaceAll("{where}", "Closest hospital: Example General — 3.0 mi, 8 min by road\nECMO centre: Example Heart — 6.8 mi, 15 min by road")
         .replaceAll("{place}", "Example General").replaceAll("{nearest}", "Example Heart").replaceAll("{km}", "10.9").replaceAll("{mins}", "15")
         .replaceAll("{hospital}", "Example General").replaceAll("{report}", "…the crew's report…").replaceAll("{ai}", "");
-      $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}${/\{address\}/.test(tpl) ? " · the address opens Google Maps" : ""}</div>`;
-      return;
     }
+    if (kind !== "call") return null;
+    const s = preview && preview.samples[0];
     const tr = s && tried.get(s.id);
     const f = { tg: s ? s.tg : 1234, tgname: s ? s.tg_name : "Talkgroup", unit: s ? s.unit_name : "Medic 1", time: s ? new Date(s.start * 1000).toLocaleTimeString("en-US", { hour12: false }) : "12:34:56", transcript: s ? s.transcript : "…the transcript…", keywords: s ? (s.keywords || []).join(", ") : "" };
     let out = tpl.replaceAll("{name}", t.name || "Tripwire").replaceAll("{alert}", t.name || "Tripwire").replaceAll("{tg}", String(f.tg)).replaceAll("{tgname}", f.tgname).replaceAll("{tgdesc}", "‹description›")
       .replaceAll("{unitname}", f.unit).replaceAll("{unit}", f.unit).replaceAll("{time}", f.time).replaceAll("{secs}", "6").replaceAll("{transcript}", f.transcript).replaceAll("{keywords}", f.keywords)
       .replaceAll("{ai}", tr && tr.note ? tr.note : t.check.kind === "ask" ? "‹the model's reason›" : "").replaceAll("{json}", tr && tr.fields ? JSON.stringify(tr.fields, null, 1) : "");
     for (const fld of t.check.fields || []) { if (!fld.key) continue; const v = tr && tr.fields && tr.fields[fld.key] != null ? String(tr.fields[fld.key]) : `‹${fld.key}›`; out = out.replaceAll(`{field.${fld.key}}`, v).replaceAll(`{${fld.key}}`, v); }
-    $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like${s ? "" : " (with made-up values)"}</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.audio ? " · with the audio" : ""}${t.send.follow !== "off" ? ` · follow-ups for ${t.send.follow_mins} min` : ""}</div>`;
+    return out;
+  }
+
+  function renderMsgPreview() {
+    if (!draft) return;
+    const t = draft, tpl = $("twMessage").value, kind = t.when.kind;
+    const s = preview && preview.samples[0];
+    const out = tpl.trim() ? fillSample(tpl) : null;
+    if (out == null) $("twMsgPrev").innerHTML = "";
+    else if (kind === "incident") $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like (with a made-up run)</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.map ? " · with a map of the run" : ""}${/\{address\}/.test(tpl) ? " · the address opens Google Maps" : ""}</div>`;
+    else $("twMsgPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Looks like${s ? "" : " (with made-up values)"}</div><div class="tw-bubble">${fmt(out.trim())}</div><div class="faint">to ${esc(destLabel(t.send))}${t.send.audio ? " · with the audio" : ""}${t.send.follow !== "off" ? ` · follow-ups for ${t.send.follow_mins} min` : ""}</div>`;
+    renderEmailPreview();
+  }
+
+  // The email as it will arrive: its subject line and its body.
+  function renderEmailPreview() {
+    const t = draft, kind = t.when.kind;
+    if (!t.send.email) { $("twEmailPrev").innerHTML = ""; return; }
+    const subjTpl = $("twEmailSubject").value.trim() || SUBJECTS[kind] || SUBJECTS.call;
+    const bodyTpl = $("twEmailBody").value.trim() ? $("twEmailBody").value : $("twMessage").value;
+    const subj = fillSample(subjTpl), body = fillSample(bodyTpl);
+    const to = $("twEmailTo").value.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+    const extras = [t.send.audio && (kind === "call" || kind === "incident" || kind === "conversation") ? "the audio attached" : "", t.send.map && kind === "incident" ? "a map attached" : ""].filter(Boolean).join(" · ");
+    $("twEmailPrev").innerHTML = `<div class="lab" style="margin:0 0 3px">Email looks like${subj == null ? " (the model writes the summary)" : ""}</div>`
+      + `<div class="tw-bubble tw-mail"><div class="tw-mailhead"><span class="faint">To</span> ${esc(to.join(", ") || "‹no one yet›")}<br><span class="faint">Subject</span> <b>${esc((subj == null ? subjTpl : subj).split("\n").map((x) => x.trim()).filter(Boolean).join(" · "))}</b></div>`
+      + `${fmt(((body == null ? bodyTpl : body) || "").trim())}</div>${extras ? `<div class="faint">${esc(extras)}</div>` : ""}`;
   }
 
   /* ---------- conversations open right now ---------- */

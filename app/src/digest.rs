@@ -34,6 +34,21 @@ pub struct DigestRule {
     /// Telegram chat; blank = the alerts' chat.
     #[serde(default)]
     pub chat_id: String,
+    /// Send to Telegram; off leaves only the email.
+    #[serde(default = "yes")]
+    pub telegram: bool,
+    /// Email recipients and templates (same tokens as `message`; a blank
+    /// body is `message`).
+    #[serde(default)]
+    pub email_to: String,
+    #[serde(default)]
+    pub email_subject: String,
+    #[serde(default)]
+    pub email_body: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for DigestRule {
@@ -48,6 +63,10 @@ impl Default for DigestRule {
             prompt: "Summarise what is happening on these radio channels right now. Group by talkgroup; list the units involved and any notable events (emergencies, fires, pursuits, medical calls, road closures, weather). Stick to what was actually said; mark anything unclear as unclear.".into(),
             message: "📡 {name}\n{summary}\n\n{count} transmissions in the last {window} · {time}".into(),
             chat_id: String::new(),
+            telegram: true,
+            email_to: String::new(),
+            email_subject: String::new(),
+            email_body: String::new(),
         }
     }
 }
@@ -199,23 +218,59 @@ fn run_digest(app: AppHandle, r: DigestRule) -> Result<String, String> {
         }
     };
 
-    let message = r
-        .message
-        .replace("{summary}", &summary)
-        .replace("{name}", &r.name)
-        .replace("{count}", &n.to_string())
-        .replace("{window}", &fmt_window(r.window_secs))
-        .replace("{time}", &fmt_time(now))
-        .replace("{transcript}", &rollup.trim());
-
-    let (detail, ids) = match crate::alerts::send_text_id(&chat, message.trim()) {
-        Ok(id) => ("sent".to_string(), vec![id]),
-        Err(e) => {
-            record(&app, &r, "failed", &e, &message, &chat, Vec::new());
-            let _ = app.emit("tripwires", ());
-            return Err(e);
-        }
+    let fill = |tpl: &str| {
+        tpl.replace("{summary}", &summary)
+            .replace("{name}", &r.name)
+            .replace("{count}", &n.to_string())
+            .replace("{window}", &fmt_window(r.window_secs))
+            .replace("{time}", &fmt_time(now))
+            .replace("{transcript}", rollup.trim())
     };
+    let message = fill(&r.message);
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut ids = Vec::new();
+    let mut failed: Option<String> = None;
+    if r.telegram {
+        match crate::alerts::send_text_id(&chat, message.trim()) {
+            Ok(id) => {
+                parts.push("sent".into());
+                ids.push(id);
+            }
+            Err(e) => {
+                parts.push(format!("Telegram failed: {e}"));
+                failed = Some(e);
+            }
+        }
+    }
+    let to = crate::email::recipients(&r.email_to);
+    if !to.is_empty() {
+        let subject = fill(if r.email_subject.trim().is_empty() { "📡 {name} · {time}" } else { &r.email_subject });
+        let text = fill(if r.email_body.trim().is_empty() { &r.message } else { &r.email_body });
+        let mail = crate::email::Mail {
+            to: to.clone(),
+            subject,
+            html: Some(crate::email::html_body(&crate::alerts::html_escape(text.trim()))),
+            text,
+            ..Default::default()
+        };
+        match crate::email::send(&mail) {
+            Ok(_) => parts.push(format!("emailed {}", to.join(", "))),
+            Err(e) => {
+                parts.push(format!("email failed: {e}"));
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    let detail = parts.join("; ");
+    let ok = ids.len() + parts.iter().filter(|p| p.starts_with("emailed")).count() > 0;
+    let chat = if r.telegram { chat } else { String::new() };
+    if !ok {
+        let why = failed.unwrap_or_else(|| "neither Telegram nor email is on for it".into());
+        record(&app, &r, "failed", &detail, &message, &chat, Vec::new());
+        let _ = app.emit("tripwires", ());
+        return Err(why);
+    }
     record(&app, &r, "sent", &detail, &message, &chat, ids);
     let _ = app.emit("tripwires", ());
     Ok(summary)

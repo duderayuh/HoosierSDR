@@ -257,7 +257,18 @@ pub struct Send {
     /// as replies to the first message for `follow_mins`.
     pub follow: String,
     pub follow_mins: u32,
+    /// Also send by email, alongside or instead of Telegram.
+    pub email: bool,
+    /// Who to, separated by commas.
+    pub email_to: String,
+    /// Templates with the same tokens as `message`. A blank body is the
+    /// Telegram message itself.
+    pub email_subject: String,
+    pub email_body: String,
 }
+
+/// The subject a new tripwire's email starts with.
+pub const EMAIL_SUBJECT: &str = "{name} · {tgname} · {time}";
 
 impl Default for Send {
     fn default() -> Self {
@@ -274,6 +285,10 @@ impl Default for Send {
             quiet_secs: 300,
             follow: "off".into(),
             follow_mins: 30,
+            email: false,
+            email_to: String::new(),
+            email_subject: EMAIL_SUBJECT.into(),
+            email_body: String::new(),
         }
     }
 }
@@ -325,7 +340,12 @@ struct Thread {
     unit: u32,
     scope: String,
     dest: String,
+    /// The first Telegram message, or 0 when the thread never reached
+    /// Telegram.
     root: i64,
+    /// The first email's Message-ID and subject, when it went by email.
+    email_root: Option<String>,
+    email_subject: String,
     until: i64,
     replies: u32,
     /// Calls already sent in this thread.
@@ -498,6 +518,7 @@ pub fn migrate(
                 quiet_secs: a.cooldown_secs,
                 follow: "off".into(),
                 follow_mins: 30,
+                ..Send::default()
             },
         });
     }
@@ -630,6 +651,7 @@ fn from_analyzer(r: &crate::analyzers::AnalyzerRule, al: &crate::alerts::Setting
             quiet_secs: r.cooldown_secs,
             follow: "off".into(),
             follow_mins: 30,
+            ..Send::default()
         },
     }
 }
@@ -1199,6 +1221,17 @@ pub(crate) fn send_map(
     incident: i64,
     reply_to: Option<i64>,
 ) -> Result<i64, String> {
+    let (png, caption, linked) = draw_map(app, state, incident)?;
+    crate::alerts::send_photo_reply(dest, &png, &caption, linked.as_deref(), reply_to)
+}
+
+/// The run drawn: the picture, its caption, and the caption with the
+/// address linked.
+pub(crate) fn draw_map(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    incident: i64,
+) -> Result<(Vec<u8>, String, Option<String>), String> {
     let Some(db) = state.db.lock().unwrap().clone() else {
         return Err("library not open".into());
     };
@@ -1230,13 +1263,7 @@ pub(crate) fn send_map(
     let region = state.dispatch.lock().unwrap().settings.region_hint.clone();
     let url = crate::alerts::maps_url(i.lat, i.lon, &i.address, &region);
     let linked = crate::alerts::link_in(&caption, &i.address, &url);
-    crate::alerts::send_photo_reply(
-        dest,
-        &shot.png,
-        &caption,
-        linked.as_deref(),
-        reply_to,
-    )
+    Ok((shot.png, caption, linked))
 }
 
 /// Does this run trip this tripwire?
@@ -1593,6 +1620,13 @@ pub fn compile(app: &AppHandle) {
 }
 
 /// Pure half of `compile`, so it is tested.
+/// A report's or a digest's email subject: the listener's own, or blank
+/// for the engine's default when it is still the call subject, whose
+/// tokens those engines do not have.
+fn own_subject(send: &Send) -> String {
+    if send.email_subject.trim() == EMAIL_SUBJECT { String::new() } else { send.email_subject.clone() }
+}
+
 pub fn compile_rules(
     list: &[Tripwire],
     folders: &[Folder],
@@ -1628,8 +1662,8 @@ pub fn compile_rules(
                         Some(f) => format!("its folder “{}” is switched off", f.name),
                         None => "a folder above it is switched off".to_string(),
                     }
-                } else if !t.send.telegram {
-                    "Telegram sending is off for it — which also stops the reports being written"
+                } else if !t.send.telegram && !t.send.email {
+                    "neither Telegram nor email is on for it — which also stops the reports being written"
                         .to_string()
                 } else {
                     String::new()
@@ -1637,7 +1671,7 @@ pub fn compile_rules(
                 convs.push(crate::conversations::Rule {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    enabled: t.enabled && folder_on && t.send.telegram,
+                    enabled: t.enabled && folder_on && (t.send.telegram || t.send.email),
                     tgs: t.when.tgs.clone(),
                     fixed_units: o.fixed_units.clone(),
                     learn_fixed: o.learn_fixed,
@@ -1652,6 +1686,10 @@ pub fn compile_rules(
                     attach_audio: t.send.audio,
                     send_without_transcript: o.send_without_transcript,
                     off_reason,
+                    telegram: t.send.telegram,
+                    email_to: if t.send.email { t.send.email_to.clone() } else { String::new() },
+                    email_subject: own_subject(&t.send),
+                    email_body: t.send.email_body.clone(),
                 });
             }
             "digest" => {
@@ -1659,13 +1697,17 @@ pub fn compile_rules(
                 digests.push(crate::digest::DigestRule {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    enabled: t.enabled && folders_on(folders, &t.parent) && t.send.telegram,
+                    enabled: t.enabled && folders_on(folders, &t.parent) && (t.send.telegram || t.send.email),
                     tgs: t.when.tgs.clone(),
                     interval_secs: o.every_mins * 60,
                     window_secs: o.window_mins * 60,
                     prompt: t.check.prompt.clone(),
                     message: t.send.message.clone(),
                     chat_id: chat,
+                    telegram: t.send.telegram,
+                    email_to: if t.send.email { t.send.email_to.clone() } else { String::new() },
+                    email_subject: own_subject(&t.send),
+                    email_body: t.send.email_body.clone(),
                 });
             }
             _ => {}
@@ -1949,11 +1991,11 @@ pub fn check_once(
 }
 
 /// Is there a live reply thread this tripwire's repeat on `tg` belongs to?
-fn open_thread(st: &TripState, rule: &str, tg: u16, now: i64) -> Option<(String, i64)> {
+fn open_thread(st: &TripState, rule: &str, tg: u16, now: i64) -> Option<Thread> {
     st.threads
         .iter()
         .find(|th| th.rule == rule && th.tg == tg && th.until > now && th.replies < MAX_REPLIES)
-        .map(|th| (th.dest.clone(), th.root))
+        .cloned()
 }
 
 /// Run one tripwire for one call: quiet window, check, send, record.
@@ -2094,8 +2136,15 @@ fn fire_with(
         "alert",
         serde_json::json!({ "name": t.name, "tg": f.tg, "message": message, "tone": t.send.tone && !is_reply, "call": f.id, "follow": is_reply }),
     );
-    if !t.send.telegram {
-        state.tripwires.lock().unwrap().last_sent.insert(key, now);
+    let email_to = crate::email::recipients(&t.send.email_to);
+    // A reply goes by email only into a thread whose first word did.
+    let emailing = t.send.email && !email_to.is_empty() && reply_to.as_ref().is_none_or(|th| th.email_root.is_some());
+    // …and to Telegram only into a thread that reached it.
+    let telegram = t.send.telegram && reply_to.as_ref().is_none_or(|th| th.root != 0);
+    if !telegram && !emailing {
+        if reply_to.is_none() {
+            state.tripwires.lock().unwrap().last_sent.insert(key, now);
+        }
         rec(
             app,
             &t,
@@ -2109,26 +2158,10 @@ fn fire_with(
         );
         return;
     }
-    let dest = match &reply_to {
-        Some((d, _)) => Ok(d.clone()),
+    let dest: Result<String, String> = match &reply_to {
+        _ if !telegram => Ok(String::new()),
+        Some(th) => Ok(th.dest.clone()),
         None => resolve_dest(&state.alerts.lock().unwrap().settings, &t.send),
-    };
-    let dest = match dest {
-        Ok(d) => d,
-        Err(e) => {
-            rec(
-                app,
-                &t,
-                &f,
-                "failed",
-                e,
-                message,
-                &keywords,
-                fields.as_ref(),
-                (String::new(), Vec::new()),
-            );
-            return;
-        }
     };
     // The clip for a run: every recording the incident is made of, as one
     // piece. Gathered here rather than passed in, so a follow-up reply does
@@ -2143,63 +2176,121 @@ fn fire_with(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let res = deliver(
+    let clip = match prepare_clip(
         &state,
-        &dest,
         &f,
-        &message,
-        linked.as_deref(),
-        &t.name,
         t.send.audio,
         if is_reply { 0 } else { t.send.earlier_calls },
         t.send.earlier_window_secs,
-        reply_to.as_ref().map(|r| r.1),
         &run_audio,
-    );
-    match res {
-        Ok((detail, mut ids)) => {
-            {
-                let mut st = state.tripwires.lock().unwrap();
-                if let Some((_, root)) = &reply_to {
-                    if let Some(th) = st
-                        .threads
-                        .iter_mut()
-                        .find(|th| th.rule == t.id && th.root == *root)
-                    {
-                        th.replies += 1;
-                        th.calls.extend(f.id);
-                    }
-                } else {
-                    st.last_sent.insert(key, now);
-                    if t.send.follow != "off" {
-                        if let Some(root) = ids.first() {
-                            st.threads.retain(|th| !(th.rule == t.id && th.tg == f.tg));
-                            st.threads.push(Thread {
-                                rule: t.id.clone(),
-                                tg: f.tg,
-                                unit: f.unit,
-                                scope: t.send.follow.clone(),
-                                dest: dest.clone(),
-                                root: *root,
-                                until: now + t.send.follow_mins as i64 * 60,
-                                replies: 0,
-                                calls: f.id.into_iter().collect(),
-                            });
-                        }
-                    }
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            rec(app, &t, &f, "failed", e, message, &keywords, fields.as_ref(), (String::new(), Vec::new()));
+            return;
+        }
+    };
+    let tg_res: Option<Result<(String, Vec<i64>), String>> = match &dest {
+        _ if !telegram => None,
+        Ok(d) => Some(deliver(
+            d,
+            &f,
+            &message,
+            linked.as_deref(),
+            &t.name,
+            clip.as_ref(),
+            reply_to.as_ref().map(|th| th.root),
+        )),
+        Err(e) => Some(Err(e.clone())),
+    };
+    // The email: its own subject and body, or, in a thread, the follow-up
+    // under the first email's subject.
+    let mail = emailing.then(|| {
+        let (subject, text, html, message_id, in_reply_to) = match &reply_to {
+            Some(th) => (format!("Re: {}", th.email_subject), message.clone(), None, None, th.email_root.clone()),
+            None => {
+                let body = if t.send.email_body.trim().is_empty() { &t.send.message } else { &t.send.email_body };
+                let subject = render(&t.send.email_subject, &t.name, &f, &keywords, &note, fields.as_ref());
+                let text = render(body, &t.name, &f, &keywords, &note, fields.as_ref());
+                let html = render_html(body, &t.name, &f, &keywords, &note, fields.as_ref());
+                let html = fields
+                    .as_ref()
+                    .and_then(|v| crate::alerts::link_html(&html, v["address"].as_str().unwrap_or(""), v["maps"].as_str().unwrap_or("")))
+                    .unwrap_or(html);
+                let id = crate::email::thread_id(&["tripwire", &t.id, &f.tg.to_string(), &now.to_string()]);
+                (subject, text, Some(crate::email::html_body(&html)), Some(id), None)
+            }
+        };
+        let subject = if subject.trim().is_empty() { t.name.clone() } else { subject };
+        let mut attachments: Vec<crate::email::Attachment> = clip.as_ref().and_then(|(p, _)| crate::email::Attachment::file(p)).into_iter().collect();
+        if t.send.map && !is_reply {
+            if let Some(inc) = incident {
+                if let Ok((png, _, _)) = draw_map(app, &state, inc) {
+                    attachments.push(crate::email::Attachment { name: "map.png".into(), mime: "image/png".into(), bytes: png });
                 }
             }
-            let mut detail = if is_reply {
-                format!("follow-up {detail}")
-            } else {
-                detail
-            };
+        }
+        crate::email::Mail { to: email_to.clone(), subject, text, html, attachments, message_id, in_reply_to }
+    });
+    // What a thread needs to follow this email: its Message-ID and subject.
+    let email_res: Option<Result<(String, String), String>> = mail.map(|m| {
+        crate::email::send(&m).map(|_| (m.message_id.or(m.in_reply_to).unwrap_or_default(), m.subject.trim_start_matches("Re: ").to_string()))
+    });
+    if let Some((p, _)) = &clip {
+        let _ = std::fs::remove_file(p);
+    }
+    let tg_ok = matches!(tg_res, Some(Ok(_)));
+    let email_ok = matches!(email_res, Some(Ok(_)));
+    if tg_ok || email_ok {
+        let mut st = state.tripwires.lock().unwrap();
+        if let Some(th0) = &reply_to {
+            if let Some(th) = st
+                .threads
+                .iter_mut()
+                .find(|th| th.rule == t.id && th.root == th0.root && th.email_root == th0.email_root)
+            {
+                th.replies += 1;
+                th.calls.extend(f.id);
+            }
+        } else {
+            st.last_sent.insert(key, now);
+            if t.send.follow != "off" {
+                let root = match &tg_res {
+                    Some(Ok((_, ids))) => ids.first().copied().unwrap_or(0),
+                    _ => 0,
+                };
+                let (email_root, email_subject) = match &email_res {
+                    Some(Ok((id, subject))) => (Some(id.clone()), subject.clone()),
+                    _ => (None, String::new()),
+                };
+                st.threads.retain(|th| !(th.rule == t.id && th.tg == f.tg));
+                st.threads.push(Thread {
+                    rule: t.id.clone(),
+                    tg: f.tg,
+                    unit: f.unit,
+                    scope: t.send.follow.clone(),
+                    dest: dest.clone().unwrap_or_default(),
+                    root,
+                    email_root,
+                    email_subject,
+                    until: now + t.send.follow_mins as i64 * 60,
+                    replies: 0,
+                    calls: f.id.into_iter().collect(),
+                });
+            }
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut sent_to = (dest.clone().unwrap_or_default(), Vec::new());
+    match tg_res {
+        Some(Ok((detail, mut ids))) => {
+            let mut detail = detail;
             // The picture hangs off the message that was just sent, so it
             // is drawn after it and never in its way. The thread root is
             // already recorded above, so a photo id can't become one.
-            if t.send.map {
-                if let Some(inc) = incident {
-                    match send_map(app, &state, &dest, inc, ids.last().copied()) {
+            if t.send.map && !is_reply {
+                if let (Some(inc), Ok(d)) = (incident, &dest) {
+                    match send_map(app, &state, d, inc, ids.last().copied()) {
                         Ok(id) => {
                             ids.push(id);
                             detail.push_str(", with a map");
@@ -2208,30 +2299,30 @@ fn fire_with(
                     }
                 }
             }
-            rec(
-                app,
-                &t,
-                &f,
-                "sent",
-                detail,
-                message,
-                &keywords,
-                fields.as_ref(),
-                (dest, ids),
-            );
+            parts.push(detail);
+            sent_to.1 = ids;
         }
-        Err(e) => rec(
-            app,
-            &t,
-            &f,
-            "failed",
-            e,
-            message,
-            &keywords,
-            fields.as_ref(),
-            (dest, Vec::new()),
-        ),
+        Some(Err(e)) => parts.push(if emailing { format!("Telegram failed: {e}") } else { e }),
+        None => {}
     }
+    match &email_res {
+        Some(Ok(_)) => parts.push(format!("emailed {}", email_to.join(", "))),
+        Some(Err(e)) => parts.push(format!("email failed: {e}")),
+        None => {}
+    }
+    let detail = parts.join("; ");
+    let detail = if is_reply { format!("follow-up {detail}") } else { detail };
+    rec(
+        app,
+        &t,
+        &f,
+        if tg_ok || email_ok { "sent" } else { "failed" },
+        detail,
+        message,
+        &keywords,
+        fields.as_ref(),
+        sent_to,
+    );
 }
 
 /// Later traffic inside a live thread's scope, sent as a reply. `fired` are
@@ -2296,52 +2387,86 @@ fn follow_ups(app: &AppHandle, f: &CallFacts, fired: &HashSet<String>) {
                 "alert",
                 serde_json::json!({ "name": t.name, "tg": f.tg, "message": message, "tone": false, "call": f.id, "follow": true }),
             );
-            let res = deliver(
-                &state,
-                &th.dest,
-                &f,
-                &message,
-                None,
-                &t.name,
-                t.send.audio,
-                0,
-                0,
-                Some(th.root),
-                &[],
-            );
-            match res {
-                Ok((d, ids)) => record(
-                    &app,
-                    &t,
-                    &f,
-                    "sent",
-                    format!("follow-up {d}"),
-                    message,
-                    &[],
-                    None,
-                    (th.dest.clone(), ids),
-                ),
-                Err(e) => record(
-                    &app,
-                    &t,
-                    &f,
-                    "failed",
-                    format!("follow-up: {e}"),
-                    message,
-                    &[],
-                    None,
-                    (th.dest.clone(), Vec::new()),
-                ),
+            let clip = match prepare_clip(&state, &f, t.send.audio, 0, 0, &[]) {
+                Ok(c) => c,
+                Err(e) => {
+                    record(&app, &t, &f, "failed", format!("follow-up: {e}"), message, &[], None, (th.dest.clone(), Vec::new()));
+                    return;
+                }
+            };
+            let tg = (t.send.telegram && th.root != 0).then(|| deliver(&th.dest, &f, &message, None, &t.name, clip.as_ref(), Some(th.root)));
+            let mail = th.email_root.as_ref().filter(|_| t.send.email).map(|root| crate::email::Mail {
+                to: crate::email::recipients(&t.send.email_to),
+                subject: format!("Re: {}", th.email_subject),
+                text: message.clone(),
+                attachments: clip.as_ref().and_then(|(p, _)| crate::email::Attachment::file(p)).into_iter().collect(),
+                in_reply_to: Some(root.clone()),
+                ..Default::default()
+            });
+            let emailed = mail.filter(|m| !m.to.is_empty()).map(|m| crate::email::send(&m).map(|_| m.to.join(", ")));
+            if let Some((p, _)) = &clip {
+                let _ = std::fs::remove_file(p);
             }
+            let mut parts = Vec::new();
+            let mut ids = Vec::new();
+            let mut ok = false;
+            match tg {
+                Some(Ok((d, i))) => {
+                    parts.push(d);
+                    ids = i;
+                    ok = true;
+                }
+                Some(Err(e)) => parts.push(format!("Telegram failed: {e}")),
+                None => {}
+            }
+            match emailed {
+                Some(Ok(to)) => {
+                    parts.push(format!("emailed {to}"));
+                    ok = true;
+                }
+                Some(Err(e)) => parts.push(format!("email failed: {e}")),
+                None => {}
+            }
+            record(
+                &app,
+                &t,
+                &f,
+                if ok { "sent" } else { "failed" },
+                format!("follow-up {}", parts.join("; ")),
+                message,
+                &[],
+                None,
+                (th.dest.clone(), ids),
+            );
         });
+    }
+}
+
+/// The recording that goes with a message: a run's own audio when given,
+/// else the call with any earlier calls asked for. The caller removes the
+/// file once every channel has had it.
+fn prepare_clip(
+    state: &AppState,
+    f: &CallFacts,
+    audio: bool,
+    earlier: u32,
+    earlier_window: u32,
+    // The recordings behind a run. A run has no single call of its own, so
+    // when these are here they are the clip.
+    run_audio: &[String],
+) -> Result<Option<(std::path::PathBuf, bool)>, String> {
+    if !audio {
+        Ok(None)
+    } else if !run_audio.is_empty() {
+        Ok(crate::alerts::combine_clips(run_audio, &format!("tw_run_{}", f.tg)).ok())
+    } else {
+        crate::alerts::clip_for_call(f, earlier, earlier_window, state)
     }
 }
 
 /// Send text, or the audio with the text as its caption; as a reply when
 /// `reply_to` is set. Returns a short detail and the Telegram message ids.
-#[allow(clippy::too_many_arguments)]
 fn deliver(
-    state: &AppState,
     dest: &str,
     f: &CallFacts,
     message: &str,
@@ -2349,36 +2474,21 @@ fn deliver(
     // link. `None` sends plain text, as everything did before.
     html: Option<&str>,
     title: &str,
-    audio: bool,
-    earlier: u32,
-    earlier_window: u32,
+    clip: Option<&(std::path::PathBuf, bool)>,
     reply_to: Option<i64>,
-    // The recordings behind a run. A run has no single call of its own, so
-    // when these are here they are the clip.
-    run_audio: &[String],
 ) -> Result<(String, Vec<i64>), String> {
-    let clip = if !audio {
-        None
-    } else if !run_audio.is_empty() {
-        crate::alerts::combine_clips(run_audio, &format!("tw_run_{}", f.tg)).ok()
-    } else {
-        crate::alerts::clip_for_call(f, earlier, earlier_window, state)?
-    };
     match clip {
         None => crate::alerts::send_text_reply_html(dest, message, html, reply_to)
             .map(|id| ("sent".to_string(), vec![id])),
-        Some((path, is_mp3)) => {
-            let res = crate::alerts::send_audio_reply(
-                dest, &path, is_mp3, message, html, title, &f.tg_name, reply_to,
-            );
-            let _ = std::fs::remove_file(&path);
-            res.map(|ids| {
-                (
-                    format!("sent with {}", if is_mp3 { "MP3" } else { "WAV" }),
-                    ids,
-                )
-            })
-        }
+        Some((path, is_mp3)) => crate::alerts::send_audio_reply(
+            dest, path, *is_mp3, message, html, title, &f.tg_name, reply_to,
+        )
+        .map(|ids| {
+            (
+                format!("sent with {}", if *is_mp3 { "MP3" } else { "WAV" }),
+                ids,
+            )
+        }),
     }
 }
 
@@ -3188,6 +3298,8 @@ mod tests {
             scope: scope.into(),
             dest: String::new(),
             root: 42,
+            email_root: None,
+            email_subject: String::new(),
             until,
             replies: 0,
             calls: HashSet::new(),

@@ -151,7 +151,9 @@
     $("csSendHosp").checked = t.hospitals !== false;
     $("csSendMap").checked = t.map !== false;
     $("csSendAudio").checked = t.audio !== false;
-    $("csSendMeta").textContent = t.enabled ? "on" : "off";
+    $("csSendEmail").checked = !!t.email;
+    $("csSendEmailTo").value = t.email_to || "";
+    $("csSendMeta").textContent = [t.enabled ? "Telegram on" : "", t.email ? "email on" : ""].filter(Boolean).join(" · ") || "off";
   }
 
   function readSend() {
@@ -161,6 +163,8 @@
       hospitals: $("csSendHosp").checked,
       map: $("csSendMap").checked,
       audio: $("csSendAudio").checked,
+      email: $("csSendEmail").checked,
+      email_to: $("csSendEmailTo").value.trim(),
     };
   }
 
@@ -174,7 +178,7 @@
       const s = await invoke("cases_set_telegram", { profile: profile.id, telegram: t });
       profile = ((s && s.profiles) || []).find((p) => p.id === profile.id) || profile;
       drawSend();
-      uiToast(t.enabled ? "Cases will be sent to Telegram" : "Saved — nothing is sent while it is off");
+      uiToast(t.enabled || t.email ? `Cases will be sent${t.enabled ? " to Telegram" : ""}${t.enabled && t.email ? " and" : ""}${t.email ? " by email" : ""}` : "Saved — nothing is sent while it is off");
     } catch (e) { uiToast(`${e}`, "err"); }
   }
 
