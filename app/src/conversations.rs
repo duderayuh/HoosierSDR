@@ -158,6 +158,12 @@ pub struct Piece {
     pub secs: f64,
     pub audio: Option<String>,
     pub transcript: Option<String>,
+    /// On a channel many hospitals share, who this is when it can be told
+    /// from the radio: `HOSPITAL (Methodist)`, `DISPATCH`, `RADIO (no ID)`.
+    /// Blank everywhere else, where the labels are the fixed party and the
+    /// mobile radios.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub who: String,
 }
 
 /// One chat a conversation's summary was sent to, and the messages it left.
@@ -339,6 +345,25 @@ pub fn is_fixed(s: &Settings, r: &Rule, tg: u16, unit: u32) -> bool {
     n >= 3 && total > 0 && n * 3 >= total
 }
 
+/// Whether a radio is the fixed party of an exchange, and on a shared
+/// channel, who it is.
+///
+/// On a channel many hospitals share, a radio with no ID is not the
+/// hospital: it is whoever came in through the statewide link, crew or
+/// hospital alike. The hospital is a radio it is known to answer on, and a
+/// radio heard in most exchanges is the dispatcher connecting them.
+fn role(s: &Settings, r: &Rule, places: &crate::places::Settings, tg: u16, unit: u32) -> (bool, String) {
+    if !places.shared_tgs.contains(&tg) {
+        return (unit == 0 || is_fixed(s, r, tg, unit), String::new());
+    }
+    match places.places.iter().find(|p| p.enabled && unit != 0 && p.radios.contains(&unit)) {
+        Some(p) => (true, format!("HOSPITAL ({})", p.name)),
+        None if unit == 0 => (false, "RADIO (no ID)".to_string()),
+        None if is_fixed(s, r, tg, unit) => (true, "DISPATCH".to_string()),
+        None => (false, String::new()),
+    }
+}
+
 /// Which open conversation a transmission belongs to (index into `open`), or
 /// `None` to start a new one.
 ///
@@ -442,9 +467,10 @@ fn one_per_question(rules: Vec<Rule>) -> Vec<Rule> {
 
 pub fn on_call(app: &AppHandle, f: &CallFacts) {
     let state = app.state::<AppState>();
+    let places = state.places.lock().unwrap().settings.clone();
     {
         let mut st = state.conversations.lock().unwrap();
-        take_call(&mut st, f);
+        take_call(&mut st, f, &places);
     }
     let _ = app.emit("conversations", ());
 }
@@ -452,7 +478,7 @@ pub fn on_call(app: &AppHandle, f: &CallFacts) {
 /// Put one transmission where it belongs: into the conversation it
 /// continues, or a new one. Everything that decides that is here, over the
 /// state alone, so it can be tested without a window.
-fn take_call(st: &mut ConvState, f: &CallFacts) {
+fn take_call(st: &mut ConvState, f: &CallFacts, places: &crate::places::Settings) {
     let rules: Vec<Rule> = st.settings
         .rules
         .iter()
@@ -470,7 +496,7 @@ fn take_call(st: &mut ConvState, f: &CallFacts) {
     // its answer is a different report.
     let rules = one_per_question(rules);
     for r in rules {
-        let fixed = f.unit == 0 || is_fixed(&st.settings, &r, f.tg, f.unit);
+        let (fixed, who) = role(&st.settings, &r, places, f.tg, f.unit);
         let piece = Piece {
             id: f.id,
             unit: f.unit,
@@ -480,6 +506,7 @@ fn take_call(st: &mut ConvState, f: &CallFacts) {
             secs: f.secs,
             audio: f.audio.clone(),
             transcript: f.transcript.clone(),
+            who,
         };
         let late = r.late_window_secs as i64;
         let gap = r.end_gap_secs as i64;
@@ -560,6 +587,7 @@ pub fn spawn_ticker(app: AppHandle) {
         let now = crate::library::now();
         let transcribing = state.transcriber.lock().unwrap().settings.enabled;
         let mut due: Vec<Conversation> = Vec::new();
+        let places = state.places.lock().unwrap().settings.clone();
         {
             let mut st = state.conversations.lock().unwrap();
             let rules = st.settings.rules.clone();
@@ -587,6 +615,24 @@ pub fn spawn_ticker(app: AppHandle) {
                     if transcribing && missing && quiet < gap + 90 {
                         keep.push(c);
                         continue;
+                    }
+                    // A shared channel runs one exchange into the next;
+                    // cut it at each new call-up, now every word is in.
+                    if places.shared_tgs.contains(&c.tg) && c.sent_at.is_none() {
+                        let mut parts = split_shared(&c, &places).into_iter();
+                        match parts.next() {
+                            None => {
+                                note(&mut st, r, &c, "dropped: nothing said but the transcriber's filler".into());
+                                continue;
+                            }
+                            Some(first) => {
+                                for rest in parts {
+                                    st.next_key += 1;
+                                    keep.push(Conversation { key: st.next_key, ..rest });
+                                }
+                                c = first;
+                            }
+                        }
                     }
                     let has_mobile = c.pieces.iter().any(|p| !p.fixed);
                     if !has_mobile || (c.pieces.len() as u32) < r.min_calls.max(1) {
@@ -694,11 +740,51 @@ fn fmt_time(epoch: i64) -> String {
 /// its alias when one is known). A raw radio ID never appears — fed one, the
 /// model wrote "Unit 4917150 is bringing…" instead of reading the unit's
 /// name (Medic 42, Ambulance 7) out of what was actually said.
+/// A report's transmissions as (radio, what was said), for working out
+/// which hospital it was with.
+pub fn said(pieces: &[Piece]) -> Vec<(u32, String)> {
+    pieces.iter().map(|p| (p.unit, p.transcript.clone().unwrap_or_default())).collect()
+}
+
+/// One stretch of a shared channel as the exchanges in it: a new one at
+/// each call-up, the transcriber's filler left out. Each keeps the first
+/// one's key until the caller gives it its own.
+fn split_shared(c: &Conversation, places: &crate::places::Settings) -> Vec<Conversation> {
+    let names = crate::hospitals::aliases(places);
+    let texts: Vec<&str> = c.pieces.iter().map(|p| p.transcript.as_deref().unwrap_or("")).collect();
+    crate::hospitals::exchanges(&texts, &names)
+        .into_iter()
+        .map(|idx| {
+            let pieces: Vec<Piece> = idx.iter().map(|i| c.pieces[*i].clone()).collect();
+            let mut participants: Vec<u32> = Vec::new();
+            for p in pieces.iter().filter(|p| !p.fixed) {
+                if !participants.contains(&p.unit) {
+                    participants.push(p.unit);
+                }
+            }
+            Conversation {
+                first_at: pieces.first().map_or(c.first_at, |p| p.at),
+                last_at: pieces.last().map_or(c.last_at, |p| p.at),
+                mobile_unit: participants.first().copied(),
+                participants,
+                pieces,
+                ..c.clone()
+            }
+        })
+        .collect()
+}
+
 pub fn stitched_transcript(c: &Conversation) -> String {
     let mut out = String::new();
     let mut slots: Vec<u32> = Vec::new();
     for p in &c.pieces {
-        let who = if p.fixed {
+        // On a shared channel the transcriber's filler is nobody speaking.
+        if !p.who.is_empty() && p.transcript.as_deref().is_some_and(crate::hospitals::is_noise) {
+            continue;
+        }
+        let who = if !p.who.is_empty() {
+            p.who.clone()
+        } else if p.fixed {
             "HOSPITAL".to_string()
         } else if let Some(name) = p.unit_name.as_deref().filter(|n| !n.trim().is_empty()) {
             format!("RADIO \"{}\"", name.trim())
@@ -729,7 +815,10 @@ pub fn stitched_transcript(c: &Conversation) -> String {
 pub const SUMMARY_GUIDE: &str = "How to read the transcript: it is machine-generated from radio audio and \
 may contain recognition errors (mis-heard numbers, drug names, street names). Speaker labels are \
 radio slots — HOSPITAL is the fixed party, RADIO A / RADIO B are the mobile radios (a label in quotes \
-is that radio's alias). The labels are NOT unit names: identify the EMS unit from what is said \
+is that radio's alias). On a channel many hospitals share (IHERN), HOSPITAL (name) is that \
+hospital's own radio, DISPATCH is the county dispatcher connecting callers, and RADIO (no ID) is \
+anyone heard through the statewide link — a crew or a hospital alike, told apart only by what \
+they say. The labels are NOT unit names: identify the EMS unit from what is said \
 (\"Medic 42\", \"Ambulance 7\", \"Engine 6\"), and if no unit name is spoken say \"the unit\". \
 Never mention radio IDs, label letters, or that the text is a transcript.\n\n\
 What to write: first a headline, then the note, then the facts.\n\n\
@@ -1495,6 +1584,7 @@ pub fn conversations_state(state: State<AppState>) -> StateView {
 pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let places = state.places.lock().unwrap().settings.clone();
         let (rule, settings) = {
             let st = state.conversations.lock().unwrap();
             (
@@ -1551,15 +1641,17 @@ pub async fn conversation_test(app: AppHandle, id: String) -> Result<String, Str
                 break;
             }
             last = r.start;
+            let (fixed, who) = role(&settings, &rule, &places, r.tg, r.unit);
             pieces.push(Piece {
                 id: Some(r.id),
                 unit: r.unit,
                 unit_name: r.unit_name.clone(),
-                fixed: r.unit == 0 || is_fixed(&settings, &rule, r.tg, r.unit),
+                fixed,
                 at: r.start,
                 secs: r.secs,
                 audio: r.audio.clone(),
                 transcript: r.transcript_edited.or(r.transcript),
+                who,
             });
         }
         pieces.reverse();
@@ -2247,15 +2339,76 @@ mod tests {
             transcript: Some("medic 21 inbound".into()),
             ..Default::default()
         };
-        take_call(&mut st, &call(4917123, 1_700_000_000));
-        take_call(&mut st, &call(31709, 1_700_000_010));
+        take_call(&mut st, &call(4917123, 1_700_000_000), &crate::places::Settings::default());
+        take_call(&mut st, &call(31709, 1_700_000_010), &crate::places::Settings::default());
         assert_eq!(st.open.len(), 1, "two rules watch this talkgroup, but it is one exchange");
         assert_eq!(st.open[0].rule_id, "t2", "the hospital's own rule keeps it");
         assert_eq!(st.open[0].pieces.len(), 2);
         // A talkgroup only the wide rule watches still opens one.
-        take_call(&mut st, &crate::alerts::CallFacts { tg: 10255, ..call(4911391, 1_700_000_100) });
+        take_call(&mut st, &crate::alerts::CallFacts { tg: 10255, ..call(4911391, 1_700_000_100) }, &crate::places::Settings::default());
         assert_eq!(st.open.len(), 2);
         assert_eq!(st.open[1].rule_id, "c1");
+    }
+
+    /// IHERN: many hospitals, most radios with no ID, one exchange after
+    /// another. Who is who comes from the place book; each exchange is cut
+    /// off at the next call-up and credited on its own.
+    #[test]
+    fn a_shared_channel_is_read_exchange_by_exchange() {
+        let rule = Rule { id: "ih".into(), name: "IHERN".into(), tgs: vec![10254], learn_fixed: false, ..Default::default() };
+        let mut st = ConvState { settings: Settings { rules: vec![rule], ..Default::default() }, ..Default::default() };
+        let mut places = crate::places::Settings { shared_tgs: vec![10254], ..Default::default() };
+        for (id, name, tg) in [("m", "IU Health Methodist", 10256u16), ("r", "IU Health Riley Children's", 10258)] {
+            places.places.push(crate::places::Place { id: id.into(), name: name.into(), kind: "hospital".into(), enabled: true, tgs: vec![tg], ..Default::default() });
+        }
+        places.places[0].radios = vec![9412088];
+        let said = |unit: u32, at: i64, text: &str| crate::alerts::CallFacts {
+            id: Some(at),
+            start: at,
+            tg: 10254,
+            tg_name: "IHERN-800".into(),
+            unit,
+            secs: 4.0,
+            transcript: Some(text.into()),
+            ..Default::default()
+        };
+        let t0 = 1_700_000_000;
+        for (u, dt, text) in [
+            (0, 0, "Indianapolis EMS, Indianapolis EMS, Lifeline 2 on the IHERN."),
+            (0, 8, "Lifeline 2, this is Indianapolis EMS, go ahead."),
+            (0, 14, "Thank you."),
+            (9412088, 20, "This is Methodist, go ahead."),
+            (0, 26, "Good evening Methodist, 54 year old female, ETA 10 minutes."),
+            (9412088, 40, "Copy, see you on arrival."),
+            (0, 50, "Riley ER, Air Vac 145 on IHERN."),
+            (0, 58, "Air Vac 145, this is Riley, go ahead."),
+            (0, 66, "Five year old male coming out of Jay County, ETA 11 minutes."),
+        ] {
+            take_call(&mut st, &said(u, t0 + dt, text), &places);
+        }
+        // Heard live it is one stretch: no ID tells one caller from another.
+        assert_eq!(st.open.len(), 1);
+        let c = &st.open[0];
+        let whose = |p: &Piece| (p.fixed, p.who.clone());
+        assert_eq!(whose(&c.pieces[0]), (false, "RADIO (no ID)".into()), "a radio with no ID is not the hospital");
+        assert_eq!(whose(&c.pieces[3]), (true, "HOSPITAL (IU Health Methodist)".into()));
+        // Once quiet, it is cut into its exchanges, the filler left out.
+        let parts = split_shared(c, &places);
+        assert_eq!(parts.len(), 2, "{:?}", parts.iter().map(|p| p.pieces.len()).collect::<Vec<_>>());
+        assert_eq!(parts[0].pieces.len(), 5);
+        assert_eq!(parts[1].first_at, t0 + 50);
+        let text = stitched_transcript(&parts[0]);
+        assert!(text.starts_with("RADIO (no ID): Indianapolis EMS"), "{text}");
+        assert!(text.contains("HOSPITAL (IU Health Methodist): This is Methodist"), "{text}");
+        assert!(!text.contains("Thank you."), "{text}");
+        // And each is credited to its own hospital.
+        let who = |c: &Conversation| crate::hospitals::whose(&places, 10254, &said_of(c)).map(|w| w.place_id);
+        assert_eq!(who(&parts[0]).as_deref(), Some("m"));
+        assert_eq!(who(&parts[1]).as_deref(), Some("r"));
+    }
+
+    fn said_of(c: &Conversation) -> Vec<(u32, String)> {
+        said(&c.pieces)
     }
 
     #[test]
@@ -2317,7 +2470,7 @@ mod tests {
         let mut c = conv(7, 10202, Some(790065), 1_700_000_030, false);
         c.first_at = 1_700_000_000;
         c.pieces = vec![
-            Piece {
+            Piece { who: String::new(),
                 id: Some(41),
                 unit: 790065,
                 unit_name: Some("Medic 3".into()),
@@ -2327,7 +2480,7 @@ mod tests {
                 audio: Some("/tmp/a.wav".into()),
                 transcript: Some("Medic 3 inbound with a 60 year old male".into()),
             },
-            Piece {
+            Piece { who: String::new(),
                 id: Some(42),
                 unit: 900001,
                 unit_name: None,
@@ -2364,7 +2517,7 @@ mod tests {
         assert_eq!(row.facts, vec![Fact { key: "age".into(), value: "60".into() }]);
 
         // A late transmission revises the same conversation: one row, rev 1.
-        c.pieces.push(Piece {
+        c.pieces.push(Piece { who: String::new(),
             id: Some(43),
             unit: 790065,
             unit_name: Some("Medic 3".into()),
@@ -2659,7 +2812,7 @@ mod tests {
     #[test]
     fn unnamed_radios_get_slot_letters_never_ids() {
         let mut c = conv(1, 10202, Some(4917150), 100, false);
-        let piece = |unit: u32, text: &str| Piece {
+        let piece = |unit: u32, text: &str| Piece { who: String::new(),
             id: None,
             unit,
             unit_name: None,
@@ -2695,7 +2848,7 @@ mod tests {
             mobile_unit: Some(790065),
             participants: vec![790065],
             pieces: vec![
-                Piece {
+                Piece { who: String::new(),
                     id: Some(1),
                     unit: 790065,
                     unit_name: Some("Medic 3".into()),
@@ -2705,7 +2858,7 @@ mod tests {
                     audio: None,
                     transcript: Some("Medic 3 inbound, 64 year old male chest pain".into()),
                 },
-                Piece {
+                Piece { who: String::new(),
                     id: Some(2),
                     unit: 900001,
                     unit_name: None,
@@ -2715,7 +2868,7 @@ mod tests {
                     audio: None,
                     transcript: Some("Copy, ETA?".into()),
                 },
-                Piece {
+                Piece { who: String::new(),
                     id: Some(3),
                     unit: 790065,
                     unit_name: Some("Medic 3".into()),
@@ -2970,7 +3123,7 @@ mod visibility_tests {
     }
 
     fn piece(unit: u32, fixed: bool) -> Piece {
-        Piece {
+        Piece { who: String::new(),
             id: Some(1),
             unit,
             unit_name: None,
@@ -3080,6 +3233,7 @@ mod visibility_tests {
 pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let places = state.places.lock().unwrap().settings.clone();
         let (rules, settings) = {
             let mut st = state.conversations.lock().unwrap();
             if st.busy {
@@ -3136,7 +3290,11 @@ pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize,
                         if let Some(conv) =
                             assemble(r, *tg, tg_name.clone(), tg_desc.clone(), pieces)
                         {
-                            out.push(conv);
+                            if places.shared_tgs.contains(tg) {
+                                out.extend(split_shared(&conv, &places));
+                            } else {
+                                out.push(conv);
+                            }
                         }
                     };
                     for row in rows {
@@ -3146,15 +3304,17 @@ pub async fn conversations_backfill(app: AppHandle, hours: u32) -> Result<usize,
                                 flush(&mut group, &mut out);
                             }
                         }
+                        let (fixed, who) = role(&settings, r, &places, row.tg, row.unit);
                         group.push(Piece {
                             id: Some(row.id),
                             unit: row.unit,
                             unit_name: row.unit_name.clone(),
-                            fixed: row.unit == 0 || is_fixed(&settings, r, row.tg, row.unit),
+                            fixed,
                             at,
                             secs: row.secs,
                             audio: row.audio.clone(),
                             transcript: row.transcript_edited.or(row.transcript),
+                            who,
                         });
                     }
                     flush(&mut group, &mut out);
@@ -3353,7 +3513,7 @@ mod backfill_tests {
     }
 
     fn piece(unit: u32, fixed: bool, at: i64) -> Piece {
-        Piece {
+        Piece { who: String::new(),
             id: Some(at),
             unit,
             unit_name: None,

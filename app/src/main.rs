@@ -55,6 +55,7 @@ mod tripwires;
 mod backtest;
 mod fuzzy;
 mod highway;
+mod hospitals;
 mod uistate;
 mod convexport;
 mod rr;
@@ -2537,6 +2538,7 @@ fn main() {
             radios::radio_answer,
             places::places_get,
             places::places_set,
+            hospitals::places_heard_radios,
             places::places_suggest,
             dashboards::dashboards_get,
             dashboards::dashboards_render,

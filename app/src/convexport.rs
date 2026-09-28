@@ -251,7 +251,7 @@ mod tests {
         let b = dir.join("b.m4a");
         std::fs::write(&a, b"AAAA").unwrap();
         std::fs::write(&b, b"BBBB").unwrap();
-        let piece = |id, unit, fixed, at, audio: Option<&std::path::Path>, name: Option<&str>, text: &str| Piece {
+        let piece = |id, unit, fixed, at, audio: Option<&std::path::Path>, name: Option<&str>, text: &str| Piece { who: String::new(),
             id: Some(id),
             unit,
             unit_name: name.map(String::from),

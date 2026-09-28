@@ -372,6 +372,8 @@ pub struct LinkedReport {
     pub tg_name: String,
     pub tg_desc: String,
     pub place: String,
+    /// The place book's id for it, when it is one of the listener's places.
+    pub place_id: String,
     /// The findings line the summary call named, when there is one.
     pub headline: String,
     pub summary: String,
@@ -380,22 +382,23 @@ pub struct LinkedReport {
 
 pub fn reports_for(c: &Connection, incident: i64, places: &crate::places::Settings) -> Vec<LinkedReport> {
     let Ok(mut q) = c.prepare(
-        "SELECT id, first_at, tg, tg_name, tg_desc, summary, link_how, headline FROM conversations
+        "SELECT id, first_at, tg, tg_name, tg_desc, summary, link_how, headline, pieces FROM conversations
           WHERE incident = ?1 ORDER BY first_at",
     ) else {
         return Vec::new();
     };
     let rows = q.query_map([incident], |r| {
         let tg: u16 = r.get::<_, i64>(2)? as u16;
+        let pieces: Vec<crate::conversations::Piece> = serde_json::from_str(&r.get::<_, String>(8).unwrap_or_default()).unwrap_or_default();
+        let whose = crate::hospitals::whose(places, tg, &crate::conversations::said(&pieces));
         Ok(LinkedReport {
             id: r.get(0)?,
             at: r.get(1)?,
             tg,
             tg_name: r.get(3)?,
             tg_desc: r.get(4)?,
-            place: crate::places::for_tg(places, tg, "")
-                .map(|p| p.name.clone())
-                .unwrap_or_default(),
+            place: whose.as_ref().map(|w| w.name.clone()).unwrap_or_default(),
+            place_id: whose.map(|w| w.place_id).unwrap_or_default(),
             headline: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
             summary: r.get(5)?,
             how: r.get(6)?,

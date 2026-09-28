@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     fn piece(unit: u32, fixed: bool, at: i64, text: &str) -> Piece {
-        Piece { id: Some(at), unit, unit_name: None, fixed, at, secs: 3.0, audio: None, transcript: Some(text.into()) }
+        Piece { who: String::new(), id: Some(at), unit, unit_name: None, fixed, at, secs: 3.0, audio: None, transcript: Some(text.into()) }
     }
 
     #[test]

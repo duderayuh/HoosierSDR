@@ -1429,3 +1429,8 @@ td.tr.edited { box-shadow: inset 2px 0 0 var(--amber); }
 .rs-chart .zero { stroke: var(--ink-faint); stroke-width: 1; }
 .rs-def { margin: 0 0 4px; }
 
+
+/* Places: shared channels and the radios heard answering */
+.pl-shared { margin: 8px 0 4px; }
+.pl-heard { margin: 0 0 8px; }
+.pl-heard-row { align-items: center; }

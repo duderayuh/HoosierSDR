@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     fn places() -> crate::places::Settings {
-        crate::places::Settings {
+        crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![crate::places::Place { id: "p-general".into(), name: "Example General".into(), enabled: true, dest: "d-general".into(), ..Default::default() }],
         }
     }

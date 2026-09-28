@@ -1419,7 +1419,7 @@ fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Setti
                 .find(|f| f.key == "eta")
                 .map(|f| f.value.clone())
                 .or_else(|| crate::conversations::eta_phrase(&summary));
-            let hospital = crate::places::for_tg(places, r.tg, "");
+            let hospital = places.places.iter().find(|p| !r.place_id.is_empty() && p.id == r.place_id);
             let place = if r.place.is_empty() { r.tg_desc.clone() } else { r.place.clone() };
             let place = if place.is_empty() { r.tg_name.clone() } else { place };
             let ends = scene.zip(hospital.and_then(|h| h.lat.zip(h.lon)));
@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     fn piece(at: i64, fixed: bool, text: &str) -> crate::conversations::Piece {
-        crate::conversations::Piece {
+        crate::conversations::Piece { who: String::new(),
             id: None, unit: if fixed { 0 } else { 900_001 }, unit_name: None, fixed, at, secs: 5.0,
             audio: None, transcript: Some(text.into()),
         }

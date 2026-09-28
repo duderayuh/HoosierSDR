@@ -11,6 +11,8 @@
   const invoke = (cmd, args) => window.__TAURI__ ? window.__TAURI__.core.invoke(cmd, args) : window.dpInvoke(cmd, args);
 
   let places = [];
+  let shared = [];
+  let heard = [];
   let features = [];
   let dests = [];
   let sel = null;
@@ -23,14 +25,42 @@
     try {
       const [s, f] = await Promise.all([invoke("places_get"), invoke("place_features")]);
       places = s.places || [];
+      shared = s.shared_tgs || [];
       features = f || [];
+      loadHeard();
       try { const a = await invoke("alerts_get"); dests = (a && a.settings && a.settings.destinations) || []; } catch (e) { dests = []; }
       render();
     } catch (e) { /* the panel is only shown in the app */ }
   }
 
+  const nums = (v) => String(v || "").split(/[^0-9]+/).filter(Boolean).map(Number);
+
+  // Radios the library has heard answering as a place, not yet on it.
+  async function loadHeard() {
+    try { heard = (await invoke("places_heard_radios")) || []; } catch (e) { heard = []; }
+    drawHeard();
+  }
+
+  function drawHeard() {
+    const box = $("plHeard"); if (!box) return;
+    if (!heard.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="lab small">Radios heard answering as your places <span class="faint">— each keeps to hospital channels and keeps saying which place it is</span></div>`
+      + heard.map((h, i) => `<div class="row pl-heard-row"><span class="grow"><b>${esc(h.place)}</b> · radio <span class="mono">${h.radio}</span>${h.shared ? ' <span class="feat">IHERN</span>' : ""}<br><small class="faint">${h.answered} of ${h.calls} transmissions name it — “${esc(h.example)}”</small></span><button class="btn ghost sm" data-heard="${i}">Add</button></div>`).join("")
+      + (heard.length > 1 ? `<div class="inline"><button class="btn ghost sm" id="plHeardAll">Add all ${heard.length}</button></div>` : "");
+    const take = (list) => {
+      for (const h of list) {
+        const p = find(h.place_id);
+        if (p && !(p.radios || []).includes(h.radio)) p.radios = [...(p.radios || []), h.radio];
+      }
+      return save(list.length === 1 ? `Radio ${list[0].radio} is ${list[0].place}'s` : `Added ${list.length} radios`).then(loadHeard);
+    };
+    box.querySelectorAll("[data-heard]").forEach((b) => b.onclick = () => take([heard[+b.dataset.heard]]));
+    if ($("plHeardAll")) $("plHeardAll").onclick = () => take(heard);
+  }
+
   function render() {
     const box = $("plList"); if (!box) return;
+    if (document.activeElement !== $("plShared")) $("plShared").value = shared.join(", ");
     $("plMeta").textContent = places.length ? `${places.length} place${places.length === 1 ? "" : "s"} · ${places.filter((p) => p.lat != null).length} on the map` : "";
     $("plEmpty").style.display = places.length ? "none" : "";
     box.innerHTML = places.map((p) => `
@@ -68,6 +98,8 @@
       `<label class="check"><input type="checkbox" data-feat="${esc(k)}" ${(p.features || []).includes(k) ? "checked" : ""} /> ${esc(lab)}</label>`).join("");
     $("plOwnFeatures").value = own.join(", ");
     if ($("plEmail")) $("plEmail").value = p.email || "";
+    $("plRadios").value = (p.radios || []).join(", ");
+    $("plAliases").value = (p.aliases || []).join(", ");
     if ($("plDest")) {
       $("plDest").innerHTML = `<option value="">— none —</option>` + dests.map((d) => `<option value="${esc(d.id)}" ${d.id === p.dest ? "selected" : ""}>${esc(d.name)}</option>`).join("")
         + (p.dest && !dests.some((d) => d.id === p.dest) ? `<option value="${esc(p.dest)}" selected>a destination that was removed</option>` : "");
@@ -88,13 +120,16 @@
     p.features = [...new Set([...ticked, ...own])];
     if ($("plDest")) p.dest = $("plDest").value;
     if ($("plEmail")) p.email = $("plEmail").value.trim();
+    p.radios = nums($("plRadios").value);
+    p.aliases = $("plAliases").value.split(",").map((x) => x.trim()).filter(Boolean);
     return p;
   }
 
   async function save(note) {
     try {
-      const s = await invoke("places_set", { settings: { places } });
+      const s = await invoke("places_set", { settings: { places, shared_tgs: shared } });
       places = s.places || [];
+      shared = s.shared_tgs || [];
       if (sel && !find(sel)) sel = null;
       render();
       if (note) uiToast(note);
@@ -133,6 +168,7 @@
       if (got) { $("plTgs").value = got.join(", "); }
     };
     $("plSuggest").onclick = suggest;
+    $("plShared").onchange = () => { shared = nums($("plShared").value); save(shared.length ? `Talkgroup${shared.length === 1 ? "" : "s"} ${shared.join(", ")} read as shared` : "No shared channels"); };
     load();
   }
 
