@@ -81,11 +81,202 @@ impl Default for Send {
 }
 
 // ---------------------------------------------------------------------------
+// what the message is made of (Settings → Cases)
+// ---------------------------------------------------------------------------
+
+/// How a case's state heads its message and names it on a board.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Banner {
+    /// dispatched | working | rosc | transporting | reported | arrived | terminated | downgraded
+    pub state: String,
+    pub icon: String,
+    /// The banner line, as written (it is not upper-cased for you).
+    pub words: String,
+    /// The state in a few words, for a board's card title.
+    pub label: String,
+}
+
+/// A fact from the hospital report shown on the 🩺 line.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct FactShown {
+    pub key: String,
+    pub label: String,
+    /// How it is named on the "Not stated" line.
+    pub unstated: String,
+}
+
+/// Everything about the wording and the timing of a profile's messages.
+/// The defaults are what the message has always said.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Message {
+    /// Starts the first line, before the title and the address.
+    pub icon: String,
+    /// Starts the units line; blank leaves the units out.
+    pub units_icon: String,
+    pub show_units: bool,
+    pub banners: Vec<Banner>,
+    /// Shown, in this order, once a report is heard.
+    pub facts: Vec<FactShown>,
+    /// The "Not stated: …" line under them.
+    pub show_unstated: bool,
+    /// Telegram's limit on a caption is 1024 characters after markup; the
+    /// timeline under the page heard keeps inside this.
+    pub caption_chars: u32,
+    /// Telegram's limit on a message is 4096.
+    pub text_chars: u32,
+    /// A report's summary is cut to no shorter than this before older
+    /// lines go.
+    pub summary_min: u32,
+    /// A case whose last word is older than this gets no new thread.
+    pub start_within_hours: u32,
+    /// A clip older than this is not sent; the thread is brought up to
+    /// date by the edit instead, and nobody is buzzed about old news.
+    pub notify_within_mins: u32,
+    /// An ETA that moves by less than this is not news.
+    pub eta_move_mins: u32,
+    /// The kinds of line that earn an email reply.
+    pub email_events: Vec<String>,
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        let b = |state: &str, icon: &str, words: &str, label: &str| Banner { state: state.into(), icon: icon.into(), words: words.into(), label: label.into() };
+        let f = |key: &str, label: &str, unstated: &str| FactShown { key: key.into(), label: label.into(), unstated: unstated.into() };
+        Message {
+            icon: "🫀".into(),
+            units_icon: "🚒".into(),
+            show_units: true,
+            banners: vec![
+                b("dispatched", "🟡", "DISPATCHED", "dispatched"),
+                b("working", "🔴", "WORKING ARREST", "working"),
+                b("rosc", "💚", "ROSC · PULSES BACK", "ROSC"),
+                b("transporting", "🚑", "TRANSPORTING", "transporting"),
+                b("reported", "🏥", "HOSPITAL NOTIFIED", "reported to hospital"),
+                b("arrived", "🏥", "AT THE HOSPITAL", "at the hospital"),
+                b("terminated", "⚫", "EFFORTS CEASED", "efforts ceased"),
+                b("downgraded", "⚪", "NOT A CARDIAC ARREST · COMPLETED", "not an arrest"),
+            ],
+            facts: vec![
+                f("witnessed", "Witnessed", "witnessed"),
+                f("bystander cpr", "Bystander CPR", "bystander CPR"),
+                f("rhythm", "Rhythm", "rhythm"),
+                f("downtime", "Downtime (as said)", "downtime"),
+                f("history", "History", "history"),
+            ],
+            show_unstated: true,
+            caption_chars: CAPTION_CHARS as u32,
+            text_chars: TEXT_CHARS as u32,
+            summary_min: SUMMARY_MIN as u32,
+            start_within_hours: (START_WITHIN_SECS / 3600) as u32,
+            notify_within_mins: (NOTIFY_WITHIN_SECS / 60) as u32,
+            eta_move_mins: (ETA_MOVE_SECS / 60) as u32,
+            email_events: EMAIL_EVENTS.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+}
+
+impl Message {
+    pub fn start_within_secs(&self) -> i64 {
+        self.start_within_hours as i64 * 3600
+    }
+    pub fn notify_within_secs(&self) -> i64 {
+        self.notify_within_mins as i64 * 60
+    }
+    pub fn eta_move_secs(&self) -> i64 {
+        self.eta_move_mins as i64 * 60
+    }
+    /// The room the timeline has: a caption's, when it rides on the call heard.
+    pub fn cap_for(&self, audio: bool) -> usize {
+        if audio {
+            self.caption_chars as usize
+        } else {
+            self.text_chars as usize
+        }
+    }
+    pub fn banner(&self, state: &str) -> (String, String) {
+        match self.banners.iter().find(|b| b.state == state) {
+            Some(b) => (b.icon.clone(), b.words.clone()),
+            None => ("🔵".into(), state_label(state).to_uppercase()),
+        }
+    }
+    pub fn label(&self, state: &str) -> String {
+        match self.banners.iter().find(|b| b.state == state) {
+            Some(b) if !b.label.is_empty() => b.label.clone(),
+            _ => state_label(state).to_string(),
+        }
+    }
+}
+
+/// The eight states a case can be in, in the order the banners list them.
+pub const STATES: &[&str] = &["dispatched", "working", "rosc", "transporting", "reported", "arrived", "terminated", "downgraded"];
+
+/// Every state has a banner (a missing one gets the default), the caps
+/// stay inside what Telegram takes, and no window is zero.
+pub fn sanitize_message(m: &mut Message) {
+    let d = Message::default();
+    m.icon = m.icon.trim().to_string();
+    m.units_icon = m.units_icon.trim().to_string();
+    let mut banners = Vec::new();
+    for st in STATES {
+        let mut b = m.banners.iter().find(|b| b.state == *st).cloned().unwrap_or_else(|| d.banners.iter().find(|b| b.state == *st).cloned().unwrap());
+        b.icon = b.icon.trim().to_string();
+        b.words = b.words.trim().to_string();
+        b.label = b.label.trim().to_string();
+        if b.words.is_empty() {
+            b.words = d.banners.iter().find(|x| x.state == *st).map(|x| x.words.clone()).unwrap_or_default();
+        }
+        banners.push(b);
+    }
+    m.banners = banners;
+    m.facts.retain(|f| !f.key.trim().is_empty());
+    let mut keys: Vec<String> = Vec::new();
+    for f in m.facts.iter_mut() {
+        f.key = f.key.trim().to_lowercase();
+        f.label = f.label.trim().to_string();
+        f.unstated = f.unstated.trim().to_string();
+        if f.label.is_empty() {
+            f.label = f.key.clone();
+        }
+        if f.unstated.is_empty() {
+            f.unstated = f.label.to_lowercase();
+        }
+    }
+    m.facts.retain(|f| if keys.contains(&f.key) { false } else { keys.push(f.key.clone()); true });
+    m.caption_chars = m.caption_chars.clamp(200, 1024);
+    m.text_chars = m.text_chars.clamp(500, 4096);
+    m.summary_min = m.summary_min.clamp(20, 2000);
+    m.start_within_hours = m.start_within_hours.max(1);
+    m.notify_within_mins = m.notify_within_mins.max(1);
+    m.eta_move_mins = m.eta_move_mins.max(1);
+    let mut ev: Vec<String> = Vec::new();
+    for e in m.email_events.iter().flat_map(|l| l.split(['\n', ','])) {
+        let e = e.trim().to_lowercase();
+        if !e.is_empty() && !ev.contains(&e) {
+            ev.push(e);
+        }
+    }
+    m.email_events = ev;
+}
+
+/// The message settings a case is rendered by: its profile's.
+fn message_of(k: &CaseView) -> Message {
+    crate::cases::profile_of(&k.profile).message
+}
+
+// ---------------------------------------------------------------------------
 // what the timeline message says
 // ---------------------------------------------------------------------------
 
 fn hm(epoch: i64) -> String {
     crate::library::local_hm(epoch)
+}
+
+/// A state's label as the profile words it, for a board.
+pub fn state_label_for(profile: &str, state: &str) -> String {
+    crate::cases::profile_of(profile).message.label(state)
 }
 
 pub(crate) fn state_label(state: &str) -> &str {
@@ -133,15 +324,6 @@ fn said_by(l: &Line) -> String {
     }
 }
 
-/// The fact's key, how it is labelled, and how it is named when unstated.
-const FACTS_SHOWN: &[(&str, &str, &str)] = &[
-    ("witnessed", "Witnessed", "witnessed"),
-    ("bystander cpr", "Bystander CPR", "bystander CPR"),
-    ("rhythm", "Rhythm", "rhythm"),
-    ("downtime", "Downtime (as said)", "downtime"),
-    ("history", "History", "history"),
-];
-
 /// The latest value each report gave.
 fn facts_of(k: &CaseView) -> HashMap<String, String> {
     let mut got = HashMap::new();
@@ -158,21 +340,6 @@ fn facts_of(k: &CaseView) -> HashMap<String, String> {
 /// one. Never the talkgroup, whose "49F" reads as a patient's age and sex.
 pub fn number(k: &CaseView) -> String {
     format!("Incident #{}", k.incident)
-}
-
-/// Where a case stands, as it heads the message: a colour and the words.
-pub(crate) fn banner(state: &str) -> (&'static str, String) {
-    match state {
-        "dispatched" => ("🟡", "DISPATCHED".into()),
-        "working" => ("🔴", "WORKING ARREST".into()),
-        "rosc" => ("💚", "ROSC · PULSES BACK".into()),
-        "transporting" => ("🚑", "TRANSPORTING".into()),
-        "reported" => ("🏥", "HOSPITAL NOTIFIED".into()),
-        "arrived" => ("🏥", "AT THE HOSPITAL".into()),
-        "terminated" => ("⚫", "EFFORTS CEASED".into()),
-        "downgraded" => ("⚪", "NOT A CARDIAC ARREST · COMPLETED".into()),
-        other => ("🔵", state_label(other).to_uppercase()),
-    }
 }
 
 fn esc(s: &str) -> String {
@@ -210,8 +377,9 @@ impl Row {
 /// it; then what happened, a line each, with what the crew told the
 /// hospital under the line that says they called; then when to expect
 /// them and what the report said about the patient.
-fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
+fn compose(k: &CaseView, region: &str, m: &Message) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
     let mut head = Vec::new();
+    let lead = if m.icon.is_empty() { String::new() } else { format!("{} ", m.icon) };
     let place = if k.address.is_empty() { "address not heard".to_string() } else { k.address.clone() };
     let url = crate::alerts::maps_url(k.lat, k.lon, &k.address, region);
     let place_html = if k.address.is_empty() || url.is_empty() {
@@ -219,12 +387,14 @@ fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
     } else {
         format!("<a href=\"{}\">{}</a>", esc(&url), esc(&place))
     };
-    head.push(Row::new(format!("🫀 {} · {place}", k.title), format!("🫀 <b>{} · {place_html}</b>", esc(&k.title))));
-    let (icon, words) = banner(&k.state);
-    head.push(Row::new(format!("{icon} {words}"), format!("{icon} <b>{}</b>", esc(&words))));
-    if !k.units.is_empty() {
+    head.push(Row::new(format!("{lead}{} · {place}", k.title), format!("{}<b>{} · {place_html}</b>", esc(&lead), esc(&k.title))));
+    let (icon, words) = m.banner(&k.state);
+    let icon = if icon.is_empty() { String::new() } else { format!("{icon} ") };
+    head.push(Row::new(format!("{icon}{words}"), format!("{}<b>{}</b>", esc(&icon), esc(&words))));
+    if m.show_units && !k.units.is_empty() {
         let units = k.units.join(", ");
-        head.push(Row::new(format!("🚒 {units}"), format!("🚒 {}", esc(&units))));
+        let ui = if m.units_icon.is_empty() { String::new() } else { format!("{} ", m.units_icon) };
+        head.push(Row::new(format!("{ui}{units}"), format!("{}{}", esc(&ui), esc(&units))));
     }
     // The crew's own account, when it names no arrest at all. Said here
     // rather than left to the timeline, because the line at the top of this
@@ -286,19 +456,24 @@ fn compose(k: &CaseView, region: &str) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
             let who = who.join(", ");
             tail.push(Row::new(format!("👤 Patient: {who}"), format!("👤 <b>Patient</b>: {}", esc(&who))));
         }
-        let stated: Vec<(&str, &str)> = FACTS_SHOWN.iter().filter_map(|(key, label, _)| facts.get(*key).map(|v| (*label, v.as_str()))).collect();
+        let stated: Vec<(&str, &str)> = m.facts.iter().filter_map(|f| facts.get(&f.key).map(|v| (f.label.as_str(), v.as_str()))).collect();
         if !stated.is_empty() {
             tail.push(Row::new(
                 format!("🩺 {}", stated.iter().map(|(l, v)| format!("{l}: {v}")).collect::<Vec<_>>().join(" · ")),
                 format!("🩺 {}", stated.iter().map(|(l, v)| format!("{}: <b>{}</b>", esc(l), esc(v))).collect::<Vec<_>>().join(" · ")),
             ));
         }
-        // The score, worked out from what was stated: a range while any of
-        // its inputs is missing, never a guess.
-        let score = crate::study::score(&facts.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-        tail.push(Row::new(format!("📈 {}: {}", score.name, score.estimate), format!("📈 {}: <b>{}</b>", esc(&score.name), esc(&score.estimate))));
-        let unstated: Vec<&str> = FACTS_SHOWN.iter().filter(|(key, _, _)| !facts.contains_key(*key)).map(|(_, _, name)| *name).collect();
-        if !unstated.is_empty() {
+        // The score, worked out from what was stated by the rules on
+        // Settings → ECPR: a range while any of its inputs is missing,
+        // never a guess. Left out when that page says so.
+        let e = crate::ecpr::settings();
+        if e.case_line {
+            let score = crate::study::score_with(&e.score, &facts.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+            let lead = if e.case_prefix.is_empty() { String::new() } else { format!("{} ", e.case_prefix) };
+            tail.push(Row::new(format!("{lead}{}: {}", score.name, score.estimate), format!("{}{}: <b>{}</b>", esc(&lead), esc(&score.name), esc(&score.estimate))));
+        }
+        let unstated: Vec<&str> = m.facts.iter().filter(|f| !facts.contains_key(&f.key)).map(|f| f.unstated.as_str()).collect();
+        if m.show_unstated && !unstated.is_empty() {
             let s = format!("Not stated: {}", unstated.join(", "));
             tail.push(Row { plain: s.clone(), html: format!("<i>{}</i>", esc(&s)), part: Part::Unstated });
         }
@@ -334,7 +509,7 @@ fn trim_summary(timeline: &mut Vec<Row>, over: usize, floor: usize) {
 /// down to its headline and first sentence, then the oldest lines after
 /// the first — said so, since the first line and the latest are what the
 /// ED needs — and last whatever is left of that summary.
-fn fit(head: &[Row], mut timeline: Vec<Row>, mut tail: Vec<Row>, cap: usize) -> (Vec<Row>, Vec<Row>) {
+fn fit(head: &[Row], mut timeline: Vec<Row>, mut tail: Vec<Row>, cap: usize, summary_min: usize) -> (Vec<Row>, Vec<Row>) {
     let size = |t: &[Row], tail: &[Row]| head.iter().chain(t).chain(tail).map(|x| x.plain.chars().count() + 1).sum::<usize>() + 40;
     if size(&timeline, &tail) > cap {
         if let Some(last) = timeline.iter().rposition(|r| r.part == Part::Summary) {
@@ -346,7 +521,7 @@ fn fit(head: &[Row], mut timeline: Vec<Row>, mut tail: Vec<Row>, cap: usize) -> 
     }
     if size(&timeline, &tail) > cap {
         let over = size(&timeline, &tail) - cap;
-        trim_summary(&mut timeline, over, SUMMARY_MIN);
+        trim_summary(&mut timeline, over, summary_min);
     }
     // The line that says lines were dropped takes room of its own.
     let marker = |n: usize| if n > 0 { format!("… {n} earlier lines") } else { String::new() };
@@ -370,8 +545,13 @@ fn fit(head: &[Row], mut timeline: Vec<Row>, mut tail: Vec<Row>, cap: usize) -> 
 /// kept, compared to know when to edit, and shown in the Cases tab's
 /// preview.
 pub fn render(k: &CaseView, cap: usize) -> String {
-    let (head, timeline, tail) = compose(k, "");
-    let (timeline, tail) = fit(&head, timeline, tail, cap);
+    render_with(k, cap, &message_of(k))
+}
+
+/// The plain text of the timeline message by these message settings.
+pub fn render_with(k: &CaseView, cap: usize, m: &Message) -> String {
+    let (head, timeline, tail) = compose(k, "", m);
+    let (timeline, tail) = fit(&head, timeline, tail, cap, m.summary_min as usize);
     let mut out: Vec<&str> = head.iter().map(|r| r.plain.as_str()).collect();
     for block in [&timeline[..], &tail[..]] {
         if !block.is_empty() {
@@ -390,8 +570,9 @@ pub fn render(k: &CaseView, cap: usize) -> String {
 /// address), the timeline set off as a quote, and the incident number in
 /// monospace, which Telegram copies with a tap.
 pub fn html(k: &CaseView, region: &str, cap: usize) -> String {
-    let (head, timeline, tail) = compose(k, region);
-    let (timeline, tail) = fit(&head, timeline, tail, cap);
+    let m = message_of(k);
+    let (head, timeline, tail) = compose(k, region, &m);
+    let (timeline, tail) = fit(&head, timeline, tail, cap, m.summary_min as usize);
     let mut out = head.iter().map(|r| r.html.clone()).collect::<Vec<_>>().join("\n");
     if !timeline.is_empty() {
         out.push_str(&format!("\n<blockquote>{}</blockquote>", timeline.iter().map(|r| r.html.as_str()).collect::<Vec<_>>().join("\n")));
@@ -408,7 +589,7 @@ pub fn html(k: &CaseView, region: &str, cap: usize) -> String {
 /// after an upgrade for every recent one, would be noise.
 pub fn map_due(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) -> bool {
     let last = k.lines.last().map(|l| l.at).unwrap_or(k.opened);
-    s.map && t.place_id.is_none() && !had.is_some_and(|h| h.map_sent) && k.open && now - last <= NOTIFY_WITHIN_SECS
+    s.map && t.place_id.is_none() && !had.is_some_and(|h| h.map_sent) && k.open && now - last <= message_of(k).notify_within_secs()
 }
 
 /// Whether the case has ended: efforts ceased, or it was not an arrest.
@@ -470,6 +651,7 @@ fn event_text(icon: &str, words: &str, when: &str) -> (String, String) {
 /// one only when its ETA moved, or it gave one where the last did not.
 /// Everything else the case says is in the timeline already.
 pub fn notices(k: &CaseView) -> Vec<Notice> {
+    let eta_move = message_of(k).eta_move_secs();
     let mut out = Vec::new();
     let mut last_to: Option<Option<i64>> = None;
     for l in k.lines.iter().filter(|l| l.kind == "report") {
@@ -479,7 +661,7 @@ pub fn notices(k: &CaseView) -> Vec<Notice> {
         let news = match last_to {
             None => true,
             Some(prev) => match (prev, to) {
-                (Some(p), Some(t)) => (t - p).abs() >= ETA_MOVE_SECS,
+                (Some(p), Some(t)) => (t - p).abs() >= eta_move,
                 (None, Some(_)) => true,
                 _ => false,
             },
@@ -552,11 +734,12 @@ fn hospitals<'a>(k: &'a CaseView, places: &'a crate::places::Settings) -> impl I
 /// The crew's report to a hospital, on an arrest case, names no arrest.
 /// Read the same way as the case's own warning, so the two agree.
 fn no_arrest_reported(k: &CaseView, conversation: i64) -> bool {
-    k.profile == "cardiac-arrest"
+    let words = crate::cases::profile_of(&k.profile).report_words().to_vec();
+    !words.is_empty()
         && k.state != "downgraded"
         && k.lines
             .iter()
-            .any(|l| l.kind == "report" && l.conversation == Some(conversation) && crate::cases::contradicts_arrest(&l.detail))
+            .any(|l| l.kind == "report" && l.conversation == Some(conversation) && crate::cases::contradicts(&l.detail, &words))
 }
 
 /// What a thread opens with, heard: the page that opened the case, in the
@@ -691,20 +874,12 @@ pub enum Step {
     DropMap { map_id: i64 },
 }
 
-/// The room the timeline has: a caption's, when it rides on the call heard.
-fn cap_for(audio: bool) -> usize {
-    if audio {
-        CAPTION_CHARS
-    } else {
-        TEXT_CHARS
-    }
-}
-
 /// What one chat needs for one case, from what it already has.
 pub fn plan(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) -> Vec<Step> {
+    let m = message_of(k);
     let heard = if s.audio { intro(k, t) } else { None };
-    let cap = cap_for(had.map_or(heard.is_some(), |h| h.root_audio));
-    let text = render(k, cap);
+    let cap = m.cap_for(had.map_or(heard.is_some(), |h| h.root_audio));
+    let text = render_with(k, cap, &m);
     let mut steps = Vec::new();
     let root = match had {
         Some(h) => {
@@ -715,7 +890,7 @@ pub fn plan(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) ->
         }
         None => {
             let last = k.lines.last().map(|l| l.at).unwrap_or(k.opened);
-            if now - last > START_WITHIN_SECS || (concluded(k) && now - last > NOTIFY_WITHIN_SECS) {
+            if now - last > m.start_within_secs() || (concluded(k) && now - last > m.notify_within_secs()) {
                 return steps;
             }
             steps.push(Step::Root { text: text.clone(), heard });
@@ -731,7 +906,7 @@ pub fn plan(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64) ->
             // A new thread already shows everything up to now in its first
             // message; a clip for each call in it would be the noise this
             // is built to avoid.
-            if had.is_none() || now - n.at > NOTIFY_WITHIN_SECS {
+            if had.is_none() || now - n.at > m.notify_within_secs() {
                 steps.push(Step::Stale { notice: n });
             } else {
                 steps.push(Step::Reply { root_id: root, notice: n });
@@ -778,9 +953,10 @@ pub fn tick(app: &AppHandle) {
     let al = state.alerts.lock().unwrap().settings.clone();
     let now = crate::library::now();
     let Some(db) = state.db.lock().unwrap().clone() else { return };
+    let reach = settings.profiles.iter().map(|p| p.message.start_within_secs()).max().unwrap_or(START_WITHIN_SECS);
     let view = {
         let c = db.lock().unwrap();
-        crate::cases::list(&c, now - START_WITHIN_SECS - crate::cases::LIVE_WINDOW_SECS, &places, now)
+        crate::cases::list(&c, now - reach - crate::cases::LIVE_WINDOW_SECS, &places, now)
     };
     let view = crate::cases::with_roads(&state, view);
     for p in settings.profiles.iter().filter(|p| on(p)) {
@@ -842,7 +1018,7 @@ fn carry_out(
                 // The timeline was rendered to fit a caption when there is a
                 // call to hear; the markup follows the same cut whether or
                 // not the clip can be put together.
-                let cap = cap_for(heard.is_some());
+                let cap = p.message.cap_for(heard.is_some());
                 let markup = html(k, &region, cap);
                 let clip = heard.as_ref().and_then(|n| clip_of(db, k, n).map(|c| (n, c)));
                 let (id, audio) = match clip {
@@ -864,7 +1040,7 @@ fn carry_out(
             }
             Step::Edit { root_id, text } => {
                 let audio = had.as_ref().is_some_and(|h| h.root_audio);
-                let markup = html(k, &region, cap_for(audio));
+                let markup = html(k, &region, p.message.cap_for(audio));
                 let edited = if audio {
                     crate::alerts::edit_message_caption_html(&target, root_id, &text, Some(&markup))
                 } else {
@@ -1125,8 +1301,9 @@ pub struct Update {
 pub fn updates(k: &CaseView) -> Vec<Update> {
     let mut out: Vec<Update> = Vec::new();
     let mut last_kind = "";
+    let events = message_of(k).email_events;
     for l in &k.lines {
-        if !EMAIL_EVENTS.contains(&l.kind.as_str()) || l.kind == last_kind {
+        if !events.contains(&l.kind) || l.kind == last_kind {
             continue;
         }
         last_kind = l.kind.as_str();
@@ -1172,17 +1349,18 @@ pub fn plan_email(k: &CaseView, t: &EmailThread, had: Option<&EmailSent>, now: i
     match had {
         None => {
             let last = k.lines.last().map(|l| l.at).unwrap_or(k.opened);
-            if now - last > START_WITHIN_SECS || (concluded(k) && now - last > NOTIFY_WITHIN_SECS) {
+            let m = message_of(k);
+            if now - last > m.start_within_secs() || (concluded(k) && now - last > m.notify_within_secs()) {
                 return steps;
             }
-            let subject = render(k, TEXT_CHARS).lines().next().unwrap_or("Case").to_string();
+            let subject = render_with(k, m.text_chars as usize, &m).lines().next().unwrap_or("Case").to_string();
             steps.push(EmailStep::Open { subject });
             // The first email tells everything so far.
             steps.extend(mine.into_iter().map(|u| EmailStep::Stale { key: u.key }));
         }
         Some(h) => {
             for u in mine.into_iter().filter(|u| !h.keys.contains(&u.key)) {
-                if now - u.at > NOTIFY_WITHIN_SECS {
+                if now - u.at > message_of(k).notify_within_secs() {
                     steps.push(EmailStep::Stale { key: u.key });
                 } else {
                     steps.push(EmailStep::Follow { update: u });
@@ -1388,7 +1566,7 @@ pub fn preview(view: &crate::cases::CasesView, s: &Send, places: &crate::places:
             opened: k.opened,
             chats: ts.iter().map(|t| name(&t.dest)).collect(),
             replies: all.iter().map(|n| n.text.clone()).collect(),
-            timeline: render(k, cap_for(s.audio)),
+            timeline: render(k, message_of(k).cap_for(s.audio)),
         });
     }
     let mut days: Vec<PreviewDay> = days.into_values().collect();
@@ -1544,7 +1722,34 @@ mod tests {
     }
 
     fn had(k: &CaseView, audio: bool, map_id: Option<i64>) -> Sent {
-        Sent { target: "x".into(), root_id: 77, root_audio: audio, rendered: render(k, cap_for(audio)), map_sent: map_id.is_some(), map_id, notices: HashSet::new() }
+        Sent { target: "x".into(), root_id: 77, root_audio: audio, rendered: render(k, Message::default().cap_for(audio)), map_sent: map_id.is_some(), map_id, notices: HashSet::new() }
+    }
+
+    #[test]
+    fn the_message_is_worded_by_its_settings() {
+        let mut m = Message::default();
+        m.icon = "🚨".into();
+        m.units_icon = String::new();
+        m.show_unstated = false;
+        m.banners.iter_mut().find(|b| b.state == "reported").unwrap().words = "Hospital called".into();
+        m.facts = vec![FactShown { key: "rhythm".into(), label: "First rhythm".into(), unstated: "rhythm".into() }];
+        let text = render_with(&arrest(), TEXT_CHARS, &m);
+        assert!(text.starts_with("🚨 Cardiac arrest · "), "{text}");
+        assert!(text.contains("\n🏥 Hospital called\n"), "{text}");
+        assert!(text.lines().any(|l| l == "Engine 5, Medic 7" || l.starts_with("Engine")), "units without an icon: {text}");
+        assert!(text.contains("🩺 First rhythm: VF") && !text.contains("Witnessed"), "{text}");
+        assert!(!text.contains("Not stated"), "{text}");
+        // The defaults are what the message always said.
+        assert_eq!(render_with(&arrest(), TEXT_CHARS, &Message::default()), render(&arrest(), TEXT_CHARS));
+    }
+
+    #[test]
+    fn sanitizing_a_message_keeps_every_state_and_the_caps_inside_telegrams() {
+        let mut m = Message { banners: Vec::new(), caption_chars: 0, text_chars: 99_999, email_events: vec!["rosc, ROSC\nworking".into()], ..Default::default() };
+        sanitize_message(&mut m);
+        assert_eq!(m.banners.len(), STATES.len());
+        assert_eq!((m.caption_chars, m.text_chars), (200, 4096));
+        assert_eq!(m.email_events, vec!["rosc", "working"]);
     }
 
     #[test]

@@ -129,79 +129,8 @@
     } catch (e) { uiToast(`${e}`, "err"); }
   }
 
-  /* ---------- Telegram ---------- */
-  let profile = null, dests = [];
-
-  async function loadSend() {
-    try {
-      const s = (await invoke("cases_profiles")) || { profiles: [] };
-      profile = (s.profiles || [])[0] || null;
-      const a = await invoke("alerts_get");
-      dests = (a && a.settings && a.settings.destinations) || [];
-    } catch (e) { return; }
-    drawSend();
-  }
-
-  function drawSend() {
-    if (!profile || !$("csSendOn")) return;
-    const t = profile.telegram || {};
-    $("csSendOn").checked = !!t.enabled;
-    $("csSendDest").innerHTML = `<option value="">— none —</option>` + dests.map((d) => `<option value="${esc(d.id)}" ${d.id === t.dest ? "selected" : ""}>${esc(d.name)}</option>`).join("")
-      + (t.dest && !dests.some((d) => d.id === t.dest) ? `<option value="${esc(t.dest)}" selected>a destination that was removed</option>` : "");
-    $("csSendHosp").checked = t.hospitals !== false;
-    $("csSendMap").checked = t.map !== false;
-    $("csSendAudio").checked = t.audio !== false;
-    $("csSendEmail").checked = !!t.email;
-    $("csSendEmailTo").value = t.email_to || "";
-    $("csSendMeta").textContent = [t.enabled ? "Telegram on" : "", t.email ? "email on" : ""].filter(Boolean).join(" · ") || "off";
-  }
-
-  function readSend() {
-    return {
-      enabled: $("csSendOn").checked,
-      dest: $("csSendDest").value,
-      hospitals: $("csSendHosp").checked,
-      map: $("csSendMap").checked,
-      audio: $("csSendAudio").checked,
-      email: $("csSendEmail").checked,
-      email_to: $("csSendEmailTo").value.trim(),
-    };
-  }
-
-  async function saveSend() {
-    if (!profile) return;
-    const t = readSend();
-    if (t.enabled && !(profile.telegram || {}).enabled && !(await uiConfirm("Cases will start sending to Telegram. Any tripwire that already announces arrests will keep sending too — turn those off once this looks right.", "Switch on"))) {
-      $("csSendOn").checked = false; return;
-    }
-    try {
-      const s = await invoke("cases_set_telegram", { profile: profile.id, telegram: t });
-      profile = ((s && s.profiles) || []).find((p) => p.id === profile.id) || profile;
-      drawSend();
-      uiToast(t.enabled || t.email ? `Cases will be sent${t.enabled ? " to Telegram" : ""}${t.enabled && t.email ? " and" : ""}${t.email ? " by email" : ""}` : "Saved — nothing is sent while it is off");
-    } catch (e) { uiToast(`${e}`, "err"); }
-  }
-
-  async function preview() {
-    if (!profile) return;
-    const days = await uiAsk("Preview the cases already built over how many days? Nothing is sent. Save first to preview what you changed.", "3", "Preview");
-    if (days == null || !(+days > 0)) return;
-    try {
-      const p = await invoke("cases_preview", { profile: profile.id, days: +days });
-      if (!p) return;
-      const rows = (p.days || []).map((d) => `<tr><td class="mono">${esc(d.date)}</td><td>${esc(d.dest)}</td><td class="mono">${d.threads}</td><td class="mono">${d.replies}</td></tr>`).join("");
-      const sample = (p.cases || []).filter((k) => k.chats.length).slice(0, 5).map((k) =>
-        `<details class="cs-sample"><summary>${esc(k.title)} · ${esc(k.address || "address not heard")} · ${esc(when(k.opened))} → ${esc(k.chats.join(", "))}</summary><pre>${esc(k.timeline)}</pre>${k.replies.length ? `<div class="lab small">Reports heard, under it</div><pre>${esc(k.replies.join("\n"))}</pre>` : ""}</details>`).join("");
-      $("csPreview").innerHTML = (p.warnings || []).map((w) => `<div class="cs-warn">${esc(w)}</div>`).join("")
-        + (rows ? `<table class="cs-count"><thead><tr><th>Day</th><th>Chat</th><th>Cases</th><th>Reports heard</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty small">Nothing would have been sent.</div>')
-        + sample;
-    } catch (e) { uiToast(`${e}`, "err"); }
-  }
-
-  if ($("csSendSave")) {
-    $("csSendSave").onclick = saveSend;
-    $("csPreviewBtn").onclick = preview;
-  }
+  // Where cases go, and everything else about them, is set on Settings → Cases.
+  if ($("csSendGo")) $("csSendGo").onclick = () => { showView("settings"); setPage("cases"); };
 
   $("csHours").onchange = load;
   $("csRebuild").onclick = async () => {
@@ -218,5 +147,5 @@
   if (listen) listen("cases", () => { if (!shown()) return; clearTimeout(timer); timer = setTimeout(load, 800); });
   // Keep "since dispatch" honest while the tab is open.
   setInterval(() => { if (shown() && data.cases.some((k) => k.open)) drawTimeline(); }, 30000);
-  window.casesOnShow = () => { load(); loadSend(); };
+  window.casesOnShow = () => { load(); };
 })();

@@ -34,26 +34,12 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 // the score
 // ---------------------------------------------------------------------------
+//
+// The rules — the criteria, the estimate table, the age exclusion and the
+// word lists — live in Settings → ECPR (`ecpr::ScoreRules`). The defaults
+// there are the program's ED-ECPR gate; this is the arithmetic over them.
 
-/// The score, by the name a methods section would give it.
-pub const SCORE_NAME: &str = "ED-ECPR 4-criterion screen";
-
-/// Favourable-outcome estimate, percent, by criteria met: the table the
-/// program's ED-ECPR gate uses (4 of 4 about 46 %, 3 of 4 about 12 %, two or
-/// fewer 0 to 5 %). One home, so a study that names a different table
-/// changes it here and nowhere else.
-pub fn band(met: u8) -> (f64, f64) {
-    match met {
-        4.. => (46.0, 46.0),
-        3 => (12.0, 12.0),
-        _ => (0.0, 5.0),
-    }
-}
-
-/// Oldest age the screen accepts; older is a hard exclusion.
-pub const MAX_AGE: u32 = 65;
-/// Age plus low-flow minutes must come in under this.
-pub const AGE_PLUS_LOW_FLOW: u32 = 100;
+use crate::ecpr::{CriterionRule, ScoreRules};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Criterion {
@@ -74,6 +60,9 @@ pub struct Score {
     pub met: u8,
     pub unknown: u8,
     pub assumed: u8,
+    /// How many criteria the screen has.
+    #[serde(default)]
+    pub of: u8,
     /// A hard exclusion, and why; empty when none.
     pub excluded: String,
     /// The estimate if every unknown criterion failed, and if every one held.
@@ -85,61 +74,85 @@ pub struct Score {
     pub estimate: String,
 }
 
-/// Work the score out from the facts a report stated, by fact key
-/// (`age`, `downtime`, `witnessed`, `bystander cpr`, `history`). A key that
-/// is absent was not stated.
+/// Work the score out by the rules saved on Settings → ECPR.
 pub fn score(facts: &BTreeMap<String, String>) -> Score {
-    let get = |k: &str| facts.get(k).map(String::as_str).filter(|v| !is_unstated(v));
-    let age = get("age").and_then(parse_age);
-    let low_flow = get("downtime").and_then(parse_minutes);
-    let crit = |key: &str, label: &str, verdict: &str, why: String| Criterion { key: key.into(), label: label.into(), verdict: verdict.into(), why };
+    score_with(&crate::ecpr::settings().score, facts)
+}
 
-    let time = match (age, low_flow) {
-        (Some(a), Some(m)) => {
-            let ok = a + m < AGE_PLUS_LOW_FLOW;
-            crit("time", "Age + low-flow minutes < 100", if ok { "met" } else { "not met" }, format!("{a} + {m} min stated = {}", a + m))
-        }
-        (Some(a), None) if a >= AGE_PLUS_LOW_FLOW => crit("time", "Age + low-flow minutes < 100", "not met", format!("age {a} alone")),
-        (a, m) => crit(
-            "time",
-            "Age + low-flow minutes < 100",
-            "unknown",
-            match (a, m) {
-                (None, None) => "age and downtime not stated".into(),
-                (None, _) => "age not stated".into(),
-                _ => "downtime not stated".into(),
+/// Work the score out from the facts a report stated, by fact key
+/// (`age`, `downtime`, `witnessed`, `bystander cpr`, `history` with the
+/// default rules). A key that is absent was not stated.
+pub fn score_with(r: &ScoreRules, facts: &BTreeMap<String, String>) -> Score {
+    let get = |k: &str| facts.get(k).map(String::as_str).filter(|v| !is_unstated_with(&r.unstated_words, v));
+    let age = get(&r.age_fact).and_then(parse_age);
+    let crit = |c: &CriterionRule, verdict: &str, why: String| Criterion { key: c.key.clone(), label: c.label.clone(), verdict: verdict.into(), why };
+    // What a criterion whose fact was not stated becomes, as the rule says.
+    let unstated = |c: &CriterionRule, why: String| match c.unstated.as_str() {
+        "met" => crit(c, "assumed", format!("{why}; the screen counts it met")),
+        "not met" => crit(c, "not met", format!("{why}; the screen counts it not met")),
+        _ => crit(c, "unknown", why),
+    };
+
+    let mut criteria = Vec::new();
+    for c in r.criteria.iter().filter(|c| c.enabled) {
+        let out = match c.kind.as_str() {
+            "time" => {
+                let mins = get(&c.fact).and_then(parse_minutes);
+                match (age, mins) {
+                    (Some(a), Some(m)) => {
+                        let ok = a + m < c.limit;
+                        crit(c, if ok { "met" } else { "not met" }, format!("{a} + {m} min stated = {}", a + m))
+                    }
+                    (Some(a), None) if a >= c.limit => crit(c, "not met", format!("{} {a} alone", r.age_fact)),
+                    (a, m) => unstated(
+                        c,
+                        match (a, m) {
+                            (None, None) => format!("{} and {} not stated", r.age_fact, c.fact),
+                            (None, _) => format!("{} not stated", r.age_fact),
+                            _ => format!("{} not stated", c.fact),
+                        },
+                    ),
+                }
+            }
+            "no_disease" => match get(&c.fact) {
+                Some(v) if end_stage_with(&r.end_stage_words, v) => crit(c, "not met", format!("“{v}”")),
+                Some(v) => crit(c, "met", format!("“{v}”")),
+                None => unstated(c, "not stated".into()),
             },
-        ),
-    };
-    let yes_no = |key: &str, fact: &str, label: &str| match get(fact) {
-        Some(v) => match parse_yes_no(v) {
-            Some(true) => crit(key, label, "met", format!("“{v}”")),
-            Some(false) => crit(key, label, "not met", format!("“{v}”")),
-            None => crit(key, label, "unknown", format!("“{v}” does not say")),
-        },
-        None => crit(key, label, "unknown", "not stated".into()),
-    };
-    let witnessed = yes_no("witnessed", "witnessed", "Witnessed arrest");
-    let bystander = yes_no("bystander", "bystander cpr", "Bystander CPR");
-    let disease = match get("history") {
-        Some(v) if end_stage(v) => crit("disease", "No known end-stage disease", "not met", format!("“{v}”")),
-        Some(v) => crit("disease", "No known end-stage disease", "met", format!("“{v}”")),
-        None => crit("disease", "No known end-stage disease", "assumed", "no history stated; the screen counts it met".into()),
-    };
-    let criteria = vec![time, witnessed, bystander, disease];
+            _ => match get(&c.fact) {
+                Some(v) => match parse_yes_no_with(r, v) {
+                    Some(true) => crit(c, "met", format!("“{v}”")),
+                    Some(false) => crit(c, "not met", format!("“{v}”")),
+                    None => crit(c, "unknown", format!("“{v}” does not say")),
+                },
+                None => unstated(c, "not stated".into()),
+            },
+        };
+        criteria.push(out);
+    }
     let count = |v: &str| criteria.iter().filter(|c| c.verdict == v).count() as u8;
     let (met, unknown, assumed) = (count("met") + count("assumed"), count("unknown"), count("assumed"));
+    let of = criteria.len() as u8;
     let excluded = match age {
-        Some(a) if a > MAX_AGE => format!("age {a} is over {MAX_AGE}"),
+        Some(a) if r.max_age > 0 && a > r.max_age => format!("{} {a} is over {}", r.age_fact, r.max_age),
         _ => String::new(),
     };
-    let mut s = Score { name: SCORE_NAME.into(), criteria, met, unknown, assumed, excluded, complete: unknown == 0, ..Default::default() };
+    let mut s = Score { name: r.name.clone(), criteria, met, unknown, assumed, of, excluded, complete: unknown == 0, ..Default::default() };
     if !s.excluded.is_empty() {
         s.estimate = format!("excluded: {}", s.excluded);
         return s;
     }
-    let (lo, _) = band(met);
-    let (_, hi) = band(met + unknown);
+    let band = |n: u8| -> Option<[f64; 2]> {
+        if r.bands.is_empty() {
+            return None;
+        }
+        Some(r.bands[(n as usize).min(r.bands.len() - 1)])
+    };
+    let (Some(low), Some(high)) = (band(met), band(met + unknown)) else {
+        s.estimate = "no estimate table".into();
+        return s;
+    };
+    let (lo, hi) = (low[0], high[1]);
     s.lo_pct = Some(lo);
     s.hi_pct = Some(hi);
     let pct = |x: f64| format!("{}", x.round() as i64);
@@ -148,8 +161,8 @@ pub fn score(facts: &BTreeMap<String, String>) -> Score {
     } else {
         format!("{}–{}%", pct(lo), pct(hi))
     };
-    if unknown > 0 {
-        s.estimate.push_str(&format!(" ({unknown} of 4 not stated)"));
+    if unknown > 0 && r.not_stated_note {
+        s.estimate.push_str(&format!(" ({unknown} of {of} not stated)"));
     }
     s
 }
@@ -158,10 +171,15 @@ pub fn score(facts: &BTreeMap<String, String>) -> Score {
 // reading a stated value
 // ---------------------------------------------------------------------------
 
-/// Words that mean the thing was not said, which is not the same as "no".
+/// Words that mean the thing was not said, which is not the same as "no",
+/// by the list on Settings → ECPR.
 pub fn is_unstated(v: &str) -> bool {
+    is_unstated_with(&crate::ecpr::settings().score.unstated_words, v)
+}
+
+pub fn is_unstated_with(words: &[String], v: &str) -> bool {
     let v = v.trim().trim_end_matches('.').to_ascii_lowercase();
-    ["", "not stated", "not said", "unknown", "unclear", "n/a", "na", "none stated", "not mentioned", "not reported", "?"].contains(&v.as_str())
+    v.is_empty() || words.iter().any(|w| *w == v)
 }
 
 fn numbers(v: &str) -> Vec<(u32, usize, usize)> {
@@ -263,34 +281,29 @@ pub fn parse_minutes(v: &str) -> Option<u32> {
     best.filter(|m| *m <= 24 * 60)
 }
 
-/// Yes or no, from how a report or a reviewer put it. `None` when it says
-/// neither.
+/// Yes or no, from how a report or a reviewer put it, by the word lists
+/// on Settings → ECPR. `None` when it says neither.
 pub fn parse_yes_no(v: &str) -> Option<bool> {
+    parse_yes_no_with(&crate::ecpr::settings().score, v)
+}
+
+pub fn parse_yes_no_with(r: &ScoreRules, v: &str) -> Option<bool> {
     let l = v.trim().to_ascii_lowercase();
     let first = l.split(|c: char| !c.is_ascii_alphanumeric()).find(|w| !w.is_empty()).unwrap_or("");
-    if ["no", "not", "none", "negative", "never", "n", "false", "0", "unwitnessed", "without"].contains(&first)
-        || ["unwitnessed", "not witnessed", "no bystander", "no cpr", "no rosc", "no pulse", "remains in arrest", "still in arrest"]
-            .iter()
-            .any(|p| l.contains(p))
-    {
+    if r.no_words.iter().any(|w| w == first) || r.no_phrases.iter().any(|p| l.contains(p.as_str())) {
         return Some(false);
     }
-    if ["yes", "y", "true", "1", "positive", "affirmative"].contains(&first)
-        || ["witnessed", "bystander", "cpr", "compressions", "rosc", "pulses back", "return of", "got pulses", "pulse back"]
-            .iter()
-            .any(|p| l.contains(p))
-    {
+    if r.yes_words.iter().any(|w| w == first) || r.yes_phrases.iter().any(|p| l.contains(p.as_str())) {
         return Some(true);
     }
     None
 }
 
-/// History that names an end-stage disease, the screen's criterion 4.
-pub fn end_stage(v: &str) -> bool {
+/// History that names an end-stage disease, the screen's criterion 4, by
+/// the words on Settings → ECPR.
+pub fn end_stage_with(words: &[String], v: &str) -> bool {
     let l = v.to_ascii_lowercase();
-    ["end stage", "end-stage", "esrd", "dialysis", "hospice", "dnr", "metastatic", "terminal", "comfort care"]
-        .iter()
-        .any(|p| l.contains(p))
+    words.iter().any(|p| l.contains(p.as_str()))
 }
 
 fn norm_sex(v: &str) -> Option<&'static str> {

@@ -118,7 +118,7 @@ $("navSeg").querySelectorAll("button").forEach((b) => b.onclick = () => showView
 // Pages that load something when shown. Playlists, Aliases, Devices and
 // Discovery were top-level tabs once; their code
 // still refreshes only while on screen, via settingsPageVisible().
-const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", library: "libraryOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
+const PAGE_HOOKS = { discovery: "discoveryOnShow", connections: "connectionsOnShow", ecpr: "ecprOnShow", cases: "casesSettingsOnShow", library: "libraryOnShow", devices: "devicesOnShow", aliases: "aliasesOnShow", remote: "remoteOnShow" };
 let curPage = "appearance";
 function setPage(p) {
   const nav = $("setNav");
@@ -138,7 +138,7 @@ setTimeout(() => {
   const m = /^#settings(?:\/(\w+))?/.exec(location.hash);
   if (m) { showView("settings"); if (m[1]) setPage(m[1]); return; }
   const page = location.hash.slice(1);
-  if (["discovery", "playlists", "aliases", "connections", "devices"].includes(page)) { showView("settings"); setPage(page); return; }
+  if (["discovery", "playlists", "aliases", "connections", "devices", "ecpr"].includes(page)) { showView("settings"); setPage(page); return; }
   // The old Alerts and Analyzers pages are Tripwires now.
   if (["alerts", "analyzers", "tripwires"].includes(page)) { showView("tripwires"); return; }
   if (["library", "conversations", "dispatch", "dashboard"].includes(page)) showView(page);

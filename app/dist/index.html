@@ -650,22 +650,8 @@
             </div>
           </div>
           <div class="panel">
-            <div class="head"><span class="eyebrow">On Telegram and by email</span><span class="meta" id="csSendMeta"></span></div>
-            <div class="body tight cs-send">
-              <p class="help">Each case is one message per chat: its timeline, edited as the case grows, which buzzes nobody. A reply, which does, goes out only for the events ticked below. A hospital's chat hears a case once a crew calls that hospital, never on a guess. Read the preview before switching it on, and turn off the tripwires that already announce arrests, or both will.</p>
-              <label class="check"><input type="checkbox" id="csSendOn" /> Send cases to Telegram</label>
-              <label class="field"><span class="lab">Every case goes to</span><select id="csSendDest"></select></label>
-              <label class="check"><input type="checkbox" id="csSendHosp" /> And to a hospital's own chat once a crew calls it <span class="faint small">(set the chat on the place, in Dispatch setup → Places)</span></label>
-              <label class="check"><input type="checkbox" id="csSendMap" /> With a map under it: the run and its routes to where its care pathway says to go (scene to hospital in a hospital's chat), taken down when the case ends</label>
-              <label class="check"><input type="checkbox" id="csSendAudio" /> With the radio: the thread opens with the page heard and the timeline under it (in a hospital's chat, the report), and a crew's report to a hospital follows as the clip of that call</label>
-              <div class="cs-email">
-                <label class="check"><input type="checkbox" id="csSendEmail" /> Also by email, through the account on Settings → Connections</label>
-                <label class="field"><span class="lab">Every case is emailed to <span class="mono faint">addresses, separated by commas</span></span><input id="csSendEmailTo" type="text" placeholder="ed-charge@example.org" spellcheck="false" /></label>
-                <p class="help">Email cannot be edited, so a case by email is a thread: the first email is the timeline so far, and each piece of news — working, ROSC, lost pulses, transporting, efforts ceased, not an arrest, a report to a hospital — follows as a reply with the timeline as it then stands. With “a hospital's own chat” ticked, a hospital's own email addresses (on the place) hear it the same way. The map and the radio are attached when ticked above.</p>
-              </div>
-              <div class="inline"><button class="btn primary sm" id="csSendSave">Save</button><button class="btn ghost sm" id="csPreviewBtn" title="What the cases already built would have sent. Nothing is sent.">Preview…</button></div>
-              <div id="csPreview"></div>
-            </div>
+            <div class="head"><span class="eyebrow">On Telegram and by email</span><span class="meta" id="csSendMeta"></span><span class="spacer"></span><button class="btn ghost sm" id="csSendGo">Settings → Cases</button></div>
+            <div class="body tight"><p class="help">Where cases go, what the message says, which words are events and how they are placed on a run are all set on Settings → Cases.</p></div>
           </div>
         </div>
       </section>
@@ -869,6 +855,8 @@
           <button data-p="playlists">Playlists</button>
           <button data-p="aliases">Aliases</button>
           <button data-p="connections">Connections</button>
+          <button data-p="ecpr">ECPR</button>
+          <button data-p="cases">Cases</button>
           <button data-p="devices">Devices</button>
           <button data-p="transcription">Transcription</button>
           <button data-p="corrections">Corrections</button>
@@ -1415,6 +1403,208 @@
         </div>
       </section>
         </div>
+        <div class="stack settings-page" id="set-ecpr" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">ECPR · the whole process, in one place</span><span class="meta" id="ecMeta"></span><span class="spacer"></span><span class="tw-dirty" id="ecDirty"></span><button class="btn ghost sm" id="ecReset" title="Put every setting on this page back to the program's ED-ECPR gate. Nothing changes until you Save.">Reset to defaults</button><button class="btn primary sm" id="ecSave">Save</button></div>
+            <div class="body">
+              <p class="help">Four things make up the ECPR process, and every one of them is set here. <b>The screen</b> listens to the radio and pages the team (a tripwire, edited on Tripwires). <b>The score</b> is the survival estimate worked out in code from what the crew told the hospital; its criteria, its estimate table and its age exclusion are below. <b>Reading what was said</b> is the word lists that turn "unwitnessed" into <i>no</i> and "hospice" into <i>end-stage</i>. <b>The case message</b> is where the score is shown. Try any change on a made-up report at the bottom right before saving it.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">1</span><span class="eyebrow">The screen · who gets paged</span><span class="meta" id="ecScreenMeta"></span></div>
+            <div class="body">
+              <p class="help">The screen is a tripwire with an <i>extract</i> check: the words it listens for, the talkgroups, the questions it asks the model, the fields it returns, the conditions for sending, the destination and the message are all in its editor on Tripwires. Here is which tripwire that is, so the research page reads the right one.</p>
+              <label class="field"><span class="lab">Which tripwire is the ECPR screen</span><select id="ecScreen"></select></label>
+              <div class="inline"><button class="btn ghost sm" id="ecOpenScreen">Open it on Tripwires</button><button class="btn ghost sm" id="ecCreateScreen" title="Adds the starter ECPR screen, switched off, and opens it so you can pick its talkgroups and destination">Add the starter screen</button><span class="help" id="ecScreenNote"></span></div>
+              <div class="lab" style="margin-top:12px">The fields research reads off it <span class="mono faint">as the screen's extraction names them · change these if you rename the fields in the editor</span></div>
+              <div class="row2">
+                <label class="field"><span class="lab">Candidate <span class="mono faint">yes | maybe | no</span></span><input id="ecFCandidate" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Criteria met</span><input id="ecFMet" type="text" spellcheck="false" /></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Likelihood %</span><input id="ecFPct" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">Reason</span><input id="ecFReason" type="text" spellcheck="false" /></label>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">2</span><span class="eyebrow">The score · worked out from the crew's report</span><span class="meta" id="ecScoreMeta"></span></div>
+            <div class="body">
+              <p class="help">A number the model is asked to guess cannot be checked, so the score is arithmetic over the facts the report stated (the FACTS block of the hospital summary). A criterion whose fact was not said is <i>unknown</i> and widens the estimate to a range; it is never filled in, unless a criterion below says to count it.</p>
+              <label class="field"><span class="lab">Name <span class="mono faint">as a methods section would give it · shown on the case message and the research page</span></span><input id="ecName" type="text" spellcheck="false" /></label>
+              <div class="lab">Criteria <span class="mono faint">each reads one fact from the report · <b>time</b>: age + minutes under the limit · <b>yes / no</b>: met when the fact says yes · <b>no disease</b>: met unless the fact names an end-stage word</span></div>
+              <div id="ecCriteria"></div>
+              <datalist id="ecFactList"></datalist>
+              <button class="btn ghost sm" id="ecCritAdd" style="margin-top:4px">Add a criterion</button>
+              <div class="row3" style="margin-top:12px">
+                <label class="field"><span class="lab">The age is the fact</span><input id="ecAgeFact" type="text" spellcheck="false" list="ecFactList" /></label>
+                <label class="field"><span class="lab">Oldest age accepted <span class="mono faint">older is excluded · 0 = no age exclusion</span></span><input id="ecMaxAge" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="ecNote" type="checkbox" /> say how many were not stated</label></label>
+              </div>
+              <div class="lab">Estimate by criteria met <span class="mono faint">percent, low and high · a range while inputs are missing runs from the low of what is met to the high of what could be</span></div>
+              <div id="ecBands"></div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="tw-num">3</span><span class="eyebrow">Reading what was said</span></div>
+            <div class="body">
+              <p class="help">How a fact's words become a verdict. One word or phrase per line, any case. <i>No</i> is checked before <i>yes</i>, so "no bystander CPR" is no even though it contains "cpr".</p>
+              <div class="row2">
+                <label class="field"><span class="lab">Means "not said" <span class="mono faint">the whole value</span></span><textarea id="ecWUnstated" rows="4" spellcheck="false"></textarea></label>
+                <label class="field"><span class="lab">Names an end-stage disease <span class="mono faint">anywhere in the history</span></span><textarea id="ecWEnd" rows="4" spellcheck="false"></textarea></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">No · as the first word</span><textarea id="ecWNo" rows="4" spellcheck="false"></textarea></label>
+                <label class="field"><span class="lab">No · anywhere in the value</span><textarea id="ecWNoP" rows="4" spellcheck="false"></textarea></label>
+              </div>
+              <div class="row2">
+                <label class="field"><span class="lab">Yes · as the first word</span><textarea id="ecWYes" rows="4" spellcheck="false"></textarea></label>
+                <label class="field"><span class="lab">Yes · anywhere in the value</span><textarea id="ecWYesP" rows="4" spellcheck="false"></textarea></label>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">4</span><span class="eyebrow">In the case message</span></div>
+            <div class="body">
+              <label class="check"><input id="ecCaseLine" type="checkbox" /> Put the score in the case thread the ED reads, under the report's facts</label>
+              <label class="field"><span class="lab">The line starts with <span class="mono faint">an emoji or a word · blank for nothing</span></span><input id="ecPrefix" type="text" spellcheck="false" style="max-width:12em" /></label>
+              <div class="lab">As it will read</div>
+              <div class="mono small" id="ecCasePrev">—</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Try it · score a report by the rules on this page</span><span class="meta" id="ecTryMeta"></span></div>
+            <div class="body">
+              <p class="help">Type what a crew might say for each fact. Nothing is saved: the rules as they stand on this page, saved or not, do the arithmetic, so a change can be checked before it goes live.</p>
+              <div id="ecTryFacts"></div>
+              <div class="ectry" id="ecTryOut"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
+        <div class="stack settings-page" id="set-cases" style="display:none">
+      <section class="two-col">
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="eyebrow">Cases · the arrest messaging, in one place</span><span class="meta" id="ccMeta"></span><span class="spacer"></span><span class="tw-dirty" id="ccDirty"></span><button class="btn ghost sm" id="ccReset" title="Put every setting on this page back to the built-in cardiac arrest profile. Nothing changes until you Save.">Reset to defaults</button><button class="btn primary sm" id="ccSave">Save</button></div>
+            <div class="body">
+              <p class="help">A case is one run's story, told as one Telegram message that is edited as the run goes on. Everything that shapes it is here: <b>what makes a run a case</b> and <b>which words are events</b>; <b>how an event is placed</b> on a run when nothing names it; <b>where it is sent</b>; <b>what the message says</b>; and <b>what the crew's report to the hospital is asked for</b>. Read a change on a real case with the preview before saving it. The ECPR screen and score have a page of their own.</p>
+              <div class="row3" id="ccProfileRow">
+                <label class="field"><span class="lab">Profile</span><select id="ccProfile"></select></label>
+                <label class="field"><span class="lab">Name</span><input id="ccName" type="text" spellcheck="false" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="ccEnabled" type="checkbox" /> build cases for this profile</label></label>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">1</span><span class="eyebrow">What makes a run a case</span></div>
+            <div class="body">
+              <label class="field"><span class="lab">Dispatch call types <span class="mono faint">as the Dispatch settings spell them · comma separated</span></span><input id="ccCallTypes" type="text" spellcheck="false" placeholder="Cardiac Arrest" /></label>
+              <label class="field"><span class="lab">Words on a page that make a run a case <span class="mono faint">whatever type the model filed · one per line</span></span><textarea id="ccPagePhrases" rows="2" spellcheck="false"></textarea></label>
+              <label class="field"><span class="lab">Words a crew uses about this kind of run <span class="mono faint">a report to a hospital naming none of them contradicts the case (a seizure paged as an arrest) and the message says so · blank = never</span></span><textarea id="ccReportWords" rows="3" spellcheck="false"></textarea></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">2</span><span class="eyebrow">Events · what the radio can say about a case</span><span class="meta" id="ccEventsMeta"></span></div>
+            <div class="body">
+              <p class="help">Checked in order; the first rule that matches names the event, so a rule whose words contain another's ("not a cardiac arrest" contains "arrest") goes first. <b>Said</b> phrases count from anyone. <b>Readback</b> words count only in a dispatcher's short logged readback, where the shape carries the meaning ("Working 803"). The kinds <span class="mono">working, rosc, rearrest, transporting, terminated, downgrade, arrived</span> are what the state, the board and the email replies understand.</p>
+              <div id="ccEvents"></div>
+              <datalist id="ccKindList"><option value="working"><option value="downgrade"><option value="rosc"><option value="rearrest"><option value="terminated"><option value="transporting"><option value="arrived"></datalist>
+              <button class="btn ghost sm" id="ccEventAdd" style="margin-top:4px">Add an event</button>
+              <div class="lab" style="margin-top:12px">Try a transmission <span class="mono faint">read by the rules above as they stand · nothing is saved</span></div>
+              <div class="inline"><input id="ccTryText" type="text" spellcheck="false" placeholder="Working arrest 1748." /><label class="check" style="margin:0;white-space:nowrap"><input id="ccTryConsole" type="checkbox" checked /> from a console</label></div>
+              <div class="mono small" id="ccTryOut">—</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">3</span><span class="eyebrow">Placing an event on a run</span></div>
+            <div class="body">
+              <p class="help">Each of these was measured on the library; the reason is under the field. Widen a window and more events land on the right run, and more land on the wrong one.</p>
+              <div class="row3">
+                <label class="field"><span class="lab">Case open for (min)</span><input id="ccOpen" type="text" inputmode="numeric" /><span class="help">60: every real event arrived within 34 min of the page; the two later were misreads.</span></label>
+                <label class="field"><span class="lab">Infer only within (min)</span><input id="ccInfer" type="text" inputmode="numeric" /><span class="help">45: a readback naming no run goes on the only open arrest only if it was paged this recently.</span></label>
+                <label class="field"><span class="lab">Same street within (min)</span><input id="ccFork" type="text" inputmode="numeric" /><span class="help">20: a page with a mis-heard house number on the same street is the same case.</span></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Readback answers within (s)</span><input id="ccPair" type="text" inputmode="numeric" /><span class="help">20: the crew call a dispatcher's readback repeats.</span></label>
+                <label class="field"><span class="lab">Page agrees within (min)</span><input id="ccAgrees" type="text" inputmode="numeric" /><span class="help">3: an upgrade read back this close to a page saying the same is that page's run.</span></label>
+                <label class="field"><span class="lab">Readback words <span class="mono faint">with a time / without</span></span><span class="inline"><input id="ccRbWords" type="text" inputmode="numeric" /><input id="ccRbUntimed" type="text" inputmode="numeric" /></span><span class="help">9 and 6: longer, a console is relaying or asking.</span></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">Talk, not a status</span><textarea id="ccTalking" rows="3" spellcheck="false"></textarea><span class="help">A transmission with one of these is the dispatcher talking.</span></label>
+                <label class="field"><span class="lab">Starts a question</span><textarea id="ccAsking" rows="3" spellcheck="false"></textarea></label>
+                <label class="field"><span class="lab">Makes it a request</span><textarea id="ccRequests" rows="3" spellcheck="false"></textarea></label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="head"><span class="tw-num">4</span><span class="eyebrow">Sending · on Telegram and by email</span><span class="meta" id="csSendMeta"></span></div>
+            <div class="body tight cs-send">
+              <p class="help">Each case is one message per chat: its timeline, edited as the case grows, which buzzes nobody. A reply, which does, goes out only for the events ticked below. A hospital's chat hears a case once a crew calls that hospital, never on a guess. Read the preview before switching it on, and turn off the tripwires that already announce arrests, or both will.</p>
+              <label class="check"><input type="checkbox" id="csSendOn" /> Send cases to Telegram</label>
+              <label class="field"><span class="lab">Every case goes to</span><select id="csSendDest"></select></label>
+              <label class="check"><input type="checkbox" id="csSendHosp" /> And to a hospital's own chat once a crew calls it <span class="faint small">(set the chat on the place, in Dispatch setup → Places)</span></label>
+              <label class="check"><input type="checkbox" id="csSendMap" /> With a map under it: the run and its routes to where its care pathway says to go (scene to hospital in a hospital's chat), taken down when the case ends</label>
+              <label class="check"><input type="checkbox" id="csSendAudio" /> With the radio: the thread opens with the page heard and the timeline under it (in a hospital's chat, the report), and a crew's report to a hospital follows as the clip of that call</label>
+              <div class="cs-email">
+                <label class="check"><input type="checkbox" id="csSendEmail" /> Also by email, through the account on Settings → Connections</label>
+                <label class="field"><span class="lab">Every case is emailed to <span class="mono faint">addresses, separated by commas</span></span><input id="csSendEmailTo" type="text" placeholder="ed-charge@example.org" spellcheck="false" /></label>
+                <p class="help">Email cannot be edited, so a case by email is a thread: the first email is the timeline so far, and each piece of news — working, ROSC, lost pulses, transporting, efforts ceased, not an arrest, a report to a hospital — follows as a reply with the timeline as it then stands. With “a hospital's own chat” ticked, a hospital's own email addresses (on the place) hear it the same way. The map and the radio are attached when ticked above.</p>
+              </div>
+              <div class="inline"><button class="btn ghost sm" id="csPreviewBtn" title="What the cases already built would have sent, by the settings as saved. Nothing is sent.">Preview what was sent…</button></div>
+              <div id="csPreview"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">5</span><span class="eyebrow">The message</span><span class="meta" id="ccMsgMeta"></span></div>
+            <div class="body">
+              <div class="row3">
+                <label class="field"><span class="lab">Starts the first line</span><input id="ccIcon" type="text" spellcheck="false" style="max-width:8em" /></label>
+                <label class="field"><span class="lab">Starts the units line</span><input id="ccUnitsIcon" type="text" spellcheck="false" style="max-width:8em" /></label>
+                <label class="field"><span class="lab">&nbsp;</span><label class="check" style="margin:0"><input id="ccShowUnits" type="checkbox" /> show the units</label></label>
+              </div>
+              <div class="lab">Banner by state <span class="mono faint">the second line of the message, and how a board names the state</span></div>
+              <div id="ccBanners"></div>
+              <div class="lab" style="margin-top:10px">Facts from the report, on the 🩺 line <span class="mono faint">in this order · the ECPR score line follows them</span></div>
+              <div id="ccFacts"></div>
+              <datalist id="ccFactKeys"></datalist>
+              <div class="inline"><button class="btn ghost sm" id="ccFactAdd">Add a fact</button><label class="check" style="margin:0"><input id="ccShowUnstated" type="checkbox" /> then a “Not stated: …” line for the rest</label></div>
+              <div class="row3" style="margin-top:10px">
+                <label class="field"><span class="lab">Caption limit <span class="mono faint">under the page heard · Telegram allows 1024</span></span><input id="ccCaption" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">Message limit <span class="mono faint">no audio · Telegram allows 4096</span></span><input id="ccText" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">Keep of a summary (chars) <span class="mono faint">when the message has to shrink</span></span><input id="ccSummaryMin" type="text" inputmode="numeric" /></label>
+              </div>
+              <div class="row3">
+                <label class="field"><span class="lab">No new thread after (h) <span class="mono faint">a case gone quiet this long</span></span><input id="ccStartWithin" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">Clips buzz within (min) <span class="mono faint">older news is an edit, not a reply</span></span><input id="ccNotifyWithin" type="text" inputmode="numeric" /></label>
+                <label class="field"><span class="lab">An ETA is news when it moves (min)</span><input id="ccEtaMove" type="text" inputmode="numeric" /></label>
+              </div>
+              <div class="lab">Events that earn an email reply</div>
+              <div class="chips" id="ccEmailEvents"></div>
+              <div class="inline" style="margin-top:8px"><button class="btn ghost sm" id="ccPreview" title="The newest cases, worded by the settings on this page as they stand. Nothing is sent or saved.">Preview the newest cases…</button><span class="help" id="ccPreviewNote"></span></div>
+              <div id="ccPreviewOut"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">6</span><span class="eyebrow">What the crew's report is asked for</span><span class="meta" id="ccReportMeta"></span></div>
+            <div class="body">
+              <p class="help">The hospital summary call ends with a FACTS block: these keys in this order, each with what to put after it. They are asked before the report is joined to any run, so this is one list for every profile. The 🩺 line above, the ECPR score's criteria and the research export all read these keys — rename one here and the others need to follow. <b>Arrest only</b> facts are “not stated” for a patient who was not in arrest, so a fall does not come back “bystander cpr: no”.</p>
+              <div id="ccReport"></div>
+              <button class="btn ghost sm" id="ccReportAdd" style="margin-top:4px">Add a fact</button>
+              <div class="lab" style="margin-top:10px">As the model is asked</div>
+              <div class="mono small" id="ccReportPrev"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+        </div>
         <div class="stack settings-page" id="set-connections" style="display:none">
       <section class="two-col">
         <div class="stack">
@@ -1607,6 +1797,8 @@
   <script src="app.js"></script>
   <script src="picker.js"></script>
   <script src="retention.js"></script>
+  <script src="ecpr.js"></script>
+  <script src="casesettings.js"></script>
   <script src="connections.js"></script>
   <script src="email.js"></script>
   <script src="tripwires.js"></script>
