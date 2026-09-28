@@ -61,6 +61,15 @@ pub struct Place {
     /// it. Blank is none.
     #[serde(default)]
     pub email: String,
+    /// Radios it answers on — its console, and a radio kept for a shared
+    /// channel such as IHERN. On a shared channel, an exchange one of these
+    /// speaks in is with this place.
+    #[serde(default)]
+    pub radios: Vec<u32>,
+    /// Other names it is called on the air ("Riley Fishers"), beyond the
+    /// ones worked out from its name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 fn other() -> String {
@@ -87,6 +96,11 @@ pub const KNOWN_FEATURES: &[(&str, &str)] = &[
 pub struct Settings {
     #[serde(default)]
     pub places: Vec<Place>,
+    /// Talkgroups many hospitals answer on (IHERN). A report on one is
+    /// credited to a hospital by who answered and what was said, not by
+    /// the channel.
+    #[serde(default)]
+    pub shared_tgs: Vec<u16>,
 }
 
 #[derive(Default)]
@@ -125,6 +139,9 @@ const MAX_PLACES: usize = 500;
 
 pub fn sanitize(s: &mut Settings) {
     s.places.truncate(MAX_PLACES);
+    s.shared_tgs.sort_unstable();
+    s.shared_tgs.dedup();
+    s.shared_tgs.truncate(16);
     let mut seen = std::collections::HashSet::new();
     s.places.retain_mut(|p| {
         p.name = crate::analyzers::clean_line(&p.name, 120);
@@ -149,6 +166,17 @@ pub fn sanitize(s: &mut Settings) {
         p.tgs.sort_unstable();
         p.tgs.dedup();
         p.tgs.truncate(32);
+        p.radios.retain(|r| *r != 0);
+        p.radios.sort_unstable();
+        p.radios.dedup();
+        p.radios.truncate(16);
+        p.aliases = p
+            .aliases
+            .iter()
+            .map(|a| crate::analyzers::clean_line(a, 60))
+            .filter(|a| !a.is_empty())
+            .take(8)
+            .collect();
         if p.lat.is_some_and(|v| !(-90.0..=90.0).contains(&v))
             || p.lon.is_some_and(|v| !(-180.0..=180.0).contains(&v))
         {
@@ -409,7 +437,7 @@ mod tests {
 
     #[test]
     fn the_nearest_place_that_can_do_the_thing() {
-        let s = Settings {
+        let s = Settings { shared_tgs: Vec::new(),
             places: vec![
                 place("Near General", &["stroke"], 40.00, -86.00),
                 place("Far Heart", &["stemi", "ecmo"], 40.50, -86.00),
@@ -435,7 +463,7 @@ mod tests {
 
     #[test]
     fn a_talkgroup_belongs_to_one_place() {
-        let mut s = Settings {
+        let mut s = Settings { shared_tgs: Vec::new(),
             places: vec![place("Example General", &[], 40.0, -86.0)],
         };
         s.places[0].tgs = vec![10257];
@@ -453,7 +481,7 @@ mod tests {
 
     #[test]
     fn sanitising_fills_in_ids_and_throws_out_nonsense() {
-        let mut s = Settings {
+        let mut s = Settings { shared_tgs: Vec::new(),
             places: vec![
                 Place {
                     name: "  Example General  ".into(),

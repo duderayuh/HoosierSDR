@@ -3416,7 +3416,7 @@ mod tests {
     }
 
     fn book() -> crate::places::Settings {
-        crate::places::Settings {
+        crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![
                 crate::places::Place {
                     id: "heart".into(),
@@ -3504,7 +3504,7 @@ mod tests {
     fn a_run_message_can_name_the_nearest_place_that_can_help() {
         let places = book();
         let r = run("Cardiac Arrest", Some(40.0), Some(-86.0));
-        let reports = vec![crate::link::LinkedReport {
+        let reports = vec![crate::link::LinkedReport { place_id: String::new(),
             id: 9,
             at: 500,
             tg: 10259,

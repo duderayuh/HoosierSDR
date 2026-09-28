@@ -961,7 +961,7 @@ mod tests {
     // A station somebody tagged `ecmo` is not somewhere to take a patient.
     #[test]
     fn only_hospitals_are_chosen_and_every_feature_must_match() {
-        let s = crate::places::Settings {
+        let s = crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![
                 place("station", "station", &["ecmo"], 39.77, -86.16),
                 place("general", "hospital", &[], 39.78, -86.16),
@@ -1003,7 +1003,7 @@ mod tests {
     // The nearest by crow flight is not always the nearest by road.
     #[test]
     fn the_quickest_by_road_wins_not_the_nearest_on_the_map() {
-        let s = crate::places::Settings {
+        let s = crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![
                 place("across-the-river", "hospital", &[], 39.780, -86.160),
                 place("straight-up-the-road", "hospital", &[], 39.800, -86.160),
@@ -1031,7 +1031,7 @@ mod tests {
     // With no router the numbers are still honest about what they are.
     #[test]
     fn with_no_router_the_straight_line_says_so_and_never_shows_a_time() {
-        let s = crate::places::Settings {
+        let s = crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![place("general", "hospital", &[], 39.80, -86.16)],
         };
         let mut straight = |f: (f64, f64), t: (f64, f64)| crate::routing::straight(f, t);
@@ -1050,7 +1050,7 @@ mod tests {
 
     #[test]
     fn a_needs_list_comes_back_in_the_order_it_was_written() {
-        let s = crate::places::Settings {
+        let s = crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![
                 place("general", "hospital", &[], 39.78, -86.16),
                 place("heart", "hospital", &["ecmo"], 39.90, -86.16),
@@ -1073,7 +1073,7 @@ mod tests {
     // A need nothing can satisfy is left out rather than faked.
     #[test]
     fn a_need_with_nowhere_to_send_it_is_left_out() {
-        let s = crate::places::Settings {
+        let s = crate::places::Settings { shared_tgs: Vec::new(),
             places: vec![place("general", "hospital", &[], 39.78, -86.16)],
         };
         let mut route = |f: (f64, f64), t: (f64, f64)| crate::routing::straight(f, t);

@@ -690,7 +690,7 @@ pub fn render(
     places: &[crate::places::Place],
     now: i64,
 ) -> RenderedBoard {
-    render_with_cases(board, incidents, reports, &[], places, now)
+    render_with_cases(board, incidents, reports, &[], places, &[], now)
 }
 
 /// [`render`], with the cases a cases pane draws from.
@@ -700,6 +700,8 @@ pub fn render_with_cases(
     reports: &[crate::conversations::Stored],
     cases: &[CaseRow],
     places: &[crate::places::Place],
+    // Talkgroups many hospitals share, whose reports go by who answered.
+    shared: &[u16],
     now: i64,
 ) -> RenderedBoard {
     let panes = board
@@ -724,10 +726,20 @@ pub fn render_with_cases(
                 )
             } else if pane.kind == "reports" {
                 let p = place_by(places, &pane.place);
-                let tgs: std::collections::HashSet<u16> =
-                    p.map(|p| p.tgs.iter().copied().collect()).unwrap_or_default();
-                let rows: Vec<&crate::conversations::Stored> =
-                    reports.iter().filter(|r| tgs.contains(&r.tg)).collect();
+                // A report is the place's when the place is whose it was:
+                // its own channel, or on a shared one, the hospital that
+                // answered or was called.
+                let book = crate::places::Settings { places: places.to_vec(), shared_tgs: shared.to_vec() };
+                let rows: Vec<&crate::conversations::Stored> = reports
+                    .iter()
+                    .filter(|r| {
+                        p.is_some_and(|p| {
+                            (p.tgs.contains(&r.tg) && !shared.contains(&r.tg))
+                                || (shared.contains(&r.tg)
+                                    && crate::hospitals::whose(&book, r.tg, &crate::conversations::said(&r.pieces)).is_some_and(|w| w.place_id == p.id))
+                        })
+                    })
+                    .collect();
                 let mut rows = one_per_exchange(rows);
                 rows.sort_by_key(|r| std::cmp::Reverse(r.last_at));
                 let total = rows.len();
@@ -908,6 +920,7 @@ pub fn dashboards_render(
 /// board is allowed is settled before this is called; this only fetches and
 /// renders.
 pub fn draw(state: &crate::AppState, board: &Dashboard) -> Result<RenderedBoard, String> {
+    let shared = state.places.lock().unwrap().settings.shared_tgs.clone();
     let places: Vec<crate::places::Place> = state
         .places
         .lock()
@@ -928,7 +941,7 @@ pub fn draw(state: &crate::AppState, board: &Dashboard) -> Result<RenderedBoard,
             // router here: a board is polled every few seconds, so the drive
             // shown is the one stored with the picture.
             let cases = if wants_cases {
-                let book = crate::places::Settings { places: places.clone() };
+                let book = crate::places::Settings { shared_tgs: shared.clone(), places: places.clone() };
                 crate::cases::list(&c, now - crate::cases::LIVE_WINDOW_SECS, &book, now)
                     .cases
                     .into_iter()
@@ -948,7 +961,7 @@ pub fn draw(state: &crate::AppState, board: &Dashboard) -> Result<RenderedBoard,
         }
         None => (Vec::new(), Vec::new(), Vec::new()),
     };
-    Ok(render_with_cases(board, &incidents, &reports, &cases, &places, now))
+    Ok(render_with_cases(board, &incidents, &reports, &cases, &places, &shared, now))
 }
 
 /// How much recent traffic a board is matched against. A pane's own limit
@@ -1353,7 +1366,7 @@ mod render_tests {
             case_row(3, "working", now - 3 * 3600, "", false),
             case_row(4, "terminated", now - 2 * 3600, "", false),
         ];
-        let out = render_with_cases(&board(vec![pane.clone()]), &[], &[], &rows, &places(), now);
+        let out = render_with_cases(&board(vec![pane.clone()]), &[], &[], &rows, &places(), &[], now);
         let p = &out.panes[0];
         assert_eq!(p.title, "Cardiac arrests");
         // Open first; an ended case stays half an hour; an old one goes.
@@ -1371,7 +1384,7 @@ mod render_tests {
         assert_eq!(p.cards[2].style, "dim");
         // A pane for one hospital shows the cases reported to it.
         let one_place = Pane { place: "p-far".into(), ..pane };
-        let out = render_with_cases(&board(vec![one_place]), &[], &[], &rows, &places(), now);
+        let out = render_with_cases(&board(vec![one_place]), &[], &[], &rows, &places(), &[], now);
         assert_eq!(out.panes[0].cards.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2]);
         assert!(out.panes[0].sub.starts_with("reported to "));
     }
