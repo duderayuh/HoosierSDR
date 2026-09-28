@@ -37,6 +37,8 @@ session starts from it rather than from the codebase again.
 | Boards on the desktop and on the tailnet | `dashboards.rs`, two pane kinds (`dispatch`, `reports`), matched in Rust, keyed share links. |
 | Radio ID names | `units.rs`: per-system aliases, regex rules, over-the-air talker aliases. `conversations.rs` learns the hospital's fixed console IDs (≥3 seen and ≥60 %). |
 | Arrest extraction | `analyzers.rs` built-in screens: CPR in progress, outcome (ROSC / terminated), ECPR candidate. Per transmission, sent to Telegram, **nothing written back to the incident**. |
+| Case settings | `cases.rs` `Settings` + `casesend.rs` `Message`, Settings → Cases: the profile (call types, page phrases, event rules, report words), `Placement` (the windows and word lists that were constants), `Message` (icons, banners, facts shown, caps, timings, email events), the send settings, and `ReportFacts` (the FACTS block of the hospital summary). One `cases.json`, held in a cell every scorer and sender reads. |
+| ECPR settings | `ecpr.rs`, Settings → ECPR: which tripwire is the screen, the field names research reads, the survival score's criteria / estimate table / age exclusion, the yes-no and end-stage word lists, and the score line in the case message. `study.rs` scores by these rules; the defaults are the program's ED-ECPR gate. |
 
 The honest summary of the gap: the app knows *that* a run exists and *where*
 the patient went. It does not know *what happened in between*, and it has no
@@ -638,7 +640,9 @@ The sending loop itself (network, then the write) is not covered by tests;
 what it sends is decided by `plan`, which is.
 
 The listener's existing arrest tripwires keep sending until turned off. The
-ECPR-candidate screen is not replaced by this and stays.
+ECPR-candidate screen is not replaced by this and stays. Which tripwire is the
+screen, and everything about the score under the report's facts, is set on
+Settings → ECPR (`ecpr.rs`) rather than in code.
 
 ## Step 5 built: the board pane (2026-09-14)
 
@@ -660,6 +664,33 @@ stays half an hour. It works on shared boards like any other pane.
   make another machine's screen fetch an address.
 - Maps are drawn for cases open now; a rebuild over past days does not draw
   pictures for them.
+
+## Settings → Cases (2026-09-28)
+
+Everything about a case that was a constant is a setting, on one page, so a
+window or a word can be changed without a build. `cases.json` grew:
+
+- **Profile**: `report_words` (the words a hospital report must name, or it
+  contradicts the case; absent in an older file means the built-in arrest
+  words for the arrest profile and none for any other), `placement` (open,
+  infer, fork, pair and page-agrees windows, the readback length limits, the
+  talk / question / request word lists) and `message` (the first-line and
+  units icons, a banner per state with its board label, the facts shown and
+  how each is named when unstated, the caption and text caps, the summary
+  floor, the no-new-thread and clip-buzz windows, the ETA-moved threshold,
+  and which event kinds reply by email).
+- **Report facts** (`report.facts`): the FACTS block's keys, what to put
+  after each, and which are arrest-only. `conversations::summary_guide()`
+  builds the prompt from it and `fact_keys()` replaces the constant; the
+  research export, the 🩺 line and the ECPR score's pickers read the same
+  list.
+
+The page (`app/dist/casesettings.js`) also owns the sending panel that was
+on the Cases tab, tries a transmission against the draft's event rules
+(`cases_try_event`), and renders the newest cases by the draft's wording
+(`cases_message_preview`). `sanitize` settles ids, kinds, word lists,
+windows of zero, missing banners and caps outside Telegram's limits; the
+defaults reproduce every message the app has sent.
 
 ## Research statistics (2026-09-18)
 

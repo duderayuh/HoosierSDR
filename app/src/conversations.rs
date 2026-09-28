@@ -812,7 +812,9 @@ pub fn stitched_transcript(c: &Conversation) -> String {
 /// The standing instructions every summary gets, on top of the rule's own
 /// prompt: how to read the labels, what a good clinical hand-off contains,
 /// and what not to do (name radio IDs, grade the transcript, guess).
-pub const SUMMARY_GUIDE: &str = "How to read the transcript: it is machine-generated from radio audio and \
+/// The fixed part of the summary guide: how to read the transcript, the
+/// headline and the note. The facts part follows from Settings → Cases.
+const SUMMARY_GUIDE_HEAD: &str = "How to read the transcript: it is machine-generated from radio audio and \
 may contain recognition errors (mis-heard numbers, drug names, street names). Speaker labels are \
 radio slots — HOSPITAL is the fixed party, RADIO A / RADIO B are the mobile radios (a label in quotes \
 is that radio's alias). On a channel many hospitals share (IHERN), HOSPITAL (name) is that \
@@ -834,20 +836,44 @@ and vitals, interventions given, and ETA; include any request or instruction fro
 Use only what was said — do not infer, and do not pad. Where something matters but was garbled or \
 missing, write \"unclear\" for that item rather than describing the transcript's quality. If almost \
 nothing is intelligible, write one sentence with whatever can be told (e.g. \"Medic 42 inbound with an \
-adult patient, details unclear\").\n\n\
-Last, after the note, a blank line and the facts: a line \"FACTS:\" and then exactly these lines, in \
-this order, each written \"key: value\". The value is \"not stated\" unless the transcript says it; \
-never work one out. Witnessed, bystander cpr, rosc and downtime are about a cardiac arrest: for a \
-patient who was not in arrest, each is \"not stated\".\n\
-age: the patient's age as said\n\
-sex: male or female\n\
-witnessed: yes or no — was the collapse seen by someone\n\
-bystander cpr: yes or no — had anyone started CPR before EMS arrived\n\
-rhythm: the heart rhythm named (asystole, PEA, VF, sinus …)\n\
-rosc: yes or no — are there pulses back, with when if said\n\
-downtime: how long the patient was down, in the crew's words\n\
-history: the medical history named, separated by commas\n\
-eta: the time to arrival as said (\"10 minutes\")";
+adult patient, details unclear\").\n\n";
+
+/// The whole guide: the fixed part, then the FACTS block as Settings → Cases
+/// lists it — the keys in order, what to put after each, and which are
+/// about a cardiac arrest (so a patient not in arrest gets "not stated").
+pub fn summary_guide() -> String {
+    summary_guide_for(&crate::cases::settings().report)
+}
+
+pub fn summary_guide_for(r: &crate::cases::ReportFacts) -> String {
+    let arrest: Vec<&str> = r.facts.iter().filter(|f| f.arrest_only).map(|f| f.key.as_str()).collect();
+    let mut g = String::from(SUMMARY_GUIDE_HEAD);
+    g.push_str("Last, after the note, a blank line and the facts: a line \"FACTS:\" and then exactly these lines, in this order, each written \"key: value\". The value is \"not stated\" unless the transcript says it; never work one out.");
+    if !arrest.is_empty() {
+        let list = match arrest.len() {
+            1 => arrest[0].to_string(),
+            n => format!("{} and {}", arrest[..n - 1].join(", "), arrest[n - 1]),
+        };
+        g.push_str(&format!(" {} {} about a cardiac arrest: for a patient who was not in arrest, each is \"not stated\".", capitalise(&list), if arrest.len() == 1 { "is" } else { "are" }));
+    }
+    for f in &r.facts {
+        g.push_str(&format!("\n{}: {}", f.key, f.ask));
+    }
+    g
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The facts the summary call is asked for, in the order it is asked.
+pub fn fact_keys() -> Vec<String> {
+    crate::cases::settings().report.facts.iter().map(|f| f.key.clone()).collect()
+}
 
 /// One fact the summary call lifted out of a report.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -856,8 +882,6 @@ pub struct Fact {
     pub value: String,
 }
 
-/// The facts the summary call is asked for, in the order it is asked.
-pub const FACT_KEYS: &[&str] = &["age", "sex", "witnessed", "bystander cpr", "rhythm", "rosc", "downtime", "history", "eta"];
 
 /// Take the facts block off the end of a note.
 ///
@@ -872,6 +896,7 @@ pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
     let Some(start) = lines.iter().position(|l| clean(l).to_ascii_lowercase().starts_with("facts:")) else {
         return (note.trim().to_string(), Vec::new());
     };
+    let keys = fact_keys();
     let mut facts: Vec<Fact> = Vec::new();
     let mut end = start + 1;
     while end < lines.len() {
@@ -882,7 +907,7 @@ pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
         }
         let Some((k, v)) = l.split_once(':') else { break };
         let key = k.trim().trim_matches('*').trim().to_ascii_lowercase().replace('_', " ");
-        if !FACT_KEYS.contains(&key.as_str()) {
+        if !keys.contains(&key) {
             break;
         }
         let value = v.trim().trim_matches(|c: char| c == '*' || c == '"' || c == '.').trim().to_string();
@@ -1125,8 +1150,9 @@ fn summarise_and_send_with(app: AppHandle, c: Conversation, r: Rule) {
     let transcript = stitched_transcript(&c);
     let prompt = if has_text {
         format!(
-            "{}\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
+            "{}\n\n{}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
             r.summary_prompt.trim(),
+            summary_guide(),
             c.tg_name,
             c.tg,
             transcript
@@ -2948,7 +2974,7 @@ mod failed_summary_tests {
 
 #[cfg(test)]
 mod facts_tests {
-    use super::{read_summary, split_facts, Fact, FACT_KEYS, SUMMARY_GUIDE};
+    use super::{fact_keys, read_summary, split_facts, summary_guide, Fact};
 
     fn fact(k: &str, v: &str) -> Fact {
         Fact { key: k.into(), value: v.into() }
@@ -3018,7 +3044,8 @@ mod facts_tests {
                 .query_row("SELECT tg, tg_name, transcript FROM conversations WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap();
             let prompt = format!(
-                "Summarise this EMS-to-hospital radio report.\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {tg_name} (TG {tg}).\n\nTranscript:\n{transcript}\n\nSummary:"
+                "Summarise this EMS-to-hospital radio report.\n\n{}\n\nTalkgroup: {tg_name} (TG {tg}).\n\nTranscript:\n{transcript}\n\nSummary:",
+                summary_guide()
             );
             let t = std::time::Instant::now();
             let raw = crate::alerts::ollama_complete(&o, &prompt).unwrap();
@@ -3029,9 +3056,13 @@ mod facts_tests {
 
     #[test]
     fn the_guide_asks_for_every_key_that_is_read() {
-        for k in FACT_KEYS {
-            assert!(SUMMARY_GUIDE.contains(&format!("\n{k}: ")), "guide does not ask for {k}");
+        let guide = summary_guide();
+        for k in fact_keys() {
+            assert!(guide.contains(&format!("\n{k}: ")), "guide does not ask for {k}");
         }
+        // The arrest-only sentence names the keys as the list has them.
+        assert!(guide.contains("Witnessed, bystander cpr, rosc and downtime are about a cardiac arrest"), "{guide}");
+        assert!(guide.contains("\nage: the patient's age as said\n"));
     }
 }
 
@@ -3465,8 +3496,9 @@ fn summarise_only(app: &AppHandle, c: &Conversation, r: &Rule) {
     }
     let transcript = stitched_transcript(c);
     let prompt = format!(
-        "{}\n\n{SUMMARY_GUIDE}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
+        "{}\n\n{}\n\nTalkgroup: {} (TG {}).\n\nTranscript:\n{}\n\nSummary:",
         r.summary_prompt.trim(),
+        summary_guide(),
         c.tg_name,
         c.tg,
         transcript

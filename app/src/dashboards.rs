@@ -632,8 +632,8 @@ fn case_card(row: &CaseRow) -> Card {
     Card {
         id: k.id,
         at: k.updated,
-        emoji: "🫀".into(),
-        title: format!("{} · {}", k.title, crate::casesend::state_label(&k.state)),
+        emoji: crate::cases::profile_of(&k.profile).message.icon,
+        title: format!("{} · {}", k.title, crate::casesend::state_label_for(&k.profile, &k.state)),
         style: case_style(&k.state).into(),
         note,
         meta,

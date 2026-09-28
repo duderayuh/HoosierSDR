@@ -32,7 +32,9 @@ use tauri::{AppHandle, Manager, State};
 use crate::AppState;
 
 /// The facts a report is asked for, in the order a clinician reads them.
-const FACT_KEYS: &[&str] = crate::conversations::FACT_KEYS;
+fn fact_keys() -> Vec<String> {
+    crate::conversations::fact_keys()
+}
 
 pub fn ensure_schema(c: &Connection) {
     let _ = c.execute_batch(
@@ -218,7 +220,7 @@ impl CaseRow {
         self.report_to_ai_report = diff(self.report_generated, self.report);
         self.score = self.report.map(|_| crate::study::score(&self.fact_values));
         self.tags = COUNTS.iter().filter(|c| (c.is)(self)).map(|c| c.key.to_string()).collect();
-        self.tags.extend(FACT_KEYS.iter().filter(|k| self.facts.iter().any(|f| f == *k)).map(|k| fact_key(k)));
+        self.tags.extend(fact_keys().iter().filter(|k| self.facts.iter().any(|f| f == *k)).map(|k| fact_key(k)));
         self.minutes = MEASURES.iter().filter_map(|m| (m.secs)(self).map(|s| (m.key.to_string(), round1(s as f64 / 60.0)))).collect();
     }
 }
@@ -370,32 +372,35 @@ fn case_calls(c: &Connection, k: &crate::cases::CaseView) -> Vec<i64> {
 }
 
 /// The first tripwire that extracted fields about this run or any of its
-/// calls. One naming a candidate (the ECPR screen's shape) wins over any
-/// other extraction.
+/// calls. The tripwire Settings → ECPR names as the screen wins; failing
+/// that, one returning the candidate field (the ECPR screen's shape) wins
+/// over any other extraction. The field names are the ones set there too.
 fn first_screen(c: &Connection, incidents: &[i64], calls: &[i64]) -> Option<Screen> {
     if incidents.is_empty() && calls.is_empty() {
         return None;
     }
+    let e = crate::ecpr::settings();
     let inc = if incidents.is_empty() { "NULL".to_string() } else { id_list(incidents) };
     let cl = if calls.is_empty() { "NULL".to_string() } else { id_list(calls) };
-    let rows: Vec<(i64, String, String, String)> = c
+    let rows: Vec<(i64, String, String, String, String)> = c
         .prepare(&format!(
-            "SELECT at, rule_name, status, data FROM tripwire_events
+            "SELECT at, rule_id, rule_name, status, data FROM tripwire_events
               WHERE source = 'tripwire' AND data LIKE '%\"fields\":{{%'
                 AND (incident_id IN ({inc}) OR id IN (SELECT event FROM tripwire_event_calls WHERE call IN ({cl})))
               ORDER BY at"
         ))
-        .and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map(|rows| rows.flatten().collect()))
+        .and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map(|rows| rows.flatten().collect()))
         .unwrap_or_default();
-    let parsed: Vec<(i64, String, String, serde_json::Map<String, serde_json::Value>)> = rows
+    let parsed: Vec<(i64, String, String, String, serde_json::Map<String, serde_json::Value>)> = rows
         .into_iter()
-        .filter_map(|(at, rule, status, data)| {
+        .filter_map(|(at, rule_id, rule, status, data)| {
             let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-            Some((at, rule, status, v.get("fields")?.as_object()?.clone()))
+            Some((at, rule_id, rule, status, v.get("fields")?.as_object()?.clone()))
         })
         .collect();
-    let pick = parsed.iter().find(|(.., f)| f.contains_key("candidate")).or_else(|| parsed.first())?;
-    let (at, rule, status, f) = pick;
+    let named = (!e.screen_tripwire.is_empty()).then(|| parsed.iter().find(|(_, id, ..)| *id == e.screen_tripwire)).flatten();
+    let pick = named.or_else(|| parsed.iter().find(|(.., f)| f.contains_key(&e.screen.candidate))).or_else(|| parsed.first())?;
+    let (at, _, rule, status, f) = pick;
     let text = |k: &str| match f.get(k) {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Null) | None => String::new(),
@@ -405,10 +410,10 @@ fn first_screen(c: &Connection, incidents: &[i64], calls: &[i64]) -> Option<Scre
         rule: rule.clone(),
         at: *at,
         status: status.clone(),
-        candidate: text("candidate"),
-        criteria_met: text("criteriaMet"),
-        likelihood_pct: text("likelihoodPct"),
-        reason: text("reason"),
+        candidate: text(&e.screen.candidate),
+        criteria_met: text(&e.screen.criteria_met),
+        likelihood_pct: text(&e.screen.likelihood_pct),
+        reason: text(&e.screen.reason),
         fields: serde_json::Value::Object(f.clone()).to_string(),
     })
 }
@@ -668,7 +673,7 @@ pub fn summarise(rows: &[CaseRow]) -> (Vec<Measure>, Vec<Count>) {
     let mut counts = vec![Count { key: "cases".into(), label: "Cases".into(), n, of: n }];
     counts.extend(COUNTS.iter().map(|c| Count { key: c.key.into(), label: c.label.into(), n: rows.iter().filter(|r| (c.is)(r)).count(), of: n }));
     let reported = rows.iter().filter(|r| r.report.is_some()).count();
-    for key in FACT_KEYS {
+    for key in &fact_keys() {
         counts.push(Count {
             key: fact_key(key),
             label: fact_label(key),
@@ -900,8 +905,9 @@ pub fn csv(rows: &[CaseRow]) -> String {
     for (k, _) in intervals {
         head.push(k.to_string());
     }
-    head.extend(FACT_KEYS.iter().map(|k| fact_key(k)));
-    head.extend(FACT_KEYS.iter().map(|k| format!("value_{}", k.replace(' ', "_"))));
+    let keys = fact_keys();
+    head.extend(keys.iter().map(|k| fact_key(k)));
+    head.extend(keys.iter().map(|k| format!("value_{}", k.replace(' ', "_"))));
     head.extend(["score_name", "score_estimate", "score_lo_pct", "score_hi_pct", "score_met", "score_unknown", "score_assumed", "score_excluded"].map(String::from));
     head.extend(["time", "witnessed", "bystander", "disease"].map(|k| format!("score_{k}")));
     head.extend(["screen_rule", "screen_at_epoch", "screen_at_local", "screen_status", "screen_candidate", "screen_criteria_met", "screen_likelihood_pct", "screen_reason", "screen_fields"].map(String::from));
@@ -934,11 +940,11 @@ pub fn csv(rows: &[CaseRow]) -> String {
         for (_, g) in intervals {
             f.push(min1(g(r)));
         }
-        for k in FACT_KEYS {
+        for k in &keys {
             f.push(if r.facts.iter().any(|x| x == k) { "1".into() } else { "0".into() });
         }
-        for k in FACT_KEYS {
-            f.push(csv_field(r.fact_values.get(*k).map(String::as_str).unwrap_or_default()));
+        for k in &keys {
+            f.push(csv_field(r.fact_values.get(k).map(String::as_str).unwrap_or_default()));
         }
         let pct = |x: Option<f64>| x.map(|x| x.to_string()).unwrap_or_default();
         match &r.score {

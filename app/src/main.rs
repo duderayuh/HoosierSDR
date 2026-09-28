@@ -26,6 +26,7 @@ mod devices;
 mod digest;
 mod dispatch;
 mod dual;
+mod ecpr;
 mod email;
 mod encode;
 mod events;
@@ -2304,6 +2305,7 @@ fn main() {
             crate::backup::apply_pending(app.handle());
             crate::secrets::init(app.handle());
             crate::email::init(app.handle());
+            ecpr::init(app.handle());
             crate::web::spawn(app.handle().clone());
             // A talkgroup catalog downloaded earlier is loaded on start.
             let state = app.state::<AppState>();
@@ -2352,6 +2354,7 @@ fn main() {
             state.max_calls.store(12, Ordering::SeqCst);
             state.use_channelizer.store(true, Ordering::SeqCst);
             state.uv_quality.store(16, Ordering::SeqCst);
+            cases::init(app.handle());
             *state.alerts.lock().unwrap() = alerts::load(app.handle());
             *state.conversations.lock().unwrap() = conversations::load(app.handle());
             *state.remotes.lock().unwrap() = remotes::load(app.handle());
@@ -2515,6 +2518,11 @@ fn main() {
             cases::cases_rebuild,
             cases::cases_profiles,
             cases::cases_set_telegram,
+            cases::cases_settings_get,
+            cases::cases_settings_set,
+            cases::cases_settings_defaults,
+            cases::cases_try_event,
+            cases::cases_message_preview,
             cases::cases_preview,
             research::research_stats,
             research::research_set_record,
@@ -2568,6 +2576,11 @@ fn main() {
             channels::channel_activity,
             channels::channel_sets_get,
             channels::channel_sets_set,
+            ecpr::ecpr_get,
+            ecpr::ecpr_set,
+            ecpr::ecpr_defaults,
+            ecpr::ecpr_try,
+            ecpr::ecpr_screen_create,
             retention::retention_get,
             retention::retention_set,
             backup::backup_get,

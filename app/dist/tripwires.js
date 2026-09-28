@@ -874,6 +874,15 @@
     } catch (e) { uiToast(`${e}`, "err"); }
   };
 
+  /* ---------- "open this tripwire" from another page (Settings → ECPR) ---------- */
+  window.tripwireOpen = async (id) => {
+    showView("tripwires");
+    if (!(await leaveOk())) return;
+    await load();
+    if (list.some((t) => t.id === id)) { sel = null; pick(id); }
+    else uiToast("That tripwire is not in the list any more", "err");
+  };
+
   /* ---------- wiring ---------- */
   window.tripwiresOnShow = async () => {
     if (!activity.length) loadActivity().then(() => { if (draft) fillSystem(); });

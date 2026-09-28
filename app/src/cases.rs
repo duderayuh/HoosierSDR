@@ -40,6 +40,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, RwLock};
 use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
@@ -68,6 +69,73 @@ const READBACK_WORDS: usize = 9;
 const READBACK_WORDS_UNTIMED: usize = 6;
 /// Words that make a transmission talk rather than a status: see `classify`.
 const TALKING: &[&str] = &["i", "im", "ive", "id", "ill", "you", "your", "youre", "we", "us", "our", "me", "my"];
+/// A transmission starting with one of these is a question, not a status.
+const ASKING: &[&str] = &["can", "could", "would", "will", "any", "is", "was", "what", "did", "do", "are", "where", "who", "how", "please", "should"];
+/// Phrases that make a transmission a request about an arrest.
+const REQUESTS: &[&str] = &["add us", "that cardiac arrest", "that arrest", "the cardiac arrest with", "transporting unit", "transport unit", "second transport"];
+
+/// How events are placed on runs: the windows and word lists above, as a
+/// profile carries them (Settings → Cases). The defaults are the measured
+/// values, with why each is what it is on the constants they come from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Placement {
+    /// A case is open to ops-channel events this long after its dispatch.
+    pub open_mins: u32,
+    /// A readback names no run: placed on the only open arrest only when
+    /// that arrest was dispatched this recently.
+    pub infer_mins: u32,
+    /// A page naming the same street within this is the same case.
+    pub fork_mins: u32,
+    /// A readback answers the crew call inside this.
+    pub pair_secs: u32,
+    /// A readback of an upgrade this close to a page saying the same is
+    /// that page's run.
+    pub page_agrees_mins: u32,
+    /// A readback is at most this many words with a time …
+    pub readback_words: u32,
+    /// … or this many without one.
+    pub readback_words_untimed: u32,
+    /// Words that make a transmission talk rather than a status.
+    pub talking: Vec<String>,
+    /// A transmission starting with one of these is a question.
+    pub asking: Vec<String>,
+    /// Phrases that make it a request about an arrest, not the arrest.
+    pub requests: Vec<String>,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        let w = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect();
+        Placement {
+            open_mins: (OPEN_SECS / 60) as u32,
+            infer_mins: (INFER_SECS / 60) as u32,
+            fork_mins: (FORK_SECS / 60) as u32,
+            pair_secs: PAIR_SECS as u32,
+            page_agrees_mins: (PAGE_AGREES_SECS / 60) as u32,
+            readback_words: READBACK_WORDS as u32,
+            readback_words_untimed: READBACK_WORDS_UNTIMED as u32,
+            talking: w(TALKING),
+            asking: w(ASKING),
+            requests: w(REQUESTS),
+        }
+    }
+}
+
+impl Placement {
+    pub fn open_secs(&self) -> i64 {
+        self.open_mins as i64 * 60
+    }
+    pub fn infer_secs(&self) -> i64 {
+        self.infer_mins as i64 * 60
+    }
+    pub fn fork_secs(&self) -> i64 {
+        self.fork_mins as i64 * 60
+    }
+    pub fn page_agrees_secs(&self) -> i64 {
+        self.page_agrees_mins as i64 * 60
+    }
+}
 
 // ---------------------------------------------------------------------------
 // profiles
@@ -107,6 +175,16 @@ pub struct Profile {
     pub events: Vec<EventRule>,
     /// Where its timelines go on Telegram. Off until switched on.
     pub telegram: crate::casesend::Send,
+    /// Words a crew uses about this kind of run in a report to a hospital.
+    /// A report naming none of them contradicts the case (a seizure paged
+    /// as an arrest) and is said so. Empty = never contradict; absent (a
+    /// file from before this existed) = the built-in arrest words for the
+    /// arrest profile and none for any other, settled on load.
+    pub report_words: Option<Vec<String>>,
+    /// How events are placed on runs.
+    pub placement: Placement,
+    /// What the Telegram message and the emails say.
+    pub message: crate::casesend::Message,
 }
 
 impl Default for Profile {
@@ -119,7 +197,26 @@ impl Default for Profile {
             page_phrases: Vec::new(),
             events: Vec::new(),
             telegram: crate::casesend::Send::default(),
+            report_words: None,
+            placement: Placement::default(),
+            message: crate::casesend::Message::default(),
         }
+    }
+}
+
+impl Profile {
+    /// The report words in force: none until the file is settled on load.
+    pub fn report_words(&self) -> &[String] {
+        self.report_words.as_deref().unwrap_or(&[])
+    }
+}
+
+/// What a profile's report words are when its file never had any.
+fn default_report_words(id: &str) -> Vec<String> {
+    if id == "cardiac-arrest" {
+        ARREST_WORDS.iter().map(|w| w.to_string()).collect()
+    } else {
+        Vec::new()
     }
 }
 
@@ -143,6 +240,9 @@ pub fn arrest_profile() -> Profile {
         name: "Cardiac arrest".into(),
         enabled: true,
         telegram: crate::casesend::Send::default(),
+        report_words: Some(default_report_words("cardiac-arrest")),
+        placement: Placement::default(),
+        message: crate::casesend::Message::default(),
         call_types: vec!["Cardiac Arrest".into()],
         page_phrases: vec!["cardiac arrest".into()],
         events: vec![
@@ -179,10 +279,171 @@ pub fn arrest_profile() -> Profile {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+/// One fact the hospital summary call is asked for, in the FACTS block.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct ReportFact {
+    /// The key, as the line is written ("bystander cpr").
+    pub key: String,
+    /// What the model is told to put after it.
+    pub ask: String,
+    /// About a cardiac arrest: for a patient not in arrest it is "not
+    /// stated", so a fall does not come back "bystander cpr: no".
+    pub arrest_only: bool,
+}
+
+/// The facts every hospital report is asked for. Written before the report
+/// is joined to any run, so they are one list, not the profile's. The case
+/// message, the ECPR score and the research export all read these keys.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ReportFacts {
+    pub facts: Vec<ReportFact>,
+}
+
+impl Default for ReportFacts {
+    fn default() -> Self {
+        let f = |key: &str, ask: &str, arrest_only: bool| ReportFact { key: key.into(), ask: ask.into(), arrest_only };
+        ReportFacts {
+            facts: vec![
+                f("age", "the patient's age as said", false),
+                f("sex", "male or female", false),
+                f("witnessed", "yes or no — was the collapse seen by someone", true),
+                f("bystander cpr", "yes or no — had anyone started CPR before EMS arrived", true),
+                f("rhythm", "the heart rhythm named (asystole, PEA, VF, sinus …)", false),
+                f("rosc", "yes or no — are there pulses back, with when if said", true),
+                f("downtime", "how long the patient was down, in the crew's words", true),
+                f("history", "the medical history named, separated by commas", false),
+                f("eta", "the time to arrival as said (\"10 minutes\")", false),
+            ],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     pub profiles: Vec<Profile>,
+    pub report: ReportFacts,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { profiles: vec![arrest_profile()], report: ReportFacts::default() }
+    }
+}
+
+/// The settings as last read or saved, for the case sender, the summary
+/// call and the research page, none of which has the app to hand.
+static SETTINGS: OnceLock<RwLock<Settings>> = OnceLock::new();
+
+fn cell() -> &'static RwLock<Settings> {
+    SETTINGS.get_or_init(|| RwLock::new(Settings::default()))
+}
+
+pub fn settings() -> Settings {
+    cell().read().unwrap().clone()
+}
+
+/// The profile by id, or a plain one when it is not there (a case from a
+/// profile since removed still renders, with the default message and no
+/// report words to contradict it).
+pub fn profile_of(id: &str) -> Profile {
+    let s = cell().read().unwrap();
+    s.profiles.iter().find(|p| p.id == id).cloned().unwrap_or_else(|| Profile { id: id.into(), report_words: Some(Vec::new()), ..Default::default() })
+}
+
+/// Read the file once at startup, so the cell is filled before anything
+/// sends.
+pub fn init(app: &AppHandle) {
+    let _ = load(app);
+}
+
+/// Every word list as typed: one per line or comma, trimmed, lower-cased,
+/// no blanks, no repeats.
+fn word_list(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in list.iter().flat_map(|l| l.split(['\n', ','])) {
+        let w = item.trim().to_lowercase();
+        if !w.is_empty() && !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
+
+/// Settle what a page could have left odd: blank names and kinds, word
+/// lists, windows of zero, a message with a state missing.
+pub fn sanitize(s: &mut Settings) {
+    let mut ids: Vec<String> = Vec::new();
+    for (i, p) in s.profiles.iter_mut().enumerate() {
+        p.name = p.name.trim().to_string();
+        if p.name.is_empty() {
+            p.name = format!("Profile {}", i + 1);
+        }
+        p.id = p.id.trim().to_string();
+        if p.id.is_empty() {
+            p.id = p.name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').to_string();
+        }
+        if p.id.is_empty() || ids.contains(&p.id) {
+            p.id = format!("profile-{}", i + 1);
+        }
+        ids.push(p.id.clone());
+        p.call_types = p.call_types.iter().flat_map(|l| l.split(['\n', ','])).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+        p.page_phrases = word_list(&p.page_phrases);
+        p.report_words = Some(match p.report_words.take() {
+            Some(list) => word_list(&list),
+            None => default_report_words(&p.id),
+        });
+        p.events.retain(|e| !(e.label.trim().is_empty() && e.phrases.iter().all(|x| x.trim().is_empty()) && e.readback.iter().all(|x| x.trim().is_empty())));
+        for e in p.events.iter_mut() {
+            e.kind = e.kind.trim().to_lowercase().replace(' ', "_");
+            e.label = e.label.trim().to_string();
+            if e.kind.is_empty() {
+                e.kind = e.label.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().trim_matches('_').to_string();
+            }
+            if e.label.is_empty() {
+                e.label = e.kind.replace('_', " ");
+            }
+            e.phrases = word_list(&e.phrases);
+            e.readback = word_list(&e.readback);
+        }
+        let pl = &mut p.placement;
+        pl.open_mins = pl.open_mins.max(1);
+        pl.infer_mins = pl.infer_mins.max(1);
+        pl.fork_mins = pl.fork_mins.max(1);
+        pl.pair_secs = pl.pair_secs.max(1);
+        pl.page_agrees_mins = pl.page_agrees_mins.max(1);
+        pl.readback_words = pl.readback_words.max(1);
+        pl.readback_words_untimed = pl.readback_words_untimed.max(1);
+        pl.talking = word_list(&pl.talking);
+        pl.asking = word_list(&pl.asking);
+        pl.requests = word_list(&pl.requests);
+        crate::casesend::sanitize_message(&mut p.message);
+    }
+    let mut keys: Vec<String> = Vec::new();
+    s.report.facts.retain(|f| !f.key.trim().is_empty());
+    for f in s.report.facts.iter_mut() {
+        f.key = f.key.trim().to_lowercase().replace('_', " ");
+        f.ask = f.ask.trim().to_string();
+        if f.ask.is_empty() {
+            f.ask = "as said".into();
+        }
+    }
+    s.report.facts.retain(|f| if keys.contains(&f.key) { false } else { keys.push(f.key.clone()); true });
+    if s.report.facts.is_empty() {
+        s.report = ReportFacts::default();
+    }
+}
+
+/// Write the settings and make them the ones in use.
+pub fn save(app: &AppHandle, mut s: Settings) -> Result<Settings, String> {
+    sanitize(&mut s);
+    let path = settings_path(app)?;
+    std::fs::write(&path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", path.display()))?;
+    *cell().write().unwrap() = s.clone();
+    touch();
+    Ok(s)
 }
 
 fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -198,9 +459,10 @@ pub fn load(app: &AppHandle) -> Settings {
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<Settings>(&t).ok());
-    match read {
+    let s = match read {
         Some(s) => {
-            let (s, grew) = with_new_defaults(s);
+            let (mut s, grew) = with_new_defaults(s);
+            sanitize(&mut s);
             if grew {
                 if let (Some(p), Ok(t)) = (path, serde_json::to_string_pretty(&s)) {
                     let _ = std::fs::write(p, t);
@@ -209,13 +471,15 @@ pub fn load(app: &AppHandle) -> Settings {
             s
         }
         None => {
-            let s = Settings { profiles: vec![arrest_profile()] };
+            let s = Settings::default();
             if let (Some(p), Ok(t)) = (path, serde_json::to_string_pretty(&s)) {
                 let _ = std::fs::write(p, t);
             }
             s
         }
-    }
+    };
+    *cell().write().unwrap() = s.clone();
+    s
 }
 
 /// Give a saved built-in profile the events a newer build added, each in its
@@ -291,22 +555,18 @@ pub fn phrase_at(w: &[String], phrase: &str) -> Option<usize> {
     None
 }
 
-const ASKING: &[&str] = &["can", "could", "would", "will", "any", "is", "was", "what", "did", "do", "are", "where", "who", "how", "please", "should"];
-
 /// A question or a request about an arrest, which is not the arrest
 /// happening: "can you add us to that cardiac arrest", "any working arrests?"
-pub fn is_request(text: &str) -> bool {
+pub fn is_request(text: &str, pl: &Placement) -> bool {
     if text.contains('?') {
         return true;
     }
     let w = words(text);
-    if w.first().is_some_and(|f| ASKING.contains(&f.as_str())) {
+    if w.first().is_some_and(|f| pl.asking.iter().any(|a| a == f)) {
         return true;
     }
     let joined = w.join(" ");
-    ["add us", "that cardiac arrest", "that arrest", "the cardiac arrest with", "transporting unit", "transport unit", "second transport"]
-        .iter()
-        .any(|p| joined.contains(p))
+    pl.requests.iter().any(|p| joined.contains(p.as_str()))
 }
 
 /// The time a dispatcher reads out at the end of a readback, as minutes after
@@ -358,7 +618,7 @@ impl Source {
 }
 
 /// What one ops-channel transmission says, if it is an event.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Heard {
     pub kind: String,
     pub label: String,
@@ -369,13 +629,14 @@ pub struct Heard {
 
 /// Read one transmission on an ops channel.
 pub fn classify(text: &str, console: bool, call_minute: i64, p: &Profile) -> Option<Heard> {
-    if is_request(text) {
+    let pl = &p.placement;
+    if is_request(text, pl) {
         return None;
     }
     let w = words(text);
     let clock = spoken_clock(text, call_minute);
     let timed = clock.is_some() || ends_with_number(text);
-    let readback_shape = console && (w.len() <= READBACK_WORDS && timed || w.len() <= READBACK_WORDS_UNTIMED);
+    let readback_shape = console && (w.len() <= pl.readback_words as usize && timed || w.len() <= pl.readback_words_untimed as usize);
     // A status logged on the air is about a run, not about the people on it:
     // "Working Arrest 1748", "rosc 1914", "Ceasing efforts 2326". A word
     // like "working" inside a sentence with an *I* or a *you* in it is the
@@ -384,7 +645,7 @@ pub fn classify(text: &str, console: bool, call_minute: i64, p: &Profile) -> Opt
     // each of them most of an hour into a run that was already over. Across
     // the library every status a console logged was said without one of
     // these; every transmission carrying one was talk.
-    let talking = w.iter().any(|x| TALKING.contains(&x.as_str()));
+    let talking = w.iter().any(|x| pl.talking.contains(x));
     if console && !readback_shape {
         // A console saying a long sentence is relaying or asking, not
         // logging a status.
@@ -568,7 +829,7 @@ pub fn ops_events(calls: &[OpsCall], consoles: &HashSet<u32>, p: &Profile) -> Ve
             let answers = calls[..i]
                 .iter()
                 .rev()
-                .take_while(|k| c.at - k.at <= PAIR_SECS)
+                .take_while(|k| c.at - k.at <= p.placement.pair_secs as i64)
                 .find(|k| k.tg == c.tg && !consoles.contains(&k.radio))
                 .cloned();
             // The crew's own statement of the same thing becomes this.
@@ -619,9 +880,9 @@ pub enum Placed {
 ///
 /// `runs` are every run dispatched around the event, cases or not; `open`
 /// says which of them are open cases of this profile at the event's time.
-pub fn place(e: &OpsEvent, runs: &[Run], open: &dyn Fn(&Run) -> bool, vocab: &HashSet<String>) -> Placed {
+pub fn place(e: &OpsEvent, runs: &[Run], open: &dyn Fn(&Run) -> bool, vocab: &HashSet<String>, pl: &Placement) -> Placed {
     let crew = e.answers.as_ref().unwrap_or(&e.call);
-    let near = |r: &&Run| r.at <= e.call.at + 5 * 60 && e.call.at - r.at <= OPEN_SECS;
+    let near = |r: &&Run| r.at <= e.call.at + 5 * 60 && e.call.at - r.at <= pl.open_secs();
 
     // The dispatch map attached the call to a run — and that run is still
     // open to what is said about it. The map goes on attaching traffic to a
@@ -643,7 +904,7 @@ pub fn place(e: &OpsEvent, runs: &[Run], open: &dyn Fn(&Run) -> bool, vocab: &Ha
     if e.heard.kind == "working" {
         let agrees: Vec<&Run> = runs
             .iter()
-            .filter(|r| open(r) && r.upgraded.iter().any(|t| (t - e.call.at).abs() <= PAGE_AGREES_SECS))
+            .filter(|r| open(r) && r.upgraded.iter().any(|t| (t - e.call.at).abs() <= pl.page_agrees_secs()))
             .collect();
         let cases: HashSet<usize> = agrees.iter().filter_map(|r| r.case).collect();
         if cases.len() == 1 {
@@ -687,7 +948,7 @@ pub fn place(e: &OpsEvent, runs: &[Run], open: &dyn Fn(&Run) -> bool, vocab: &Ha
     if e.heard.source == Source::Readback {
         let open_now: Vec<&Run> = runs
             .iter()
-            .filter(|r| r.at <= e.call.at + 5 * 60 && e.call.at - r.at <= INFER_SECS)
+            .filter(|r| r.at <= e.call.at + 5 * 60 && e.call.at - r.at <= pl.infer_secs())
             .filter(|r| open(r))
             .collect();
         let cases: HashSet<usize> = open_now.iter().filter_map(|r| r.case).collect();
@@ -994,7 +1255,7 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
             .prepare("SELECT id, created, call_type, address_key, units FROM incidents WHERE created BETWEEN ?1 AND ?2 ORDER BY created, id")
             .map_err(|e| e.to_string())?;
         let rows = q
-            .query_map(params![from - OPEN_SECS, to], |r| {
+            .query_map(params![from - p.placement.open_secs(), to], |r| {
                 Ok(IncRow {
                     id: r.get(0)?,
                     created: r.get(1)?,
@@ -1053,7 +1314,7 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
         }
         pages.insert(r.id, pg);
         let s = street(&r.address_key);
-        let joins = runs_rows[..i].iter().rev().take_while(|pr| r.created - pr.created <= FORK_SECS).find(|pr| {
+        let joins = runs_rows[..i].iter().rev().take_while(|pr| r.created - pr.created <= p.placement.fork_secs()).find(|pr| {
             let (a, b) = (house(&pr.address_key), house(&r.address_key));
             // The same street, and no two different house numbers.
             let same_street = !s.is_empty()
@@ -1166,7 +1427,7 @@ pub fn rebuild(c: &Connection, inp: &Inputs, from: i64, to: i64) -> Result<Built
                     .and_then(|pid| ended.get(pid))
                     .map_or(true, |t| *t > e.call.at)
         };
-        match place(e, &runs, &open, &vocab) {
+        match place(e, &runs, &open, &vocab, &p.placement) {
             Placed::Run { incident, how, inferred } => {
                 let primary = match case_of.get(&incident) {
                     Some(pid) => *pid,
@@ -1396,9 +1657,16 @@ const ARREST_WORDS: &[&str] = &[
 /// crew uses about an arrest — including the ones that follow one, since a
 /// patient with pulses back can present seizing — is not contradicting
 /// anything. Only a report with none of them at all is.
+#[cfg(test)]
 pub fn contradicts_arrest(report: &str) -> bool {
+    contradicts(report, arrest_profile().report_words())
+}
+
+/// Does this report describe something other than the profile's kind of
+/// run: none of `words` in it? No words, no contradiction.
+pub fn contradicts(report: &str, words: &[String]) -> bool {
     let text = report.to_lowercase();
-    !text.trim().is_empty() && !ARREST_WORDS.iter().any(|w| text.contains(w))
+    !words.is_empty() && !text.trim().is_empty() && !words.iter().any(|w| text.contains(w.as_str()))
 }
 
 fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Settings, scene: Option<(f64, f64)>) -> (Vec<Line>, Vec<Arrival>) {
@@ -1496,12 +1764,13 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
     // The crew's own account of the patient, when it names no arrest at
     // all. Only for a profile about arrests: the words it looks for are
     // theirs.
-    let contested = (profile == "cardiac-arrest" && state != "downgraded")
+    let report_words = profile_of(profile).report_words().to_vec();
+    let contested = (!report_words.is_empty() && state != "downgraded")
         .then(|| {
             lines
                 .iter()
                 .rev()
-                .find(|l| l.kind == "report" && contradicts_arrest(&l.detail))
+                .find(|l| l.kind == "report" && contradicts(&l.detail, &report_words))
                 .map(|l| {
                     let said = l.detail.split(" — ").next().unwrap_or(&l.detail).trim();
                     let place = l.label.trim_start_matches("Report to ").split(" · ").next().unwrap_or("the hospital");
@@ -1698,10 +1967,78 @@ pub fn cases_set_telegram(app: AppHandle, profile: String, telegram: crate::case
     let mut s = load(&app);
     let p = s.profiles.iter_mut().find(|p| p.id == profile).ok_or("no such case profile")?;
     p.telegram = telegram;
-    let path = settings_path(&app)?;
-    std::fs::write(&path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", path.display()))?;
-    touch();
+    save(&app, s)
+}
+
+/// Everything on Settings → Cases: the profiles and the report facts.
+#[tauri::command]
+pub fn cases_settings_get(app: AppHandle) -> Settings {
+    load(&app)
+}
+
+#[tauri::command]
+pub fn cases_settings_set(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+    if settings.profiles.is_empty() {
+        return Err("there has to be at least one profile".into());
+    }
+    let s = save(&app, settings)?;
+    // Events are read by the rules as they now stand: the live window is
+    // built again so the cases on screen agree with the settings.
+    let _ = tauri::Emitter::emit(&app, "cases", ());
     Ok(s)
+}
+
+#[tauri::command]
+pub fn cases_settings_defaults() -> Settings {
+    Settings::default()
+}
+
+/// Read one transmission by a draft profile's event rules, as the ops
+/// channel would be read: the page's try-it box. Nothing is saved.
+#[tauri::command]
+pub fn cases_try_event(profile: Profile, text: String, console: bool) -> Option<Heard> {
+    let mut s = Settings { profiles: vec![profile], ..Default::default() };
+    sanitize(&mut s);
+    let minute = local_minute(crate::library::now());
+    classify(&text, console, minute, &s.profiles[0])
+}
+
+/// One case's message as a draft profile would word it.
+#[derive(Serialize, Clone, Debug)]
+pub struct MessagePreview {
+    pub title: String,
+    pub opened: i64,
+    pub text: String,
+}
+
+/// The newest cases of a profile, rendered by a draft's message settings:
+/// what the Telegram thread would read. Nothing is sent or saved.
+#[tauri::command]
+pub async fn cases_message_preview(app: AppHandle, profile: Profile, days: u32) -> Result<Vec<MessagePreview>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = Settings { profiles: vec![profile], ..Default::default() };
+        sanitize(&mut s);
+        let p = &s.profiles[0];
+        let state = app.state::<AppState>();
+        let places = crate::places::load(&app).settings;
+        let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
+        let now = crate::library::now();
+        let view = {
+            let c = db.lock().unwrap();
+            list(&c, now - days.clamp(1, 60) as i64 * 86400, &places, now)
+        };
+        let view = with_roads(&state, view);
+        let cap = if p.telegram.audio { p.message.caption_chars as usize } else { p.message.text_chars as usize };
+        Ok(view
+            .cases
+            .iter()
+            .filter(|k| k.profile == p.id)
+            .take(3)
+            .map(|k| MessagePreview { title: k.title.clone(), opened: k.opened, text: crate::casesend::render_with(k, cap, &p.message) })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// What a profile's timelines would have sent over the last `days`, without
@@ -1744,12 +2081,88 @@ mod tests {
     fn p() -> Profile {
         arrest_profile()
     }
+    fn pl() -> Placement {
+        Placement::default()
+    }
 
     fn kind(text: &str, console: bool, minute: i64) -> Option<(String, Source, Option<i64>)> {
         classify(text, console, minute, &p()).map(|h| (h.kind, h.source, h.clock))
     }
 
     const M1748: i64 = 17 * 60 + 48;
+
+    #[test]
+    fn settings_from_an_older_file_get_the_new_parts_and_survive_a_round_trip() {
+        // A cases.json written before placement, message and report facts
+        // existed: every new part is the built-in default.
+        let s: Settings = serde_json::from_str(r#"{"profiles":[{"id":"cardiac-arrest","name":"Cardiac arrest","enabled":true,"call_types":["Cardiac Arrest"],"page_phrases":["cardiac arrest"],"events":[],"telegram":{"enabled":true,"dest":"d1"}}]}"#).unwrap();
+        let (mut s, _) = with_new_defaults(s);
+        sanitize(&mut s);
+        let p = &s.profiles[0];
+        assert_eq!(p.placement, Placement::default());
+        assert_eq!(p.message, crate::casesend::Message::default());
+        assert_eq!(p.report_words, arrest_profile().report_words);
+        assert!(p.telegram.enabled && p.telegram.dest == "d1");
+        assert_eq!(s.report, ReportFacts::default());
+        assert_eq!(s.profiles[0].events.len(), arrest_profile().events.len(), "the events a newer build added are put in");
+        let text = serde_json::to_string(&Settings::default()).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn sanitizing_settles_ids_kinds_words_and_windows() {
+        let mut s = Settings::default();
+        let p = &mut s.profiles[0];
+        p.events.push(EventRule { kind: "Lost Pulses".into(), label: String::new(), phrases: vec!["No Pulse, lost pulse".into()], readback: vec![String::new()] });
+        p.events.push(EventRule::default());
+        p.placement.open_mins = 0;
+        p.report_words = Some(vec!["CPR\nrosc".into()]);
+        p.message.banners.retain(|b| b.state != "rosc");
+        p.message.caption_chars = 5000;
+        s.report.facts.push(ReportFact { key: " Rhythm ".into(), ask: String::new(), arrest_only: false });
+        s.report.facts.push(ReportFact { key: "GCS".into(), ask: "as said".into(), arrest_only: false });
+        sanitize(&mut s);
+        let p = &s.profiles[0];
+        let e = &p.events[p.events.len() - 1];
+        assert_eq!((e.kind.as_str(), e.label.as_str()), ("lost_pulses", "lost pulses"));
+        assert_eq!(e.phrases, vec!["no pulse", "lost pulse"]);
+        assert!(e.readback.is_empty());
+        assert_eq!(p.placement.open_mins, 1);
+        assert_eq!(p.report_words(), ["cpr", "rosc"]);
+        // A profile that never had report words gets none, not the arrest's.
+        let mut t = Settings { profiles: vec![Profile { id: "stroke".into(), name: "Stroke".into(), ..Default::default() }], ..Default::default() };
+        sanitize(&mut t);
+        assert!(t.profiles[0].report_words().is_empty());
+        assert!(p.message.banners.iter().any(|b| b.state == "rosc" && b.words == "ROSC · PULSES BACK"), "a missing banner comes back as the default");
+        assert_eq!(p.message.caption_chars, 1024);
+        // The repeated key is dropped, the new one kept.
+        assert_eq!(s.report.facts.iter().filter(|f| f.key == "rhythm").count(), 1);
+        assert_eq!(s.report.facts.last().map(|f| f.key.as_str()), Some("gcs"));
+    }
+
+    #[test]
+    fn a_report_contradicts_only_by_the_profiles_words() {
+        assert!(contradicts("seizure, postictal", &["arrest".to_string()]));
+        assert!(!contradicts("seizure, postictal", &[]), "no words, nothing to contradict");
+        assert!(!contradicts("cpr in progress", &["arrest".to_string(), "cpr".to_string()]));
+    }
+
+    #[test]
+    fn the_windows_and_word_lists_come_from_the_placement() {
+        let mut p = arrest_profile();
+        assert!(kind("Working Arrest 1748.", true, M1748).is_some());
+        // Two words is too long once readbacks may be one word.
+        p.placement.readback_words = 1;
+        p.placement.readback_words_untimed = 1;
+        assert!(classify("Working Arrest 1748.", true, M1748, &p).is_none());
+        // A request names the event's words; only the question and request
+        // lists keep it from being read as the event.
+        let mut p = arrest_profile();
+        assert!(classify("can you add us to that working arrest", false, M1748, &p).is_none());
+        p.placement.asking.retain(|w| w != "can");
+        p.placement.requests.clear();
+        assert_eq!(classify("can you add us to that working arrest", false, M1748, &p).map(|h| h.kind), Some("working".into()));
+    }
 
     #[test]
     fn a_dispatcher_readback_is_the_event_and_its_time() {
@@ -1899,13 +2312,13 @@ mod tests {
         let open = |r: &Run| r.case.is_some();
         // Said.
         let said = event("Control from Engine 31, this is not a cardiac arrest.", false, None);
-        assert!(matches!(place(&said, &runs, &open, &vocab()), Placed::Run { incident: 10, inferred: false, .. }));
+        assert!(matches!(place(&said, &runs, &open, &vocab(), &pl()), Placed::Run { incident: 10, inferred: false, .. }));
         // Learned: the crew call the readback answers came from a radio
         // learned as Medic 18.
         let mut crew = ops(8, 900333, 995, "This is a working arrest.");
         crew.learned = Some("Medic 18".into());
         let learned = event("Working Arrest", true, Some(crew));
-        match place(&learned, &runs, &open, &vocab()) {
+        match place(&learned, &runs, &open, &vocab(), &pl()) {
             Placed::Run { incident, how, inferred } => {
                 assert_eq!((incident, inferred), (11, false));
                 assert!(how.contains("learned as Medic 18"));
@@ -1914,9 +2327,9 @@ mod tests {
         }
         // Two arrests open and nothing names the run: not guessed.
         let bare = event("Working Arrest", true, None);
-        assert!(matches!(place(&bare, &runs, &open, &vocab()), Placed::Nowhere(_)));
+        assert!(matches!(place(&bare, &runs, &open, &vocab(), &pl()), Placed::Nowhere(_)));
         // One open: placed, and marked as inferred.
-        assert!(matches!(place(&bare, &runs[..1], &open, &vocab()), Placed::Run { incident: 10, inferred: true, .. }));
+        assert!(matches!(place(&bare, &runs[..1], &open, &vocab(), &pl()), Placed::Run { incident: 10, inferred: true, .. }));
         // A page upgrading an open arrest at that moment outranks a callsign
         // that points at an older run the page lost the unit from.
         let mut arrest = run(12, 950, &["Medic 17"], Some(2));
@@ -1924,10 +2337,10 @@ mod tests {
         let older = run(13, -2_000, &["Engine 36"], None);
         let named = event("Fire control, this is engine 36, mark this working cardiac arrest.", false, None);
         let both = vec![older, arrest];
-        assert!(matches!(place(&named, &both, &open, &vocab()), Placed::Run { incident: 12, .. }));
+        assert!(matches!(place(&named, &both, &open, &vocab(), &pl()), Placed::Run { incident: 12, .. }));
         // A crew statement is never placed by the clock.
         let crew_only = event("This is going to be a DOA.", false, None);
-        assert!(matches!(place(&crew_only, &runs[..1], &open, &vocab()), Placed::Nowhere(_)));
+        assert!(matches!(place(&crew_only, &runs[..1], &open, &vocab(), &pl()), Placed::Nowhere(_)));
     }
 
     #[test]
@@ -2032,7 +2445,7 @@ mod tests {
         let mut old = arrest_profile();
         old.events.retain(|e| e.kind != "arrived");
         old.events[0].phrases.push("the listener's own".into());
-        let (s, grew) = with_new_defaults(Settings { profiles: vec![old] });
+        let (s, grew) = with_new_defaults(Settings { profiles: vec![old], ..Default::default() });
         assert!(grew);
         let kinds: Vec<&str> = s.profiles[0].events.iter().map(|e| e.kind.as_str()).collect();
         let want: Vec<String> = arrest_profile().events.iter().map(|e| e.kind.clone()).collect();
