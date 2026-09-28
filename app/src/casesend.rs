@@ -170,7 +170,7 @@ pub(crate) fn banner(state: &str) -> (&'static str, String) {
         "reported" => ("🏥", "HOSPITAL NOTIFIED".into()),
         "arrived" => ("🏥", "AT THE HOSPITAL".into()),
         "terminated" => ("⚫", "EFFORTS CEASED".into()),
-        "downgraded" => ("⚪", "NOT A CARDIAC ARREST".into()),
+        "downgraded" => ("⚪", "NOT A CARDIAC ARREST · COMPLETED".into()),
         other => ("🔵", state_label(other).to_uppercase()),
     }
 }
@@ -415,6 +415,26 @@ pub fn map_due(k: &CaseView, t: &Thread, s: &Send, had: Option<&Sent>, now: i64)
 /// That is when the map comes down.
 pub fn concluded(k: &CaseView) -> bool {
     matches!(k.state.as_str(), "terminated" | "downgraded")
+}
+
+/// A case as it goes out. Once the crew says it is not an arrest the case is
+/// over: its message is edited to say so, and nothing heard after — a report
+/// to a hospital, a repage — is added to it or sent as a message of its own.
+/// A report after the downgrade is someone else's business, often not even
+/// this patient's.
+pub fn settled(k: &CaseView) -> std::borrow::Cow<'_, CaseView> {
+    use std::borrow::Cow;
+    if k.state != "downgraded" {
+        return Cow::Borrowed(k);
+    }
+    let Some(end) = k.lines.iter().rposition(|l| l.kind == "downgrade") else { return Cow::Borrowed(k) };
+    let cut = k.lines[end].at;
+    let mut k = k.clone();
+    k.lines.truncate(end + 1);
+    k.arrivals.retain(|a| a.anchor <= cut);
+    k.arrival = None;
+    k.open = false;
+    Cow::Owned(k)
 }
 
 // ---------------------------------------------------------------------------
@@ -765,6 +785,7 @@ pub fn tick(app: &AppHandle) {
     let view = crate::cases::with_roads(&state, view);
     for p in settings.profiles.iter().filter(|p| on(p)) {
         for k in view.cases.iter().filter(|k| k.profile == p.id) {
+            let k = &*settled(k);
             send_case_emails(app, &db, p, k, &places, now);
             if !p.telegram.enabled {
                 continue;
@@ -1349,6 +1370,7 @@ pub fn preview(view: &crate::cases::CasesView, s: &Send, places: &crate::places:
     let mut days: HashMap<(String, String), PreviewDay> = HashMap::new();
     let mut cases = Vec::new();
     for k in &view.cases {
+        let k = &*settled(k);
         let date = chrono::DateTime::from_timestamp(k.opened, 0)
             .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
             .unwrap_or_default();
@@ -1729,6 +1751,33 @@ mod tests {
         assert_eq!(hosp.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), vec!["report:5"]);
         // Hospitals' chats can be left out.
         assert_eq!(threads(&k, &Send { hospitals: false, ..s.clone() }, &places()).len(), 1);
+    }
+
+    #[test]
+    fn not_an_arrest_ends_the_case_with_an_edit_and_nothing_after() {
+        let s = Send { dest: "d-all".into(), ..Send::default() };
+        let t0 = 1_000_000;
+        let mut report_after = report(t0 + 2000, 9, vec![Fact { key: "age".into(), value: "74".into() }]);
+        report_after.detail = "Hypotension, AFib — Medic 82 en route with a 74-year-old female.".into();
+        let raw = case(
+            vec![
+                line(t0, "dispatched", "Dispatched as Cardiac Arrest", "page"),
+                line(t0 + 500, "downgrade", "Not a cardiac arrest", "crew"),
+                report_after,
+            ],
+            vec![arrival(9, t0 + 1990, Some("5 to 10 minutes"))],
+        );
+        let k = settled(&raw);
+        let text = render(&k, TEXT_CHARS);
+        assert!(text.contains("⚪ NOT A CARDIAC ARREST · COMPLETED"), "{text}");
+        assert!(!text.contains("Report to") && !text.contains("Hypotension") && !text.contains("Patient"), "{text}");
+        assert!(notices(&k).is_empty() && updates(&k).iter().all(|u| u.conversation.is_none()));
+        assert_eq!(threads(&k, &s, &places()).len(), 1, "no hospital's chat");
+        // A thread already open is edited, and hears nothing more.
+        let t = &threads(&k, &s, &places())[0];
+        let had = Sent { root_id: 42, rendered: "old".into(), ..Default::default() };
+        let steps = plan(&k, t, &s, Some(&had), t0 + 2010);
+        assert_eq!(steps, vec![Step::Edit { root_id: 42, text }]);
     }
 
     #[test]
