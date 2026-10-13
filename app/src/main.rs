@@ -2522,6 +2522,8 @@ fn main() {
             cases::cases_settings_set,
             cases::cases_settings_defaults,
             cases::cases_try_event,
+            cases::cases_try_report,
+            cases::cases_report_verdicts,
             cases::cases_message_preview,
             cases::cases_preview,
             research::research_stats,

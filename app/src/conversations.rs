@@ -875,6 +875,13 @@ pub fn fact_keys() -> Vec<String> {
     crate::cases::settings().report.facts.iter().map(|f| f.key.clone()).collect()
 }
 
+/// The answers a fact's ask offers in quotes ("ongoing", "prior", …). One
+/// of these is an answer even when it is a word that elsewhere means the
+/// model had nothing to say ("unclear").
+fn offered(ask: &str) -> Vec<String> {
+    ask.split('"').skip(1).step_by(2).map(|o| o.trim().to_ascii_lowercase()).filter(|o| !o.is_empty() && o.len() <= 24).collect()
+}
+
 /// One fact the summary call lifted out of a report.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Fact {
@@ -891,12 +898,17 @@ pub struct Fact {
 /// a fact is kept as note, so a model that puts the block in the wrong place
 /// costs the facts and nothing else.
 pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
+    split_facts_with(note, &crate::cases::settings().report.facts)
+}
+
+/// `split_facts` by a given FACTS list, for a draft not yet saved.
+pub fn split_facts_with(note: &str, asked: &[crate::cases::ReportFact]) -> (String, Vec<Fact>) {
     let clean = |l: &str| l.trim().trim_matches(|c: char| c == '*' || c == '#' || c == '-' || c == '•' || c == ' ').to_string();
     let lines: Vec<&str> = note.lines().collect();
     let Some(start) = lines.iter().position(|l| clean(l).to_ascii_lowercase().starts_with("facts:")) else {
         return (note.trim().to_string(), Vec::new());
     };
-    let keys = fact_keys();
+    let keys: Vec<String> = asked.iter().map(|f| f.key.clone()).collect();
     let mut facts: Vec<Fact> = Vec::new();
     let mut end = start + 1;
     while end < lines.len() {
@@ -912,7 +924,9 @@ pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
         }
         let value = v.trim().trim_matches(|c: char| c == '*' || c == '"' || c == '.').trim().to_string();
         let unsaid = ["not stated", "not said", "unknown", "unclear", "n/a", "none stated", "not mentioned", "not reported", ""];
-        if !unsaid.contains(&value.to_ascii_lowercase().as_str()) && !facts.iter().any(|f| f.key == key) {
+        let lower = value.to_ascii_lowercase();
+        let an_answer = asked.iter().find(|f| f.key == key).is_some_and(|f| offered(&f.ask).contains(&lower));
+        if (an_answer || !unsaid.contains(&lower.as_str())) && !facts.iter().any(|f| f.key == key) {
             facts.push(Fact { key, value: crate::analyzers::clean_line(&value, 120) });
         }
         end += 1;
@@ -926,6 +940,13 @@ pub fn split_facts(note: &str) -> (String, Vec<Fact>) {
 pub fn read_summary(raw: &str) -> (String, String, Vec<Fact>) {
     let (headline, rest) = split_headline(raw);
     let (note, facts) = split_facts(&rest);
+    (headline, note, facts)
+}
+
+/// `read_summary` by a given FACTS list, for a draft not yet saved.
+pub fn read_summary_with(raw: &str, asked: &[crate::cases::ReportFact]) -> (String, String, Vec<Fact>) {
+    let (headline, rest) = split_headline(raw);
+    let (note, facts) = split_facts_with(&rest, asked);
     (headline, note, facts)
 }
 
@@ -2974,7 +2995,7 @@ mod failed_summary_tests {
 
 #[cfg(test)]
 mod facts_tests {
-    use super::{fact_keys, read_summary, split_facts, summary_guide, Fact};
+    use super::{fact_keys, offered, read_summary, split_facts, split_facts_with, summary_guide, Fact};
 
     fn fact(k: &str, v: &str) -> Fact {
         Fact { key: k.into(), value: v.into() }
@@ -3027,6 +3048,26 @@ mod facts_tests {
     }
 
     /// Ask the real model about stored reports and print what comes back.
+    /// The arrest question's answers are offered in quotes in its ask, so
+    /// "unclear" and "none" are answers there and nothing anywhere else.
+    #[test]
+    fn an_answer_the_ask_offers_is_kept_even_where_it_would_mean_nothing_said() {
+        let asked = crate::cases::ReportFacts::default().facts;
+        let (note, facts) = split_facts_with("Medic 16 inbound.\n\nFACTS:\narrest: unclear\nage: unclear\nrosc: not stated", &asked);
+        assert_eq!(note, "Medic 16 inbound.");
+        assert_eq!(facts, vec![Fact { key: "arrest".into(), value: "unclear".into() }]);
+        let (_, facts) = split_facts_with("FACTS:\narrest: None.\nage: 74", &asked);
+        assert_eq!(facts, vec![Fact { key: "arrest".into(), value: "None".into() }, Fact { key: "age".into(), value: "74".into() }]);
+        // Offered answers are read from the ask as it stands, so a renamed one follows.
+        let mut custom = asked.clone();
+        custom[0].ask = "say \"yes\" or \"unknown\"".into();
+        let (_, facts) = split_facts_with("FACTS:\narrest: unknown", &custom);
+        assert_eq!(facts, vec![Fact { key: "arrest".into(), value: "unknown".into() }]);
+        assert_eq!(offered(ARREST_ASK_SAMPLE), ["ongoing", "prior", "none", "unclear"]);
+    }
+
+    const ARREST_ASK_SAMPLE: &str = "one word — \"ongoing\", \"prior\", \"none\" or \"unclear\". Judge this one";
+
     /// Point `HS_FACTS_DB` at a copy of a library, `HS_FACTS_IDS` at
     /// conversation ids, and `HS_FACTS_MODEL` at the model.
     #[test]

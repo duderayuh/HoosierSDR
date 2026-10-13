@@ -181,6 +181,11 @@ pub struct Profile {
     /// file from before this existed) = the built-in arrest words for the
     /// arrest profile and none for any other, settled on load.
     pub report_words: Option<Vec<String>>,
+    /// A report the summary call read as a patient never in arrest ends the
+    /// case, as a radio "not a cardiac arrest" does — unless the radio said
+    /// working, ROSC or efforts ceased, or another report on the run says
+    /// arrest. Off, such a report only puts a warning at the top.
+    pub report_ends_case: bool,
     /// How events are placed on runs.
     pub placement: Placement,
     /// What the Telegram message and the emails say.
@@ -198,6 +203,7 @@ impl Default for Profile {
             events: Vec::new(),
             telegram: crate::casesend::Send::default(),
             report_words: None,
+            report_ends_case: true,
             placement: Placement::default(),
             message: crate::casesend::Message::default(),
         }
@@ -241,6 +247,7 @@ pub fn arrest_profile() -> Profile {
         enabled: true,
         telegram: crate::casesend::Send::default(),
         report_words: Some(default_report_words("cardiac-arrest")),
+        report_ends_case: true,
         placement: Placement::default(),
         message: crate::casesend::Message::default(),
         call_types: vec!["Cardiac Arrest".into()],
@@ -306,6 +313,7 @@ impl Default for ReportFacts {
         let f = |key: &str, ask: &str, arrest_only: bool| ReportFact { key: key.into(), ask: ask.into(), arrest_only };
         ReportFacts {
             facts: vec![
+                f(ARREST_FACT, ARREST_ASK, false),
                 f("age", "the patient's age as said", false),
                 f("sex", "male or female", false),
                 f("witnessed", "yes or no — was the collapse seen by someone", true),
@@ -502,6 +510,20 @@ fn with_new_defaults(mut s: Settings) -> (Settings, bool) {
             }
             grew = true;
         }
+    }
+    // The facts a newer build asks for, each in its place: the arrest
+    // question is what decides whether a case is one.
+    let d = ReportFacts::default();
+    for (i, f) in d.facts.iter().enumerate() {
+        if s.report.facts.iter().any(|x| x.key == f.key) {
+            continue;
+        }
+        let before = d.facts[i + 1..].iter().find_map(|next| s.report.facts.iter().position(|x| x.key == next.key));
+        match before {
+            Some(at) => s.report.facts.insert(at, f.clone()),
+            None => s.report.facts.push(f.clone()),
+        }
+        grew = true;
     }
     (s, grew)
 }
@@ -1639,9 +1661,36 @@ fn lines_for(c: &Connection, case: i64) -> Vec<Line> {
 /// other emergency.
 const ARREST_WORDS: &[&str] = &[
     "arrest", "cpr", "rosc", "pulse", "compression", "defib", "aed", "asystole",
-    "fibrillation", "vfib", "v-fib", "pea", "agonal", "resuscitat", "downtime",
+    "ventricular fibrillation", "vfib", "v-fib", "vf", "pea", "agonal", "resuscitat", "downtime",
     "return of spontaneous", "lucas", "bvm", "intubat",
 ];
+
+/// The fact the summary call answers about every report: was this patient
+/// in cardiac arrest. The one line of the FACTS block that is a judgement.
+pub const ARREST_FACT: &str = "arrest";
+
+/// What the model is told to put after it. The four answers are what
+/// `arrest_answer` reads; the words around them are the question.
+pub const ARREST_ASK: &str = "one word — \"ongoing\", \"prior\", \"none\" or \"unclear\". The test is pulselessness, judged from the whole report and not from a word in it. \"ongoing\": compressions are going on now, or the crew is working the arrest. \"prior\": the patient was pulseless at some point — a cardiac arrest, CPR, compressions, shocks or ROSC are reported — and has pulses now. \"none\": the patient was never pulseless — awake, talking, or with a pulse and a blood pressure throughout — however unwell otherwise; a respiratory arrest or an overdose reversed with naloxone without compressions is \"none\", and so are bystander compressions on a patient who was never pulseless. \"unclear\": the pulse, the mental status and what was done all go unsaid. Where the transcript carries more than one patient, answer for the one who was in arrest, if any";
+
+/// Whether `word` is named in `text`: at the start of a word, so "pea" is
+/// not "appear" or "repeat", and "cpr" is not "cprs" either way; a stem
+/// ("resuscitat", "intubat") takes whatever ends it.
+fn names(text: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(i) = text[from..].find(word) {
+        let at = from + i;
+        if at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() {
+            return true;
+        }
+        from = at + word.len();
+    }
+    false
+}
 
 /// Does this report describe something other than an arrest?
 ///
@@ -1666,7 +1715,143 @@ pub fn contradicts_arrest(report: &str) -> bool {
 /// run: none of `words` in it? No words, no contradiction.
 pub fn contradicts(report: &str, words: &[String]) -> bool {
     let text = report.to_lowercase();
-    !words.is_empty() && !text.trim().is_empty() && !words.iter().any(|w| text.contains(w.as_str()))
+    !words.is_empty() && !text.trim().is_empty() && !words.iter().any(|w| names(&text, w))
+}
+
+/// Which of `words` a report names, for a page showing why it passed.
+pub fn words_named(report: &str, words: &[String]) -> Vec<String> {
+    let text = report.to_lowercase();
+    words.iter().filter(|w| names(&text, w)).cloned().collect()
+}
+
+// ---------------------------------------------------------------------------
+// was this patient in arrest
+// ---------------------------------------------------------------------------
+
+/// What one report says about whether its patient was in cardiac arrest.
+///
+/// The question is put to the summary call, which reads the whole report:
+/// a patient "in atrial fibrillation with a pressure of 104/70" was never
+/// in arrest, however many arrest-adjacent words the account has. The word
+/// list is what is left when the call was never asked (an older report) or
+/// would not say.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Compressions now, or the crew is working the arrest.
+    Ongoing,
+    /// Pulseless at some point; pulses now.
+    Prior,
+    /// Never in arrest.
+    NoArrest,
+    /// The report does not say, or nobody asked.
+    Unclear,
+}
+
+/// A report's verdict and how it was reached: by the model's answer, or by
+/// the fallback word list, which is weaker and never ends a case.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Said {
+    pub verdict: Verdict,
+    pub asked: bool,
+}
+
+/// The model's answer to the arrest question, if the report carries one.
+/// Read leniently: a model that writes "ongoing — compressions in progress"
+/// or "no, never pulseless" has still answered.
+pub fn arrest_answer(facts: &[crate::conversations::Fact]) -> Option<Verdict> {
+    let v = facts.iter().find(|f| f.key == ARREST_FACT)?.value.trim().to_lowercase();
+    // The first word carries the answer; what follows is the model explaining itself.
+    let first = v.split(|c: char| !c.is_alphanumeric()).find(|w| !w.is_empty()).unwrap_or("");
+    Some(if matches!(first, "ongoing" | "current" | "currently" | "working" | "active" | "yes") || v.starts_with("in progress") {
+        Verdict::Ongoing
+    } else if matches!(first, "prior" | "earlier" | "previous" | "previously" | "resolved" | "rosc" | "post" | "was" | "had") {
+        Verdict::Prior
+    } else if matches!(first, "no" | "none" | "never" | "not") {
+        Verdict::NoArrest
+    } else {
+        Verdict::Unclear
+    })
+}
+
+/// What a report line says: the model's answer where there is one, else
+/// the word list — naming none of the words is "no arrest", weakly; naming
+/// any is only "unclear", since words are not an account.
+pub fn report_verdict(l: &Line, words: &[String]) -> Said {
+    if let Some(verdict) = arrest_answer(&l.facts) {
+        return Said { verdict, asked: true };
+    }
+    let verdict = if contradicts(&l.detail, words) { Verdict::NoArrest } else { Verdict::Unclear };
+    Said { verdict, asked: false }
+}
+
+/// What a case does with what its reports said.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    /// Goes on as an arrest; nothing said otherwise.
+    Arrest,
+    /// Said at the top, and the hospital told of no arrest is not paged;
+    /// the case goes on as an arrest.
+    Warn,
+    /// Ends the case: not a cardiac arrest.
+    Ends,
+}
+
+/// Decide from every report on the case. One report of an arrest, ongoing
+/// or prior, settles it: a second patient's report cannot talk it down.
+/// The case ends only when the setting allows, every report was read by
+/// the model as never an arrest, and the radio never said working, ROSC,
+/// lost pulses or efforts ceased. Anything less is a warning: the word
+/// list alone, a report the model could not read, or a conflict.
+pub fn decide(reports: &[Said], radio_arrest: bool, ends_case: bool) -> Decision {
+    if reports.is_empty() || reports.iter().any(|s| matches!(s.verdict, Verdict::Ongoing | Verdict::Prior)) {
+        return Decision::Arrest;
+    }
+    if !reports.iter().any(|s| s.verdict == Verdict::NoArrest) {
+        return Decision::Arrest;
+    }
+    if ends_case && !radio_arrest && reports.iter().all(|s| s.verdict == Verdict::NoArrest && s.asked) {
+        Decision::Ends
+    } else {
+        Decision::Warn
+    }
+}
+
+/// Whether the radio itself said this run was an arrest: the crew's or the
+/// dispatcher's words, not a report's.
+pub fn radio_said_arrest(lines: &[Line]) -> bool {
+    lines.iter().any(|l| l.source != "report" && matches!(l.kind.as_str(), "working" | "rosc" | "rearrest" | "terminated"))
+}
+
+/// The hospital a report line names, from its label.
+pub fn report_place(l: &Line) -> &str {
+    l.label.trim_start_matches("Report to ").split(" · ").next().unwrap_or("the hospital")
+}
+
+/// The headline of a report line: what the crew said it was.
+pub fn report_said(l: &Line) -> &str {
+    l.detail.split(" — ").next().unwrap_or(&l.detail).trim()
+}
+
+/// The line that ends a case on the crew's report: the profile's own
+/// downgrade label, credited to the report, at the report's time.
+fn report_downgrade(p: &Profile, r: &Line) -> Line {
+    let label = p.events.iter().find(|e| e.kind == "downgrade").map(|e| e.label.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| "Not a cardiac arrest".into());
+    let place = report_place(r);
+    Line {
+        at: r.at,
+        clock: None,
+        kind: "downgrade".into(),
+        label: format!("{label} · the crew's report to {place}"),
+        source: Source::Report.as_str().into(),
+        how: format!("the crew's report to {place} is of a patient never in arrest"),
+        inferred: false,
+        call: r.call,
+        conversation: r.conversation,
+        detail: report_said(r).to_string(),
+        facts: Vec::new(),
+    }
 }
 
 fn report_lines(c: &Connection, incidents: &[i64], places: &crate::places::Settings, scene: Option<(f64, f64)>) -> (Vec<Line>, Vec<Arrival>) {
@@ -1752,6 +1937,19 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
             check_arrival(a, at);
         }
     }
+    // Was this patient in arrest, by the crew's own reports. A case every
+    // report says was never one ends here, on the last report, unless the
+    // radio said otherwise.
+    let p = profile_of(profile);
+    let report_words = p.report_words().to_vec();
+    let said: Vec<(usize, Said)> = lines.iter().enumerate().filter(|(_, l)| l.kind == "report").map(|(i, l)| (i, report_verdict(l, &report_words))).collect();
+    let decision = decide(&said.iter().map(|(_, s)| *s).collect::<Vec<_>>(), radio_said_arrest(&lines), p.report_ends_case);
+    if decision == Decision::Ends && !lines.iter().any(|l| l.kind == "downgrade") {
+        if let Some((i, _)) = said.last() {
+            let end = report_downgrade(&p, &lines[*i]);
+            lines.insert(i + 1, end);
+        }
+    }
     let state = state_of(&lines).to_string();
     let updated = lines.iter().map(|l| l.at).max().unwrap_or(opened);
     let pediatric = lines.iter().any(|l| l.source == "page" && words(&l.detail).iter().any(|w| w == "pediatric"));
@@ -1761,20 +1959,17 @@ fn view(c: &Connection, id: i64, profile: &str, primary: i64, opened: i64, place
         _ if profile == "cardiac-arrest" => "Cardiac arrest".to_string(),
         _ => inc.call_type.clone(),
     };
-    // The crew's own account of the patient, when it names no arrest at
-    // all. Only for a profile about arrests: the words it looks for are
-    // theirs.
-    let report_words = profile_of(profile).report_words().to_vec();
-    let contested = (!report_words.is_empty() && state != "downgraded")
+    // The crew's own account of the patient, when it is of no arrest and
+    // the case goes on regardless: said at the top.
+    let contested = (decision == Decision::Warn && state != "downgraded")
         .then(|| {
-            lines
-                .iter()
+            said.iter()
                 .rev()
-                .find(|l| l.kind == "report" && contradicts(&l.detail, &report_words))
-                .map(|l| {
-                    let said = l.detail.split(" — ").next().unwrap_or(&l.detail).trim();
-                    let place = l.label.trim_start_matches("Report to ").split(" · ").next().unwrap_or("the hospital");
-                    format!("Reported to {place} as: {said}")
+                .find(|(_, s)| s.verdict == Verdict::NoArrest)
+                .map(|(i, s)| {
+                    let l = &lines[*i];
+                    let how = if s.asked { "the crew's report is of no arrest" } else { "the report names no arrest" };
+                    format!("Reported to {} as: {} · {how}", report_place(l), report_said(l))
                 })
         })
         .flatten();
@@ -2003,6 +2198,133 @@ pub fn cases_try_event(profile: Profile, text: String, console: bool) -> Option<
     classify(&text, console, minute, &s.profiles[0])
 }
 
+/// A pasted report read as the summary call would read it, then judged as
+/// a case would judge it: the page's try-it box for the arrest question.
+#[derive(Serialize, Clone, Debug)]
+pub struct ReportTry {
+    pub headline: String,
+    pub note: String,
+    pub facts: Vec<crate::conversations::Fact>,
+    /// The model's own words after "arrest:", if any.
+    pub answer: Option<String>,
+    pub said: Said,
+    /// The fallback words the report names, for when the model did not answer.
+    pub words_named: Vec<String>,
+    /// What a case with this as its only report, and nothing on the radio, would do.
+    pub decision: Decision,
+}
+
+/// Run the summary call on a pasted report by the draft's FACTS block, and
+/// say what a case would make of the answer. Nothing is saved or sent.
+#[tauri::command]
+pub async fn cases_try_report(app: AppHandle, profile: Profile, report: ReportFacts, text: String) -> Result<ReportTry, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = Settings { profiles: vec![profile], report };
+        sanitize(&mut s);
+        let p = &s.profiles[0];
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("paste what the crew said".into());
+        }
+        let state = app.state::<AppState>();
+        let (_, ollama) = crate::alerts::shared_settings(&state);
+        let transcript = if text.lines().any(|l| l.contains(':')) { text.to_string() } else { format!("RADIO A: {text}") };
+        let prompt = format!(
+            "Summarise this EMS-to-hospital radio report.\n\n{}\n\nTranscript:\n{transcript}\n\nSummary:",
+            crate::conversations::summary_guide_for(&s.report)
+        );
+        let raw = crate::alerts::ollama_complete(&ollama, &prompt)?;
+        let (headline, note, facts) = crate::conversations::read_summary_with(&raw, &s.report.facts);
+        let l = Line {
+            at: 0,
+            clock: None,
+            kind: "report".into(),
+            label: "Report to the hospital".into(),
+            source: Source::Report.as_str().into(),
+            how: String::new(),
+            inferred: false,
+            call: None,
+            conversation: None,
+            detail: if headline.is_empty() { note.clone() } else { format!("{headline} — {note}") },
+            facts: facts.clone(),
+        };
+        let said = report_verdict(&l, p.report_words());
+        Ok(ReportTry {
+            answer: facts.iter().find(|f| f.key == ARREST_FACT).map(|f| f.value.clone()),
+            words_named: words_named(&l.detail, p.report_words()),
+            decision: decide(&[said], false, p.report_ends_case),
+            headline,
+            note,
+            facts,
+            said,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One report on a recent case, as the arrest question was answered for it.
+#[derive(Serialize, Clone, Debug)]
+pub struct ReportVerdictRow {
+    pub at: i64,
+    pub case_title: String,
+    pub address: String,
+    pub place: String,
+    pub headline: String,
+    pub answer: Option<String>,
+    pub said: Said,
+    pub words_named: Vec<String>,
+    /// What the case did, by the draft's setting and words.
+    pub decision: Decision,
+    pub radio_arrest: bool,
+}
+
+/// Every report on the profile's recent cases, with the verdict each got
+/// and what the case did with it, by the draft's words and setting.
+#[tauri::command]
+pub async fn cases_report_verdicts(app: AppHandle, profile: Profile, days: u32) -> Result<Vec<ReportVerdictRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = Settings { profiles: vec![profile], ..Default::default() };
+        sanitize(&mut s);
+        let p = &s.profiles[0];
+        let state = app.state::<AppState>();
+        let places = crate::places::load(&app).settings;
+        let db = state.db.lock().unwrap().clone().ok_or("library not open")?;
+        let now = crate::library::now();
+        let view = {
+            let c = db.lock().unwrap();
+            list(&c, now - days.clamp(1, 90) as i64 * 86400, &places, now)
+        };
+        let mut out = Vec::new();
+        for k in view.cases.iter().filter(|k| k.profile == p.id) {
+            // Judge the reports as heard, not the line a report may have ended the case with.
+            let heard: Vec<&Line> = k.lines.iter().filter(|l| l.kind != "downgrade" || l.source != "report").collect();
+            let reports: Vec<&Line> = heard.iter().copied().filter(|l| l.kind == "report").collect();
+            let saids: Vec<Said> = reports.iter().map(|l| report_verdict(l, p.report_words())).collect();
+            let radio_arrest = radio_said_arrest(&k.lines);
+            let decision = decide(&saids, radio_arrest, p.report_ends_case);
+            for (l, said) in reports.iter().zip(saids) {
+                out.push(ReportVerdictRow {
+                    at: l.at,
+                    case_title: k.title.clone(),
+                    address: k.address.clone(),
+                    place: report_place(l).to_string(),
+                    headline: report_said(l).to_string(),
+                    answer: l.facts.iter().find(|f| f.key == ARREST_FACT).map(|f| f.value.clone()),
+                    said,
+                    words_named: words_named(&l.detail, p.report_words()),
+                    decision,
+                    radio_arrest,
+                });
+            }
+        }
+        out.sort_by_key(|r| std::cmp::Reverse(r.at));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// One case's message as a draft profile would word it.
 #[derive(Serialize, Clone, Debug)]
 pub struct MessagePreview {
@@ -2138,6 +2460,147 @@ mod tests {
         // The repeated key is dropped, the new one kept.
         assert_eq!(s.report.facts.iter().filter(|f| f.key == "rhythm").count(), 1);
         assert_eq!(s.report.facts.last().map(|f| f.key.as_str()), Some("gcs"));
+    }
+
+    fn report_line(detail: &str, facts: Vec<crate::conversations::Fact>) -> Line {
+        Line {
+            at: 100, clock: None, kind: "report".into(), label: "Report to Franciscan Health South · said 7 to 10 minutes".into(),
+            source: "report".into(), how: String::new(), inferred: false, call: Some(7), conversation: Some(9), detail: detail.into(), facts,
+        }
+    }
+
+    fn radio_line(kind: &str, source: &str) -> Line {
+        Line { kind: kind.into(), source: source.into(), ..report_line("", Vec::new()) }
+    }
+
+    fn answer(v: &str) -> Vec<crate::conversations::Fact> {
+        vec![crate::conversations::Fact { key: ARREST_FACT.into(), value: v.into() }]
+    }
+
+    const SYNCOPE: &str = "Syncope, Hypotension, Atrial Fibrillation — Medic 16 is transporting a 74-year-old male to Franciscan with a syncopal episode at home. Hypotensive at 82/41 and tachycardic at 120 bpm in atrial fibrillation with rapid ventricular response; 104/70 after fluids. Denies chest pain.";
+
+    /// The report that prompted the question: paged as a cardiac arrest,
+    /// an awake man in atrial fibrillation. "Fibrillation" is no longer an
+    /// arrest word, and a word counts only at the start of a word.
+    #[test]
+    fn words_count_at_the_start_of_a_word_and_atrial_fibrillation_is_not_one() {
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(contradicts("the patient appears to repeat himself and speaks clearly", &w(&["pea"])), "pea is not appear, repeat or speak");
+        assert!(!contradicts("rhythm PEA on arrival", &w(&["pea"])));
+        assert!(!contradicts("resuscitation in progress", &w(&["resuscitat"])), "a stem takes any ending");
+        assert!(!contradicts("post-arrest hypothermia", &w(&["arrest"])), "a hyphen is a word boundary");
+        assert!(contradicts_arrest(SYNCOPE));
+        assert!(!contradicts_arrest("Cardiac Arrest, VF — ventricular fibrillation on arrival, two shocks."));
+        assert!(!contradicts_arrest("Unresponsive — VF on the monitor."));
+        assert_eq!(words_named("post-arrest, rosc, appears well", &w(&["arrest", "rosc", "pea"])), ["arrest", "rosc"]);
+        assert!(words_named("anything", &w(&[""])).is_empty(), "an empty word names nothing");
+    }
+
+    #[test]
+    fn the_models_answer_to_the_arrest_question_is_read_leniently() {
+        for (said, want) in [
+            ("ongoing", Verdict::Ongoing),
+            ("Ongoing — compressions in progress", Verdict::Ongoing),
+            ("in progress", Verdict::Ongoing),
+            ("prior", Verdict::Prior),
+            ("ROSC after two shocks", Verdict::Prior),
+            ("none", Verdict::NoArrest),
+            ("No, never pulseless", Verdict::NoArrest),
+            ("not in arrest", Verdict::NoArrest),
+            ("unclear", Verdict::Unclear),
+            ("maybe", Verdict::Unclear),
+        ] {
+            assert_eq!(arrest_answer(&answer(said)), Some(want), "{said}");
+        }
+        assert_eq!(arrest_answer(&[]), None);
+        assert_eq!(arrest_answer(&[crate::conversations::Fact { key: "rhythm".into(), value: "none".into() }]), None, "another fact is not the answer");
+    }
+
+    #[test]
+    fn a_report_is_judged_by_the_answer_first_and_the_words_only_without_one() {
+        let words = arrest_profile().report_words().to_vec();
+        // The model read the whole report: never in arrest.
+        assert_eq!(report_verdict(&report_line(SYNCOPE, answer("none")), &words), Said { verdict: Verdict::NoArrest, asked: true });
+        // The model's answer beats the words either way.
+        assert_eq!(report_verdict(&report_line("Cardiac Arrest, ROSC — pulses back.", answer("none")), &words), Said { verdict: Verdict::NoArrest, asked: true });
+        assert_eq!(report_verdict(&report_line(SYNCOPE, answer("prior")), &words), Said { verdict: Verdict::Prior, asked: true });
+        // No answer: the words, weakly, and naming one is only unclear.
+        assert_eq!(report_verdict(&report_line(SYNCOPE, Vec::new()), &words), Said { verdict: Verdict::NoArrest, asked: false });
+        assert_eq!(report_verdict(&report_line("Cardiac Arrest, ROSC — pulses back.", Vec::new()), &words), Said { verdict: Verdict::Unclear, asked: false });
+        // An explicit "unclear" is an answer, not an absence: the words are not read.
+        assert_eq!(report_verdict(&report_line(SYNCOPE, answer("unclear")), &words), Said { verdict: Verdict::Unclear, asked: true });
+        // A profile with no words contradicts nothing.
+        assert_eq!(report_verdict(&report_line(SYNCOPE, Vec::new()), &[]), Said { verdict: Verdict::Unclear, asked: false });
+    }
+
+    #[test]
+    fn a_case_ends_only_when_every_report_was_read_as_no_arrest_and_the_radio_agrees() {
+        let none = Said { verdict: Verdict::NoArrest, asked: true };
+        let weak = Said { verdict: Verdict::NoArrest, asked: false };
+        let unclear = Said { verdict: Verdict::Unclear, asked: true };
+        let prior = Said { verdict: Verdict::Prior, asked: true };
+        let ongoing = Said { verdict: Verdict::Ongoing, asked: true };
+        assert_eq!(decide(&[], false, true), Decision::Arrest, "no report, nothing to say");
+        assert_eq!(decide(&[none], false, true), Decision::Ends);
+        assert_eq!(decide(&[none, none], false, true), Decision::Ends, "two hospitals, both told of no arrest");
+        assert_eq!(decide(&[none], false, false), Decision::Warn, "the setting off: a warning only");
+        assert_eq!(decide(&[none], true, true), Decision::Warn, "the radio said working: the report does not end it");
+        assert_eq!(decide(&[weak], false, true), Decision::Warn, "the word list alone never ends a case");
+        assert_eq!(decide(&[none, weak], false, true), Decision::Warn);
+        assert_eq!(decide(&[none, unclear], false, true), Decision::Warn, "a report the model could not read holds it open");
+        assert_eq!(decide(&[none, prior], false, true), Decision::Arrest, "a second patient's report cannot talk an arrest down");
+        assert_eq!(decide(&[weak, ongoing], true, true), Decision::Arrest);
+        assert_eq!(decide(&[unclear], false, true), Decision::Arrest);
+        assert_eq!(decide(&[unclear, unclear], false, true), Decision::Arrest);
+    }
+
+    #[test]
+    fn the_radio_saying_arrest_is_the_crews_or_dispatchers_words_not_a_reports() {
+        assert!(radio_said_arrest(&[radio_line("dispatched", "page"), radio_line("working", "readback")]));
+        assert!(radio_said_arrest(&[radio_line("rosc", "crew")]));
+        assert!(radio_said_arrest(&[radio_line("terminated", "readback")]));
+        assert!(!radio_said_arrest(&[radio_line("dispatched", "page"), radio_line("transporting", "crew"), report_line("x", Vec::new())]));
+        // The line a report ended a case with is not the radio.
+        assert!(!radio_said_arrest(&[radio_line("downgrade", "report")]));
+    }
+
+    #[test]
+    fn the_line_a_report_ends_a_case_with_is_the_profiles_downgrade_credited_to_the_hospital() {
+        let p = arrest_profile();
+        let r = report_line(SYNCOPE, answer("none"));
+        let end = report_downgrade(&p, &r);
+        assert_eq!(end.kind, "downgrade");
+        assert_eq!(end.label, "Not a cardiac arrest · the crew's report to Franciscan Health South");
+        assert_eq!((end.at, end.source.as_str(), end.conversation, end.call), (r.at, "report", Some(9), Some(7)));
+        assert_eq!(end.detail, "Syncope, Hypotension, Atrial Fibrillation");
+        assert_eq!(state_of(&[radio_line("dispatched", "page"), r.clone(), end.clone()]), "downgraded");
+        // A profile whose downgrade rule was renamed uses its name; one with none keeps the words.
+        let mut q = p.clone();
+        q.events.iter_mut().find(|e| e.kind == "downgrade").unwrap().label = "Stood down".into();
+        assert!(report_downgrade(&q, &r).label.starts_with("Stood down · "));
+        q.events.retain(|e| e.kind != "downgrade");
+        assert!(report_downgrade(&q, &r).label.starts_with("Not a cardiac arrest · "));
+    }
+
+    #[test]
+    fn the_arrest_question_is_asked_first_and_added_to_a_saved_facts_list() {
+        assert_eq!(ReportFacts::default().facts[0].key, ARREST_FACT);
+        assert!(ARREST_ASK.contains("\"ongoing\"") && ARREST_ASK.contains("\"prior\"") && ARREST_ASK.contains("\"none\"") && ARREST_ASK.contains("\"unclear\""));
+        // A file saved before the question existed gets it, in its place.
+        let mut s = Settings::default();
+        s.report.facts.retain(|f| f.key != ARREST_FACT);
+        s.report.facts.retain(|f| f.key != "eta");
+        let (s, grew) = with_new_defaults(s);
+        assert!(grew);
+        assert_eq!(s.report.facts.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ReportFacts::default().facts.iter().map(|f| f.key.as_str()).collect::<Vec<_>>());
+        let (_, grew) = with_new_defaults(Settings::default());
+        assert!(!grew);
+        // The switch is on until turned off, and survives a file without it.
+        assert!(arrest_profile().report_ends_case);
+        let s: Settings = serde_json::from_str(r#"{"profiles":[{"id":"cardiac-arrest","name":"Cardiac arrest"}]}"#).unwrap();
+        assert!(s.profiles[0].report_ends_case);
+        let s: Settings = serde_json::from_str(r#"{"profiles":[{"id":"cardiac-arrest","name":"Cardiac arrest","report_ends_case":false}]}"#).unwrap();
+        assert!(!s.profiles[0].report_ends_case);
     }
 
     #[test]

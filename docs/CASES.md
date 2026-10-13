@@ -685,6 +685,52 @@ window or a word can be changed without a build. `cases.json` grew:
   research export, the 🩺 line and the ECPR score's pickers read the same
   list.
 
+## Was this patient in arrest? (2026-10-13)
+
+A run paged as a cardiac arrest that was a syncope went out as one, with
+Franciscan's arrest chat paged, because the report said "atrial
+fibrillation" and `fibrillation` was on the arrest word list. The word list
+was answering a question it cannot: whether the crew's account is of a
+patient who was, or is, in cardiac arrest.
+
+- **The summary call answers it.** `ReportFacts` opens with an `arrest`
+  fact (`cases::ARREST_FACT`, asked as `ARREST_ASK`): `ongoing`
+  (compressions now, or working the arrest), `prior` (pulseless at some
+  point, pulses now), `none` (never in arrest; bystander compressions on a
+  patient who was never pulseless included) or `unclear`. It is the one
+  line of the FACTS block that is a judgement from the whole report, and
+  the ask says so. `split_facts` keeps a value the ask offers in quotes
+  even when it is a word that elsewhere means "nothing said", so an
+  explicit `unclear` survives and is told apart from a report never asked.
+- **A report's verdict** (`report_verdict` → `Said`): the model's answer
+  where there is one (`arrest_answer`, read leniently), else the fallback
+  word list — naming none of the words is "no arrest", weakly; naming any
+  is only "unclear". Words match at the start of a word (`names`), so
+  "pea" is no longer "appear" and "repeat"; bare `fibrillation` left the
+  default list for `ventricular fibrillation`, `vf`, `vfib`, `v-fib`.
+- **The case decides** (`decide`): any report `ongoing` or `prior` keeps
+  it an arrest, whatever a second patient's report says. Every report
+  `none` by the model, with the profile's `report_ends_case` on and the
+  radio never having said working, ROSC, lost pulses or efforts ceased
+  (`radio_said_arrest`), ends the case: `view()` puts a `downgrade` line
+  after the last report (`report_downgrade`, source `report`, the
+  profile's own downgrade label credited to the hospital), so the state,
+  the banner, `settled()` and the email all treat it as a radio "not a
+  cardiac arrest" would. Anything less — the word list alone, an
+  `unclear`, a conflict with the radio, the setting off — is the warning
+  at the top as before, and `casesend::hospitals` keeps that hospital's
+  chat out by the same verdict. The ECPR score line is left off a
+  downgraded case.
+- **Settings → Cases, panel 1b**: the ends-the-case switch, a try-it box
+  that runs the summary call on a pasted report by the draft's FACTS block
+  and says what a case would do (`cases_try_report`), and a table of every
+  report on recent cases with the answer each got and what the case did by
+  the draft (`cases_report_verdicts`). The word list is now labelled as the
+  fallback it is. `with_new_defaults` adds the `arrest` fact to a saved
+  FACTS list in its place, as it does new events.
+- Reports summarised before this carry no answer and are read by the
+  words; a backfill re-summarises them.
+
 The page (`app/dist/casesettings.js`) also owns the sending panel that was
 on the Cases tab, tries a transmission against the draft's event rules
 (`cases_try_event`), and renders the newest cases by the draft's wording

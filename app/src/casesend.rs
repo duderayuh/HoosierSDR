@@ -465,9 +465,10 @@ fn compose(k: &CaseView, region: &str, m: &Message) -> (Vec<Row>, Vec<Row>, Vec<
         }
         // The score, worked out from what was stated by the rules on
         // Settings → ECPR: a range while any of its inputs is missing,
-        // never a guess. Left out when that page says so.
+        // never a guess. Left out when that page says so, and for a patient
+        // who was never in arrest.
         let e = crate::ecpr::settings();
-        if e.case_line {
+        if e.case_line && k.state != "downgraded" {
             let score = crate::study::score_with(&e.score, &facts.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
             let lead = if e.case_prefix.is_empty() { String::new() } else { format!("{} ", e.case_prefix) };
             tail.push(Row::new(format!("{lead}{}: {}", score.name, score.estimate), format!("{}{}: <b>{}</b>", esc(&lead), esc(&score.name), esc(&score.estimate))));
@@ -731,15 +732,14 @@ fn hospitals<'a>(k: &'a CaseView, places: &'a crate::places::Settings) -> impl I
     })
 }
 
-/// The crew's report to a hospital, on an arrest case, names no arrest.
+/// The crew's report to a hospital, on an arrest case, is of no arrest: by
+/// the model's answer to the arrest question, else by the profile's words.
 /// Read the same way as the case's own warning, so the two agree.
 fn no_arrest_reported(k: &CaseView, conversation: i64) -> bool {
     let words = crate::cases::profile_of(&k.profile).report_words().to_vec();
-    !words.is_empty()
-        && k.state != "downgraded"
-        && k.lines
-            .iter()
-            .any(|l| l.kind == "report" && l.conversation == Some(conversation) && crate::cases::contradicts(&l.detail, &words))
+    k.lines
+        .iter()
+        .any(|l| l.kind == "report" && l.conversation == Some(conversation) && crate::cases::report_verdict(l, &words).verdict == crate::cases::Verdict::NoArrest)
 }
 
 /// What a thread opens with, heard: the page that opened the case, in the
@@ -1998,6 +1998,53 @@ mod tests {
         // Another profile is not read for arrest words.
         k.profile = "stroke".into();
         assert_eq!(threads(&k, &s, &places()).len(), 2);
+    }
+
+    /// The report that prompted the question: paged as a cardiac arrest,
+    /// an awake man in atrial fibrillation. The model's answer decides;
+    /// the words are for a report it never read.
+    #[test]
+    fn a_hospital_is_not_paged_when_the_model_read_its_report_as_no_arrest() {
+        let s = Send { dest: "d-all".into(), ..Send::default() };
+        let afib = "Syncope, Hypotension, Atrial Fibrillation — Medic 7 inbound with a 74-year-old male, syncopal episode, 120 in atrial fibrillation with RVR, 104/70 after fluids.";
+        let mut k = arrest();
+        for l in k.lines.iter_mut().filter(|l| l.kind == "report") {
+            l.detail = afib.into();
+            l.facts = vec![Fact { key: "arrest".into(), value: "none".into() }];
+        }
+        assert_eq!(threads(&k, &s, &places()).iter().map(|x| x.dest.as_str()).collect::<Vec<_>>(), vec!["d-all"], "the arrest chat is not that patient's");
+        // The same report with the opposite answer brings the chat in, whatever the words.
+        for l in k.lines.iter_mut().filter(|l| l.kind == "report") {
+            l.facts = vec![Fact { key: "arrest".into(), value: "prior — ROSC before the call".into() }];
+        }
+        assert_eq!(threads(&k, &s, &places()).len(), 2);
+        // No answer at all: the words, and atrial fibrillation names no arrest.
+        for l in k.lines.iter_mut().filter(|l| l.kind == "report") {
+            l.facts.clear();
+        }
+        assert_eq!(threads(&k, &s, &places()).len(), 1);
+        // Once a report has ended the case, the hospital it was to still is not paged.
+        k.lines.push(line(k.lines.last().unwrap().at, "downgrade", "Not a cardiac arrest · the crew's report to Example General", "report"));
+        k.state = "downgraded".into();
+        assert_eq!(threads(&k, &s, &places()).len(), 1);
+    }
+
+    #[test]
+    fn a_case_ended_by_the_crews_report_reads_as_not_an_arrest_with_the_report_kept() {
+        let t0 = 1_000_000;
+        let mut r = report(t0 + 2000, 9, vec![Fact { key: "age".into(), value: "74".into() }, Fact { key: "arrest".into(), value: "none".into() }]);
+        r.detail = "Syncope, Hypotension, Atrial Fibrillation — Medic 7 inbound with a 74-year-old male.".into();
+        let end = Line { conversation: Some(9), ..line(t0 + 2000, "downgrade", "Not a cardiac arrest · the crew's report to Example General", "report") };
+        let raw = case(vec![line(t0, "dispatched", "Dispatched as Cardiac Arrest", "page"), r, end], vec![arrival(9, t0 + 1990, Some("5 to 10 minutes"))]);
+        assert_eq!(raw.state, "downgraded");
+        let k = settled(&raw);
+        let text = render(&k, TEXT_CHARS);
+        assert!(text.contains("⚪ NOT A CARDIAC ARREST · COMPLETED"), "{text}");
+        assert!(text.contains("Not a cardiac arrest · the crew's report to Example General"), "{text}");
+        assert!(text.contains("↳ Syncope, Hypotension, Atrial Fibrillation"), "the report that said so stays: {text}");
+        assert!(!text.contains("Expected at"), "nobody is expected anywhere: {text}");
+        assert!(!text.contains("ECPR"), "no screen for a patient never in arrest: {text}");
+        assert!(updates(&k).iter().any(|u| u.key.starts_with("downgrade:")), "the end is news by email: {:?}", updates(&k));
     }
 
     #[test]
