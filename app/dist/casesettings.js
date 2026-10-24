@@ -32,6 +32,8 @@
     $("ccCallTypes").value = (p.call_types || []).join(", ");
     $("ccPagePhrases").value = (p.page_phrases || []).join("\n");
     $("ccReportWords").value = (p.report_words || []).join("\n");
+    $("ccReportEnds").checked = p.report_ends_case !== false;
+    $("ccVerdictMeta").textContent = p.report_ends_case !== false ? "a report can end a case" : "a report only warns";
   }
   $("ccProfile").onchange = () => { cur = +$("ccProfile").value; fill(); };
   $("ccName").oninput = () => { P().name = $("ccName").value; markDirty(); };
@@ -39,6 +41,43 @@
   $("ccCallTypes").onchange = () => { P().call_types = csv($("ccCallTypes").value); changed(false); };
   $("ccPagePhrases").onchange = () => { P().page_phrases = lines($("ccPagePhrases").value); changed(false); };
   $("ccReportWords").onchange = () => { P().report_words = lines($("ccReportWords").value); changed(false); };
+  $("ccReportEnds").onchange = () => { P().report_ends_case = $("ccReportEnds").checked; changed(false); fillHead(); };
+
+  /* ---------- is it an arrest ---------- */
+  const VERDICT = { ongoing: "in arrest now", prior: "was in arrest, pulses now", no_arrest: "never in arrest", unclear: "unclear" };
+  const DECISION = { arrest: "the case goes on as a cardiac arrest", warn: "a warning at the top; that hospital's chat is not paged; the case goes on as an arrest", ends: "the case ends: not a cardiac arrest" };
+  const saidText = (r) => `${VERDICT[r.said.verdict] || r.said.verdict}${r.said.asked ? "" : " (by the fallback words)"}`;
+  $("ccTryReportBtn").onclick = async () => {
+    const p = P(); const text = $("ccTryReport").value.trim();
+    if (!p || !text) { $("ccTryReportOut").textContent = "—"; return; }
+    $("ccTryReportNote").textContent = "asking the model…"; $("ccTryReportBtn").disabled = true;
+    try {
+      const r = await invoke("cases_try_report", { profile: p, report: s.report, text });
+      const facts = (r.facts || []).map((f) => `${esc(f.key)}: <b>${esc(f.value)}</b>`).join(" · ");
+      $("ccTryReportOut").innerHTML = `<div><b>${esc(r.headline || "(no headline)")}</b></div><div class="faint">${esc(r.note)}</div>`
+        + `<div style="margin-top:6px">${facts || '<span class="faint">no facts came back</span>'}</div>`
+        + `<div style="margin-top:6px">Answer: <b>${esc(r.answer || "none given")}</b> → read as <b>${esc(saidText(r))}</b>${r.said.asked ? "" : ` · words named: ${esc((r.words_named || []).join(", ") || "none")}`}</div>`
+        + `<div>→ <b>${esc(DECISION[r.decision] || r.decision)}</b> <span class="faint">(as the only report, with nothing on the radio)</span></div>`;
+      $("ccTryReportNote").textContent = "";
+    } catch (e) { $("ccTryReportOut").textContent = String(e); $("ccTryReportNote").textContent = ""; }
+    $("ccTryReportBtn").disabled = false;
+  };
+  $("ccVerdictsBtn").onclick = async () => {
+    const p = P(); if (!p) return;
+    const days = await uiAsk("Show every report on this profile's cases over how many days, with the answer each got and what the case did by the settings on this page?", "7", "Show");
+    if (days == null || !(+days > 0)) return;
+    $("ccVerdictsNote").textContent = "reading…";
+    try {
+      const rows = await invoke("cases_report_verdicts", { profile: p, days: +days });
+      const when = (epoch) => new Date(epoch * 1000).toLocaleString("en-US", { hour12: false, month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      const DEC = { arrest: "arrest", warn: "warned", ends: "ended" };
+      $("ccVerdicts").innerHTML = rows.length ? `<table class="cs-count"><thead><tr><th>When</th><th>Case</th><th>Report to</th><th>Said</th><th>Answer</th><th>Read as</th><th>Case</th></tr></thead><tbody>${rows.map((r) =>
+        `<tr><td class="mono">${esc(when(r.at))}</td><td>${esc(r.case_title)} · ${esc(r.address || "address not heard")}</td><td>${esc(r.place)}</td><td>${esc(r.headline)}</td><td class="mono">${esc(r.answer || "—")}</td><td>${esc(saidText(r))}</td><td class="${r.decision === "ends" ? "faint" : ""}">${esc(DEC[r.decision] || r.decision)}${r.radio_arrest ? " · radio said arrest" : ""}</td></tr>`).join("")}</tbody></table>`
+        : '<div class="empty small">No report on a case of this profile in that time.</div>';
+      const n = rows.filter((r) => r.said.verdict === "no_arrest").length;
+      $("ccVerdictsNote").textContent = `${rows.length} reports · ${n} read as never an arrest · ${rows.filter((r) => !r.said.asked).length} by the fallback words`;
+    } catch (e) { $("ccVerdictsNote").textContent = ""; uiToast(`${e}`, "err"); }
+  };
 
   /* ---------- events ---------- */
   function fillEvents() {

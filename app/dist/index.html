@@ -1506,7 +1506,20 @@
             <div class="body">
               <label class="field"><span class="lab">Dispatch call types <span class="mono faint">as the Dispatch settings spell them · comma separated</span></span><input id="ccCallTypes" type="text" spellcheck="false" placeholder="Cardiac Arrest" /></label>
               <label class="field"><span class="lab">Words on a page that make a run a case <span class="mono faint">whatever type the model filed · one per line</span></span><textarea id="ccPagePhrases" rows="2" spellcheck="false"></textarea></label>
-              <label class="field"><span class="lab">Words a crew uses about this kind of run <span class="mono faint">a report to a hospital naming none of them contradicts the case (a seizure paged as an arrest) and the message says so · blank = never</span></span><textarea id="ccReportWords" rows="3" spellcheck="false"></textarea></label>
+              <label class="field"><span class="lab">Fallback words a crew uses about this kind of run <span class="mono faint">read only when a report was summarised without the arrest question below (an older report, or the model would not say) · a report naming none of them puts a warning on the case and keeps that hospital's chat out, and never ends the case · matched at the start of a word · blank = never</span></span><textarea id="ccReportWords" rows="3" spellcheck="false"></textarea></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="head"><span class="tw-num">1b</span><span class="eyebrow">Is it an arrest? · the crew's report decides</span><span class="meta" id="ccVerdictMeta"></span></div>
+            <div class="body">
+              <p class="help">A run is paged on what the caller said, and the first to know better is the crew, telling the hospital. So the hospital summary call is asked, about every report, whether this patient was in cardiac arrest: the <span class="mono">arrest</span> fact in panel 6, answered <span class="mono">ongoing</span> (compressions now), <span class="mono">prior</span> (pulseless at some point, pulses now), <span class="mono">none</span> (never in arrest) or <span class="mono">unclear</span>. <b>Ongoing</b> or <b>prior</b> on any report keeps the case an arrest, whatever another report says. <b>None</b> on a report keeps that hospital's chat out and, with the box below ticked, ends the case when every report says so and the radio never said working, ROSC or efforts ceased; otherwise it is a warning at the top. <b>Unclear</b>, or no answer, changes nothing, and the fallback words above are read instead.</p>
+              <label class="check"><input id="ccReportEnds" type="checkbox" /> A report the model reads as <b>never an arrest</b> ends the case, as a radio “not a cardiac arrest” does</label>
+              <div class="lab" style="margin-top:10px">Try a report <span class="mono faint">the model reads it by the FACTS block as it stands on this page · nothing is saved or sent</span></div>
+              <textarea id="ccTryReport" rows="3" spellcheck="false" placeholder="Medic 16 transporting a 74-year-old male with a syncopal episode at home, hypotensive 82/41, tachycardic at 120 in atrial fibrillation with RVR, pressure 104/70 after fluids, denies chest pain, ETA 7 to 10 minutes."></textarea>
+              <div class="inline" style="margin-top:4px"><button class="btn ghost sm" id="ccTryReportBtn">Ask the model</button><span class="help" id="ccTryReportNote"></span></div>
+              <div class="mono small" id="ccTryReportOut">—</div>
+              <div class="inline" style="margin-top:12px"><button class="btn ghost sm" id="ccVerdictsBtn" title="Every report on this profile's recent cases, with the answer each got and what the case did with it, by the setting and words on this page.">Recent reports…</button><span class="help" id="ccVerdictsNote"></span></div>
+              <div id="ccVerdicts"></div>
             </div>
           </div>
           <div class="panel">
